@@ -35,7 +35,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
-from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
+from ouroboros.orchestrator.leaf_dispatcher import LeafDispatcher, _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
     MAX_STALL_RETRIES,
@@ -229,6 +229,79 @@ def _make_executor() -> ParallelACExecutor:
     executor._emit_level_completed = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
     return executor
+
+
+def _authority_test_verifier(**_: object) -> VerifierVerdict:
+    return VerifierVerdict(passed=True, reasons=())
+
+
+def test_execution_authority_rejects_post_construction_leaf_dispatcher_replacement() -> None:
+    """Dispatch cannot switch away from the authority-bound leaf factory."""
+    executor = _make_executor()
+
+    class BypassDispatcher:
+        async def stream(self, **_: object) -> None:
+            raise AssertionError("must not be invoked after authority drift")
+
+    executor._leaf_dispatcher_factory = BypassDispatcher
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_execution_authority_rejects_post_construction_leaf_dispatcher_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-place dispatch implementation mutation cannot bypass authority."""
+    executor = _make_executor()
+
+    async def bypass_stream(self: object, **_: object) -> None:
+        raise AssertionError("must not be invoked after authority drift")
+
+    monkeypatch.setattr(LeafDispatcher.stream, "__code__", bypass_stream.__code__)
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_execution_authority_rejects_post_construction_atomic_verifier_replacement() -> None:
+    """Acceptance behavior cannot switch away from the authority-bound verifier."""
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=_authority_test_verifier,
+    )
+
+    def bypass_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=True, reasons=())
+
+    executor._atomic_verifier = bypass_verifier
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_execution_authority_rejects_post_construction_atomic_verifier_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-place verifier implementation mutation cannot bypass authority."""
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        atomic_verifier=_authority_test_verifier,
+    )
+
+    def bypass_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=True, reasons=())
+
+    monkeypatch.setattr(_authority_test_verifier, "__code__", bypass_verifier.__code__)
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
 
 
 def test_criterion_satisfied_by_exact_runtime_evidence() -> None:

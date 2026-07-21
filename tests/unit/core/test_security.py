@@ -16,6 +16,7 @@ from ouroboros.core.security import (
     MAX_SEED_FILE_SIZE,
     MAX_USER_RESPONSE_LENGTH,
     InputValidator,
+    is_sensitive_credential_field,
     is_sensitive_field,
     is_sensitive_value,
     mask_api_key,
@@ -101,6 +102,21 @@ class TestSensitiveDetection:
         assert is_sensitive_field("ANTHROPIC_API_KEY") is True
         assert is_sensitive_field("my_secret_value") is True
 
+    @pytest.mark.parametrize(
+        "field_name",
+        ("apiKeyValue", "accessTokenValue", "api_key", "auth", "authentication"),
+    )
+    def test_sensitive_credential_field_aliases(self, field_name: str) -> None:
+        """Durable-contract screening recognizes common credential aliases."""
+        assert is_sensitive_credential_field(field_name) is True
+
+    @pytest.mark.parametrize(
+        "field_name",
+        ("token_estimator", "resume_token", "resumeTokenValue", "key_value"),
+    )
+    def test_semantic_or_protocol_fields_are_not_credential_aliases(self, field_name: str) -> None:
+        assert is_sensitive_credential_field(field_name) is False
+
     def test_non_sensitive_field_names(self) -> None:
         """Normal field names are not flagged."""
         assert is_sensitive_field("name") is False
@@ -155,17 +171,51 @@ class TestSensitiveDetection:
         assert is_sensitive_value("Implement token budget accounting") is False
         assert is_sensitive_value("token budget accounting") is False
         assert is_sensitive_value("Adopt an API-first design") is False
+        assert is_sensitive_value("Adopt API-first-design-for-internal-services") is False
         assert is_sensitive_value(123) is False
 
-    def test_generic_credential_prefixes_require_opaque_payloads(self) -> None:
+    def test_generic_credential_prefixes_require_structured_opaque_payloads(self) -> None:
+        payload = "a" * 14 + "123456"
         assert is_sensitive_value("api-" + "a" * 20) is True
-        assert is_sensitive_value("token " + "a" * 20) is True
+        assert is_sensitive_value("token " + payload) is True
+        assert is_sensitive_value("token internationalization") is False
+
+    def test_hyphenated_api_prose_remains_non_sensitive(self) -> None:
+        """A long API-first goal is semantic data, not a generic credential."""
+        value = "Adopt API-first-design-for-internal-services"
+        assert is_sensitive_value(value) is False
+        assert redact_sensitive_text(value) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        ("PK-based authentication should remain durable", "secret_rotation_workflow"),
+    )
+    def test_ambiguous_security_prefix_prose_remains_non_sensitive(self, value: str) -> None:
+        """Bare ``pk-`` and ``secret_`` prefixes do not identify credentials."""
+        assert is_sensitive_value(value) is False
+        assert redact_sensitive_text(value) == value
 
     @pytest.mark.parametrize(
         ("value", "expected"),
         (
-            ("retry with token " + "a" * 20, "retry with token [redacted]"),
+            ("retry with token " + "a" * 14 + "123456", "retry with token [redacted]"),
             ("retry with api-" + "a" * 20, "retry with api-[redacted]"),
+            (
+                "retry with api-abcdefghij-klmnopqrst",
+                "retry with api-[redacted]",
+            ),
+            (
+                "retry with token abcdefghijklmnopqrst/uvwxyz",
+                "retry with token [redacted]",
+            ),
+            (
+                "retry with token abcdefghijklmnopqrst+uvwxyz",
+                "retry with token [redacted]",
+            ),
+            (
+                "retry with token \u200b" + "a" * 14 + "123456",
+                "retry with token \u200b[redacted]",
+            ),
         ),
     )
     def test_embedded_generic_credential_text_is_sensitive_and_redacted(
@@ -178,11 +228,34 @@ class TestSensitiveDetection:
         assert is_sensitive_value(value) is True
         assert redact_sensitive_text(value) == expected
 
+    @pytest.mark.parametrize(
+        "value",
+        (
+            "Implement token internationalization",
+            "Implement token compartmentalization",
+            "Discuss token hyperparameterization",
+        ),
+    )
+    def test_long_semantic_token_words_remain_non_sensitive(self, value: str) -> None:
+        """Long natural-language words must survive replay unchanged."""
+        assert is_sensitive_value(value) is False
+        assert redact_sensitive_text(value) == value
+
     def test_diagnostic_text_with_embedded_secret_remains_sensitive(self) -> None:
         """Global credential detection remains fail-closed for diagnostics."""
         text = "command: deploy --api-key sk-live-SECRET123"
         assert is_sensitive_value(text) is True
         assert redact_sensitive_text(text) == "command: deploy --api-key [redacted]"
+
+    def test_embedded_stripe_and_pem_private_key_values_are_redacted(self) -> None:
+        """Credential shapes beyond prefix-only forms cannot reach diagnostics."""
+        stripe = "sk_live_" + "a" * 24
+        pem = "-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----"
+
+        assert is_sensitive_value(f"retry with {stripe}") is True
+        assert redact_sensitive_text(f"retry with {stripe}") == "retry with [redacted]"
+        assert is_sensitive_value(f"retry with {pem}") is True
+        assert redact_sensitive_text(f"retry with {pem}") == "retry with [redacted]"
 
     def test_compact_assignment_with_embedded_secret_remains_sensitive(self) -> None:
         """Identity/configuration consumers must reject compact secret values."""

@@ -46,7 +46,7 @@ from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
-from ouroboros.core.security import is_sensitive_value
+from ouroboros.core.security import is_sensitive_credential_field, is_sensitive_value
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -1879,7 +1879,9 @@ class OrchestratorRunner:
                     continue
                 seen_containers.add(current_id)
                 for key, item in current.items():
-                    if isinstance(key, str) and is_sensitive_value(key):
+                    if isinstance(key, str) and (
+                        is_sensitive_value(key) or is_sensitive_credential_field(key)
+                    ):
                         return True
                     pending.append(item)
                 continue

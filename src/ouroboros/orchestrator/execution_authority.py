@@ -28,7 +28,11 @@ import threading
 from typing import Any
 import weakref
 
-from ouroboros.core.security import is_sensitive_field, is_sensitive_value
+from ouroboros.core.security import (
+    is_sensitive_credential_field,
+    is_sensitive_field,
+    is_sensitive_value,
+)
 from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
@@ -123,6 +127,13 @@ _PORTABLE_CALLABLE_GLOBAL_EXCLUSIONS = frozenset(
         ("ouroboros.orchestrator.parallel_executor", "LevelCoordinator"),
         ("ouroboros.orchestrator.parallel_executor", "ACRuntimeHandleManager"),
         ("ouroboros.orchestrator.parallel_executor", "ExecutionEventEmitter"),
+        # These process-local time-of-use guards enforce the already-bound
+        # portable baseline. Their live object references cannot be serialized
+        # or reused across processes, so following their helper graph would
+        # incorrectly turn an otherwise portable executor into process-local.
+        ("ouroboros.orchestrator.parallel_executor", "_capture_live_callable_integrity"),
+        ("ouroboros.orchestrator.parallel_executor", "_capture_runtime_dispatch_integrity"),
+        ("ouroboros.orchestrator.parallel_executor", "_runtime_dispatch_integrity_is_intact"),
     }
 )
 
@@ -224,6 +235,43 @@ def _canonical_object(value: object, *, field: str) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         raise ValueError(f"{field} is not an object")
     return normalized
+
+
+def _contains_sensitive_authority_data(value: object) -> bool:
+    """Reject credential data before any authority section is accepted.
+
+    ``ExecutionAuthorityContract`` can also be built from persisted canonical
+    JSON, not only from the local projection helpers. Screen every nested
+    section here so a forged ``runtime.provider_credential`` (or an aliased
+    credential field) cannot bypass the producer-side sanitizers. The field
+    predicate is intentionally narrower than logging's generic ``key``/
+    ``token`` heuristic: authority protocol fields such as ``token_estimator``
+    are semantic implementation labels, not credentials.
+    """
+    pending: list[object] = [value]
+    item_count = 0
+    while pending:
+        current = pending.pop()
+        item_count += 1
+        if item_count > _MAX_IDENTITY_ITEMS * 128:
+            return True
+        if isinstance(current, str):
+            if is_sensitive_value(current):
+                return True
+            continue
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                if (
+                    not isinstance(key, str)
+                    or is_sensitive_credential_field(key)
+                    or is_sensitive_value(key)
+                ):
+                    return True
+                pending.append(item)
+            continue
+        if isinstance(current, list):
+            pending.extend(current)
+    return False
 
 
 def _sha256(value: str) -> str:
@@ -2832,6 +2880,124 @@ def valid_execution_policy_contract(value: object) -> bool:
     return _valid_dispatch_rate_contract(value.get("dispatch_rate"))
 
 
+def _valid_executor_authority_envelope(value: object) -> bool:
+    """Validate the finite executor envelope before it is fingerprinted."""
+    if not isinstance(value, Mapping) or value.get("version") != 3:
+        return False
+    mode = value.get("mode")
+    stability = value.get("stability")
+    components = value.get("components")
+    if mode not in {"bound", "unbound"} or stability not in {"durable", "process_local"}:
+        return False
+    if not isinstance(components, Mapping):
+        return False
+    if mode == "unbound":
+        return set(value) == {"version", "mode", "stability", "instance_nonce", "components"} and (
+            isinstance(value.get("instance_nonce"), str) and bool(value["instance_nonce"])
+        )
+    required = {
+        "version",
+        "mode",
+        "type",
+        "stability",
+        "implementation",
+        "instance_overrides",
+        "components",
+    }
+    if not required.issubset(value) or not isinstance(value.get("type"), str):
+        return False
+    if not isinstance(value.get("implementation"), Mapping) or not isinstance(
+        value.get("instance_overrides"), Mapping
+    ):
+        return False
+    if stability == "durable":
+        return set(value) == required
+    return (
+        set(value) == required | {"instance_nonce"}
+        and isinstance(value.get("instance_nonce"), str)
+        and bool(value["instance_nonce"])
+    )
+
+
+def _valid_workspace_authority_envelope(value: object) -> bool:
+    """Validate the workspace owner and generation envelopes."""
+    if not isinstance(value, Mapping) or value.get("version") != 1:
+        return False
+    observed = value.get("observed")
+    generation = value.get("generation")
+    if not isinstance(observed, bool) or not isinstance(generation, Mapping):
+        return False
+    generation_observed = generation.get("observed")
+    if not isinstance(generation_observed, bool):
+        return False
+    if generation_observed:
+        if set(generation) != {"observed", "identity"} or not _valid_workspace_generation_identity(
+            generation.get("identity")
+        ):
+            return False
+    elif set(generation) != {"observed"}:
+        return False
+    if observed:
+        return set(value) == {"version", "observed", "identity", "generation"} and isinstance(
+            value.get("identity"), Mapping
+        )
+    return set(value) in (
+        {"version", "observed", "generation"},
+        {"version", "observed", "identity", "generation"},
+    ) and ("identity" not in value or isinstance(value.get("identity"), Mapping))
+
+
+def _valid_runtime_authority_envelope(value: object) -> bool:
+    """Validate the fixed runtime authority envelope without re-executing it."""
+    required = {
+        "version",
+        "runtime_backend",
+        "self_governs_rate_limit",
+        "llm_backend",
+        "permission_mode",
+        "constructor_model",
+        "execution_identity",
+        "capabilities",
+        "implementation",
+        "executable",
+        "watchdog",
+        "skill_dispatcher",
+        "handle_selector",
+    }
+    optional = {"runtime_backend_unobserved", "llm_backend_unobserved"}
+    if (
+        not isinstance(value, Mapping)
+        or not required.issubset(value)
+        or set(value) - required - optional
+    ):
+        return False
+    if value.get("version") != 1 or not isinstance(value.get("self_governs_rate_limit"), bool):
+        return False
+    if any(
+        not isinstance(value.get(name), Mapping)
+        for name in required
+        - {"version", "runtime_backend", "self_governs_rate_limit", "llm_backend"}
+    ):
+        return False
+    return all(
+        isinstance(value.get(name), str) or value.get(name) is None
+        for name in ("runtime_backend", "llm_backend")
+    ) and all(isinstance(value.get(name, False), bool) for name in optional if name in value)
+
+
+def _valid_verifier_authority_envelope(value: object) -> bool:
+    """Validate the two allowed verifier authority shapes."""
+    if not isinstance(value, Mapping) or value.get("version") != 1:
+        return False
+    mode = value.get("mode")
+    required = {"version", "mode", "implementation", "behavioral_state"}
+    if mode == "custom":
+        required |= {"runtime_transcript_implementation"}
+    if set(value) != required:
+        return False
+    return all(isinstance(value.get(name), Mapping) for name in required - {"version", "mode"})
+
+
 def build_execution_policy_contract(
     *,
     decomposition_mode: str,
@@ -2906,6 +3072,17 @@ class ExecutionAuthorityContract:
             raise ValueError("execution authority contract has an invalid shape")
         if not _valid_execution_authority_boundary(data.get("boundary")):
             raise ValueError("execution authority contract has an invalid boundary")
+        if _contains_sensitive_authority_data(data):
+            raise ValueError("execution authority contract contains sensitive data")
+        envelope_validators = {
+            "executor": _valid_executor_authority_envelope,
+            "workspace": _valid_workspace_authority_envelope,
+            "runtime": _valid_runtime_authority_envelope,
+            "verifier": _valid_verifier_authority_envelope,
+        }
+        for section_name, validator in envelope_validators.items():
+            if not validator(data.get(section_name)):
+                raise ValueError(f"execution authority contract has an invalid {section_name}")
         if not valid_execution_policy_contract(data.get("execution_policy")):
             raise ValueError("execution authority contract has an invalid execution policy")
         runtime = data.get("runtime")

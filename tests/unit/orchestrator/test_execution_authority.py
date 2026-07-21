@@ -5,6 +5,7 @@ from dataclasses import replace
 from functools import wraps
 import gc
 import hashlib
+import json
 import os
 import random
 from types import MethodType, SimpleNamespace, coroutine
@@ -14,6 +15,8 @@ import weakref
 import pytest
 
 from ouroboros import codex_permissions
+from ouroboros.orchestrator import claude_worker_runtime as claude_worker_runtime_module
+from ouroboros.orchestrator import codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator import execution_authority as execution_authority_module
 from ouroboros.orchestrator import parallel_executor as parallel_executor_module
 from ouroboros.orchestrator import rate_limit as rate_limit_module
@@ -325,6 +328,97 @@ def test_runtime_identity_validators_reject_nested_credentials() -> None:
     )
 
 
+@pytest.mark.parametrize("section_name", ("executor", "workspace", "runtime", "verifier"))
+def test_contract_constructor_rejects_sensitive_data_in_every_authority_section(
+    section_name: str,
+) -> None:
+    """Deserialized authority JSON cannot bypass producer-side secret checks."""
+    secret = "ghp_" + "a" * 36
+    data = _contract().data
+    section = data[section_name]
+    assert isinstance(section, dict)
+    section["provider_credential"] = secret
+    canonical = json.dumps(
+        data,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+    with pytest.raises(ValueError, match="contains sensitive data") as exc_info:
+        ExecutionAuthorityContract(canonical)
+
+    assert secret not in str(exc_info.value)
+
+
+def test_contract_constructor_rejects_aliased_credential_field_even_with_benign_value() -> None:
+    """A credential alias itself is invalid in a durable authority section."""
+    data = _contract().data
+    runtime = data["runtime"]
+    assert isinstance(runtime, dict)
+    runtime["apiKeyValue"] = "opaque-provider-label"
+
+    with pytest.raises(ValueError, match="contains sensitive data"):
+        ExecutionAuthorityContract(
+            json.dumps(
+                data,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
+
+
+def test_contract_constructor_rejects_credential_shaped_key_even_with_benign_value() -> None:
+    """Raw credential-shaped mapping keys cannot persist in authority JSON."""
+    data = _contract().data
+    runtime = data["runtime"]
+    assert isinstance(runtime, dict)
+    runtime["ghp_" + "a" * 36] = "opaque-provider-label"
+
+    with pytest.raises(ValueError, match="contains sensitive data"):
+        ExecutionAuthorityContract(
+            json.dumps(
+                data,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("section_name", "malformed"),
+    (
+        ("executor", {"version": 3}),
+        ("workspace", {"version": 1, "observed": False}),
+        ("runtime", {"version": 1, "runtime_backend": "test"}),
+        ("verifier", {"version": 1, "mode": "runtime_transcript"}),
+    ),
+)
+def test_contract_constructor_rejects_malformed_authority_envelopes(
+    section_name: str,
+    malformed: dict[str, object],
+) -> None:
+    """Every authority section must be structurally valid before fingerprinting."""
+    data = _contract().data
+    data[section_name] = malformed
+
+    with pytest.raises(ValueError, match=f"invalid {section_name}"):
+        ExecutionAuthorityContract(
+            json.dumps(
+                data,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
+
+
 def test_runtime_authority_binds_nested_command_helper_globals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -347,6 +441,84 @@ def test_runtime_authority_binds_nested_command_helper_globals(
     assert baseline != changed
     assert changed["implementation"]["stability"] == "durable"
     assert runtime._build_permission_args() == ["--sentinel-permission-flag"]
+
+
+def test_executor_rejects_post_construction_runtime_implementation_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """An executor cannot dispatch after its bound subprocess implementation changes."""
+    runtime = CodexCliRuntime(cli_path="/usr/bin/true", cwd=str(tmp_path))
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    async def altered_launch(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("altered subprocess launch")
+
+    monkeypatch.setattr(
+        codex_cli_runtime_module.asyncio,
+        "create_subprocess_exec",
+        altered_launch,
+    )
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_post_construction_runtime_subprocess_pipe_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Nested subprocess constants cannot change beneath a live authority."""
+    runtime = CodexCliRuntime(cli_path="/usr/bin/true", cwd=str(tmp_path))
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    monkeypatch.setattr(codex_cli_runtime_module.asyncio.subprocess, "PIPE", -999)
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+@pytest.mark.parametrize("member", ("create_subprocess_exec", "wait_for", "subprocess.PIPE"))
+def test_executor_rejects_post_construction_worker_subprocess_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    member: str,
+) -> None:
+    """Declared worker transports are rechecked before their subprocess effect."""
+    runtime = LeaderDrivenWorkerRuntime(
+        transport=ClaudeWorkerTransport(cli_path="/usr/bin/true"),
+        runtime_backend="claude_mcp",
+        llm_backend="claude",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        enable_decomposition=False,
+    )
+
+    async def altered_asyncio_member(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("altered asyncio member")
+
+    if member == "subprocess.PIPE":
+        monkeypatch.setattr(claude_worker_runtime_module.asyncio.subprocess, "PIPE", -999)
+    else:
+        monkeypatch.setattr(
+            claude_worker_runtime_module.asyncio,
+            member,
+            altered_asyncio_member,
+        )
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
 
 
 def _worker_contract(

@@ -293,6 +293,26 @@ def test_routing_contract_validators_reject_sensitive_subcontracts() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    ("apiKeyValue", "accessTokenValue", "auth", "authentication"),
+)
+def test_resume_contract_screening_rejects_credential_aliases_without_echoing_them(
+    field_name: str,
+) -> None:
+    """Aliased credentials must not reach guidance mismatch diagnostics."""
+    secret = "opaque-provider-credential-1234567890"
+    persisted = _runner()._build_execution_contract()
+    persisted["guidance"] = {field_name: secret}
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract") as exc_info:
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert exc_info.value.details == {"invalid": "sensitive persisted data"}
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
 def test_runtime_identity_failure_does_not_egress_dynamic_adapter_type() -> None:
     secret = "ghp_" + "a" * 36
 

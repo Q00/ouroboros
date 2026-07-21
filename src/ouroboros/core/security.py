@@ -48,12 +48,53 @@ SENSITIVE_FIELD_NAMES = frozenset(
     }
 )
 
+# ``is_sensitive_field`` intentionally errs on the broad side for log display
+# (for example, any field containing ``key``). Durable contracts need a more
+# precise predicate: they must reject actual credential aliases without
+# treating semantic fields such as ``token_estimator`` as secrets.
+_CREDENTIAL_FIELD_NAMES = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "auth_token",
+        "authentication",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "id_token",
+        "passwd",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "secret_access_key",
+        "token",
+    }
+)
+_CREDENTIAL_FIELD_SUFFIXES = (
+    "_api_key",
+    "_credential",
+    "_credentials",
+    "_passwd",
+    "_password",
+    "_private_key",
+    "_secret",
+    "_secret_access_key",
+    "_token",
+)
+_NON_CREDENTIAL_PROTOCOL_FIELD_NAMES = frozenset({"resume_token"})
+_API_HYPHENATED_PROSE_CONNECTORS = frozenset(
+    {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+)
+
 # Sensitive value prefixes that indicate secrets
 SENSITIVE_PREFIXES = (
     "sk-",
-    "pk-",
     "bearer ",
-    "secret_",
     "AIza",
     # Common provider credentials that are otherwise easy to place under a
     # benign metadata key. Keep these prefix checks shared by logging and
@@ -81,24 +122,24 @@ SENSITIVE_PREFIXES = (
 SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
     re.compile(r"hf_[A-Za-z0-9]{20,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{16,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+_PEM_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----"
 )
 
 # ``api-`` and ``token `` also begin ordinary prose such as ``API-first`` and
-# ``token budget``. Keep their direct-value detection only for a sufficiently
-# long opaque payload, while provider-specific prefixes above remain strict.
-_GENERIC_CREDENTIAL_VALUE_PATTERN = re.compile(
-    r"(?i)^(?:api-[A-Za-z0-9_-]{20,}|token\s+[A-Za-z0-9_-]{20,})$"
-)
-# The same generic forms can occur inside a command or diagnostic sentence.
-# Require the opaque payload so ordinary prose such as ``token budget`` and
-# ``API-first design`` remains semantic data, while a credential cannot evade
-# durable-event redaction merely by being embedded in a longer string.
+# ``token budget``. The ``api-`` form is sufficiently credential-shaped to stay
+# fail-closed at 20+ characters. A bare ``token <word>`` is not: a length-only
+# rule corrupts legitimate long words such as ``token internationalization``.
+# Those token values therefore need a digit or transport-safe punctuation in
+# addition to 20+ payload characters. Known provider prefixes remain strict.
 _GENERIC_CREDENTIAL_TEXT_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9_-])"
-    r"(?P<label>api-|token\s+)"
-    r"(?P<credential>[A-Za-z0-9_-]{20,})"
-    r"(?![A-Za-z0-9_-])"
+    r"(?i)(?<![A-Za-z0-9_+/=-])"
+    r"(?P<label>api-|token[\s\u200b\ufeff\u2060\u034f\ufe0f]+)"
+    r"(?P<credential>[A-Za-z0-9_+/=-]{20,})"
+    r"(?![A-Za-z0-9_+/=-])"
 )
 
 # A full value that is a credential should be treated differently from an
@@ -140,18 +181,69 @@ _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
     r"|hf_[A-Za-z0-9]{20,}"
     r"|xox[abpr]-[A-Za-z0-9-]{20,}"
     r"|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}"
+    r"|sk_(?:live|test)_[A-Za-z0-9_-]{16,}"
     r"|AIza[A-Za-z0-9_-]{35}"
     r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
     r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r")\b"
 )
-# ``secret_`` is useful only as a direct value prefix. Looking for it after
-# every delimiter would classify ordinary persistence keys such as
-# ``quoted_secret_preview`` as credentials. Provider-shaped prefixes remain
-# detectable after a delimiter (for example ``branch-ghp_...``).
-_DELIMITED_CREDENTIAL_PREFIXES = tuple(
-    prefix for prefix in SENSITIVE_PREFIXES if prefix != "secret_"
-)
+# Provider-shaped prefixes remain detectable after a delimiter (for example
+# ``branch-ghp_...``). Ambiguous prose prefixes such as ``pk-`` and
+# ``secret_`` are intentionally absent: they do not constitute credential
+# shape on their own and otherwise corrupt durable semantic text.
+_DELIMITED_CREDENTIAL_PREFIXES = SENSITIVE_PREFIXES
+
+
+def _is_generic_credential_match(match: re.Match[str]) -> bool:
+    """Distinguish opaque credentials from ambiguous natural-language prose."""
+    credential = match.group("credential")
+    if match.group("label").lower() == "api-":
+        # ``api-`` followed by one opaque run is credential-shaped, including
+        # an all-letter value. Preserve only an *obvious grammatical* sequence
+        # of hyphenated words (for example ``API-first-design-for-…``). Treat
+        # ambiguous opaque runs such as ``api-abcdefghij-klmnopqrst`` as a
+        # credential instead of allowing every alphabetic dash-separated tail
+        # to bypass durable-event redaction.
+        parts = credential.split("-")
+        is_hyphenated_prose = (
+            len(parts) >= 3
+            and all(part and part.isalpha() for part in parts)
+            and any(part.lower() in _API_HYPHENATED_PROSE_CONNECTORS for part in parts)
+        )
+        return not is_hyphenated_prose
+    return any(not char.isalpha() for char in credential)
+
+
+def _normalize_credential_field_name(field_name: str) -> str:
+    """Normalize common snake/kebab/camel credential-field spellings."""
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", field_name.strip())
+    normalized = re.sub(r"[-\s]+", "_", normalized.lower())
+    return normalized.strip("_")
+
+
+def is_sensitive_credential_field(field_name: object) -> bool:
+    """Return whether a field names a credential rather than semantic data.
+
+    This narrowly recognizes credential-specific names and aliases such as
+    ``apiKeyValue`` and ``accessTokenValue``. It deliberately does not apply
+    the broader logging heuristic from :func:`is_sensitive_field`, so durable
+    protocol fields such as ``token_estimator`` remain valid.
+    """
+    if not isinstance(field_name, str) or not field_name.strip():
+        return False
+    normalized = _normalize_credential_field_name(field_name)
+    if normalized in _NON_CREDENTIAL_PROTOCOL_FIELD_NAMES:
+        return False
+    if normalized in _CREDENTIAL_FIELD_NAMES or normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES):
+        return True
+    if normalized.endswith("_value"):
+        base_name = normalized.removesuffix("_value")
+        if base_name in _NON_CREDENTIAL_PROTOCOL_FIELD_NAMES:
+            return False
+        return base_name in _CREDENTIAL_FIELD_NAMES or base_name.endswith(
+            _CREDENTIAL_FIELD_SUFFIXES
+        )
+    return False
 
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:
@@ -269,9 +361,15 @@ def is_sensitive_value(value: Any) -> bool:
 
     if any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES):
         return True
-    if _GENERIC_CREDENTIAL_VALUE_PATTERN.fullmatch(normalized_value):
+    if _PEM_PRIVATE_KEY_PATTERN.search(normalized_value):
         return True
-    if _GENERIC_CREDENTIAL_TEXT_PATTERN.search(normalized_value):
+    generic_direct_value = _GENERIC_CREDENTIAL_TEXT_PATTERN.fullmatch(normalized_value)
+    if generic_direct_value is not None and _is_generic_credential_match(generic_direct_value):
+        return True
+    if any(
+        _is_generic_credential_match(match)
+        for match in _GENERIC_CREDENTIAL_TEXT_PATTERN.finditer(normalized_value)
+    ):
         return True
     if any(pattern.match(normalized_value) for pattern in SENSITIVE_VALUE_PATTERNS):
         return True
@@ -315,11 +413,16 @@ def redact_sensitive_text(value: str, *, replacement: str = "[redacted]") -> str
     whether the surrounding text makes the value an identity that must be
     replaced wholesale, or a diagnostic that can retain its non-secret context.
     """
-    redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", value)
+    redacted = _PEM_PRIVATE_KEY_PATTERN.sub(replacement, value)
+    redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", redacted)
     redacted = _SECRET_LABEL_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", redacted)
     redacted = _BEARER_PATTERN.sub(f"Bearer {replacement}", redacted)
     redacted = _GENERIC_CREDENTIAL_TEXT_PATTERN.sub(
-        lambda match: f"{match.group('label')}{replacement}",
+        lambda match: (
+            f"{match.group('label')}{replacement}"
+            if _is_generic_credential_match(match)
+            else match.group(0)
+        ),
         redacted,
     )
     return _HIGH_CONFIDENCE_SECRET_PATTERN.sub(replacement, redacted)

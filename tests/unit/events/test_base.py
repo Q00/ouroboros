@@ -348,13 +348,17 @@ class TestBaseEventVersion:
 def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_keys() -> None:
     """Persistence redacts credentials but preserves replay and dedupe keys."""
     secret = "ghp_" + "a" * 36
-    generic_secret = "a" * 20
+    generic_secret = "a" * 14 + "123456"
     payload = {
         "runtime_backend": "\u034f" + secret,
         "nested": {"label": "\u200b" + secret},
         "detail": f"retry with token {generic_secret}",
         secret: "not-a-secret-value",
         "api_key": "unprefixed-provider-credential-1234567890",
+        "apiKeyValue": "opaque-provider-credential-1234567890",
+        "accessTokenValue": "opaque-provider-access-token-1234567890",
+        "auth": "opaque-provider-authentication-1234567890",
+        "authentication": "opaque-provider-authentication-1234567890",
         "semantic_ac_key": "ac_123",
         "idempotency_key": "turn-1",
         "correlation_key": "lane-1",
@@ -374,10 +378,18 @@ def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_key
     assert sanitized["detail"] == "retry with token [redacted]"
     assert secret not in sanitized
     assert sanitized["api_key"] == "<REDACTED>"
+    assert sanitized["apiKeyValue"] == "<REDACTED>"
+    assert sanitized["accessTokenValue"] == "<REDACTED>"
+    assert sanitized["auth"] == "<REDACTED>"
+    assert sanitized["authentication"] == "<REDACTED>"
     assert sanitized["semantic_ac_key"] == "ac_123"
     assert sanitized["idempotency_key"] == "turn-1"
     assert sanitized["correlation_key"] == "lane-1"
     assert persisted["api_key"] == "<REDACTED>"
+    assert persisted["apiKeyValue"] == "<REDACTED>"
+    assert persisted["accessTokenValue"] == "<REDACTED>"
+    assert persisted["auth"] == "<REDACTED>"
+    assert persisted["authentication"] == "<REDACTED>"
     assert persisted["semantic_ac_key"] == "ac_123"
     assert persisted["idempotency_key"] == "turn-1"
     assert persisted["correlation_key"] == "lane-1"
@@ -393,8 +405,11 @@ def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
     payload = {
         "goal": "Implement token budget accounting",
         "criterion": "Adopt an API-first design",
+        "hyphenated_criterion": "Adopt API-first-design-for-internal-services",
         "direct_goal": "token budget accounting",
         "direct_criterion": "API-first design",
+        "authentication_note": "PK-based authentication should remain durable",
+        "workflow": "secret_rotation_workflow",
     }
 
     sanitized = sanitize_event_data_for_persistence(payload)
@@ -408,5 +423,27 @@ def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
     assert sanitized == payload
     assert persisted["goal"] == payload["goal"]
     assert persisted["criterion"] == payload["criterion"]
+    assert persisted["hyphenated_criterion"] == payload["hyphenated_criterion"]
     assert persisted["direct_goal"] == payload["direct_goal"]
     assert persisted["direct_criterion"] == payload["direct_criterion"]
+    assert persisted["authentication_note"] == payload["authentication_note"]
+    assert persisted["workflow"] == payload["workflow"]
+
+
+def test_persistence_sanitizer_redacts_embedded_stripe_and_pem_credentials() -> None:
+    """Benign keys cannot allow common credential formats into durable events."""
+    stripe = "sk_live_" + "a" * 24
+    pem = "-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----"
+    payload = {"detail": f"retry with {stripe}", "certificate": pem}
+
+    persisted = BaseEvent(
+        type="test.event.created",
+        aggregate_type="test",
+        aggregate_id="event-credential-shapes",
+        data=payload,
+    ).to_db_dict()["payload"]
+
+    assert stripe not in persisted
+    assert pem not in persisted
+    assert persisted["detail"] == "retry with [redacted]"
+    assert persisted["certificate"] == "[redacted]"

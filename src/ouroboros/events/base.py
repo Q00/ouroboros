@@ -13,7 +13,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from ouroboros.core.security import is_sensitive_value, redact_sensitive_text
+from ouroboros.core.security import (
+    is_sensitive_credential_field,
+    is_sensitive_value,
+    redact_sensitive_text,
+)
 
 _EXCLUDED_PERSISTENCE_KEYS = frozenset(
     {
@@ -32,38 +36,6 @@ _EXCLUDED_PERSISTENCE_KEYS = frozenset(
         "subscribed_payload",
         "subscribed_payloads",
     }
-)
-_SENSITIVE_PERSISTENCE_KEYS = frozenset(
-    {
-        "access_token",
-        "api_key",
-        "apikey",
-        "auth_token",
-        "authorization",
-        "bearer_token",
-        "client_secret",
-        "credential",
-        "credentials",
-        "id_token",
-        "passwd",
-        "password",
-        "private_key",
-        "refresh_token",
-        "secret",
-        "secret_access_key",
-        "token",
-    }
-)
-_SENSITIVE_PERSISTENCE_KEY_SUFFIXES = (
-    "_api_key",
-    "_credential",
-    "_credentials",
-    "_passwd",
-    "_password",
-    "_private_key",
-    "_secret",
-    "_secret_access_key",
-    "_token",
 )
 _PERSISTENCE_PROTOCOL_KEYS = frozenset({"resume_token"})
 
@@ -93,9 +65,7 @@ def _is_sensitive_persistence_key(key: str) -> bool:
     normalized = normalized.lower().replace("-", "_").replace(" ", "_")
     if normalized in _PERSISTENCE_PROTOCOL_KEYS:
         return False
-    return normalized in _SENSITIVE_PERSISTENCE_KEYS or normalized.endswith(
-        _SENSITIVE_PERSISTENCE_KEY_SUFFIXES
-    )
+    return is_sensitive_credential_field(key)
 
 
 def sanitize_event_data_for_persistence(value: Any) -> Any:

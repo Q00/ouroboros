@@ -32,6 +32,8 @@ from collections.abc import Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import dis
+import inspect
 import json
 import math
 import os
@@ -705,6 +707,295 @@ class _VerifyGateOutcome:
     missing_artifacts: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _LiveCallableIntegrityBinding:
+    """Non-serializable in-process binding for one later-invoked collaborator.
+
+    The durable authority owns the collaborator's semantic fingerprint. The
+    live binding protects the narrower time-of-use boundary: execution must
+    invoke the exact collaborator object captured at construction, rather than
+    a field substituted after the authority was built. It intentionally does
+    not inspect live implementation details, which may be specialized by the
+    interpreter during ordinary execution.
+    """
+
+    value: object | None
+    member_name: str | None
+    entrypoint: object | None
+    code: object | None
+    defaults: object | None
+    keyword_defaults: object | None
+    closure_cells: tuple[tuple[object, object], ...] | None
+
+
+@dataclass(frozen=True)
+class _AuthorityBoundExecutionCollaborators:
+    """Construction-time live bindings for collaborators executed later."""
+
+    leaf_dispatcher: _LiveCallableIntegrityBinding
+    atomic_verifier: _LiveCallableIntegrityBinding
+
+
+@dataclass(frozen=True)
+class _LiveRuntimeModuleMemberBinding:
+    """One direct runtime module member captured for dispatch integrity."""
+
+    source_function: object
+    global_name: str
+    module: object
+    path: tuple[str, ...]
+    value: object
+    callable_binding: _LiveCallableIntegrityBinding | None
+
+
+@dataclass(frozen=True)
+class _RuntimeDispatchIntegrityBinding:
+    """Stable construction-time binding of direct runtime dispatch behavior."""
+
+    entrypoints: tuple[_LiveCallableIntegrityBinding, ...]
+    module_members: tuple[_LiveRuntimeModuleMemberBinding, ...]
+
+
+_RUNTIME_DISPATCH_ENTRYPOINTS = frozenset({"execute_task", "_execute_task_impl", "_run"})
+
+
+def _unwrap_live_callable_member(value: object) -> object | None:
+    """Return the direct callable a Python call will resolve to."""
+    if isinstance(value, (staticmethod, classmethod)):
+        value = value.__func__
+    if inspect.ismethod(value):
+        value = value.__func__
+    return value if callable(value) else None
+
+
+def _live_callable_entrypoint(value: object | None, *, member_name: str | None) -> object | None:
+    """Resolve the one executable entrypoint used by a bound collaborator."""
+    if value is None:
+        return None
+    if member_name is None:
+        direct = _unwrap_live_callable_member(value)
+        if inspect.isfunction(direct) or inspect.isbuiltin(direct):
+            return direct
+        owner_type = type(value)
+        try:
+            return _unwrap_live_callable_member(inspect.getattr_static(owner_type, "__call__"))
+        except (AttributeError, TypeError):
+            return None
+    try:
+        return _unwrap_live_callable_member(inspect.getattr_static(value, member_name))
+    except (AttributeError, TypeError):
+        return None
+
+
+def _live_callable_closure_cells(
+    entrypoint: object | None,
+) -> tuple[tuple[object, object], ...] | None:
+    """Capture closure-cell object/value pairs without serializing live data."""
+    closure = getattr(entrypoint, "__closure__", None)
+    if closure is None:
+        return ()
+    try:
+        return tuple((cell, cell.cell_contents) for cell in closure)
+    except ValueError:
+        return None
+
+
+def _capture_live_callable_integrity(
+    value: object | None,
+    *,
+    member_name: str | None = None,
+) -> _LiveCallableIntegrityBinding:
+    """Capture the direct executable entrypoint selected at construction."""
+    entrypoint = _live_callable_entrypoint(value, member_name=member_name)
+    return _LiveCallableIntegrityBinding(
+        value=value,
+        member_name=member_name,
+        entrypoint=entrypoint,
+        code=getattr(entrypoint, "__code__", None),
+        defaults=getattr(entrypoint, "__defaults__", None),
+        keyword_defaults=getattr(entrypoint, "__kwdefaults__", None),
+        closure_cells=_live_callable_closure_cells(entrypoint),
+    )
+
+
+def _live_callable_integrity_is_intact(
+    binding: _LiveCallableIntegrityBinding,
+    current: object | None,
+) -> bool:
+    """Return whether execution will use its construction-time entrypoint."""
+    if current is not binding.value:
+        return False
+    current_entrypoint = _live_callable_entrypoint(current, member_name=binding.member_name)
+    if current_entrypoint is not binding.entrypoint:
+        return False
+    if binding.entrypoint is None:
+        return current is None
+    if getattr(current_entrypoint, "__code__", None) is not binding.code:
+        return False
+    if getattr(current_entrypoint, "__defaults__", None) is not binding.defaults:
+        return False
+    if getattr(current_entrypoint, "__kwdefaults__", None) is not binding.keyword_defaults:
+        return False
+    current_closure_cells = _live_callable_closure_cells(current_entrypoint)
+    if binding.closure_cells is None or current_closure_cells is None:
+        return False
+    if len(current_closure_cells) != len(binding.closure_cells):
+        return False
+    return all(
+        current_cell is expected_cell and current_value is expected_value
+        for (current_cell, current_value), (expected_cell, expected_value) in zip(
+            current_closure_cells,
+            binding.closure_cells,
+            strict=True,
+        )
+    )
+
+
+def _direct_module_member_paths(function: object, global_name: str) -> tuple[tuple[str, ...], ...]:
+    """Return direct attribute paths read from one module global by a function."""
+    if not inspect.isfunction(function):
+        return ()
+    paths: set[tuple[str, ...]] = set()
+    instructions = tuple(dis.get_instructions(function))
+    ignored_opcodes = frozenset({"CACHE", "EXTENDED_ARG", "PUSH_NULL", "COPY", "SWAP"})
+    for index, instruction in enumerate(instructions):
+        if (
+            instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}
+            or instruction.argval != global_name
+        ):
+            continue
+        path: list[str] = []
+        for following in instructions[index + 1 :]:
+            if following.opname in ignored_opcodes:
+                continue
+            if following.opname in {"LOAD_ATTR", "LOAD_METHOD"} and isinstance(
+                following.argval, str
+            ):
+                path.append(following.argval)
+                paths.add(tuple(path))
+                continue
+            break
+    return tuple(sorted(paths))
+
+
+def _runtime_dispatch_owners(adapter: object) -> tuple[object, ...]:
+    """Return the adapter and its explicitly declared execution components."""
+    owners = [adapter]
+    try:
+        provider = object.__getattribute__(adapter, "execution_components")
+        components = provider() if callable(provider) else None
+    except Exception:
+        components = None
+    if isinstance(components, Mapping):
+        owners.extend(component for component in components.values() if component is not None)
+    unique_owners: list[object] = []
+    seen: set[int] = set()
+    for owner in owners:
+        owner_id = id(owner)
+        if owner_id not in seen:
+            seen.add(owner_id)
+            unique_owners.append(owner)
+    return tuple(unique_owners)
+
+
+def _live_value_is_intact(expected: object, current: object) -> bool:
+    """Compare direct module values without rejecting equal scalar sentinels."""
+    if expected is current:
+        return True
+    if expected is None or isinstance(expected, (bool, int, float, str, bytes)):
+        return type(current) is type(expected) and current == expected
+    return False
+
+
+def _capture_runtime_dispatch_integrity(adapter: object) -> _RuntimeDispatchIntegrityBinding:
+    """Capture direct dispatch roots and module calls without serializing live state.
+
+    This deliberately inspects only execution entrypoints and declared runtime
+    components. It covers subprocess launch surfaces (including nested
+    ``asyncio.subprocess.PIPE`` paths) while avoiding unstable retry handles,
+    pools, and interpreter-specialized code serialization.
+    """
+    entrypoints: list[_LiveCallableIntegrityBinding] = []
+    module_members: list[_LiveRuntimeModuleMemberBinding] = []
+    seen_entrypoints: set[tuple[int, str]] = set()
+    seen_module_members: set[tuple[int, str, tuple[str, ...]]] = set()
+    for owner in _runtime_dispatch_owners(adapter):
+        for name in _RUNTIME_DISPATCH_ENTRYPOINTS:
+            key = (id(owner), name)
+            if key in seen_entrypoints:
+                continue
+            binding = _capture_live_callable_integrity(owner, member_name=name)
+            if binding.entrypoint is None:
+                continue
+            seen_entrypoints.add(key)
+            entrypoints.append(binding)
+            function = binding.entrypoint
+            if not inspect.isfunction(function):
+                continue
+            try:
+                global_dependencies = inspect.getclosurevars(function).globals
+            except Exception:
+                continue
+            for global_name, dependency in global_dependencies.items():
+                if not inspect.ismodule(dependency):
+                    continue
+                for path in _direct_module_member_paths(function, global_name):
+                    member = dependency
+                    try:
+                        for attribute in path:
+                            member = inspect.getattr_static(member, attribute)
+                    except (AttributeError, TypeError):
+                        continue
+                    member_key = (id(function), global_name, path)
+                    if member_key in seen_module_members:
+                        continue
+                    seen_module_members.add(member_key)
+                    module_members.append(
+                        _LiveRuntimeModuleMemberBinding(
+                            source_function=function,
+                            global_name=global_name,
+                            module=dependency,
+                            path=path,
+                            value=member,
+                            callable_binding=(
+                                _capture_live_callable_integrity(member)
+                                if callable(member)
+                                else None
+                            ),
+                        )
+                    )
+    return _RuntimeDispatchIntegrityBinding(tuple(entrypoints), tuple(module_members))
+
+
+def _runtime_dispatch_integrity_is_intact(binding: _RuntimeDispatchIntegrityBinding) -> bool:
+    """Return whether direct runtime dispatch code and module members are unchanged."""
+    if not all(
+        _live_callable_integrity_is_intact(entrypoint, entrypoint.value)
+        for entrypoint in binding.entrypoints
+    ):
+        return False
+    for member_binding in binding.module_members:
+        global_values = getattr(member_binding.source_function, "__globals__", None)
+        if not isinstance(global_values, Mapping):
+            return False
+        if global_values.get(member_binding.global_name) is not member_binding.module:
+            return False
+        current = member_binding.module
+        try:
+            for attribute in member_binding.path:
+                current = inspect.getattr_static(current, attribute)
+        except (AttributeError, TypeError):
+            return False
+        if not _live_value_is_intact(member_binding.value, current):
+            return False
+        if member_binding.callable_binding is not None and not _live_callable_integrity_is_intact(
+            member_binding.callable_binding,
+            current,
+        ):
+            return False
+    return True
+
+
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
     """Return the expected artifacts absent relative to ``cwd``.
 
@@ -996,6 +1287,19 @@ class ParallelACExecutor:
         self._leaf_dispatcher_factory = LeafDispatcher
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
+        self._authority_bound_execution_collaborators = _AuthorityBoundExecutionCollaborators(
+            leaf_dispatcher=_capture_live_callable_integrity(
+                self._leaf_dispatcher_factory,
+                member_name="stream",
+            ),
+            atomic_verifier=_capture_live_callable_integrity(self._atomic_verifier),
+        )
+        self._runtime_dispatch_integrity = _capture_runtime_dispatch_integrity(adapter)
+        self._runtime_dispatch_integrity_binding = self._runtime_dispatch_integrity
+        self._runtime_dispatch_integrity_checker = _runtime_dispatch_integrity_is_intact
+        self._runtime_dispatch_integrity_checker_binding = _capture_live_callable_integrity(
+            self._runtime_dispatch_integrity_checker
+        )
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=self._inherited_runtime_handle,
@@ -1108,6 +1412,47 @@ class ParallelACExecutor:
     def execution_authority(self) -> ExecutionAuthorityContract:
         """Return the immutable authority snapshot used by this executor."""
         return self._execution_authority
+
+    def _execution_collaborators_are_intact(self) -> bool:
+        """Verify that later execution still uses the authority-bound collaborators."""
+        binding = self._authority_bound_execution_collaborators
+        try:
+            return _live_callable_integrity_is_intact(
+                binding.leaf_dispatcher,
+                self._leaf_dispatcher_factory,
+            ) and _live_callable_integrity_is_intact(
+                binding.atomic_verifier,
+                self._atomic_verifier,
+            )
+        except Exception:
+            return False
+
+    def _runtime_authority_is_intact(self) -> bool:
+        """Recheck the adapter implementation before it can perform an effect.
+
+        The durable contract captures the runtime implementation. This
+        process-local binding captures its direct dispatch roots and module
+        dependencies without reserializing interpreter-specialized code or
+        folding handles and retry counters into the baseline.
+        """
+        try:
+            return (
+                self._runtime_dispatch_integrity is self._runtime_dispatch_integrity_binding
+                and _live_callable_integrity_is_intact(
+                    self._runtime_dispatch_integrity_checker_binding,
+                    self._runtime_dispatch_integrity_checker,
+                )
+                and self._runtime_dispatch_integrity_checker(self._runtime_dispatch_integrity)
+            )
+        except Exception:
+            return False
+
+    def _require_execution_collaborators_intact(self) -> None:
+        """Fail closed before dispatch or acceptance behavior can drift."""
+        if not self._execution_collaborators_are_intact():
+            raise ValueError("execution collaborators drifted from execution authority")
+        if not self._runtime_authority_is_intact():
+            raise ValueError("runtime implementation drifted from execution authority")
 
     @staticmethod
     def _dispatch_rate_backend(adapter: AgentRuntime) -> str:
@@ -3563,6 +3908,7 @@ class ParallelACExecutor:
             permission_mode="bypassPermissions",
         )
 
+        self._require_execution_collaborators_intact()
         alt_executor = ParallelACExecutor(
             alt_adapter,
             self._event_store,
@@ -4613,6 +4959,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
+            self._require_execution_collaborators_intact()
             await self._leaf_dispatcher_factory(self).stream(
                 state=dispatch_state,
                 prompt=prompt,
@@ -4715,6 +5062,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
+                        self._require_execution_collaborators_intact()
                         await self._leaf_dispatcher_factory(self).stream(
                             state=dispatch_state,
                             prompt=(
@@ -6179,6 +6527,7 @@ Respond with either ATOMIC or the structured JSON object only.
         ):
             return None
 
+        self._require_execution_collaborators_intact()
         verifier = self._atomic_verifier
         try:
             effective_schema = _effective_evidence_schema_for_ac(
