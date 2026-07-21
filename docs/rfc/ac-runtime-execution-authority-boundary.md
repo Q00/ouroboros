@@ -11,9 +11,9 @@ trust reuse, or final acceptance by itself.
 | --- | --- | --- |
 | Executor implementation, static `LeafDispatcher`, and token estimator | Versioned, implementation-bound portable baseline | Foundation A |
 | Runtime/backend configuration, executable generation, watchdog policy, static handle-selector implementation | Versioned, redacted/digested portable baseline | Foundation A |
-| Workspace generation, verifier implementation, and exact execution policy | Versioned portable baseline | Foundation A |
+| Workspace generation, verifier implementation, and exact static execution policy (including configured base reasoning effort) | Versioned portable baseline | Foundation A |
 | AC semantics, prompt, tool catalog, selected runtime handle, `ACRuntimeHandleManager`, checkpoint and resume state | Explicitly excluded from the baseline | Foundation C attempt capsule |
-| `LevelCoordinator` implementation, conflict-reconciliation policy, reasoning effort, session cache, and review session state | Explicitly excluded from the baseline | Foundation C attempt capsule |
+| `LevelCoordinator` implementation, conflict-reconciliation policy, selected per-AC reasoning effort, session cache, and review session state | Explicitly excluded from the baseline | Foundation C attempt capsule |
 | `ExecutionEventEmitter`, event-store handles, `SessionSignalHub`, queues, locks, and live pools | Explicitly volatile; never upgraded by a declared identity | Foundation B event semantics / runtime process |
 
 The machine-readable form of this matrix is
@@ -36,6 +36,10 @@ The machine-readable form of this matrix is
 - A selector implementation can be baseline identity; a selected
   `RuntimeHandle` cannot. The handle's metadata is bound by the attempt capsule
   that actually resumes or dispatches it.
+- The configured base reasoning-effort policy is baseline identity because it
+  changes the executor's static behavior. The selected effort for a concrete
+  AC (after investment assessment, decomposition role, and retry state) is
+  per-attempt data and is never represented by this baseline.
 - If a provider getter, implementation, gate-factory dependency, or directly
   constructed gate-class member cannot be observed safely, the resulting
   baseline is process-local rather than exposing an error message or claiming
@@ -90,7 +94,7 @@ following:
    change the baseline fingerprint.
 3. A live signal hub cannot become portable merely by declaring an identity.
 4. Changing an AC runtime handle, handle manager, checkpoint state, coordinator
-   session, or event emitter does not purport to change the portable baseline;
-   the encoded boundary assigns each to its later owner.
+   session, selected per-AC effort, or event emitter does not purport to change
+   the portable baseline; the encoded boundary assigns each to its later owner.
 5. `portable_across_processes` is only an identity-stability property. It is
    insufficient for any dispatch, recovery, trust, result, or acceptance reuse.

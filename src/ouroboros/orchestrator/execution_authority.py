@@ -43,7 +43,7 @@ from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilitie
 from ouroboros.orchestrator.verifier import Verifier
 
 EXECUTION_AUTHORITY_VERSION = 5
-EXECUTION_AUTHORITY_BOUNDARY_VERSION = 1
+EXECUTION_AUTHORITY_BOUNDARY_VERSION = 2
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
 _MAX_IDENTITY_SCALAR_CHARS = 8_192
@@ -104,6 +104,7 @@ _PER_ATTEMPT_CAPSULE_BOUNDARY = (
     "ac_runtime_handle_manager",
     "checkpoint_and_resume_state",
     "level_coordinator_behavior_and_session_state",
+    "selected_ac_reasoning_effort",
 )
 _VOLATILE_BOUNDARY = (
     "session_signal_hub",
@@ -2711,7 +2712,13 @@ def build_execution_policy_contract(
     shadow_replay_enabled: bool,
     dispatch_rate_policy: Mapping[str, object],
 ) -> dict[str, object]:
-    """Return the one canonical parallel-execution policy payload."""
+    """Return the canonical *static* parallel-execution policy payload.
+
+    ``reasoning_effort`` is the configured base policy for this executor.  The
+    actual effort selected for an AC can vary with its investment assessment,
+    decomposition role, and retry attempt; that selected value belongs to the
+    Foundation-C attempt capsule and is intentionally absent from this baseline.
+    """
     return {
         "version": _EXECUTION_POLICY_VERSION,
         "decomposition_mode": decomposition_mode,

@@ -383,6 +383,7 @@ def test_foundation_a_boundary_is_explicit_and_versioned() -> None:
     assert "leaf_dispatcher_implementation" in contract.data["boundary"]["portable_baseline"]
     assert "ac_runtime_handle_manager" in contract.data["boundary"]["per_attempt_capsule"]
     assert "selected_runtime_handle" in contract.data["boundary"]["per_attempt_capsule"]
+    assert "selected_ac_reasoning_effort" in contract.data["boundary"]["per_attempt_capsule"]
     assert "execution_event_emitter" in contract.data["boundary"]["volatile"]
     assert "session_signal_hub" in contract.data["boundary"]["volatile"]
 
@@ -1397,6 +1398,7 @@ def test_level_coordinator_is_explicitly_per_attempt_not_baseline_identity(
         "level_coordinator_behavior_and_session_state"
         in baseline.data["boundary"]["per_attempt_capsule"]
     )
+    assert "selected_ac_reasoning_effort" in baseline.data["boundary"]["per_attempt_capsule"]
 
 
 def test_handle_manager_and_event_emitter_are_explicitly_outside_foundation_a(
