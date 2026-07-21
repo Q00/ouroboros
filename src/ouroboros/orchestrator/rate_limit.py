@@ -151,7 +151,10 @@ def _declared_function_direct_module_attributes(
     instructions = list(dis.get_instructions(function))
     attributes: set[str] = set()
     for index, instruction in enumerate(instructions):
-        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"} or instruction.argval != global_name:
+        if (
+            instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}
+            or instruction.argval != global_name
+        ):
             continue
         for following in instructions[index + 1 : index + 4]:
             if following.opname in {"CACHE", "EXTENDED_ARG", "PUSH_NULL"}:
@@ -291,18 +294,14 @@ class _DeclaredClassImplementation:
     runtime_class: type[object]
     class_chain: tuple[type[object], ...]
     raw_items: dict[type[object], dict[str, object]]
-    member_implementations: dict[
-        tuple[type[object], str, int], _DeclaredFunctionImplementation
-    ]
+    member_implementations: dict[tuple[type[object], str, int], _DeclaredFunctionImplementation]
 
 
 def _declared_class_implementation(
     runtime_class: type[object],
 ) -> _DeclaredClassImplementation:
     """Capture executable state without recursively following class globals."""
-    class_chain = tuple(
-        current for current in runtime_class.__mro__ if current is not object
-    )
+    class_chain = tuple(current for current in runtime_class.__mro__ if current is not object)
     raw_items: dict[type[object], dict[str, object]] = {}
     member_implementations: dict[
         tuple[type[object], str, int], _DeclaredFunctionImplementation
@@ -336,12 +335,8 @@ def _declared_class_implementation_is_intact(
     for current_class in declared.class_chain:
         expected_raw_items = declared.raw_items[current_class]
         current_raw_items = dict(vars(current_class))
-        if (
-            set(current_raw_items) != set(expected_raw_items)
-            or any(
-                expected_raw_items[name] is not current
-                for name, current in current_raw_items.items()
-            )
+        if set(current_raw_items) != set(expected_raw_items) or any(
+            expected_raw_items[name] is not current for name, current in current_raw_items.items()
         ):
             return False
         for member_name, raw_member in current_raw_items.items():
@@ -349,9 +344,8 @@ def _declared_class_implementation_is_intact(
                 declared_member = declared.member_implementations.get(
                     (current_class, member_name, index)
                 )
-                if (
-                    declared_member is None
-                    or not _declared_function_implementation_is_intact(target, declared_member)
+                if declared_member is None or not _declared_function_implementation_is_intact(
+                    target, declared_member
                 ):
                     return False
     return True
@@ -676,8 +670,7 @@ _DECLARED_GATE_LEAF_CLASS_IMPLEMENTATIONS = {
     dependency: _declared_class_implementation(dependency)
     for dependencies in _DECLARED_GATE_MEMBER_GLOBALS.values()
     for dependency in dependencies.values()
-    if isinstance(dependency, type)
-    and dependency not in (SharedRateLimitBucket, RateLimitGate)
+    if isinstance(dependency, type) and dependency not in (SharedRateLimitBucket, RateLimitGate)
 }
 
 # Direct standard-module dependencies reached by the original gate classes.
@@ -832,17 +825,11 @@ def _canonical_gate_factory_data(value: object, *, depth: int = 0) -> object:
     if isinstance(value, (tuple, list)):
         if len(value) > _GATE_FACTORY_MAX_ITEMS:
             raise ValueError("rate gate factory data is oversized")
-        return [
-            _canonical_gate_factory_data(item, depth=depth + 1)
-            for item in value
-        ]
+        return [_canonical_gate_factory_data(item, depth=depth + 1) for item in value]
     if isinstance(value, (set, frozenset)):
         if len(value) > _GATE_FACTORY_MAX_ITEMS:
             raise ValueError("rate gate factory data is oversized")
-        items = [
-            _canonical_gate_factory_data(item, depth=depth + 1)
-            for item in value
-        ]
+        items = [_canonical_gate_factory_data(item, depth=depth + 1) for item in value]
         return sorted(
             items,
             key=lambda item: json.dumps(
@@ -887,7 +874,10 @@ def _gate_factory_direct_module_attributes(
     instructions = list(dis.get_instructions(function))
     attributes: set[str] = set()
     for index, instruction in enumerate(instructions):
-        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"} or instruction.argval != global_name:
+        if (
+            instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}
+            or instruction.argval != global_name
+        ):
             continue
         for following in instructions[index + 1 : index + 4]:
             if following.opname in {"CACHE", "EXTENDED_ARG", "PUSH_NULL"}:
@@ -922,9 +912,7 @@ def _gate_factory_module_member_identity(value: object) -> dict[str, object]:
             "kind": "function",
             "module": function.__module__,
             "qualname": function.__qualname__,
-            "code_digest": "sha256:" + hashlib.sha256(
-                marshal.dumps(function.__code__)
-            ).hexdigest(),
+            "code_digest": "sha256:" + hashlib.sha256(marshal.dumps(function.__code__)).hexdigest(),
             "defaults_digest": _gate_factory_data_digest(
                 {
                     "positional": tuple(function.__defaults__ or ()),
@@ -935,7 +923,12 @@ def _gate_factory_module_member_identity(value: object) -> dict[str, object]:
     if inspect.isbuiltin(value):
         module = getattr(value, "__module__", None)
         qualname = getattr(value, "__qualname__", None)
-        if not isinstance(module, str) or not module or not isinstance(qualname, str) or not qualname:
+        if (
+            not isinstance(module, str)
+            or not module
+            or not isinstance(qualname, str)
+            or not qualname
+        ):
             raise ValueError("rate gate factory module builtin is not identifiable")
         return {"kind": "builtin", "module": module, "qualname": qualname}
     if isinstance(value, type):
@@ -1032,9 +1025,8 @@ def _gate_factory_class_member_global_identity(
         )
     if isinstance(value, type):
         declared_implementation = _DECLARED_GATE_LEAF_CLASS_IMPLEMENTATIONS.get(value)
-        if (
-            declared_implementation is not None
-            and not _declared_class_implementation_is_intact(value, declared_implementation)
+        if declared_implementation is not None and not _declared_class_implementation_is_intact(
+            value, declared_implementation
         ):
             raise ValueError("rate gate factory result type implementation drifted")
         return _gate_factory_module_member_identity(value)
@@ -1066,9 +1058,15 @@ def _gate_factory_class_member_identity(
         raise ValueError("rate gate factory class member has unbound dependencies")
     if (
         set(closure_vars.globals) != set(expected_globals)
-        or any(expected_globals[name] is not dependency for name, dependency in closure_vars.globals.items())
+        or any(
+            expected_globals[name] is not dependency
+            for name, dependency in closure_vars.globals.items()
+        )
         or set(closure_vars.builtins) != set(expected_builtins)
-        or any(expected_builtins[name] is not dependency for name, dependency in closure_vars.builtins.items())
+        or any(
+            expected_builtins[name] is not dependency
+            for name, dependency in closure_vars.builtins.items()
+        )
     ):
         raise ValueError("rate gate factory class member dependencies drifted")
     return {
@@ -1121,20 +1119,14 @@ def _gate_factory_class_identity(value: type[object]) -> dict[str, object]:
         if runtime_class is object:
             continue
         expected_member_keys = {
-            key
-            for key in _DECLARED_GATE_CLASS_MEMBERS
-            if key[0] is runtime_class
+            key for key in _DECLARED_GATE_CLASS_MEMBERS if key[0] is runtime_class
         }
         if not expected_member_keys:
             raise ValueError("rate gate factory class is not declaration-bound")
         expected_raw_items = _DECLARED_GATE_CLASS_RAW_ITEMS[runtime_class]
         current_raw_items = dict(vars(runtime_class))
-        if (
-            set(current_raw_items) != set(expected_raw_items)
-            or any(
-                expected_raw_items[name] is not current
-                for name, current in current_raw_items.items()
-            )
+        if set(current_raw_items) != set(expected_raw_items) or any(
+            expected_raw_items[name] is not current for name, current in current_raw_items.items()
         ):
             # Special descriptors such as ``__getattribute__`` can alter a
             # gate's visible methods while never appearing as a conventional
@@ -1144,9 +1136,7 @@ def _gate_factory_class_identity(value: type[object]) -> dict[str, object]:
         observed_member_keys: set[tuple[type[object], str, int]] = set()
         qualified_name = f"{runtime_class.__module__}.{runtime_class.__qualname__}"
         for member_name, raw_member in vars(runtime_class).items():
-            expected_raw_member = _DECLARED_GATE_CLASS_RAW_MEMBERS.get(
-                (runtime_class, member_name)
-            )
+            expected_raw_member = _DECLARED_GATE_CLASS_RAW_MEMBERS.get((runtime_class, member_name))
             if expected_raw_member is not None and expected_raw_member is not raw_member:
                 # A descriptor can expose the original ``__func__`` while
                 # changing binding behavior in ``__get__``. The descriptor
@@ -1300,7 +1290,12 @@ def _gate_factory_dependency_identity(
     if inspect.isbuiltin(value):
         module = getattr(value, "__module__", None)
         qualname = getattr(value, "__qualname__", None)
-        if not isinstance(module, str) or not module or not isinstance(qualname, str) or not qualname:
+        if (
+            not isinstance(module, str)
+            or not module
+            or not isinstance(qualname, str)
+            or not qualname
+        ):
             raise ValueError("rate gate factory builtin is not identifiable")
         return {"kind": "builtin", "module": module, "qualname": qualname}
     if isinstance(value, type):
@@ -1335,7 +1330,12 @@ def rate_limit_gate_algorithm_contract(
         identity = _gate_factory_function_identity(target, active=set(), depth=0)
         module = identity.get("module")
         qualname = identity.get("qualname")
-        if not isinstance(module, str) or not module or not isinstance(qualname, str) or not qualname:
+        if (
+            not isinstance(module, str)
+            or not module
+            or not isinstance(qualname, str)
+            or not qualname
+        ):
             raise ValueError("rate gate factory lacks a qualified identity")
         payload = json.dumps(
             identity,
@@ -1559,7 +1559,10 @@ def authority_bound_rate_limit_gate_is_intact(binding: AuthorityBoundRateLimitGa
         return False
     try:
         bucket = object.__getattribute__(gate, "_bucket")
-        if bucket is not binding.bucket or type(bucket) is not _DECLARED_SHARED_RATE_LIMIT_BUCKET_TYPE:
+        if (
+            bucket is not binding.bucket
+            or type(bucket) is not _DECLARED_SHARED_RATE_LIMIT_BUCKET_TYPE
+        ):
             return False
         if not _same_bound_callable(object.__getattribute__(gate, "acquire"), binding.acquire):
             return False
@@ -1626,8 +1629,9 @@ def rate_limit_token_estimator_contract(
     }
 
 
-def capture_authority_bound_rate_limit_token_estimator(
-) -> tuple[Callable[[str], int], dict[str, object]]:
+def capture_authority_bound_rate_limit_token_estimator() -> tuple[
+    Callable[[str], int], dict[str, object]
+]:
     """Capture the estimator that dispatch will actually call.
 
     The returned callable is stored by :class:`ParallelACExecutor`; later

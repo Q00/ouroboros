@@ -281,12 +281,16 @@ def test_resume_rejects_sensitive_persisted_routing_before_diagnostics(
 def test_routing_contract_validators_reject_sensitive_subcontracts() -> None:
     secret = "ghp_" + "a" * 36
 
-    assert OrchestratorRunner._runtime_routing_labels_from_contract(
-        {"runtime_backend": secret, "llm_backend": "anthropic"}
-    ) is None
-    assert OrchestratorRunner._valid_permission_mode_contract(
-        {"observed": True, "mode": secret}
-    ) is False
+    assert (
+        OrchestratorRunner._runtime_routing_labels_from_contract(
+            {"runtime_backend": secret, "llm_backend": "anthropic"}
+        )
+        is None
+    )
+    assert (
+        OrchestratorRunner._valid_permission_mode_contract({"observed": True, "mode": secret})
+        is False
+    )
 
 
 def test_runtime_identity_failure_does_not_egress_dynamic_adapter_type() -> None:

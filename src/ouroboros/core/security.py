@@ -190,13 +190,11 @@ def is_sensitive_value(value: Any) -> bool:
     start = 0
     end = len(value)
     while start < end and (
-        value[start].isspace()
-        or unicodedata.category(value[start]).startswith(("C", "M"))
+        value[start].isspace() or unicodedata.category(value[start]).startswith(("C", "M"))
     ):
         start += 1
     while end > start and (
-        value[end - 1].isspace()
-        or unicodedata.category(value[end - 1]).startswith(("C", "M"))
+        value[end - 1].isspace() or unicodedata.category(value[end - 1]).startswith(("C", "M"))
     ):
         end -= 1
     normalized_value = value[start:end]

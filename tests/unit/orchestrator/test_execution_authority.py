@@ -1941,7 +1941,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     closure_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     assert closure_first._dispatch_rate_gate._bucket._request_limit == 9
     assert closure_second._dispatch_rate_gate._bucket._request_limit == 99
-    assert closure_first.execution_authority.fingerprint != closure_second.execution_authority.fingerprint
+    assert (
+        closure_first.execution_authority.fingerprint
+        != closure_second.execution_authority.fingerprint
+    )
     closure_first_algorithm = closure_first.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -1971,7 +1974,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     default_first = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     monkeypatch.setattr(rate_limit_module, "build_rate_limit_gate", default_ninety_nine)
     default_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
-    assert default_first.execution_authority.fingerprint != default_second.execution_authority.fingerprint
+    assert (
+        default_first.execution_authority.fingerprint
+        != default_second.execution_authority.fingerprint
+    )
     default_first_algorithm = default_first.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -1999,10 +2005,13 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     global_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     assert global_first._dispatch_rate_gate._bucket._request_limit == 9
     assert global_second._dispatch_rate_gate._bucket._request_limit == 99
-    assert global_first.execution_authority.fingerprint != global_second.execution_authority.fingerprint
-    global_first_algorithm = global_first.execution_authority.data["execution_policy"]["dispatch_rate"][
-        "gate_algorithm"
-    ]
+    assert (
+        global_first.execution_authority.fingerprint
+        != global_second.execution_authority.fingerprint
+    )
+    global_first_algorithm = global_first.execution_authority.data["execution_policy"][
+        "dispatch_rate"
+    ]["gate_algorithm"]
     global_second_algorithm = global_second.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -2025,7 +2034,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     class_changed = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     assert class_baseline._dispatch_rate_gate._bucket._request_limit == 1
     assert class_changed._dispatch_rate_gate._bucket._request_limit == 99
-    assert class_baseline.execution_authority.fingerprint != class_changed.execution_authority.fingerprint
+    assert (
+        class_baseline.execution_authority.fingerprint
+        != class_changed.execution_authority.fingerprint
+    )
 
     monkeypatch.setitem(_RATE_GATE_FACTORY_TEST_GLOBALS, "limit", 9)
 
@@ -2044,7 +2056,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     class_global_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     assert class_global_first._dispatch_rate_gate._bucket._request_limit == 9
     assert class_global_second._dispatch_rate_gate._bucket._request_limit == 99
-    assert class_global_first.execution_authority.fingerprint != class_global_second.execution_authority.fingerprint
+    assert (
+        class_global_first.execution_authority.fingerprint
+        != class_global_second.execution_authority.fingerprint
+    )
     first_algorithm = class_global_first.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -2073,10 +2088,13 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     module_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     second_timestamp = module_second._dispatch_rate_gate._bucket._time()
     assert second_timestamp - first_timestamp > 98.0
-    assert module_first.execution_authority.fingerprint != module_second.execution_authority.fingerprint
-    module_algorithm = module_first.execution_authority.data["execution_policy"][
-        "dispatch_rate"
-    ]["gate_algorithm"]
+    assert (
+        module_first.execution_authority.fingerprint
+        != module_second.execution_authority.fingerprint
+    )
+    module_algorithm = module_first.execution_authority.data["execution_policy"]["dispatch_rate"][
+        "gate_algorithm"
+    ]
     assert module_algorithm["observed"] is False
 
     monkeypatch.setattr(rate_limit_module.time, "monotonic", original_monotonic)
@@ -2095,7 +2113,9 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
     deque_second = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
     deque_second._dispatch_rate_gate._bucket._reservations.append((0.0, 1))
     assert deque_second._dispatch_rate_gate._bucket._tokens_in_window() == 100
-    assert deque_first.execution_authority.fingerprint != deque_second.execution_authority.fingerprint
+    assert (
+        deque_first.execution_authority.fingerprint != deque_second.execution_authority.fingerprint
+    )
     deque_algorithm = deque_first.execution_authority.data["execution_policy"]["dispatch_rate"][
         "gate_algorithm"
     ]
@@ -2114,7 +2134,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
 
     monkeypatch.setattr(rate_limit_module.RateLimitGate, "acquire", InertAcquireDescriptor())
     descriptor_changed = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
-    assert descriptor_baseline.execution_authority.fingerprint != descriptor_changed.execution_authority.fingerprint
+    assert (
+        descriptor_baseline.execution_authority.fingerprint
+        != descriptor_changed.execution_authority.fingerprint
+    )
     descriptor_algorithm = descriptor_changed.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -2136,7 +2159,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
         SpoofAcquireStaticMethod(original_gate_acquire),
     )
     spoof_changed = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
-    assert spoof_baseline.execution_authority.fingerprint != spoof_changed.execution_authority.fingerprint
+    assert (
+        spoof_baseline.execution_authority.fingerprint
+        != spoof_changed.execution_authority.fingerprint
+    )
     spoof_algorithm = spoof_changed.execution_authority.data["execution_policy"]["dispatch_rate"][
         "gate_algorithm"
     ]
@@ -2147,6 +2173,7 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
 
     def bypassing_getattribute(self: object, name: str):  # type: ignore[no-untyped-def]
         if name == "acquire":
+
             async def noop(*_args: object, **_kwargs: object) -> None:
                 return None
 
@@ -2160,7 +2187,10 @@ def test_rate_gate_replacements_and_live_dependencies_are_process_local(
         raising=False,
     )
     raw_class_changed = ParallelACExecutor(**kwargs)  # type: ignore[arg-type]
-    assert raw_class_baseline.execution_authority.fingerprint != raw_class_changed.execution_authority.fingerprint
+    assert (
+        raw_class_baseline.execution_authority.fingerprint
+        != raw_class_changed.execution_authority.fingerprint
+    )
     raw_class_algorithm = raw_class_changed.execution_authority.data["execution_policy"][
         "dispatch_rate"
     ]["gate_algorithm"]
@@ -2255,7 +2285,10 @@ def test_unobserved_workspace_or_runtime_is_not_reusable() -> None:
 def test_selected_runtime_handle_belongs_to_the_later_attempt_capsule() -> None:
     cheap = RuntimeHandle(backend="codex_cli", metadata={"profile": "cheap"})
     expensive = RuntimeHandle(backend="codex_cli", metadata={"profile": "expensive"})
-    assert _contract(runtime_handle=cheap).fingerprint == _contract(runtime_handle=expensive).fingerprint
+    assert (
+        _contract(runtime_handle=cheap).fingerprint
+        == _contract(runtime_handle=expensive).fingerprint
+    )
 
 
 def test_verifier_identity_provider_failure_degrades_to_process_local() -> None:

@@ -166,7 +166,9 @@ def _process_local_runtime_nonce(*identity_inputs: object) -> str:
 
             nonce = secrets.token_hex(32)
 
-            def discard(dead_reference: weakref.ReferenceType[object], *, key: int = object_id) -> None:
+            def discard(
+                dead_reference: weakref.ReferenceType[object], *, key: int = object_id
+            ) -> None:
                 with _PROCESS_LOCAL_RUNTIME_NONCES_LOCK:
                     current = _PROCESS_LOCAL_RUNTIME_NONCES.get(key)
                     if current is not None and current[0] is dead_reference:
@@ -571,9 +573,7 @@ def _authority_runtime_execution_identity(
         result: dict[str, object] = {"version": 1, "observed": False}
         nonce = value.get("instance_nonce")
         result["instance_nonce"] = (
-            nonce
-            if isinstance(nonce, str) and nonce
-            else _process_local_runtime_nonce(adapter)
+            nonce if isinstance(nonce, str) and nonce else _process_local_runtime_nonce(adapter)
         )
         return result
     identity = value.get("identity")
@@ -602,8 +602,7 @@ def _valid_authority_runtime_execution_identity(value: object) -> bool:
         )
     return (
         observed is True
-        and set(value)
-        == {"version", "observed", "effective_model_observed", "identity_digest"}
+        and set(value) == {"version", "observed", "effective_model_observed", "identity_digest"}
         and isinstance(value.get("effective_model_observed"), bool)
         and isinstance(value.get("identity_digest"), str)
         and _SHA256_DIGEST_PATTERN.fullmatch(value["identity_digest"]) is not None
@@ -861,7 +860,9 @@ class ResolvedRuntimeAuthority:
             adapter,
             active,
         ):
-            raise ValueError("resolved runtime authority drifted from an unobserved execution identity")
+            raise ValueError(
+                "resolved runtime authority drifted from an unobserved execution identity"
+            )
 
     @property
     def data(self) -> dict[str, Any]:
@@ -1022,16 +1023,14 @@ def _callable_behavior_digest(target: object) -> str:
                 return {
                     "kind": type(value).__name__,
                     "items": [
-                        opaque_value_projection(item, depth=depth + 1, seen=seen)
-                        for item in value
+                        opaque_value_projection(item, depth=depth + 1, seen=seen) for item in value
                     ],
                 }
             if isinstance(value, (set, frozenset)):
                 if len(value) > _MAX_IDENTITY_ITEMS:
                     raise ValueError("callable data set is oversized")
                 items = [
-                    opaque_value_projection(item, depth=depth + 1, seen=seen)
-                    for item in value
+                    opaque_value_projection(item, depth=depth + 1, seen=seen) for item in value
                 ]
                 return {
                     "kind": type(value).__name__,
@@ -1136,8 +1135,7 @@ def _callable_behavior_digest(target: object) -> str:
             global_dependencies = [
                 direct_global_identity(dependency, depth=depth)
                 for global_name, dependency in sorted(closure_vars.globals.items())
-                if (function.__module__, global_name)
-                not in _PORTABLE_CALLABLE_GLOBAL_EXCLUSIONS
+                if (function.__module__, global_name) not in _PORTABLE_CALLABLE_GLOBAL_EXCLUSIONS
             ]
             builtin_dependencies: list[dict[str, object]] = []
             for _name, dependency in sorted(closure_vars.builtins.items()):
@@ -2178,8 +2176,7 @@ def _runtime_composition_contract(adapter: object) -> dict[str, object]:
         if not isinstance(components, Mapping) or len(components) > _MAX_IDENTITY_ITEMS:
             raise ValueError("runtime execution components are invalid")
         if not all(
-            isinstance(name, str) and name and not is_sensitive_value(name)
-            for name in components
+            isinstance(name, str) and name and not is_sensitive_value(name) for name in components
         ):
             raise ValueError("runtime execution component names are invalid")
         contracts = {
@@ -2599,10 +2596,7 @@ def _redacted_authority_policy_value(value: object) -> object:
             return "redacted:sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
         return value
     if isinstance(value, Mapping):
-        return {
-            key: _redacted_authority_policy_value(item)
-            for key, item in value.items()
-        }
+        return {key: _redacted_authority_policy_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_redacted_authority_policy_value(item) for item in value]
     return value
@@ -2945,9 +2939,7 @@ class ExecutionAuthorityContract:
             and watchdog.get("observed") is not True
         ):
             return False
-        if executable.get("required") is True and (
-            watchdog.get("observed") is not True
-        ):
+        if executable.get("required") is True and (watchdog.get("observed") is not True):
             return False
         skill_dispatcher = runtime.get("skill_dispatcher")
         if (

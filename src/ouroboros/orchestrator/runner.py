@@ -1424,9 +1424,7 @@ class OrchestratorRunner:
     ) -> RuntimeHandle | None:
         """Seed a runtime handle with startup metadata before execution begins."""
         inherited_backend = (
-            self._safe_backend_label(runtime_handle.backend)
-            if runtime_handle is not None
-            else None
+            self._safe_backend_label(runtime_handle.backend) if runtime_handle is not None else None
         )
         # A resume handle with a missing or credential-shaped backend cannot be
         # safely attributed to this run. Do not carry its raw label into runtime
@@ -2699,9 +2697,7 @@ class OrchestratorRunner:
                 return None
         else:
             return None
-        routing_labels = OrchestratorRunner._runtime_routing_labels_from_contract(
-            routing_contract
-        )
+        routing_labels = OrchestratorRunner._runtime_routing_labels_from_contract(routing_contract)
         permission_mode = routing_contract.get("permission_mode")
         constructor_model = routing_contract.get("constructor_model")
         runtime_execution = routing_contract.get("runtime_execution")
