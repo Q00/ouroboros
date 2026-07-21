@@ -463,6 +463,12 @@ class InputValidator:
         "entry",
         "reason",
         "user_preferences",
+        # ``ouroboros_submit_fanout_results.results`` carries child subagent
+        # outputs verbatim — LLM advisory prose and structured findings that
+        # routinely contain ';' / '|' and never reach a shell. Without this
+        # exemption every contract-following host submission with natural
+        # prose is rejected (found by live re-entry with real subagents).
+        "results",
     }
 
     def __init__(self) -> None:

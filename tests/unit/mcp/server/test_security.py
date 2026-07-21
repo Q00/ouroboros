@@ -235,6 +235,36 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
+    def test_validate_allows_fanout_results_punctuation_as_freetext(self) -> None:
+        """Fan-out re-entry carries child subagent outputs verbatim.
+
+        Real advisory prose routinely contains ';' / '|' (found by live
+        re-entry with real subagents, Q00/ouroboros#1671): the submission
+        must not be rejected as shell input.
+        """
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "session_id": "s1",
+                "fanout_id": "fanout_abc",
+                "correlation_key": "context.lane_id",
+                "results": [
+                    {
+                        "key": "ambiguity_contrarian",
+                        "content": {
+                            "finding": "logs exist; that does not make them usable",
+                            "suggested_options": [
+                                "read local logs; exclude analytics || fallback"
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+        assert result.is_ok
+
     def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
         """Operator-supplied user_preferences carry freetext, never shell input."""
         validator = InputValidator()
