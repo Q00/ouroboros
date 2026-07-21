@@ -104,7 +104,7 @@ class TestSensitiveDetection:
 
     @pytest.mark.parametrize(
         "field_name",
-        ("apiKeyValue", "accessTokenValue", "api_key", "auth", "authentication"),
+        ("apiKeyValue", "accessTokenValue", "api_key", "auth", "authentication", "bearer"),
     )
     def test_sensitive_credential_field_aliases(self, field_name: str) -> None:
         """Durable-contract screening recognizes common credential aliases."""
@@ -129,6 +129,7 @@ class TestSensitiveDetection:
         assert is_sensitive_value("sk-1234567890") is True
         assert is_sensitive_value("Bearer token123") is True
         assert is_sensitive_value("ghp_abcdefghijklmnopqrstuvwxyz1234567890") is True
+        assert is_sensitive_value("rk_live_" + "a" * 32) is True
         assert is_sensitive_value("AIzaXXXXXXXXXXXXXXX") is True
 
     @pytest.mark.parametrize("separator", (":", "/", "_", "\u200b"))
@@ -250,10 +251,13 @@ class TestSensitiveDetection:
     def test_embedded_stripe_and_pem_private_key_values_are_redacted(self) -> None:
         """Credential shapes beyond prefix-only forms cannot reach diagnostics."""
         stripe = "sk_live_" + "a" * 24
+        restricted = "rk_live_" + "b" * 24
         pem = "-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----"
 
         assert is_sensitive_value(f"retry with {stripe}") is True
         assert redact_sensitive_text(f"retry with {stripe}") == "retry with [redacted]"
+        assert is_sensitive_value(f"retry with {restricted}") is True
+        assert redact_sensitive_text(f"retry with {restricted}") == "retry with [redacted]"
         assert is_sensitive_value(f"retry with {pem}") is True
         assert redact_sensitive_text(f"retry with {pem}") == "retry with [redacted]"
 

@@ -28,7 +28,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -262,6 +262,7 @@ from ouroboros.orchestrator.evidence_schema import (
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ResolvedRuntimeAuthority,
+    _callable_behavior_digest,
     build_execution_policy_contract,
     runtime_routing_labels_contract,
 )
@@ -714,9 +715,11 @@ class _LiveCallableIntegrityBinding:
     The durable authority owns the collaborator's semantic fingerprint. The
     live binding protects the narrower time-of-use boundary: execution must
     invoke the exact collaborator object captured at construction, rather than
-    a field substituted after the authority was built. It intentionally does
-    not inspect live implementation details, which may be specialized by the
-    interpreter during ordinary execution.
+    a field substituted after the authority was built. Mutable closure state
+    receives an existing hash-only behavior snapshot; other live
+    implementation details remain out of this lightweight process-local check
+    because they may be specialized by the interpreter during ordinary
+    execution.
     """
 
     value: object | None
@@ -726,6 +729,7 @@ class _LiveCallableIntegrityBinding:
     defaults: object | None
     keyword_defaults: object | None
     closure_cells: tuple[tuple[object, object], ...] | None
+    closure_behavior_digest: str | None
 
 
 @dataclass(frozen=True)
@@ -734,6 +738,8 @@ class _AuthorityBoundExecutionCollaborators:
 
     leaf_dispatcher: _LiveCallableIntegrityBinding
     atomic_verifier: _LiveCallableIntegrityBinding
+    integrity_checker: Callable[[_LiveCallableIntegrityBinding, object | None], bool]
+    integrity_checker_binding: _LiveCallableIntegrityBinding
 
 
 @dataclass(frozen=True)
@@ -807,6 +813,21 @@ def _capture_live_callable_integrity(
 ) -> _LiveCallableIntegrityBinding:
     """Capture the direct executable entrypoint selected at construction."""
     entrypoint = _live_callable_entrypoint(value, member_name=member_name)
+    closure_cells = _live_callable_closure_cells(entrypoint)
+    # Cell identity alone is not enough: a verifier may close over a mutable
+    # mapping or list whose contents change after authority construction.  Keep
+    # only the existing non-egressing behavior digest, and only when a closure
+    # exists, so ordinary hot dispatch paths retain the lightweight identity
+    # check below.
+    closure_behavior_digest: str | None = None
+    if closure_cells:
+        try:
+            closure_behavior_digest = _callable_behavior_digest(entrypoint)
+        except Exception:
+            # The structural binding still protects this process-local
+            # collaborator.  An unavailable digest must never be treated as a
+            # matching digest at time of use.
+            closure_behavior_digest = None
     return _LiveCallableIntegrityBinding(
         value=value,
         member_name=member_name,
@@ -814,18 +835,30 @@ def _capture_live_callable_integrity(
         code=getattr(entrypoint, "__code__", None),
         defaults=getattr(entrypoint, "__defaults__", None),
         keyword_defaults=getattr(entrypoint, "__kwdefaults__", None),
-        closure_cells=_live_callable_closure_cells(entrypoint),
+        closure_cells=closure_cells,
+        closure_behavior_digest=closure_behavior_digest,
     )
 
 
 def _live_callable_integrity_is_intact(
     binding: _LiveCallableIntegrityBinding,
     current: object | None,
+    *,
+    _entrypoint_resolver: Callable[..., object | None] = _live_callable_entrypoint,
+    _closure_cells_resolver: Callable[[object | None], tuple[tuple[object, object], ...] | None] = (
+        _live_callable_closure_cells
+    ),
+    _behavior_digest: Callable[[object], str] = _callable_behavior_digest,
 ) -> bool:
-    """Return whether execution will use its construction-time entrypoint."""
+    """Return whether execution will use its construction-time entrypoint.
+
+    The helper dependencies are captured in defaults deliberately.  Executors
+    retain this function object at construction, so replacing this module's
+    helper name later cannot turn a live authority guard into an allow-all.
+    """
     if current is not binding.value:
         return False
-    current_entrypoint = _live_callable_entrypoint(current, member_name=binding.member_name)
+    current_entrypoint = _entrypoint_resolver(current, member_name=binding.member_name)
     if current_entrypoint is not binding.entrypoint:
         return False
     if binding.entrypoint is None:
@@ -836,19 +869,26 @@ def _live_callable_integrity_is_intact(
         return False
     if getattr(current_entrypoint, "__kwdefaults__", None) is not binding.keyword_defaults:
         return False
-    current_closure_cells = _live_callable_closure_cells(current_entrypoint)
+    current_closure_cells = _closure_cells_resolver(current_entrypoint)
     if binding.closure_cells is None or current_closure_cells is None:
         return False
     if len(current_closure_cells) != len(binding.closure_cells):
         return False
-    return all(
+    if not all(
         current_cell is expected_cell and current_value is expected_value
         for (current_cell, current_value), (expected_cell, expected_value) in zip(
             current_closure_cells,
             binding.closure_cells,
             strict=True,
         )
-    )
+    ):
+        return False
+    if binding.closure_behavior_digest is None:
+        return True
+    try:
+        return _behavior_digest(current_entrypoint) == binding.closure_behavior_digest
+    except Exception:
+        return False
 
 
 def _direct_module_member_paths(function: object, global_name: str) -> tuple[tuple[str, ...], ...]:
@@ -967,10 +1007,16 @@ def _capture_runtime_dispatch_integrity(adapter: object) -> _RuntimeDispatchInte
     return _RuntimeDispatchIntegrityBinding(tuple(entrypoints), tuple(module_members))
 
 
-def _runtime_dispatch_integrity_is_intact(binding: _RuntimeDispatchIntegrityBinding) -> bool:
+def _runtime_dispatch_integrity_is_intact(
+    binding: _RuntimeDispatchIntegrityBinding,
+    *,
+    _callable_integrity_checker: Callable[[_LiveCallableIntegrityBinding, object | None], bool] = (
+        _live_callable_integrity_is_intact
+    ),
+) -> bool:
     """Return whether direct runtime dispatch code and module members are unchanged."""
     if not all(
-        _live_callable_integrity_is_intact(entrypoint, entrypoint.value)
+        _callable_integrity_checker(entrypoint, entrypoint.value)
         for entrypoint in binding.entrypoints
     ):
         return False
@@ -988,7 +1034,7 @@ def _runtime_dispatch_integrity_is_intact(binding: _RuntimeDispatchIntegrityBind
             return False
         if not _live_value_is_intact(member_binding.value, current):
             return False
-        if member_binding.callable_binding is not None and not _live_callable_integrity_is_intact(
+        if member_binding.callable_binding is not None and not _callable_integrity_checker(
             member_binding.callable_binding,
             current,
         ):
@@ -1287,12 +1333,17 @@ class ParallelACExecutor:
         self._leaf_dispatcher_factory = LeafDispatcher
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
+        live_callable_integrity_checker = _live_callable_integrity_is_intact
         self._authority_bound_execution_collaborators = _AuthorityBoundExecutionCollaborators(
             leaf_dispatcher=_capture_live_callable_integrity(
                 self._leaf_dispatcher_factory,
                 member_name="stream",
             ),
             atomic_verifier=_capture_live_callable_integrity(self._atomic_verifier),
+            integrity_checker=live_callable_integrity_checker,
+            integrity_checker_binding=_capture_live_callable_integrity(
+                live_callable_integrity_checker
+            ),
         )
         self._runtime_dispatch_integrity = _capture_runtime_dispatch_integrity(adapter)
         self._runtime_dispatch_integrity_binding = self._runtime_dispatch_integrity
@@ -1417,12 +1468,30 @@ class ParallelACExecutor:
         """Verify that later execution still uses the authority-bound collaborators."""
         binding = self._authority_bound_execution_collaborators
         try:
-            return _live_callable_integrity_is_intact(
-                binding.leaf_dispatcher,
-                self._leaf_dispatcher_factory,
-            ) and _live_callable_integrity_is_intact(
-                binding.atomic_verifier,
-                self._atomic_verifier,
+            checker = binding.integrity_checker
+            checker_binding = binding.integrity_checker_binding
+            # Do not resolve the predicate through the mutable module name at
+            # time of use.  Check the captured predicate's finite function
+            # shape before calling it, then let its default-captured helpers
+            # inspect the actual dispatcher and verifier.
+            checker_is_bound = (
+                checker is checker_binding.value
+                and checker is checker_binding.entrypoint
+                and getattr(checker, "__code__", None) is checker_binding.code
+                and getattr(checker, "__defaults__", None) is checker_binding.defaults
+                and getattr(checker, "__kwdefaults__", None) is checker_binding.keyword_defaults
+                and checker_binding.closure_cells == ()
+            )
+            return (
+                checker_is_bound
+                and checker(
+                    binding.leaf_dispatcher,
+                    self._leaf_dispatcher_factory,
+                )
+                and checker(
+                    binding.atomic_verifier,
+                    self._atomic_verifier,
+                )
             )
         except Exception:
             return False
@@ -1436,13 +1505,20 @@ class ParallelACExecutor:
         folding handles and retry counters into the baseline.
         """
         try:
+            checker = self._runtime_dispatch_integrity_checker
+            checker_binding = self._runtime_dispatch_integrity_checker_binding
+            checker_is_bound = (
+                checker is checker_binding.value
+                and checker is checker_binding.entrypoint
+                and getattr(checker, "__code__", None) is checker_binding.code
+                and getattr(checker, "__defaults__", None) is checker_binding.defaults
+                and getattr(checker, "__kwdefaults__", None) is checker_binding.keyword_defaults
+                and checker_binding.closure_cells == ()
+            )
             return (
                 self._runtime_dispatch_integrity is self._runtime_dispatch_integrity_binding
-                and _live_callable_integrity_is_intact(
-                    self._runtime_dispatch_integrity_checker_binding,
-                    self._runtime_dispatch_integrity_checker,
-                )
-                and self._runtime_dispatch_integrity_checker(self._runtime_dispatch_integrity)
+                and checker_is_bound
+                and checker(self._runtime_dispatch_integrity)
             )
         except Exception:
             return False

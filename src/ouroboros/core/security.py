@@ -61,6 +61,7 @@ _CREDENTIAL_FIELD_NAMES = frozenset(
         "auth_token",
         "authentication",
         "authorization",
+        "bearer",
         "bearer_token",
         "client_secret",
         "credential",
@@ -105,6 +106,11 @@ SENSITIVE_PREFIXES = (
     "ghu_",
     "ghs_",
     "ghr_",
+    # Stripe restricted keys carry the same authority as the more familiar
+    # ``sk_live_``/``sk_test_`` family.  Keep them in the shared detector so
+    # authority serialization, durable events, and log redaction cannot drift.
+    "rk_live_",
+    "rk_test_",
     "xoxb-",
     "xoxp-",
     "xoxa-",
@@ -123,6 +129,7 @@ SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
     re.compile(r"hf_[A-Za-z0-9]{20,}"),
     re.compile(r"sk_(?:live|test)_[A-Za-z0-9_-]{16,}"),
+    re.compile(r"rk_(?:live|test)_[A-Za-z0-9_-]{16,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
 )
 _PEM_PRIVATE_KEY_PATTERN = re.compile(
@@ -182,6 +189,7 @@ _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
     r"|xox[abpr]-[A-Za-z0-9-]{20,}"
     r"|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}"
     r"|sk_(?:live|test)_[A-Za-z0-9_-]{16,}"
+    r"|rk_(?:live|test)_[A-Za-z0-9_-]{16,}"
     r"|AIza[A-Za-z0-9_-]{35}"
     r"|(?:AKIA|ASIA)[0-9A-Z]{16}"
     r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"

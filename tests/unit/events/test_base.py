@@ -433,8 +433,15 @@ def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
 def test_persistence_sanitizer_redacts_embedded_stripe_and_pem_credentials() -> None:
     """Benign keys cannot allow common credential formats into durable events."""
     stripe = "sk_live_" + "a" * 24
+    restricted = "rk_live_" + "b" * 24
+    bearer = "c" * 32
     pem = "-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----"
-    payload = {"detail": f"retry with {stripe}", "certificate": pem}
+    payload = {
+        "detail": f"retry with {stripe}",
+        "restricted_detail": f"retry with {restricted}",
+        "certificate": pem,
+        "bearer": bearer,
+    }
 
     persisted = BaseEvent(
         type="test.event.created",
@@ -444,6 +451,10 @@ def test_persistence_sanitizer_redacts_embedded_stripe_and_pem_credentials() -> 
     ).to_db_dict()["payload"]
 
     assert stripe not in persisted
+    assert restricted not in persisted
+    assert bearer not in persisted
     assert pem not in persisted
     assert persisted["detail"] == "retry with [redacted]"
+    assert persisted["restricted_detail"] == "retry with [redacted]"
     assert persisted["certificate"] == "[redacted]"
+    assert persisted["bearer"] == "<REDACTED>"

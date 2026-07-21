@@ -488,6 +488,82 @@ def test_executor_rejects_post_construction_runtime_subprocess_pipe_drift(
         executor._require_execution_collaborators_intact()
 
 
+def test_executor_rejects_dispatcher_drift_when_global_integrity_helper_is_patched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A patched module helper cannot bypass a captured dispatcher guard."""
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    executor._leaf_dispatcher_factory = _ReplacementLeafDispatcher
+    monkeypatch.setattr(
+        parallel_executor_module,
+        "_live_callable_integrity_is_intact",
+        lambda *_args, **_kwargs: True,
+    )
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_mutated_atomic_verifier_closure(tmp_path) -> None:
+    """Mutable verifier closure state cannot drift after authority construction."""
+    state = {"passed": True}
+
+    def closure_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=state["passed"])
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+        atomic_verifier=closure_verifier,
+    )
+
+    state["passed"] = False
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_runtime_drift_when_global_integrity_helper_is_patched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Runtime dispatch still uses the construction-time checker dependency graph."""
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    async def altered_execute_task(self: _Runtime, **_: object) -> None:
+        del self
+
+    monkeypatch.setattr(_Runtime, "execute_task", altered_execute_task)
+    monkeypatch.setattr(
+        parallel_executor_module,
+        "_live_callable_integrity_is_intact",
+        lambda *_args, **_kwargs: True,
+    )
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
+
+
 @pytest.mark.parametrize("member", ("create_subprocess_exec", "wait_for", "subprocess.PIPE"))
 def test_executor_rejects_post_construction_worker_subprocess_drift(
     monkeypatch: pytest.MonkeyPatch,
@@ -988,8 +1064,14 @@ def test_process_local_nonce_is_stable_per_live_object_and_released_after_gc() -
     assert object_id not in execution_authority_module._PROCESS_LOCAL_RUNTIME_NONCES
 
 
-def test_credential_markers_never_egress_via_authority_metadata() -> None:
-    credential = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+@pytest.mark.parametrize(
+    "credential",
+    (
+        "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        "rk_live_" + "a" * 32,
+    ),
+)
+def test_credential_markers_never_egress_via_authority_metadata(credential: str) -> None:
 
     class CredentialLabelRuntime(_Runtime):
         runtime_backend = credential
@@ -1045,8 +1127,11 @@ def test_credential_markers_never_egress_via_authority_metadata() -> None:
     assert all(credential not in contract.canonical_json for contract in contracts)
 
 
-def test_credential_shaped_runtime_capabilities_fail_closed_without_egress() -> None:
-    credential = "ghp_" + "a" * 36
+@pytest.mark.parametrize(
+    "credential",
+    ("ghp_" + "a" * 36, "rk_live_" + "b" * 36),
+)
+def test_credential_shaped_runtime_capabilities_fail_closed_without_egress(credential: str) -> None:
     runtime = _Runtime()
     runtime.capabilities = replace(  # type: ignore[attr-defined]
         FULL_CAPABILITIES,
