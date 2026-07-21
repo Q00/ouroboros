@@ -780,9 +780,10 @@ class TestOrchestratorRunner:
             seed_id=sample_seed.metadata.seed_id,
             session_id="orch_prepared",
             seed_goal=sample_seed.goal,
-            # Backend is forwarded so the live dashboard can provider-tag the run.
-            runtime_backend=runner._adapter.runtime_backend,
-            llm_backend=runner._adapter.llm_backend,
+            # Backend labels use the serializable runtime contract, never a
+            # fabricated value exposed by a dynamic adapter mock.
+            runtime_backend=runner._runtime_backend_contract(),
+            llm_backend=runner._llm_backend_contract(),
             execution_contract=runner._execution_contract,
         )
 
@@ -914,6 +915,7 @@ class TestOrchestratorRunner:
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.backend == "opencode"
         assert resume_handle.cwd == "/tmp/project"
+        assert resume_handle.approval_mode == "bypassPermissions"
         assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
         assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
         assert resume_handle.metadata["capability_graph"][0]["name"] == "Read"
@@ -3475,19 +3477,12 @@ class TestOrchestratorRunner:
         ):
             runner._build_dependency_analyzer()
 
-    def test_legacy_adapter_without_llm_backend_degrades_gracefully(
+    def test_legacy_adapter_without_llm_backend_uses_safe_runtime_fallback(
         self,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        """Legacy adapters predating v0.28.6 (no llm_backend attr) fall back to structured-only.
-
-        Protects downstream Protocol implementers (custom runtimes, test mocks)
-        from the v0.28.6 AgentRuntime Protocol addition. Instead of raising
-        AttributeError at the call site, _build_dependency_analyzer returns a
-        structured-only DependencyAnalyzer, preserving pre-v0.28.6 behavior.
-        """
-        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+        """Legacy adapters safely reuse their observed runtime backend for analysis."""
 
         class LegacyAdapter:
             """Pre-v0.28.6 adapter stub without llm_backend attribute."""
@@ -3504,10 +3499,15 @@ class TestOrchestratorRunner:
         with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
             analyzer = runner._build_dependency_analyzer()
 
-        # Must not attempt to wire an LLM adapter when the legacy runtime
-        # lacks llm_backend - that path is the breaking-change path.
-        mock_create_llm_adapter.assert_not_called()
-        assert isinstance(analyzer, DependencyAnalyzer)
+        assert analyzer is not None
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="opencode",
+            permission_mode="bypassPermissions",
+            cli_path=None,
+            cwd="/tmp/project",
+            max_turns=1,
+            allowed_tools=[],
+        )
 
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(

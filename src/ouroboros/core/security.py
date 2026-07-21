@@ -14,6 +14,7 @@ Security Level: MEDIUM
 from pathlib import Path
 import re
 from typing import Any
+import unicodedata
 
 # Maximum sizes for external inputs (DoS prevention)
 MAX_INITIAL_CONTEXT_LENGTH = 50_000  # 50KB for initial interview context
@@ -56,6 +57,33 @@ SENSITIVE_PREFIXES = (
     "token ",
     "secret_",
     "AIza",
+    # Common provider credentials that are otherwise easy to place under a
+    # benign metadata key. Keep these prefix checks shared by logging and
+    # authority serialization rather than maintaining divergent allow-lists.
+    "ghp_",
+    "github_pat_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "AKIA",
+    "ASIA",
+    "glpat-",
+    "hf_",
+)
+
+# Prefixes alone are intentionally not the whole detector: several common
+# provider credentials use distinct, structured prefixes.  These expressions
+# stay deliberately conservative so normal identifiers do not become secrets
+# merely because they happen to contain a dash or underscore.
+SENSITIVE_VALUE_PATTERNS = (
+    re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"hf_[A-Za-z0-9]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
 )
 
 
@@ -153,8 +181,52 @@ def is_sensitive_value(value: Any) -> bool:
     if not isinstance(value, str):
         return False
 
-    value_lower = value.lower()
-    return any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES)
+    # Callers frequently normalize configuration labels after validating them.
+    # Classify the same normalized representation here so leading/trailing
+    # whitespace (including invisible Unicode control, format, and combining
+    # mark characters such as NUL, ZWSP, BOM, WORD JOINER, CGJ, and variation
+    # selectors) cannot turn a credential into an apparently safe value that
+    # is then serialized without its prefix.
+    start = 0
+    end = len(value)
+    while start < end and (
+        value[start].isspace()
+        or unicodedata.category(value[start]).startswith(("C", "M"))
+    ):
+        start += 1
+    while end > start and (
+        value[end - 1].isspace()
+        or unicodedata.category(value[end - 1]).startswith(("C", "M"))
+    ):
+        end -= 1
+    normalized_value = value[start:end]
+    value_lower = normalized_value.lower()
+
+    # Provider labels and other configuration values sometimes include a
+    # human-readable prefix (for example ``claude:ghp_...``). A startswith-only
+    # check would allow the credential portion to survive authority contracts,
+    # events, and mismatch diagnostics. Treat a known marker at the beginning
+    # of a non-alphanumeric token as sensitive as well. We intentionally do
+    # not scan through an alphanumeric word: ``monkey`` is not a secret merely
+    # because it contains ``key``-like text.
+    def has_token_marker(marker: str) -> bool:
+        search_from = 0
+        lowered_marker = marker.lower()
+        while True:
+            position = value_lower.find(lowered_marker, search_from)
+            if position < 0:
+                return False
+            if position == 0 or not value_lower[position - 1].isalnum():
+                return True
+            search_from = position + 1
+
+    if any(has_token_marker(prefix) for prefix in SENSITIVE_PREFIXES):
+        return True
+    return any(
+        match.start() == 0 or not normalized_value[match.start() - 1].isalnum()
+        for pattern in SENSITIVE_VALUE_PATTERNS
+        for match in pattern.finditer(normalized_value)
+    )
 
 
 def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:

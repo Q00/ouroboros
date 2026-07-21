@@ -208,7 +208,7 @@ async def test_alternate_redispatch_event_waits_for_authority_construction(
         lambda **_kwargs: InvalidAuthorityRuntime(),
     )
 
-    with pytest.raises(ValueError, match="invalid runtime authority"):
+    with pytest.raises(ValueError, match="runtime execution identity provider failed"):
         await executor._run_single_ac_on_backend(
             "codex",
             rerun_kwargs=_rerun_kwargs(),

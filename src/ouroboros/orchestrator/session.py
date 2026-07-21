@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ouroboros.core.errors import PersistenceError
+from ouroboros.core.security import is_sensitive_value
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 from ouroboros.observability.logging import get_logger
@@ -671,10 +672,21 @@ class SessionRepository:
         }
         if seed_goal:
             event_data["seed_goal"] = seed_goal
-        if runtime_backend:
-            event_data["runtime_backend"] = runtime_backend
-        if llm_backend:
-            event_data["llm_backend"] = llm_backend
+        # These labels are observability metadata, not credentials. Omit an
+        # untrusted label rather than persisting a credential-shaped value even
+        # when a caller bypasses the runner's normalized contract path.
+        if (
+            isinstance(runtime_backend, str)
+            and runtime_backend.strip()
+            and not is_sensitive_value(runtime_backend)
+        ):
+            event_data["runtime_backend"] = runtime_backend.strip()
+        if (
+            isinstance(llm_backend, str)
+            and llm_backend.strip()
+            and not is_sensitive_value(llm_backend)
+        ):
+            event_data["llm_backend"] = llm_backend.strip()
         if execution_contract is not None:
             event_data["execution_contract"] = sanitize_event_data_for_persistence(
                 dict(execution_contract)

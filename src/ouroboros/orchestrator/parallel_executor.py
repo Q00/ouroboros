@@ -294,7 +294,11 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedMod
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
     ResolvedDispatchRatePolicy,
-    estimate_runtime_request_tokens,
+    authority_bound_rate_limit_gate_is_intact,
+    authority_bound_rate_limit_token_estimator_is_intact,
+    build_authority_bound_rate_limit_gate,
+    capture_authority_bound_rate_limit_token_estimator,
+    estimate_runtime_request_tokens,  # noqa: F401 - compatibility mutation target for integrity tests.
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
@@ -1014,10 +1018,36 @@ class ParallelACExecutor:
             adapter
         )
         self._validate_dispatch_rate_policy(adapter, self._dispatch_rate_policy)
-        dispatch_rate_gate = self._dispatch_rate_policy.build_gate()
+        # Capture each rate helper exactly once.  The authority snapshots below
+        # come from the same factory/estimator objects that this executor will
+        # use; a mutable module alias cannot be checked at one moment and used
+        # as a different implementation a moment later.
+        dispatch_rate_gate_binding = build_authority_bound_rate_limit_gate(
+            self._dispatch_rate_policy.backend,
+            request_limit=(
+                self._dispatch_rate_policy.requests_per_minute
+                if self._dispatch_rate_policy.owner == "ouroboros"
+                else None
+            ),
+            token_limit=(
+                self._dispatch_rate_policy.tokens_per_minute
+                if self._dispatch_rate_policy.owner == "ouroboros"
+                else None
+            ),
+            window_seconds=self._dispatch_rate_policy.window_seconds,
+            max_wait_seconds=self._dispatch_rate_policy.max_wait_seconds,
+            heartbeat_seconds=self._dispatch_rate_policy.heartbeat_seconds,
+        )
+        dispatch_rate_gate = dispatch_rate_gate_binding.gate
+        dispatch_rate_gate_algorithm = dispatch_rate_gate_binding.algorithm
+        (
+            self._dispatch_token_estimator,
+            self._dispatch_token_estimator_contract,
+        ) = capture_authority_bound_rate_limit_token_estimator()
         if dispatch_rate_gate.enabled is not self._dispatch_rate_policy.gate_enabled:
             raise ValueError("dispatch rate gate disagrees with the resolved policy")
         self._dispatch_rate_gate = dispatch_rate_gate
+        self._dispatch_rate_gate_binding = dispatch_rate_gate_binding
         # Param degradations already surfaced this run, keyed by (param, support),
         # so the operator is told once rather than on every dispatch.
         self._announced_param_degradations: set[tuple[str, str]] = set()
@@ -1048,7 +1078,10 @@ class ParallelACExecutor:
             model_router=self._model_router,
             cross_harness_redispatch=self._cross_harness_redispatch_enabled,
             shadow_replay_enabled=self._shadow_replay_enabled,
-            dispatch_rate_policy=self._dispatch_rate_policy.to_contract_data(),
+            dispatch_rate_policy=self._dispatch_rate_policy.to_contract_data(
+                gate_algorithm=dispatch_rate_gate_algorithm,
+                token_estimator=self._dispatch_token_estimator_contract,
+            ),
         )
         workspace = task_cwd or getattr(adapter, "working_directory", None) or os.getcwd()
         self._execution_authority = ExecutionAuthorityContract.build(
@@ -1057,13 +1090,16 @@ class ParallelACExecutor:
             executor=self,
             executor_components={
                 "leaf_dispatcher": self._leaf_dispatcher_factory,
-                "session_signal_hub": self._session_signal_hub,
             },
             workspace=workspace if isinstance(workspace, str) else os.getcwd(),
             workspace_identity=workspace_authority_identity,
             execution_policy=execution_policy,
             resolved_routing=resolved_routing_authority,
-            runtime_handle=self._inherited_runtime_handle,
+            # A selected handle, manager cache, coordinator session state, and
+            # live signal hub are intentionally per-attempt/volatile. Foundation
+            # A binds only the static selector implementation; Foundation C
+            # composes concrete handle/recovery state into its attempt capsule.
+            runtime_handle=None,
             runtime_transcript_verifier=self._verify_atomic_evidence_against_runtime_messages,
         )
 
@@ -1124,10 +1160,20 @@ class ParallelACExecutor:
         workers (they share this executor's single gate instance) and logs each
         backoff for observability.
         """
-        if not self._dispatch_rate_gate.enabled:
+        if not self._dispatch_rate_policy.gate_enabled:
             return
 
-        estimated_tokens = estimate_runtime_request_tokens(prompt, system_prompt=system_prompt)
+        if not authority_bound_rate_limit_gate_is_intact(self._dispatch_rate_gate_binding):
+            raise ValueError("dispatch rate gate drifted from execution authority")
+        if not authority_bound_rate_limit_token_estimator_is_intact(
+            self._dispatch_token_estimator,
+            self._dispatch_token_estimator_contract,
+        ):
+            raise ValueError("dispatch token estimator drifted from execution authority")
+        estimated_tokens = self._dispatch_token_estimator(
+            prompt,
+            system_prompt=system_prompt,
+        )
 
         def _log_backoff(backoff: RateLimitBackoff) -> None:
             log.info(
@@ -1142,7 +1188,7 @@ class ParallelACExecutor:
                 token_limit=backoff.snapshot.token_limit,
             )
 
-        await self._dispatch_rate_gate.acquire(estimated_tokens, on_backoff=_log_backoff)
+        await self._dispatch_rate_gate_binding.acquire(estimated_tokens, on_backoff=_log_backoff)
 
     def _announce_param_degradations(
         self,

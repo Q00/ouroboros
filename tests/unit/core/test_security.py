@@ -8,6 +8,8 @@ Tests cover:
 - Sanitization for logging
 """
 
+import pytest
+
 from ouroboros.core.security import (
     MAX_INITIAL_CONTEXT_LENGTH,
     MAX_LLM_RESPONSE_LENGTH,
@@ -109,7 +111,39 @@ class TestSensitiveDetection:
         """Values that look like secrets are detected."""
         assert is_sensitive_value("sk-1234567890") is True
         assert is_sensitive_value("Bearer token123") is True
+        assert is_sensitive_value("ghp_abcdefghijklmnopqrstuvwxyz1234567890") is True
         assert is_sensitive_value("AIzaXXXXXXXXXXXXXXX") is True
+
+    @pytest.mark.parametrize("separator", (":", "/", "_", "\u200b"))
+    def test_sensitive_values_embedded_after_a_label(self, separator: str) -> None:
+        """A provider label cannot hide a credential-shaped token."""
+        secret = "ghp_" + "a" * 36
+        assert is_sensitive_value(f"claude{separator}{secret}") is True
+
+    @pytest.mark.parametrize(
+        "prefix",
+        (" \t", "\x00", "\u200b", "\ufeff", "\u2060", "\u034f", "\ufe0f"),
+    )
+    def test_sensitive_values_remain_sensitive_after_prefix_normalization(
+        self,
+        prefix: str,
+    ) -> None:
+        """Whitespace and invisible format prefixes cannot bypass detection."""
+        secret = "ghp_" + "a" * 36
+        assert is_sensitive_value(f"{prefix}{secret}\n") is True
+
+    @pytest.mark.parametrize(
+        "credential",
+        (
+            "glpat-sentinel-not-a-real-token-123456",
+            "hf_abcdefghijklmnopqrstuvwxyz123456",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9.c2lnbmF0dXJl",
+        ),
+    )
+    def test_structured_sensitive_values(self, credential: str) -> None:
+        """Common provider/JWT forms are sensitive even under benign keys."""
+        assert is_sensitive_value(credential) is True
+        assert is_sensitive_value(f"provider:{credential}") is True
 
     def test_non_sensitive_values(self) -> None:
         """Normal values are not flagged."""
@@ -165,6 +199,12 @@ class TestSanitizeForLogging:
         result = sanitize_for_logging(data)
         assert "sk-" in result["some_field"]
         assert "abcdef" not in result["some_field"]  # Fully masked
+
+    def test_sanitize_whitespace_prefixed_sensitive_value(self) -> None:
+        """The full credential never survives a whitespace-prefixed value."""
+        secret = "ghp_" + "a" * 36
+        result = sanitize_for_logging({"some_field": f" \t{secret}"})
+        assert secret not in str(result)
 
 
 class TestTruncateInput:

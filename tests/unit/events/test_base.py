@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from ouroboros.events.base import BaseEvent
+from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 
 
 class TestBaseEventConstruction:
@@ -343,3 +343,41 @@ class TestBaseEventVersion:
         }
         event = BaseEvent.from_db_row(row)
         assert event.event_version == 0
+
+
+def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_keys() -> None:
+    """Persistence redacts credentials but preserves replay and dedupe keys."""
+    secret = "ghp_" + "a" * 36
+    payload = {
+        "runtime_backend": "\u034f" + secret,
+        "nested": {"label": "\u200b" + secret},
+        secret: "not-a-secret-value",
+        "api_key": "unprefixed-provider-credential-1234567890",
+        "semantic_ac_key": "ac_123",
+        "idempotency_key": "turn-1",
+        "correlation_key": "lane-1",
+        "safe": "claude",
+    }
+
+    sanitized = sanitize_event_data_for_persistence(payload)
+    persisted = BaseEvent(
+        type="test.event.created",
+        aggregate_type="test",
+        aggregate_id="event-sanitization",
+        data=payload,
+    ).to_db_dict()["payload"]
+
+    assert sanitized["runtime_backend"] == "<REDACTED>"
+    assert sanitized["nested"]["label"] == "<REDACTED>"
+    assert secret not in sanitized
+    assert sanitized["api_key"] == "<REDACTED>"
+    assert sanitized["semantic_ac_key"] == "ac_123"
+    assert sanitized["idempotency_key"] == "turn-1"
+    assert sanitized["correlation_key"] == "lane-1"
+    assert persisted["api_key"] == "<REDACTED>"
+    assert persisted["semantic_ac_key"] == "ac_123"
+    assert persisted["idempotency_key"] == "turn-1"
+    assert persisted["correlation_key"] == "lane-1"
+    assert "unprefixed-provider-credential-1234567890" not in str(persisted)
+    assert secret not in str(sanitized)
+    assert secret not in str(persisted)

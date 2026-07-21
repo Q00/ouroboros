@@ -21,6 +21,7 @@ from ouroboros.core.seed import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.types import MCPToolDefinition
+from ouroboros.orchestrator import rate_limit as rate_limit_module
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -56,7 +57,6 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
-from ouroboros.orchestrator.rate_limit import RateLimitGate, SharedRateLimitBucket
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
@@ -138,11 +138,11 @@ class TestDispatchRateGate:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
-        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
-        executor = _make_rate_gate_executor(adapter)
+        monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "1")
 
-        # Swap in a deterministic gate (rpm=1, fake clock + sleep) to prove the
-        # executor's dispatch hook actually waits on the shared budget.
+        # Install deterministic collaborators *before* construction.  Replacing
+        # a gate after construction is intentionally no longer a supported test
+        # seam: the executor dispatches through its authority-bound capture.
         clock = {"now": 0.0}
         slept: list[float] = []
 
@@ -150,20 +150,55 @@ class TestDispatchRateGate:
             slept.append(seconds)
             clock["now"] += seconds
 
-        bucket = SharedRateLimitBucket(
-            runtime_backend="opencode",
-            request_limit=1,
-            token_limit=None,
-            time_provider=lambda: clock["now"],
-        )
-        executor._dispatch_rate_gate = RateLimitGate(
-            bucket, heartbeat_seconds=120.0, sleep=fake_sleep
-        )
+        monkeypatch.setattr(rate_limit_module.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(rate_limit_module.asyncio, "sleep", fake_sleep)
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+        executor = _make_rate_gate_executor(adapter)
 
         await executor._await_dispatch_rate_budget(prompt="a", system_prompt=None)
         await executor._await_dispatch_rate_budget(prompt="b", system_prompt=None)
 
-        assert slept == [60.0]  # second dispatch waited a full window
+        assert slept == [30.0, 30.0]  # second dispatch waited one full window
+
+    @pytest.mark.asyncio
+    async def test_authority_bound_gate_rejects_post_construction_drift(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """A later gate-method replacement must not bypass the captured budget."""
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "1")
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+        executor = _make_rate_gate_executor(adapter)
+        invoked = False
+
+        async def bypass_acquire(*_args: object, **_kwargs: object) -> None:
+            nonlocal invoked
+            invoked = True
+
+        monkeypatch.setattr(rate_limit_module.RateLimitGate, "acquire", bypass_acquire)
+
+        with pytest.raises(ValueError, match="dispatch rate gate drifted"):
+            await executor._await_dispatch_rate_budget(prompt="hello", system_prompt=None)
+        assert invoked is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field_name", ("_request_limit", "_token_limit"))
+    async def test_authority_bound_gate_rejects_policy_field_mutation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+        field_name: str,
+    ) -> None:
+        """Mutable bucket policy fields remain bound after construction."""
+        monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "1")
+        monkeypatch.setenv("OUROBOROS_OPENCODE_TPM", "10000")
+        adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
+        executor = _make_rate_gate_executor(adapter)
+        setattr(executor._dispatch_rate_gate._bucket, field_name, None)
+
+        with pytest.raises(ValueError, match="dispatch rate gate drifted"):
+            await executor._await_dispatch_rate_budget(prompt="hello", system_prompt=None)
 
 
 def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:

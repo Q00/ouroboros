@@ -7,10 +7,13 @@ All events in Ouroboros inherit from BaseEvent. Events are immutable
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+from ouroboros.core.security import is_sensitive_value
 
 _EXCLUDED_PERSISTENCE_KEYS = frozenset(
     {
@@ -30,6 +33,39 @@ _EXCLUDED_PERSISTENCE_KEYS = frozenset(
         "subscribed_payloads",
     }
 )
+_SENSITIVE_PERSISTENCE_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth_token",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "id_token",
+        "passwd",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "secret_access_key",
+        "token",
+    }
+)
+_SENSITIVE_PERSISTENCE_KEY_SUFFIXES = (
+    "_api_key",
+    "_credential",
+    "_credentials",
+    "_passwd",
+    "_password",
+    "_private_key",
+    "_secret",
+    "_secret_access_key",
+    "_token",
+)
+_PERSISTENCE_PROTOCOL_KEYS = frozenset({"resume_token"})
 
 
 def _should_exclude_from_persistence(key: str) -> bool:
@@ -44,18 +80,45 @@ def _should_exclude_from_persistence(key: str) -> bool:
     )
 
 
+def _is_sensitive_persistence_key(key: str) -> bool:
+    """Return whether a key names a credential, without dropping protocol keys.
+
+    Event payloads use ordinary ``*_key`` fields for semantic AC identity,
+    idempotency, and correlation. The broad logging heuristic intentionally
+    treats every ``key`` substring as sensitive, but applying it here would
+    corrupt replay state. Restrict durable redaction to exact credential names
+    and credential-specific suffixes instead.
+    """
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip())
+    normalized = normalized.lower().replace("-", "_").replace(" ", "_")
+    if normalized in _PERSISTENCE_PROTOCOL_KEYS:
+        return False
+    return normalized in _SENSITIVE_PERSISTENCE_KEYS or normalized.endswith(
+        _SENSITIVE_PERSISTENCE_KEY_SUFFIXES
+    )
+
+
 def sanitize_event_data_for_persistence(value: Any) -> Any:
-    """Recursively strip raw subscribed payloads from persisted event data."""
+    """Strip raw payloads and credential-shaped values from persisted event data."""
     if isinstance(value, dict):
-        return {
-            key: sanitize_event_data_for_persistence(item)
-            for key, item in value.items()
-            if not _should_exclude_from_persistence(str(key))
-        }
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized_key = str(key)
+            if _should_exclude_from_persistence(normalized_key) or is_sensitive_value(
+                normalized_key
+            ):
+                continue
+            if _is_sensitive_persistence_key(normalized_key):
+                sanitized[key] = "<REDACTED>"
+                continue
+            sanitized[key] = sanitize_event_data_for_persistence(item)
+        return sanitized
     if isinstance(value, list):
         return [sanitize_event_data_for_persistence(item) for item in value]
     if isinstance(value, tuple):
         return [sanitize_event_data_for_persistence(item) for item in value]
+    if isinstance(value, str) and is_sensitive_value(value):
+        return "<REDACTED>"
     return value
 
 

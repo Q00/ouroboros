@@ -162,6 +162,28 @@ class LeaderDrivenWorkerRuntime:
         """Declare the transport as this runtime's execution composition boundary."""
         return {"transport": self._transport}
 
+    def execution_identity_contract(self) -> Mapping[str, object]:
+        """Describe the static worker-runtime policy, excluding live sessions.
+
+        The transport itself is separately declared through
+        :meth:`execution_components`; this envelope records only the generic
+        adapter switches that alter how Ouroboros invokes that transport.  In
+        particular, neither the live worker pool nor a selected resume handle
+        belongs to the Foundation-A baseline.
+        """
+        return {
+            "version": 1,
+            "effective_model_observed": True,
+            "targeted_resume": self._targeted_resume,
+            "reasoning_effort_support": self._reasoning_effort_support.value,
+            "enforceable_reasoning_efforts": (
+                sorted(self._enforceable_reasoning_efforts)
+                if self._enforceable_reasoning_efforts is not None
+                else None
+            ),
+            "model_override_support": self._model_override_support.value,
+        }
+
     # -- AgentRuntime Protocol properties ---------------------------------
 
     @property

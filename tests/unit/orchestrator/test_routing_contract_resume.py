@@ -17,6 +17,7 @@ from ouroboros.mcp.tools.execution_handlers import (
 )
 from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.execution_authority import ResolvedRuntimeAuthority
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.model_routing import (
     ModelRouter,
@@ -132,6 +133,264 @@ def test_router_contract_distinguishes_disabled_from_malformed() -> None:
         )
         assert recognized is False
         assert malformed is None
+
+
+def test_execution_contract_marks_an_unobserved_llm_backend_for_parallel_binding() -> None:
+    adapter = _adapter()
+    adapter.llm_backend = None
+    runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+
+    routing_contract = runner._build_execution_contract()["model_routing"]
+
+    assert routing_contract["llm_backend"] is None
+    assert routing_contract["llm_backend_unobserved"] is True
+    assert ResolvedRuntimeAuthority.bind(adapter, routing_contract).data == routing_contract
+
+
+def test_build_contract_captures_unobserved_label_before_parallel_dispatch() -> None:
+    runner = _runner()
+    runner._adapter.runtime_backend = "ghp_" + "a" * 36
+    runner._adapter.llm_backend = "ghp_" + "b" * 36
+    contract = runner._build_execution_contract()
+
+    runner._adapter.runtime_backend = "ghp_" + "c" * 36
+    runner._adapter.llm_backend = "ghp_" + "d" * 36
+
+    with pytest.raises(OrchestratorError, match="drifted since planning"):
+        runner._parallel_runtime_authority(contract["model_routing"])
+
+
+def test_resume_rejects_unobserved_llm_backend_without_cohort_reuse() -> None:
+    original = _runner()
+    original._adapter.llm_backend = None
+    persisted = original._build_execution_contract()
+
+    resumed = _runner()
+    resumed._adapter.llm_backend = None
+
+    with pytest.raises(OrchestratorError, match="backend identity is unobserved"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+    assert (
+        OrchestratorRunner._proof_cohort_identity(
+            {"seed_id": "seed-1", EXECUTION_CONTRACT_PROGRESS_KEY: persisted}
+        )
+        is None
+    )
+
+    observed = _runner()
+    with pytest.raises(OrchestratorError, match="backend identity is unobserved"):
+        observed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_resume_rejects_different_sensitive_runtime_labels_without_persisting_them() -> None:
+    original = _runner()
+    original_runtime = "ghp_" + "a" * 36
+    original_llm = "ghp_" + "b" * 36
+    original._adapter.runtime_backend = original_runtime
+    original._adapter.llm_backend = original_llm
+    persisted = original._build_execution_contract()
+
+    routing_contract = persisted["model_routing"]
+    assert routing_contract["runtime_backend"] is None
+    assert routing_contract["runtime_backend_unobserved"] is True
+    assert routing_contract["llm_backend"] is None
+    assert routing_contract["llm_backend_unobserved"] is True
+    assert original_runtime not in str(persisted)
+    assert original_llm not in str(persisted)
+
+    resumed = _runner()
+    resumed._adapter.runtime_backend = "ghp_" + "c" * 36
+    resumed._adapter.llm_backend = "ghp_" + "d" * 36
+
+    with pytest.raises(OrchestratorError, match="backend identity is unobserved"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    (" \t", "\x00", "\u200b", "\ufeff", "\u2060", "\u034f", "\ufe0f", "claude:"),
+)
+def test_prefixed_sensitive_labels_never_egress_through_resume(prefix: str) -> None:
+    original = _runner()
+    runtime_secret = "ghp_" + "a" * 36
+    llm_secret = "ghp_" + "b" * 36
+    original._adapter.runtime_backend = f"{prefix}{runtime_secret}"
+    original._adapter.llm_backend = f"{prefix}{llm_secret}"
+    persisted = original._build_execution_contract()
+
+    routing_contract = persisted["model_routing"]
+    assert routing_contract["runtime_backend"] is None
+    assert routing_contract["runtime_backend_unobserved"] is True
+    assert routing_contract["llm_backend"] is None
+    assert routing_contract["llm_backend_unobserved"] is True
+    assert runtime_secret not in str(persisted)
+    assert llm_secret not in str(persisted)
+
+    resumed = _runner()
+    with pytest.raises(OrchestratorError, match="backend identity is unobserved") as exc_info:
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert runtime_secret not in str(exc_info.value)
+    assert llm_secret not in str(exc_info.value)
+    assert runtime_secret not in str(exc_info.value.details)
+    assert llm_secret not in str(exc_info.value.details)
+
+
+@pytest.mark.parametrize(
+    "field_name, value",
+    (
+        (
+            "runtime_execution",
+            {
+                "version": 1,
+                "observed": True,
+                "identity": {
+                    "effective_model_observed": True,
+                    "opaque": "ghp_" + "a" * 36,
+                },
+            },
+        ),
+        ("constructor_model", {"observed": True, "model": "ghp_" + "a" * 36}),
+        ("permission_mode", {"observed": True, "mode": "ghp_" + "a" * 36}),
+        ("runtime_backend", "ghp_" + "a" * 36),
+        ("runtime_backend", "claude:ghp_" + "a" * 36),
+        ("llm_backend", "ghp_" + "a" * 36),
+        ("llm_backend", "anthropic:ghp_" + "a" * 36),
+    ),
+)
+def test_resume_rejects_sensitive_persisted_routing_before_diagnostics(
+    field_name: str,
+    value: object,
+) -> None:
+    original = _runner()
+    persisted = original._build_execution_contract()
+    secret = "ghp_" + "a" * 36
+    routing_contract = persisted["model_routing"]
+    routing_contract[field_name] = value
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing_contract
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract") as exc_info:
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_routing_contract_validators_reject_sensitive_subcontracts() -> None:
+    secret = "ghp_" + "a" * 36
+
+    assert OrchestratorRunner._runtime_routing_labels_from_contract(
+        {"runtime_backend": secret, "llm_backend": "anthropic"}
+    ) is None
+    assert OrchestratorRunner._valid_permission_mode_contract(
+        {"observed": True, "mode": secret}
+    ) is False
+
+
+def test_runtime_identity_failure_does_not_egress_dynamic_adapter_type() -> None:
+    secret = "ghp_" + "a" * 36
+
+    def fail_identity(_self: object) -> dict[str, object]:
+        raise RuntimeError("identity provider failed")
+
+    dynamic_adapter = type(secret, (), {"execution_identity_contract": fail_identity})()
+    runner = _runner()
+    runner._adapter = dynamic_adapter
+
+    with pytest.raises(OrchestratorError, match="invalid execution identity contract") as exc_info:
+        runner._runtime_execution_identity_contract()
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_legacy_resume_rejects_compound_sensitive_backend_before_diagnostics() -> None:
+    runner = _runner()
+    secret = "ghp_" + "a" * 36
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract") as exc_info:
+        runner._restore_execution_contract(
+            {
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "runtime_backend": f"claude:{secret}",
+                },
+            },
+            seed=_seed(),
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+@pytest.mark.parametrize(
+    "location",
+    ("runtime_cwd", "runtime_identity", "seed_goal"),
+)
+def test_legacy_resume_preflight_rejects_sensitive_values_before_diagnostics(
+    location: str,
+) -> None:
+    secret = "ghp_" + "a" * 36
+    if location == "runtime_cwd":
+        progress = {"runtime": {"cwd": f"/tmp/{secret}"}}
+    elif location == "runtime_identity":
+        progress = {
+            SESSION_RUNTIME_IDENTITY_PROGRESS_KEY: {
+                "status": "bound",
+                "backend": "claude",
+                "id_kind": "native_session_id",
+                "id": secret,
+            }
+        }
+    else:
+        progress = {SESSION_START_IDENTITY_PROGRESS_KEY: {"seed_goal": secret}}
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract") as exc_info:
+        _runner()._restore_execution_contract(progress, seed=_seed())
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_legacy_resume_does_not_egress_sensitive_current_seed_goal() -> None:
+    secret = "ghp_" + "a" * 36
+    progress = {SESSION_START_IDENTITY_PROGRESS_KEY: {"seed_goal": "original goal"}}
+
+    with pytest.raises(OrchestratorError, match="modified Seed goal") as exc_info:
+        _runner()._restore_execution_contract(progress, seed=_seed(goal=secret))
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_legacy_resume_does_not_egress_sensitive_current_workspace() -> None:
+    secret = "ghp_" + "a" * 36
+    runner = _runner(cwd=f"/tmp/{secret}")
+
+    with pytest.raises(OrchestratorError, match="different project workspace") as exc_info:
+        runner._restore_execution_contract(
+            {"runtime": {"cwd": "/tmp/original-workspace"}},
+            seed=_seed(),
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_current_contract_resume_does_not_egress_sensitive_current_workspace() -> None:
+    secret = "ghp_" + "a" * 36
+    original = _runner(cwd="/tmp/original-workspace")
+    persisted = original._build_execution_contract(seed=_seed())
+
+    with pytest.raises(OrchestratorError, match="different project workspace") as exc_info:
+        _runner(cwd=f"/tmp/{secret}")._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
 
 
 @pytest.mark.parametrize(
@@ -679,6 +938,62 @@ def test_codex_default_resume_handle_matches_start_contract() -> None:
     )
 
 
+def test_resume_selector_provider_error_does_not_egress_provider_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "ghp_" + "a" * 36
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    runner._execution_contract = runner._build_execution_contract(seed=_seed())
+
+    def raise_selector_error(
+        _runtime: CodexCliRuntime,
+        _runtime_handle: RuntimeHandle | None,
+    ) -> dict[str, object]:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(
+        CodexCliRuntime,
+        "resume_handle_execution_identity_contract",
+        raise_selector_error,
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid runtime selector metadata") as exc_info:
+        runner._validate_resume_handle_execution_identity(None)
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
+def test_resume_selector_mismatch_does_not_egress_selector_values() -> None:
+    secret = "ghp_" + "a" * 36
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    runner._execution_contract = runner._build_execution_contract(seed=_seed())
+    identity = runner._execution_contract["model_routing"]["runtime_execution"]["identity"]
+    identity["resume_handle_selector"] = {"persisted": secret}
+
+    with pytest.raises(OrchestratorError, match="different runtime handle selector") as exc_info:
+        runner._validate_resume_handle_execution_identity(
+            RuntimeHandle(
+                backend="codex_cli",
+                native_session_id="thread-123",
+                metadata={"codex_profile": secret},
+            )
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
 @pytest.mark.parametrize("backend", ["codex_cli", "goose", "pi", "hermes_cli", "opencode"])
 def test_bound_runtime_identity_rejects_same_backend_thread_swap(backend: str) -> None:
     progress = {
@@ -700,6 +1015,27 @@ def test_bound_runtime_identity_rejects_same_backend_thread_swap(backend: str) -
         )
 
 
+def test_bound_runtime_identity_mismatch_does_not_egress_current_handle_value() -> None:
+    secret = "ghp_" + "a" * 36
+    progress = {
+        SESSION_RUNTIME_IDENTITY_PROGRESS_KEY: {
+            "status": "bound",
+            "backend": "claude",
+            "id_kind": "native_session_id",
+            "id": "thread-original",
+        }
+    }
+
+    with pytest.raises(OrchestratorError, match="different backend session") as exc_info:
+        OrchestratorRunner._validate_bound_runtime_resume_identity(
+            progress,
+            RuntimeHandle(backend="claude", native_session_id=secret),
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
+
+
 def test_non_codex_runtime_rejects_cross_backend_handle() -> None:
     runtime = GooseCliRuntime(
         cli_path="/bin/echo",
@@ -715,6 +1051,19 @@ def test_non_codex_runtime_rejects_cross_backend_handle() -> None:
                 native_session_id="claude-session",
             )
         )
+
+
+def test_runtime_handle_backend_mismatch_does_not_egress_handle_value() -> None:
+    secret = "ghp_" + "a" * 36
+    runner = _runner()
+    runtime_handle = RuntimeHandle(backend="claude", native_session_id="thread-123")
+    object.__setattr__(runtime_handle, "backend", secret)
+
+    with pytest.raises(OrchestratorError, match="handle from a different backend") as exc_info:
+        runner._validate_runtime_handle_backend(runtime_handle)
+
+    assert secret not in str(exc_info.value)
+    assert secret not in str(exc_info.value.details)
 
 
 def test_runtime_handle_permission_is_overwritten_to_bypass() -> None:
@@ -1398,3 +1747,36 @@ async def test_prepare_session_persists_same_execution_contract_in_start_and_pro
     assert persisted["frugality_proof"]["project_root"] == str(Path("/tmp/project").resolve())
     assert len(persisted["frugality_proof"]["routing_fingerprint"]) == 64
     assert len(persisted["frugality_proof"]["seed_fingerprint"]) == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", (" \t", "\u200b", "\u034f", "claude:"))
+async def test_prepare_session_omits_sensitive_backend_labels_from_events(prefix: str) -> None:
+    store = AsyncMock()
+    events = []
+
+    async def _append(event) -> None:
+        events.append(event)
+
+    store.append.side_effect = _append
+    runtime_secret = "ghp_" + "a" * 36
+    llm_secret = "ghp_" + "b" * 36
+    adapter = _adapter()
+    adapter.runtime_backend = prefix + runtime_secret
+    adapter.llm_backend = prefix + llm_secret
+    runner = OrchestratorRunner(adapter, store, MagicMock())
+
+    result = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-sensitive-labels",
+        session_id="sess-sensitive-labels",
+    )
+
+    assert result.is_ok
+    start = next(event for event in events if event.type == "orchestrator.session.started")
+    assert "runtime_backend" not in start.data
+    assert "llm_backend" not in start.data
+    assert runtime_secret not in str(start.data)
+    assert llm_secret not in str(start.data)
+    assert runtime_secret not in str(start.to_db_dict())
+    assert llm_secret not in str(start.to_db_dict())
