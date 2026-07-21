@@ -1772,7 +1772,7 @@ class TestBackgroundJobPath:
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_stale_job_lease_allows_resume_after_restart_gap(
+    async def test_nonterminal_job_receipt_blocks_resume_despite_owner_anomaly(
         self, event_store, tmp_path, fake_inner_auto
     ) -> None:
         store = AutoStore(tmp_path)
@@ -1796,12 +1796,10 @@ class TestBackgroundJobPath:
         stale_snapshot.job_id = "job_stale"
         stale_snapshot.is_terminal = False
         stale_snapshot.status.value = "queued"
-        new_snapshot = MagicMock()
-        new_snapshot.job_id = "job_new"
 
         class RestartedJobManager:
             def __init__(self) -> None:
-                self.start_job = AsyncMock(side_effect=self._start_job)
+                self.start_job = AsyncMock()
 
             async def allocate_job_id(self) -> str:
                 return "job_alloc"
@@ -1819,11 +1817,6 @@ class TestBackgroundJobPath:
                 assert job_type == "auto"
                 return stale_snapshot
 
-            async def _start_job(self, *, runner, **_):
-                if inspect.iscoroutine(runner):
-                    runner.close()
-                return new_snapshot
-
         job_manager = RestartedJobManager()
         h = StartAutoHandler(
             event_store=event_store,
@@ -1834,9 +1827,10 @@ class TestBackgroundJobPath:
 
         result = await h.handle({"resume": state.auto_session_id})
 
-        assert result.is_ok
-        assert result.value.meta["job_id"] == "job_new"
-        job_manager.start_job.assert_awaited_once()
+        assert result.is_err
+        assert "active background job" in result.error.message
+        assert result.error.details["job_id"] == "job_stale"
+        job_manager.start_job.assert_not_awaited()
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2015,8 +2009,15 @@ class TestBackgroundJobPath:
 
     @pytest.mark.asyncio
     async def test_dead_owner_plugin_lease_allows_redispatch(
-        self, event_store, tmp_path, fake_inner_auto
+        self, event_store, tmp_path, fake_inner_auto, monkeypatch
     ) -> None:
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "process_identity_state",
+            lambda _pid, _start: auto_module.ProcessIdentityState.DEAD,
+        )
         store = AutoStore(tmp_path)
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         store.save(state)
@@ -2463,7 +2464,16 @@ class TestAutoHandlerLeaseRelease:
         assert not lease_path.exists()
 
     @pytest.mark.asyncio
-    async def test_direct_auto_resume_recovers_dead_owner_lease(self, tmp_path) -> None:
+    async def test_direct_auto_resume_recovers_dead_owner_lease(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "process_identity_state",
+            lambda _pid, _start: auto_module.ProcessIdentityState.DEAD,
+        )
         store = AutoStore(tmp_path)
         state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
         state.pipeline_timeout_seconds = 900
@@ -2500,3 +2510,43 @@ class TestAutoHandlerLeaseRelease:
 
         assert result.is_ok
         assert not lease_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_direct_auto_resume_keeps_unknown_owner_lease(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from ouroboros.mcp.tools import auto_handler as auto_module
+
+        monkeypatch.setattr(
+            auto_module,
+            "process_identity_state",
+            lambda _pid, _start: auto_module.ProcessIdentityState.UNKNOWN,
+        )
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        state.pipeline_timeout_seconds = 900
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "unknown_direct",
+                    "mode": "direct_auto",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": 4242,
+                    "owner_start_time": 1_700_000_000.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class StubAutoHandler(AutoHandler):
+            async def _run(self, arguments):
+                raise AssertionError("_run must not replace an unknown-owner lease")
+
+        result = await StubAutoHandler(store=store).handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "pending start lease" in result.error.message
+        assert json.loads(lease_path.read_text(encoding="utf-8"))["token"] == "unknown_direct"

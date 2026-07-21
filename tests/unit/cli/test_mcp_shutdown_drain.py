@@ -62,8 +62,8 @@ def _patches(mock_es, mock_repo, mock_server):
 
 
 @pytest.mark.asyncio
-async def test_watchdog_dead_client_stops_server(monkeypatch) -> None:
-    """A resolved client identity that dies must stop the serve loop.
+async def test_watchdog_dead_client_stops_network_server(monkeypatch) -> None:
+    """A resolved client identity that dies must stop a network serve loop.
 
     Under the shipped ``client -> uvx -> python`` topology the direct parent
     (uvx) survives the client's death, so the getppid() check alone can never
@@ -84,9 +84,45 @@ async def test_watchdog_dead_client_stops_server(monkeypatch) -> None:
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
     with es_patch, repo_patch, server_patch:
         await asyncio.wait_for(
-            mcp_module._run_mcp_server("localhost", 8080, "stdio"),
+            mcp_module._run_mcp_server("localhost", 8080, "streamable-http"),
             timeout=10.0,
         )
+
+    mock_server.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stdio_nested_client_pid_anomaly_waits_for_serve_completion(monkeypatch) -> None:
+    """An open stdio transport outranks a stale nested-child PID observation."""
+    mock_es, mock_repo, mock_server = _make_mocks()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = False
+
+    async def live_stdio_serve(*args, **kwargs):
+        nonlocal cancelled
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    mock_server.serve.side_effect = live_stdio_serve
+    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
+    monkeypatch.setattr(
+        mcp_module, "is_process_identity_alive", lambda _pid, _start_time=None: False
+    )
+
+    es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
+    with es_patch, repo_patch, server_patch:
+        server_task = asyncio.create_task(mcp_module._run_mcp_server("localhost", 8080, "stdio"))
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)
+        assert not server_task.done()
+        assert cancelled is False
+        release.set()
+        await asyncio.wait_for(server_task, timeout=2.0)
 
     mock_server.shutdown.assert_awaited_once()
 
@@ -124,14 +160,21 @@ async def test_stuck_serve_loop_is_bounded_and_unblocked_by_fd0_close(monkeypatc
 
     mock_server.serve.side_effect = stuck_serve
 
-    # Dead client fires the watchdog -> stop -> shutdown path.
-    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
-    monkeypatch.setattr(
-        mcp_module, "is_process_identity_alive", lambda _pid, _start_time=None: False
-    )
+    # A real signal, not a PID diagnostic, requests forced stdio shutdown.
+    monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: None)
+    loop = asyncio.get_running_loop()
+
+    def schedule_sigterm(sig, callback, *args):
+        if sig == mcp_module.signal.SIGTERM:
+            loop.call_later(0.05, callback, *args)
 
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
-    with es_patch, repo_patch, server_patch:
+    with (
+        es_patch,
+        repo_patch,
+        server_patch,
+        patch.object(loop, "add_signal_handler", side_effect=schedule_sigterm),
+    ):
         await asyncio.wait_for(
             mcp_module._run_mcp_server("localhost", 8080, "stdio"),
             timeout=10.0,

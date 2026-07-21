@@ -100,7 +100,11 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
-from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
+from ouroboros.orchestrator.heartbeat import (
+    ProcessIdentityState,
+    current_process_identity,
+    process_identity_state,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.factory import resolve_llm_backend
 from ouroboros.runtime.controls import load_runtime_controls
@@ -1104,9 +1108,12 @@ class StartAutoHandler:
             if snapshot.is_terminal:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
                 return None, True
-            if not _lease_owner_is_alive(lease):
-                _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
-                return None, True
+            # The durable non-terminal job receipt is stronger ownership
+            # evidence than the PID stamped on this coordination lease. In
+            # particular, a detached worker may have accepted the job after
+            # the initiating MCP process exited. Keep the lease until the job
+            # reaches a recoverable terminal outcome; JobManager performs the
+            # authoritative worker/session reconciliation.
             return (
                 MCPToolError(
                     "Auto session already has an active background job: "
@@ -1126,7 +1133,7 @@ class StartAutoHandler:
                 False,
             )
         if mode.startswith("plugin"):
-            if not _lease_owner_is_alive(lease):
+            if _lease_owner_state(lease) is ProcessIdentityState.DEAD:
                 _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
                 return None, True
             try:
@@ -1334,7 +1341,7 @@ def _reserve_start_lease(
     with file_lock(path):
         existing = _read_start_lease_locked(path)
         if existing is not None and not _lease_is_expired(existing):
-            if _lease_owner_is_alive(existing):
+            if _lease_owner_state(existing) is not ProcessIdentityState.DEAD:
                 return "", _lease_conflict_error(auto_session_id, existing)
         _write_start_lease_locked(
             path,
@@ -1499,19 +1506,21 @@ def _current_lease_owner() -> dict[str, Any]:
     }
 
 
-def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
+def _lease_owner_state(lease: dict[str, Any]) -> ProcessIdentityState:
+    """Return conservative liveness evidence for an Auto lease owner."""
     pid = lease.get("owner_pid")
-    if not isinstance(pid, int):
+    if not isinstance(pid, int) or isinstance(pid, bool):
         # Legacy non-expiring job leases did not record an owner. Treat them as
-        # active because process-local task state cannot prove cross-process
+        # unknown because process-local task state cannot prove cross-process
         # staleness.
-        return True
+        return ProcessIdentityState.UNKNOWN
     start_time = lease.get("owner_start_time")
     if start_time is not None and not isinstance(start_time, int | float):
-        start_time = None
-    if isinstance(start_time, int | float) and start_time <= 0:
-        return False
-    return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
+        return ProcessIdentityState.UNKNOWN
+    return process_identity_state(
+        pid,
+        float(start_time) if start_time is not None else None,
+    )
 
 
 def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:

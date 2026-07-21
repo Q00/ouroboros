@@ -49,6 +49,7 @@ _own_pid_payload: str | None = None
 # unwind before escalating (closing fd 0) or proceeding with store cleanup.
 _SHUTDOWN_DRAIN_GRACE_SECONDS = 5.0
 _JOB_DRAIN_GRACE_SECONDS = 5.0
+_CLIENT_WATCHDOG_POLL_SECONDS = 5.0
 
 # Idle WAL relief: long-lived idle servers pin the shared SQLite WAL (passive
 # autocheckpoints cannot truncate while any reader is active).
@@ -641,10 +642,12 @@ async def _run_mcp_server(
             with contextlib.suppress(NotImplementedError, ValueError, RuntimeError):
                 loop.add_signal_handler(_sig, _request_stop, _sig.name)
 
-        # Client-death watchdog: when the MCP client that spawned us dies, exit
-        # instead of pinning the SQLite database forever (streamable-http has no
-        # stdin EOF to rely on; for stdio, EOF stays the primary defense). Two
-        # complementary checks, polled every 5s:
+        # Client-death watchdog: network transports have no stdin EOF, so a
+        # confirmed orphan requests shutdown instead of pinning the SQLite
+        # database forever. For stdio, an open stdin is the transport authority:
+        # PID ancestry/start-time observations are diagnostic only because
+        # launchers may hand the pipe through a short-lived nested child.
+        # Two complementary checks are polled every 5s:
         #  - getppid() vs the original parent: catches death of whatever spawned
         #    us directly. Under the shipped `client -> uvx -> python` topology the
         #    direct parent is the uv wrapper, which blocks on waitpid() and
@@ -673,6 +676,12 @@ async def _run_mcp_server(
                 return
             while not stop.is_set():
                 if os.getppid() != orig_ppid:
+                    if transport == "stdio":
+                        _console_out.print(
+                            "[yellow]Parent PID changed while stdio remains open — "
+                            "continuing until EOF or signal[/yellow]"
+                        )
+                        return
                     _console_out.print("[yellow]Parent client gone — orphan exit[/yellow]")
                     stop.set()
                     return
@@ -680,13 +689,19 @@ async def _run_mcp_server(
                     client_pid, client_start = client_identity
                     alive = await asyncio.to_thread(_client_is_alive, client_pid, client_start)
                     if not alive:
+                        if transport == "stdio":
+                            _console_out.print(
+                                f"[yellow]MCP client PID {client_pid} appears gone while "
+                                "stdio remains open — continuing until EOF or signal[/yellow]"
+                            )
+                            return
                         _console_out.print(
                             f"[yellow]MCP client (pid {client_pid}) gone — orphan exit[/yellow]"
                         )
                         stop.set()
                         return
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=5.0)
+                    await asyncio.wait_for(stop.wait(), timeout=_CLIENT_WATCHDOG_POLL_SECONDS)
 
         async def _idle_wal_checkpoint() -> None:
             # Long-lived idle servers pin the shared WAL: passive autocheckpoints

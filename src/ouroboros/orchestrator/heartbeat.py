@@ -15,13 +15,23 @@ Any runtime can participate — just call acquire/release.
 
 from __future__ import annotations
 
+from enum import StrEnum
 import logging
+import math
 import os
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 LOCK_DIR = Path.home() / ".ouroboros" / "locks"
+
+
+class ProcessIdentityState(StrEnum):
+    """Conservative result of probing a recorded process identity."""
+
+    ALIVE = "alive"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
 
 
 def _ensure_dir() -> Path:
@@ -57,8 +67,12 @@ def _get_process_start_time(pid: int) -> float | None:
             # Linux: /proc/{pid}/stat field 22 is starttime in clock ticks
             stat_path = Path(f"/proc/{pid}/stat")
             if stat_path.exists():
-                fields = stat_path.read_text().split()
-                clock_ticks = int(fields[21])
+                stat = stat_path.read_text()
+                # Field 2 (comm) is parenthesized and may contain spaces, so a
+                # plain split can shift field 22 and manufacture start-time
+                # mismatches for otherwise live nested client processes.
+                fields_after_comm = stat[stat.rfind(")") + 2 :].split()
+                clock_ticks = int(fields_after_comm[19])
                 # Convert to seconds using system clock tick rate
                 hz = os.sysconf("SC_CLK_TCK")
                 boot_time = Path("/proc/stat").read_text()
@@ -136,8 +150,7 @@ def is_owned_by_current_process(session_id: str) -> bool:
             recorded_start = float(parts[1])
         except ValueError:
             return False
-        current_start = _get_process_start_time(pid)
-        if current_start is not None and abs(current_start - recorded_start) > 2.0:
+        if process_identity_state(pid, recorded_start) is not ProcessIdentityState.ALIVE:
             return False
 
     return True
@@ -154,58 +167,99 @@ def process_start_time(pid: int) -> float | None:
     return _get_process_start_time(pid)
 
 
-def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool:
-    """Return True when ``pid`` is alive and still has ``start_time``.
+def process_identity_state(
+    pid: int,
+    start_time: float | None = None,
+) -> ProcessIdentityState:
+    """Return alive/dead/unknown evidence for a recorded process identity.
 
-    ``start_time`` is optional for legacy callers, but when present it guards
-    against treating a recycled PID as the original owner.
+    ``DEAD`` is returned only when the OS proves the PID is absent or when a
+    readable start time proves that the PID was recycled. Probe failures and
+    unusable start-time evidence are ``UNKNOWN`` so lifecycle callers never
+    turn an inconclusive platform/process-table lookup into owner loss.
     """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return ProcessIdentityState.UNKNOWN
+    if start_time is not None and (
+        isinstance(start_time, bool)
+        or not isinstance(start_time, int | float)
+        or not math.isfinite(float(start_time))
+        or start_time <= 0
+    ):
+        return ProcessIdentityState.UNKNOWN
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return ProcessIdentityState.DEAD
     except PermissionError:
-        pass
+        # Permission denial proves that a process occupies this PID, even
+        # though its start time may be unavailable to this user.
+        return ProcessIdentityState.ALIVE if start_time is None else ProcessIdentityState.UNKNOWN
+    except OSError:
+        return ProcessIdentityState.UNKNOWN
 
-    if start_time is not None:
-        current_start = _get_process_start_time(pid)
-        if current_start is not None and abs(current_start - start_time) > 2.0:
-            return False
-    return True
+    if start_time is None:
+        return ProcessIdentityState.ALIVE
+    current_start = _get_process_start_time(pid)
+    if current_start is None:
+        return ProcessIdentityState.UNKNOWN
+    if abs(current_start - start_time) > 2.0:
+        return ProcessIdentityState.DEAD
+    return ProcessIdentityState.ALIVE
+
+
+def is_process_identity_alive(pid: int, start_time: float | None = None) -> bool:
+    """Return False only when ``pid``/``start_time`` is confirmed dead.
+
+    ``start_time`` is optional for legacy callers, but when present it guards
+    against treating a recycled PID as the original owner. Unknown probe
+    results remain conservatively alive for this compatibility predicate;
+    callers that need to distinguish uncertainty use
+    :func:`process_identity_state`.
+    """
+    return process_identity_state(pid, start_time) is not ProcessIdentityState.DEAD
+
+
+def holder_identity_state(session_id: str) -> ProcessIdentityState:
+    """Return conservative liveness evidence for a session-lock holder."""
+    path = lock_path(session_id)
+    if not path.exists():
+        return ProcessIdentityState.DEAD
+
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return ProcessIdentityState.UNKNOWN
+
+    parts = content.split(":", 1)
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return ProcessIdentityState.UNKNOWN
+
+    recorded_start: float | None = None
+    if len(parts) > 1 and parts[1] != "None":
+        try:
+            recorded_start = float(parts[1])
+        except ValueError:
+            return ProcessIdentityState.UNKNOWN
+    return process_identity_state(pid, recorded_start)
 
 
 def is_holder_alive(session_id: str) -> bool:
     """Check if the lock holder for a session is still alive.
 
-    Returns True only if:
-    1. A lock file exists
-    2. The recorded PID is running
-    3. The process start time matches (guards against PID recycling)
-
-    Returns False if no lock exists or the holder is confirmed dead.
+    Confirmed-live and inconclusive holders both remain active. Returns False
+    only when no lock exists or its recorded identity is confirmed dead, so
+    unknown evidence cannot authorize orphan cleanup.
     """
-    path = lock_path(session_id)
-    if not path.exists():
+    if not lock_path(session_id).exists():
         return False
-
-    try:
-        content = path.read_text().strip()
-    except OSError:
-        return False
-
-    # Parse "pid:start_time" or just "pid"
-    parts = content.split(":", 1)
-    try:
-        pid = int(parts[0])
-    except ValueError:
-        return False
-
-    recorded_start = float(parts[1]) if len(parts) > 1 and parts[1] != "None" else None
-
-    if not is_process_identity_alive(pid, recorded_start):
+    state = holder_identity_state(session_id)
+    if state is ProcessIdentityState.DEAD:
         release(session_id)  # Clean up stale lock
         return False
-
     return True
 
 
