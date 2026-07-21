@@ -95,6 +95,22 @@ class SkillInterceptor:
 
     # -- public entry point -------------------------------------------------
 
+    def execution_identity_contract(self) -> dict[str, object]:
+        """Declare the static policy that determines delegated skill dispatch."""
+        return {
+            "version": 1,
+            "configuration": {
+                "cwd": self._cwd,
+                "runtime_backend": self._runtime_backend,
+                "runtime_handle_backend": self._runtime_handle_backend,
+                "permission_mode": self._permission_mode,
+                "llm_backend": self._llm_backend,
+                "log_namespace": self._log_namespace,
+                "skills_dir": str(self._skills_dir) if self._skills_dir is not None else None,
+                "dispatch_protocol_version": 1,
+            },
+        }
+
     async def maybe_dispatch(
         self,
         prompt: str,

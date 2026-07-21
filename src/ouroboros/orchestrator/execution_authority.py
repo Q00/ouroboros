@@ -37,7 +37,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier
 
-EXECUTION_AUTHORITY_VERSION = 1
+EXECUTION_AUTHORITY_VERSION = 2
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
 _MAX_IDENTITY_SCALAR_CHARS = 8_192
@@ -391,7 +391,18 @@ def _callable_entrypoint_contract(target: object) -> dict[str, object]:
     elif inspect.isfunction(target) or inspect.isbuiltin(target):
         implementation = target
     else:
-        implementation = type(target).__call__
+        class_contract = _safe_class_implementation_contract(target)
+        instance_overrides = _instance_executable_overrides(target)
+        durable = class_contract.get("stability") == "durable" and not instance_overrides
+        contract: dict[str, object] = {
+            **class_contract,
+            "stability": "durable" if durable else "process_local",
+            "entrypoint": _callable_implementation_contract(type(target).__call__),
+            "instance_overrides": instance_overrides,
+        }
+        if not durable:
+            contract["instance_nonce"] = uuid.uuid4().hex
+        return contract
     return _callable_implementation_contract(implementation)
 
 
@@ -540,6 +551,24 @@ def _runtime_watchdog_contract(adapter: object) -> dict[str, object]:
 
 
 def _runtime_skill_dispatcher_contract(adapter: object) -> dict[str, object]:
+    interceptor_descriptor = inspect.getattr_static(adapter, "_interceptor", None)
+    if interceptor_descriptor is not None:
+        try:
+            interceptor = object.__getattribute__(adapter, "_interceptor")
+            component = _declared_component_contract(interceptor)
+        except Exception as exc:
+            return {
+                "mode": "delegated",
+                "stability": "process_local",
+                "instance_nonce": uuid.uuid4().hex,
+                "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            }
+        return {
+            "mode": "delegated",
+            "stability": component.get("stability", "process_local"),
+            "component": component,
+        }
+
     dispatcher_descriptor = inspect.getattr_static(adapter, "_skill_dispatcher", None)
     dispatcher = (
         object.__getattribute__(adapter, "_skill_dispatcher")
@@ -695,6 +724,57 @@ def _safe_class_implementation_contract(value: object) -> dict[str, object]:
             "observed": False,
             "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
         }
+
+
+def _instance_declared_method_overrides(value: object) -> dict[str, object]:
+    """Bind only instance state that shadows executable class members."""
+    try:
+        instance_state = vars(value)
+    except TypeError:
+        return {}
+    missing = object()
+    overrides: dict[str, object] = {}
+    for name, item in instance_state.items():
+        if not isinstance(name, str) or not name:
+            continue
+        class_member = inspect.getattr_static(type(value), name, missing)
+        if class_member is missing or not (
+            callable(class_member) or isinstance(class_member, (classmethod, staticmethod))
+        ):
+            continue
+        if callable(item):
+            overrides[name] = {
+                "mode": "callable",
+                "implementation": _callable_entrypoint_contract(item),
+            }
+        else:
+            overrides[name] = {"mode": "non_callable", "type": _qualified_type(item)}
+    return overrides
+
+
+def _executor_implementation_contract(executor: object | None) -> dict[str, object]:
+    """Bind the concrete effect-owning executor or fail closed when absent."""
+    if executor is None:
+        return {
+            "version": 1,
+            "mode": "unbound",
+            "stability": "process_local",
+            "instance_nonce": uuid.uuid4().hex,
+        }
+    implementation = _safe_class_implementation_contract(executor)
+    instance_overrides = _instance_declared_method_overrides(executor)
+    durable = implementation.get("stability") == "durable" and not instance_overrides
+    contract: dict[str, object] = {
+        "version": 1,
+        "mode": "bound",
+        "type": _qualified_type(executor),
+        "stability": "durable" if durable else "process_local",
+        "implementation": implementation,
+        "instance_overrides": instance_overrides,
+    }
+    if not durable:
+        contract["instance_nonce"] = uuid.uuid4().hex
+    return contract
 
 
 def _reject_sensitive_identity_fields(value: object) -> None:
@@ -1276,6 +1356,7 @@ class ExecutionAuthorityContract:
         )
         if data.get("version") != EXECUTION_AUTHORITY_VERSION or set(data) != {
             "version",
+            "executor",
             "workspace",
             "runtime",
             "verifier",
@@ -1319,6 +1400,7 @@ class ExecutionAuthorityContract:
         verifier: Verifier | None,
         workspace: str | None,
         execution_policy: Mapping[str, object],
+        executor: object | None = None,
         workspace_identity: Mapping[str, object] | None = None,
         workspace_generation: Mapping[str, object] | None = None,
         resolved_routing: ResolvedRuntimeAuthority | None = None,
@@ -1327,6 +1409,7 @@ class ExecutionAuthorityContract:
     ) -> ExecutionAuthorityContract:
         data = {
             "version": EXECUTION_AUTHORITY_VERSION,
+            "executor": _executor_implementation_contract(executor),
             "workspace": canonical_workspace_authority(
                 workspace,
                 identity=workspace_identity,
@@ -1368,6 +1451,9 @@ class ExecutionAuthorityContract:
         those require a complete per-attempt capsule with the omitted inputs.
         """
         data = self.data
+        executor = data.get("executor")
+        if not isinstance(executor, Mapping) or executor.get("stability") != "durable":
+            return False
         workspace = data.get("workspace")
         if not isinstance(workspace, Mapping) or workspace.get("observed") is not True:
             return False

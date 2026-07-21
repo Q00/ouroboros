@@ -1048,6 +1048,7 @@ class ParallelACExecutor:
         self._execution_authority = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=atomic_verifier,
+            executor=self,
             workspace=workspace if isinstance(workspace, str) else os.getcwd(),
             workspace_identity=workspace_authority_identity,
             execution_policy=execution_policy,

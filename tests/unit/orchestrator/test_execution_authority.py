@@ -16,6 +16,7 @@ from ouroboros.orchestrator.execution_authority import (
     build_execution_policy_contract,
 )
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.pi_runtime import PiRuntime
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.rate_limit import ResolvedDispatchRatePolicy
 from ouroboros.orchestrator.verifier import VerifierVerdict
@@ -75,6 +76,50 @@ class _Verifier:
 
     def __call__(self, **_: object) -> VerifierVerdict:
         return VerifierVerdict(passed=True)
+
+
+class _ExecutionOwner:
+    def execute(self) -> None:
+        """Stable test-only effect-owner implementation."""
+
+
+class _HelperVerifierBase:
+    def verification_identity_contract(self) -> dict[str, object]:
+        return {"judge": "shared"}
+
+    def __call__(self, **_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=self._passed())
+
+    def _passed(self) -> bool:
+        raise NotImplementedError
+
+
+class _PassingHelperVerifier(_HelperVerifierBase):
+    def _passed(self) -> bool:
+        return True
+
+
+class _FailingHelperVerifier(_HelperVerifierBase):
+    def _passed(self) -> bool:
+        return False
+
+
+class _BypassDispatchRateExecutor(ParallelACExecutor):
+    async def _await_dispatch_rate_budget(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+    ) -> None:
+        del prompt, system_prompt
+
+
+class _StableDispatcher:
+    def execution_identity_contract(self) -> dict[str, object]:
+        return {"dispatcher": "stable"}
+
+    async def __call__(self, **_: object) -> None:
+        return None
 
 
 class _SlottedRuntime:
@@ -143,6 +188,7 @@ def _contract(
     return ExecutionAuthorityContract.build(
         adapter=runtime or _Runtime(),
         verifier=verifier,  # type: ignore[arg-type]
+        executor=_ExecutionOwner(),
         workspace=workspace,
         execution_policy=policy if policy is not None else _policy(),
         workspace_generation=generation if generation is not None else _generation(),
@@ -164,6 +210,7 @@ def _worker_contract(
     return ExecutionAuthorityContract.build(
         adapter=runtime,
         verifier=None,
+        executor=_ExecutionOwner(),
         workspace="/tmp/workspace-a",
         workspace_generation=_generation(),
         execution_policy=_policy(backend=backend),
@@ -336,6 +383,7 @@ def test_bundled_transport_identity_is_stable_and_binds_instance_override() -> N
         return ExecutionAuthorityContract.build(
             adapter=runtime,
             verifier=None,
+            executor=_ExecutionOwner(),
             workspace="/tmp/workspace-a",
             workspace_generation=_generation(),
             execution_policy=_policy(backend="claude_mcp"),
@@ -476,6 +524,15 @@ def test_verifier_identity_drift_changes_authority() -> None:
     assert first.portable_across_processes is True
 
 
+def test_callable_verifier_helper_override_changes_authority() -> None:
+    passing = _contract(verifier=_PassingHelperVerifier())
+    failing = _contract(verifier=_FailingHelperVerifier())
+
+    assert passing.fingerprint != failing.fingerprint
+    assert passing.data["verifier"]["implementation"]["stability"] == "durable"
+    assert failing.data["verifier"]["implementation"]["stability"] == "durable"
+
+
 def test_undeclared_custom_verifier_is_process_local() -> None:
     def verifier(**_: object) -> VerifierVerdict:
         return VerifierVerdict(passed=True)
@@ -545,6 +602,67 @@ def test_dispatch_rate_policy_drift_changes_executor_authority(
     assert first_policy["requests_per_minute"] == 1
     assert second_policy["requests_per_minute"] == 9
     assert first.execution_authority.fingerprint != second.execution_authority.fingerprint
+
+
+def test_executor_implementation_override_changes_authority(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    rate_policy = ResolvedDispatchRatePolicy.resolve(
+        backend="test-runtime",
+        self_governs_rate_limit=False,
+        requests_per_minute=1,
+        tokens_per_minute=None,
+    )
+    kwargs = {
+        "adapter": runtime,
+        "event_store": AsyncMock(),
+        "task_cwd": str(tmp_path),
+        "dispatch_rate_policy": rate_policy,
+    }
+
+    baseline = ParallelACExecutor(**kwargs).execution_authority  # type: ignore[arg-type]
+    bypassed = _BypassDispatchRateExecutor(**kwargs).execution_authority  # type: ignore[arg-type]
+
+    assert baseline.data["execution_policy"]["dispatch_rate"]["gate_enabled"] is True
+    assert baseline.fingerprint != bypassed.fingerprint
+    assert baseline.data["executor"]["stability"] == "durable"
+    assert bypassed.data["executor"]["stability"] == "durable"
+
+
+def test_delegated_skill_interceptor_configuration_changes_authority(tmp_path) -> None:
+    first_runtime = PiRuntime(
+        cli_path="/usr/bin/true",
+        cwd=tmp_path,
+        skills_dir=tmp_path / "skills-a",
+    )
+    second_runtime = PiRuntime(
+        cli_path="/usr/bin/true",
+        cwd=tmp_path,
+        skills_dir=tmp_path / "skills-b",
+    )
+
+    first = ExecutionAuthorityContract.build(
+        adapter=first_runtime,
+        verifier=None,
+        executor=_ExecutionOwner(),
+        workspace=str(tmp_path),
+        workspace_generation=_generation(),
+        execution_policy=_policy(backend="pi"),
+    )
+    second = ExecutionAuthorityContract.build(
+        adapter=second_runtime,
+        verifier=None,
+        executor=_ExecutionOwner(),
+        workspace=str(tmp_path),
+        workspace_generation=_generation(),
+        execution_policy=_policy(backend="pi"),
+    )
+
+    skill_dispatcher = first.data["runtime"]["skill_dispatcher"]
+    assert skill_dispatcher["mode"] == "delegated"
+    assert skill_dispatcher["component"]["mode"] == "declared"
+    assert skill_dispatcher["stability"] == "durable"
+    assert first.fingerprint != second.fingerprint
 
 
 def test_self_governing_rate_policy_is_explicit_and_not_portable(tmp_path) -> None:
@@ -737,6 +855,7 @@ def test_bound_runtime_authority_is_used_without_raw_mapping_injection() -> None
     contract = ExecutionAuthorityContract.build(
         adapter=runtime,
         verifier=None,
+        executor=_ExecutionOwner(),
         workspace="/tmp/workspace-a",
         workspace_generation=_generation("a"),
         execution_policy=_policy(),
@@ -832,15 +951,8 @@ def test_local_skill_fallback_is_process_local() -> None:
 
 
 def test_declared_callable_dispatcher_has_durable_implementation_identity() -> None:
-    class StableDispatcher:
-        def execution_identity_contract(self) -> dict[str, object]:
-            return {"dispatcher": "stable"}
-
-        async def __call__(self, **_: object) -> None:
-            return None
-
     runtime = _Runtime()
-    runtime._skill_dispatcher = StableDispatcher()  # type: ignore[attr-defined]
+    runtime._skill_dispatcher = _StableDispatcher()  # type: ignore[attr-defined]
     contract = _contract(runtime=runtime)
     dispatcher = contract.data["runtime"]["skill_dispatcher"]
     assert dispatcher["stability"] == "durable"
