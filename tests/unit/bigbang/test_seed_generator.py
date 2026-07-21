@@ -451,7 +451,7 @@ class TestSeedGeneratorExtraction:
 
     @pytest.mark.asyncio
     async def test_generate_extracts_constraints(self) -> None:
-        """SeedGenerator extracts constraints as tuple."""
+        """SeedGenerator supports legacy pipe-delimited constraints."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
@@ -475,6 +475,34 @@ class TestSeedGeneratorExtraction:
             assert len(result.value.constraints) == 3
             assert "Python 3.14+" in result.value.constraints
             assert "No external database" in result.value.constraints
+
+    def test_structured_constraints_preserve_literal_pipes(self, tmp_path: Path) -> None:
+        """JSON constraint arrays do not treat literal pipes as separators."""
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=tmp_path)
+        requirements = generator._parse_extraction_response(
+            create_valid_extraction_response(constraints='["--lang ko|en", "keep exact flag"]')
+        )
+
+        seed = generator._build_seed(requirements, SeedMetadata(ambiguity_score=0.1))
+
+        assert seed.constraints == ("--lang ko|en", "keep exact flag")
+
+    def test_build_seed_supports_legacy_pipe_delimited_constraints(self, tmp_path: Path) -> None:
+        """Direct callers using the legacy extraction format remain supported."""
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=tmp_path)
+        requirements = generator._parse_extraction_response(
+            create_valid_extraction_response(
+                constraints="Python 3.14+ | No external database | Must work offline"
+            )
+        )
+
+        seed = generator._build_seed(requirements, SeedMetadata(ambiguity_score=0.1))
+
+        assert seed.constraints == (
+            "Python 3.14+",
+            "No external database",
+            "Must work offline",
+        )
 
     @pytest.mark.asyncio
     async def test_generate_extracts_acceptance_criteria(self) -> None:
@@ -1223,3 +1251,24 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "sub-step of a sibling" in system_prompt.lower()
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+
+
+class TestConstraintExtractionContract:
+    """Guard the collision-free constraint format used by SeedGenerator."""
+
+    def test_extraction_user_prompt_requests_json_constraint_array(self, tmp_path: Path) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock(), output_dir=tmp_path)
+
+        prompt = generator._build_extraction_user_prompt("Q: constraints?\nA: --lang ko|en")
+
+        assert 'CONSTRAINTS: ["<constraint 1>", "<constraint 2>"]' in prompt
+        assert "valid JSON array of strings" in prompt
+        assert "Preserve literal characters such as `|`" in prompt
+
+    def test_seed_architect_prompt_requests_json_constraint_array(self) -> None:
+        from ouroboros.agents.loader import load_agent_prompt
+
+        system_prompt = load_agent_prompt("seed-architect")
+
+        assert 'CONSTRAINTS: ["<constraint 1>", "<constraint 2>"]' in system_prompt
+        assert "valid JSON array of strings" in system_prompt

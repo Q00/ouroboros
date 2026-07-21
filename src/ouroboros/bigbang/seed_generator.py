@@ -12,6 +12,7 @@ The SeedGenerator:
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -55,6 +56,28 @@ EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
+
+
+def _parse_constraints(raw_value: object) -> tuple[str, ...]:
+    """Parse structured constraints while accepting legacy pipe-delimited text."""
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return ()
+        if text.startswith("["):
+            try:
+                raw_value = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("CONSTRAINTS must be a valid JSON array of strings") from exc
+        else:
+            return tuple(item.strip() for item in text.split("|") if item.strip())
+
+    if isinstance(raw_value, list | tuple):
+        if not all(isinstance(item, str) for item in raw_value):
+            raise ValueError("CONSTRAINTS must contain only strings")
+        return tuple(item.strip() for item in raw_value if item.strip())
+
+    raise ValueError("CONSTRAINTS must be a JSON array or legacy pipe-delimited string")
 
 
 def _parse_acceptance_criteria_contracts(
@@ -573,9 +596,10 @@ You MUST respond with ONLY the following format, one field per line, no other te
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+CONSTRAINTS rule: encode constraints as a valid JSON array of strings. Preserve literal characters such as `|` inside each string. Use `[]` when there are no constraints.
 
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>"]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -672,9 +696,10 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+CONSTRAINTS rule: encode constraints as a valid JSON array of strings. Preserve literal characters such as `|` inside each string. Use `[]` when there are no constraints.
 
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>"]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -773,6 +798,9 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
             _validate_acceptance_criteria_contract_lines(requirements["acceptance_criteria"])
 
+        if requirements.get("constraints"):
+            requirements["constraints"] = _parse_constraints(requirements["constraints"])
+
         # Validate required fields
         required_fields = [
             "goal",
@@ -803,9 +831,7 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         # Parse constraints
         constraints: tuple[str, ...] = ()
         if "constraints" in requirements and requirements["constraints"]:
-            constraints = tuple(
-                c.strip() for c in requirements["constraints"].split("|") if c.strip()
-            )
+            constraints = _parse_constraints(requirements["constraints"])
 
         # Parse acceptance criteria
         acceptance_criteria: tuple[AcceptanceCriterionSpec | str, ...] = ()
