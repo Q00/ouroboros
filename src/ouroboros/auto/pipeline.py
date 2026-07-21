@@ -24,6 +24,11 @@ from ouroboros.auto.checkpoint_commits import checkpoint_final_auto
 from ouroboros.auto.domain_inference import derive_domain_from_ledger
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
+from ouroboros.auto.exit_condition_requirements import (
+    qa_requests_exit_condition_repair,
+    repair_exit_conditions,
+    required_exit_conditions,
+)
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.handoff_contract import (
     IDEMPOTENCY_KEY_FIELD,
@@ -2865,11 +2870,63 @@ class AutoPipeline:
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
-                current_seed = normalize_execution_acceptance(
+                previous_seed = current_seed
+                repaired_seed = normalize_execution_acceptance(
                     await self._repair_seed_after_qa(
-                        state, current_seed, qa_result, attempt=attempt
+                        state, current_seed, qa_result, ledger=ledger, attempt=attempt
                     )
                 )
+                structural_feedback = qa_requests_exit_condition_repair(
+                    *qa_result.differences, *qa_result.suggestions
+                )
+                structural_noop = (
+                    structural_feedback
+                    and repaired_seed.exit_conditions == previous_seed.exit_conditions
+                )
+                semantic_noop = not _seed_qa_repair_has_semantic_change(
+                    previous_seed, repaired_seed
+                )
+                if structural_noop or semantic_noop:
+                    reason = (
+                        "structural_repair_unavailable" if structural_noop else "repair_no_progress"
+                    )
+                    blocker = (
+                        f"Seed QA did not pass after {attempt} attempt(s): "
+                        "structural feedback could not be applied to "
+                        "exit_conditions from explicit goal or ledger evidence; "
+                        "stopped without repeating a no-op repair"
+                        if structural_noop
+                        else (
+                            f"Seed QA did not pass after {attempt} attempt(s): "
+                            "repair made no semantic change; stopped without repeating "
+                            "a no-op repair"
+                        )
+                    )
+                    await self._emit_runtime_event(
+                        "auto.seed_qa.blocked",
+                        state.auto_session_id,
+                        {
+                            "schema_version": 1,
+                            "auto_session_id": state.auto_session_id,
+                            "seed_id": previous_seed.metadata.seed_id,
+                            "attempts": attempt,
+                            "verdict": str(qa_result.verdict)[:80],
+                            "score": float(qa_result.score),
+                            "differences": [str(item)[:320] for item in qa_result.differences[:5]],
+                            "suggestions": [str(item)[:320] for item in qa_result.suggestions[:5]],
+                            "reason": reason,
+                        },
+                    )
+                    state.mark_blocked(blocker, tool_name="seed_qa")
+                    self._save(state)
+                    return (
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
+                        previous_seed,
+                        current_review,
+                    )
+                current_seed = repaired_seed
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
                     ledger=ledger,
@@ -2939,6 +2996,7 @@ class AutoPipeline:
         seed: Seed,
         qa_result: EvaluateResult,
         *,
+        ledger: SeedDraftLedger,
         attempt: int,
     ) -> Seed:
         """Repair a Seed that failed the QA gate before the next re-judge.
@@ -2954,7 +3012,7 @@ class AutoPipeline:
         behaviour and the ``seed_qa`` → REVIEW resume contract are preserved.
         """
         if self.lateral_thinker is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
@@ -2963,7 +3021,7 @@ class AutoPipeline:
             already_tried_personas=already_tried,
         )
         if persona is None:
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
@@ -2981,10 +3039,10 @@ class AutoPipeline:
                 ),
             )
         except Exception:  # noqa: BLE001 — lateral is best-effort; degrade gracefully
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         if lateral_result.error or not lateral_result.text.strip():
-            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
+            return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt, ledger=ledger)
 
         state.last_lateral_persona = lateral_result.persona or persona.value
         state.last_lateral_approach_summary = lateral_result.approach_summary
@@ -2995,7 +3053,13 @@ class AutoPipeline:
             f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
             tool_name="seed_qa",
         )
-        return _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=attempt)
+        return _seed_with_seed_qa_lateral_feedback(
+            seed,
+            lateral_result,
+            attempt=attempt,
+            qa_result=qa_result,
+            ledger=ledger,
+        )
 
     def _seed_review_gate_blocker(
         self, state: AutoPipelineState, review: SeedReview | None
@@ -4852,6 +4916,8 @@ def _seed_with_seed_qa_lateral_feedback(
     lateral_result: LateralResult,
     *,
     attempt: int,
+    qa_result: EvaluateResult | None = None,
+    ledger: SeedDraftLedger | None = None,
 ) -> Seed:
     """Return a Seed revised with a lateral persona's concrete QA resolution.
 
@@ -4862,6 +4928,7 @@ def _seed_with_seed_qa_lateral_feedback(
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
     del attempt
+    seed = _seed_with_required_exit_condition_repair(seed, qa_result, ledger=ledger)
     normalized_feedback = _normalized_seed_qa_lateral_feedback(lateral_result)
     existing_constraints = tuple(
         constraint
@@ -4882,9 +4949,16 @@ def _seed_with_seed_qa_lateral_feedback(
     )
 
 
-def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attempt: int) -> Seed:
+def _seed_with_seed_qa_feedback(
+    seed: Seed,
+    qa_result: EvaluateResult,
+    *,
+    attempt: int,
+    ledger: SeedDraftLedger | None = None,
+) -> Seed:
     """Return a Seed revised with bounded pre-run Seed QA feedback."""
     del attempt
+    seed = _seed_with_required_exit_condition_repair(seed, qa_result, ledger=ledger)
     normalized_feedback = _normalized_seed_qa_feedback(qa_result)
     existing_constraints = tuple(
         constraint
@@ -4903,6 +4977,37 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
             ),
         },
     )
+
+
+def _seed_with_required_exit_condition_repair(
+    seed: Seed,
+    qa_result: EvaluateResult | None,
+    *,
+    ledger: SeedDraftLedger | None,
+) -> Seed:
+    """Patch structural QA feedback only from explicitly enumerated evidence."""
+    if qa_result is None or not qa_requests_exit_condition_repair(
+        *qa_result.differences, *qa_result.suggestions
+    ):
+        return seed
+    requirement = required_exit_conditions(seed, ledger)
+    if requirement is None:
+        return seed
+    return repair_exit_conditions(seed, requirement)
+
+
+def _seed_qa_repair_has_semantic_change(before: Seed, after: Seed) -> bool:
+    """Ignore lineage-only metadata when deciding whether a retry progressed."""
+
+    def _surface(seed: Seed) -> dict[str, Any]:
+        data = seed.to_dict()
+        metadata = dict(data.get("metadata") or {})
+        for field_name in ("seed_id", "created_at", "parent_seed_id"):
+            metadata.pop(field_name, None)
+        data["metadata"] = metadata
+        return data
+
+    return _surface(before) != _surface(after)
 
 
 def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:

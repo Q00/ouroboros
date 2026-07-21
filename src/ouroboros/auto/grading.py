@@ -7,6 +7,7 @@ from enum import StrEnum
 import re
 from typing import Any
 
+from ouroboros.auto.exit_condition_requirements import required_exit_conditions
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
@@ -247,6 +248,52 @@ class GradeGate:
                     "Add observable acceptance criteria.",
                 )
             )
+        required_exits = required_exit_conditions(seed, ledger)
+        if required_exits is not None:
+            actual_exit_names = tuple(condition.name for condition in seed.exit_conditions)
+            actual_exit_name_set = set(actual_exit_names)
+            required_exit_name_set = set(required_exits.names)
+            missing_exit_names = tuple(
+                name for name in required_exits.names if name not in actual_exit_name_set
+            )
+            unexpected_exit_names = (
+                tuple(name for name in actual_exit_names if name not in required_exit_name_set)
+                if required_exits.exact
+                else ()
+            )
+            duplicate_exit_names = (
+                tuple(
+                    dict.fromkeys(
+                        name for name in actual_exit_names if actual_exit_names.count(name) > 1
+                    )
+                )
+                if required_exits.exact
+                else ()
+            )
+            if missing_exit_names or unexpected_exit_names or duplicate_exit_names:
+                details: list[str] = []
+                if missing_exit_names:
+                    details.append("missing " + ", ".join(missing_exit_names))
+                if unexpected_exit_names:
+                    details.append("unexpected " + ", ".join(unexpected_exit_names))
+                if duplicate_exit_names:
+                    details.append("duplicated " + ", ".join(duplicate_exit_names))
+                findings.append(
+                    GradeFinding(
+                        "required_exit_conditions_mismatch",
+                        "high",
+                        "Seed exit_conditions do not match the explicit requirement: "
+                        + "; ".join(details),
+                        "exit_conditions",
+                        (
+                            "Restore the explicitly named exit conditions"
+                            + (" exactly" if required_exits.exact else "")
+                            + ": "
+                            + ", ".join(required_exits.names)
+                            + "."
+                        ),
+                    )
+                )
         for index, criterion_spec in enumerate(seed.acceptance_criteria):
             criterion = ac_text(criterion_spec)
             if _is_vague(criterion):

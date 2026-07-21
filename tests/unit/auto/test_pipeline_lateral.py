@@ -25,6 +25,7 @@ from ouroboros.auto.lateral_routing import (
     classify_qa_failure_to_pattern,
     select_persona_for_qa_failure,
 )
+from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import (
     AutoPipeline,
     _seed_with_recovery_constraint,
@@ -134,6 +135,79 @@ def test_seed_qa_feedback_preserves_generic_actionable_feedback() -> None:
     assert "add a 30-day retention constraint" in constraints
     assert "QA differences:" not in constraints
     assert "[seed qa repair attempt" not in constraints
+
+
+def test_seed_qa_feedback_repairs_explicit_required_exit_conditions() -> None:
+    goal = (
+        "Build a CLI. It requires exactly three named exit_conditions: "
+        "acceptance_verified, failure_modes_absent, diagnostics_clean."
+    )
+    ledger = SeedDraftLedger.from_goal(goal)
+    seed = _build_seed().model_copy(update={"goal": goal, "exit_conditions": ()})
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.55,
+        verdict="revise",
+        differences=(
+            "exit_conditions is incomplete: failure_modes_absent and diagnostics_clean are missing.",
+        ),
+        suggestions=("Restore the three explicitly named exit_conditions.",),
+    )
+
+    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1, ledger=ledger)
+
+    assert tuple(condition.name for condition in repaired.exit_conditions) == (
+        "acceptance_verified",
+        "failure_modes_absent",
+        "diagnostics_clean",
+    )
+
+
+def test_seed_qa_lateral_feedback_repairs_explicit_required_exit_conditions() -> None:
+    goal = (
+        "Build a CLI. It requires exactly three named exit_conditions: "
+        "acceptance_verified, failure_modes_absent, diagnostics_clean."
+    )
+    ledger = SeedDraftLedger.from_goal(goal)
+    seed = _build_seed().model_copy(
+        update={
+            "goal": goal,
+            "exit_conditions": (
+                ExitCondition(
+                    name="renamed_check",
+                    description="Renamed condition",
+                    evaluation_criteria="The renamed check passes",
+                ),
+            ),
+        }
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.55,
+        verdict="revise",
+        differences=("The canonical exit_conditions names are absent.",),
+        suggestions=("Restore all three explicitly named exit_conditions.",),
+    )
+    lateral_result = LateralResult(
+        persona="architect",
+        approach_summary="Restore the structural termination contract.",
+        text="Decision: use the explicitly enumerated termination conditions.",
+    )
+
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        attempt=1,
+        qa_result=qa_result,
+        ledger=ledger,
+    )
+
+    assert tuple(condition.name for condition in repaired.exit_conditions) == (
+        "acceptance_verified",
+        "failure_modes_absent",
+        "diagnostics_clean",
+    )
+    assert "renamed_check" not in {condition.name for condition in repaired.exit_conditions}
 
 
 def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:

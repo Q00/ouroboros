@@ -11,6 +11,10 @@ import threading
 from typing import Any
 from uuid import uuid4
 
+from ouroboros.auto.exit_condition_requirements import (
+    repair_exit_conditions,
+    required_exit_conditions,
+)
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
@@ -129,6 +133,7 @@ class SeedRepairer:
 
         constraints = list(seed.constraints)
         acceptance: list[AcceptanceCriterionInput] = list(seed.acceptance_criteria)
+        exit_conditions = seed.exit_conditions
         goal = seed.goal
         applied: list[str] = []
         unresolved: list[ReviewFinding] = []
@@ -183,6 +188,16 @@ class SeedRepairer:
                     ),
                 )
                 applied.append(finding.fingerprint)
+            elif finding.code == "required_exit_conditions_mismatch":
+                requirement = required_exit_conditions(seed, ledger)
+                if requirement is None:
+                    unresolved.append(finding)
+                    continue
+                exit_conditions = repair_exit_conditions(
+                    seed.model_copy(update={"exit_conditions": exit_conditions}),
+                    requirement,
+                ).exit_conditions
+                applied.append(finding.fingerprint)
             else:
                 unresolved.append(finding)
 
@@ -195,6 +210,7 @@ class SeedRepairer:
                     "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
                     "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
+                    "exit_conditions": exit_conditions,
                     "metadata": seed.metadata.model_copy(
                         update={
                             "seed_id": f"seed_{uuid4().hex[:12]}",

@@ -1537,6 +1537,74 @@ async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_stops_unrepairable_structural_seed_qa_without_noop_retries(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_structural_noop",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        raise AssertionError("an unrepairable structural Seed must not run")
+
+    qa_calls = 0
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        return EvaluateResult(
+            passed=False,
+            score=0.58,
+            verdict="revise",
+            differences=("exit_conditions is incomplete",),
+            suggestions=("add the missing named exit_conditions",),
+        )
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 5
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert qa_calls == 1
+    assert result.blocker is not None
+    assert "could not be applied to exit_conditions" in result.blocker
+    assert "without repeating a no-op repair" in result.blocker
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runs_after_seed_qa_passes(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn(

@@ -4,6 +4,8 @@ from ouroboros.auto.answerer import AutoAnswerContext, AutoAnswerer, AutoAnswerS
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+from ouroboros.auto.seed_repairer import SeedRepairer
+from ouroboros.auto.seed_reviewer import SeedReviewer
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
@@ -245,6 +247,66 @@ def test_grade_gate_accepts_observable_seed_with_ready_ledger() -> None:
 
     assert result.grade == SeedGrade.A
     assert result.may_run
+
+
+def test_grade_gate_refuses_a_when_explicit_exit_conditions_are_incomplete() -> None:
+    goal = (
+        "Build a habit tracker. It requires exactly three named exit_conditions: "
+        "acceptance_verified, failure_modes_absent, diagnostics_clean."
+    )
+    ledger = SeedDraftLedger.from_goal(goal)
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal=goal,
+        ac=("`habit list` prints stable stdout containing created habits",),
+    ).model_copy(
+        update={
+            "exit_conditions": (
+                ExitCondition(
+                    name="acceptance_verified",
+                    description="Acceptance checks pass",
+                    evaluation_criteria="All acceptance checks pass",
+                ),
+            )
+        }
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    mismatch = next(
+        finding
+        for finding in result.findings
+        if finding.code == "required_exit_conditions_mismatch"
+    )
+    assert "failure_modes_absent" in mismatch.message
+    assert "diagnostics_clean" in mismatch.message
+
+
+def test_seed_repairer_restores_explicit_exit_conditions_before_qa() -> None:
+    goal = (
+        "Build a habit tracker. It requires exactly three named exit_conditions: "
+        "acceptance_verified, failure_modes_absent, diagnostics_clean."
+    )
+    ledger = SeedDraftLedger.from_goal(goal)
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal=goal,
+        ac=("`habit list` prints stable stdout containing created habits",),
+    ).model_copy(update={"exit_conditions": ()})
+
+    repaired, final_review, history = SeedRepairer(
+        reviewer=SeedReviewer(GradeGate()), max_iterations=2
+    ).converge(seed, ledger=ledger)
+
+    assert history and history[0].changed
+    assert tuple(condition.name for condition in repaired.exit_conditions) == (
+        "acceptance_verified",
+        "failure_modes_absent",
+        "diagnostics_clean",
+    )
+    assert final_review.grade_result.grade == SeedGrade.A
 
 
 def test_grade_gate_blocks_seed_goal_mismatch_with_ready_ledger() -> None:
