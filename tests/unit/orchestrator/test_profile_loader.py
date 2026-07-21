@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -359,7 +360,15 @@ class TestWheelPackaging:
         repo_root = Path(__file__).resolve().parents[3]
         out = tmp_path / "dist"
         result = subprocess.run(
-            ["uv", "build", "--wheel", "--out-dir", str(out)],
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--python",
+                sys.executable,
+                "--out-dir",
+                str(out),
+            ],
             cwd=repo_root,
             capture_output=True,
             text=True,
