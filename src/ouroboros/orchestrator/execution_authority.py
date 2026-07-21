@@ -132,7 +132,15 @@ _PORTABLE_CALLABLE_GLOBAL_EXCLUSIONS = frozenset(
         # or reused across processes, so following their helper graph would
         # incorrectly turn an otherwise portable executor into process-local.
         ("ouroboros.orchestrator.parallel_executor", "_capture_live_callable_integrity"),
+        (
+            "ouroboros.orchestrator.parallel_executor",
+            "_capture_live_callable_integrity_checker",
+        ),
         ("ouroboros.orchestrator.parallel_executor", "_capture_runtime_dispatch_integrity"),
+        (
+            "ouroboros.orchestrator.parallel_executor",
+            "_capture_runtime_dispatch_integrity_checker",
+        ),
         ("ouroboros.orchestrator.parallel_executor", "_runtime_dispatch_integrity_is_intact"),
     }
 )

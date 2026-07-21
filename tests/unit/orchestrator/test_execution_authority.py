@@ -536,6 +536,120 @@ def test_executor_rejects_mutated_atomic_verifier_closure(tmp_path) -> None:
         executor._require_execution_collaborators_intact()
 
 
+def test_executor_rejects_uninspectable_mutable_atomic_verifier_closure(tmp_path) -> None:
+    """A cyclic verifier closure cannot fall back to an allow-all identity check."""
+    state: dict[str, object] = {"passed": True}
+    state["cycle"] = state
+
+    def cyclic_closure_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=bool(state["passed"]))
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+        atomic_verifier=cyclic_closure_verifier,
+    )
+
+    state["passed"] = False
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_oversized_mutable_atomic_verifier_closure(tmp_path) -> None:
+    """An oversized verifier closure cannot fall back to an identity-only check."""
+    state: dict[str, object] = {f"item_{index}": index for index in range(257)}
+    state["passed"] = True
+
+    def oversized_closure_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=bool(state["passed"]))
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+        atomic_verifier=oversized_closure_verifier,
+    )
+
+    state["passed"] = False
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_mutated_atomic_verifier_default(tmp_path) -> None:
+    """A mutable default cannot change verifier behavior after construction."""
+
+    def default_verifier(
+        *,
+        verdict_state: dict[str, bool] | None = None,
+        **_: object,
+    ) -> VerifierVerdict:
+        assert verdict_state is not None
+        return VerifierVerdict(passed=verdict_state["passed"])
+
+    defaults = default_verifier.__kwdefaults__
+    assert defaults is not None
+    defaults["verdict_state"] = {"passed": True}
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+        atomic_verifier=default_verifier,
+    )
+
+    verdict_state = defaults["verdict_state"]
+    assert isinstance(verdict_state, dict)
+    verdict_state["passed"] = False
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_verifier_drift_after_legacy_checker_kwdefaults_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The legacy helper's mutable defaults cannot bypass the captured checker."""
+    state = {"passed": True}
+
+    def closure_verifier(**_: object) -> VerifierVerdict:
+        return VerifierVerdict(passed=state["passed"])
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+        atomic_verifier=closure_verifier,
+    )
+
+    legacy_checker = parallel_executor_module._live_callable_integrity_is_intact
+    assert legacy_checker.__kwdefaults__ is None
+    monkeypatch.setattr(
+        legacy_checker,
+        "__kwdefaults__",
+        {"_behavior_digest": lambda *_args, **_kwargs: "attacker-controlled"},
+    )
+    state["passed"] = False
+
+    with pytest.raises(ValueError, match="execution collaborators drifted"):
+        executor._require_execution_collaborators_intact()
+
+
 def test_executor_rejects_runtime_drift_when_global_integrity_helper_is_patched(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -559,6 +673,70 @@ def test_executor_rejects_runtime_drift_when_global_integrity_helper_is_patched(
         "_live_callable_integrity_is_intact",
         lambda *_args, **_kwargs: True,
     )
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_runtime_drift_after_legacy_checker_kwdefaults_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The old runtime predicate defaults are outside the executor's trust root."""
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    legacy_checker = parallel_executor_module._runtime_dispatch_integrity_is_intact
+    assert legacy_checker.__kwdefaults__ is None
+    monkeypatch.setattr(
+        legacy_checker,
+        "__kwdefaults__",
+        {"_callable_integrity_checker": lambda *_args, **_kwargs: True},
+    )
+
+    async def altered_execute_task(self: _Runtime, **_: object) -> None:
+        del self
+
+    monkeypatch.setattr(_Runtime, "execute_task", altered_execute_task)
+
+    with pytest.raises(ValueError, match="runtime implementation drifted"):
+        executor._require_execution_collaborators_intact()
+
+
+def test_executor_rejects_runtime_drift_when_captured_runtime_checker_is_tampered(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A frozen runtime checker still verifies its nested checker identity."""
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        task_cwd=str(tmp_path),
+        enable_decomposition=False,
+    )
+
+    class _AllowAllChecker:
+        def __call__(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+    object.__setattr__(
+        executor._runtime_dispatch_integrity_checker,
+        "callable_integrity_checker",
+        _AllowAllChecker(),
+    )
+
+    async def altered_execute_task(self: _Runtime, **_: object) -> None:
+        del self
+
+    monkeypatch.setattr(_Runtime, "execute_task", altered_execute_task)
 
     with pytest.raises(ValueError, match="runtime implementation drifted"):
         executor._require_execution_collaborators_intact()

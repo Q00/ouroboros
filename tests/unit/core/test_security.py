@@ -130,7 +130,24 @@ class TestSensitiveDetection:
         assert is_sensitive_value("Bearer token123") is True
         assert is_sensitive_value("ghp_abcdefghijklmnopqrstuvwxyz1234567890") is True
         assert is_sensitive_value("rk_live_" + "a" * 32) is True
+        assert is_sensitive_value("rk_test_" + "b" * 32) is True
         assert is_sensitive_value("AIzaXXXXXXXXXXXXXXX") is True
+
+    @pytest.mark.parametrize(
+        "value",
+        (
+            "rk_live_",
+            "rk_test_",
+            "rk_live_fixture_name",
+            "rk_test_fixture_name",
+            "A note about rk_live_ keys",
+            "A note about rk_test_ keys",
+        ),
+    )
+    def test_short_restricted_key_labels_and_prose_are_not_sensitive(self, value: str) -> None:
+        """A restricted-key prefix needs an opaque payload before it is a credential."""
+        assert is_sensitive_value(value) is False
+        assert redact_sensitive_text(value) == value
 
     @pytest.mark.parametrize("separator", (":", "/", "_", "\u200b"))
     def test_sensitive_values_embedded_after_a_label(self, separator: str) -> None:
@@ -252,12 +269,15 @@ class TestSensitiveDetection:
         """Credential shapes beyond prefix-only forms cannot reach diagnostics."""
         stripe = "sk_live_" + "a" * 24
         restricted = "rk_live_" + "b" * 24
+        restricted_test = "rk_test_" + "c" * 24
         pem = "-----BEGIN PRIVATE KEY-----\nprivate material\n-----END PRIVATE KEY-----"
 
         assert is_sensitive_value(f"retry with {stripe}") is True
         assert redact_sensitive_text(f"retry with {stripe}") == "retry with [redacted]"
         assert is_sensitive_value(f"retry with {restricted}") is True
         assert redact_sensitive_text(f"retry with {restricted}") == "retry with [redacted]"
+        assert is_sensitive_value(f"retry with {restricted_test}") is True
+        assert redact_sensitive_text(f"retry with {restricted_test}") == "retry with [redacted]"
         assert is_sensitive_value(f"retry with {pem}") is True
         assert redact_sensitive_text(f"retry with {pem}") == "retry with [redacted]"
 

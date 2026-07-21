@@ -106,11 +106,6 @@ SENSITIVE_PREFIXES = (
     "ghu_",
     "ghs_",
     "ghr_",
-    # Stripe restricted keys carry the same authority as the more familiar
-    # ``sk_live_``/``sk_test_`` family.  Keep them in the shared detector so
-    # authority serialization, durable events, and log redaction cannot drift.
-    "rk_live_",
-    "rk_test_",
     "xoxb-",
     "xoxp-",
     "xoxa-",
@@ -122,9 +117,12 @@ SENSITIVE_PREFIXES = (
 )
 
 # Prefixes alone are intentionally not the whole detector: several common
-# provider credentials use distinct, structured prefixes.  These expressions
-# stay deliberately conservative so normal identifiers do not become secrets
-# merely because they happen to contain a dash or underscore.
+# provider credentials use distinct, structured prefixes. In particular,
+# Stripe restricted-key labels must carry an opaque payload before becoming
+# sensitive, so configuration labels and explanatory prose such as
+# ``rk_live_fixture_name`` remain durable. These expressions stay deliberately
+# conservative so normal identifiers do not become secrets merely because they
+# happen to contain a dash or underscore.
 SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
     re.compile(r"hf_[A-Za-z0-9]{20,}"),

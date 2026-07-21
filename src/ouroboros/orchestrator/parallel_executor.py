@@ -729,6 +729,7 @@ class _LiveCallableIntegrityBinding:
     defaults: object | None
     keyword_defaults: object | None
     closure_cells: tuple[tuple[object, object], ...] | None
+    requires_behavior_digest: bool
     closure_behavior_digest: str | None
 
 
@@ -738,7 +739,7 @@ class _AuthorityBoundExecutionCollaborators:
 
     leaf_dispatcher: _LiveCallableIntegrityBinding
     atomic_verifier: _LiveCallableIntegrityBinding
-    integrity_checker: Callable[[_LiveCallableIntegrityBinding, object | None], bool]
+    integrity_checker: _LiveCallableIntegrityChecker
     integrity_checker_binding: _LiveCallableIntegrityBinding
 
 
@@ -806,6 +807,35 @@ def _live_callable_closure_cells(
         return None
 
 
+def _callable_defaults_have_mutable_state(
+    defaults: object | None,
+    keyword_defaults: object | None,
+) -> bool:
+    """Return whether default values can drift without replacing their tuple.
+
+    A function's positional-default tuple is immutable, so scalar and nested
+    immutable values are already protected by the tuple identity check. A
+    mutable value nested in it, or any populated keyword-default mapping, can
+    change behavior in place and therefore needs the hash-only snapshot.
+    """
+
+    def is_mutable(value: object) -> bool:
+        if value is None or isinstance(value, (bool, int, float, str, bytes)):
+            return False
+        if isinstance(value, tuple):
+            return any(is_mutable(item) for item in value)
+        if isinstance(value, frozenset):
+            return any(is_mutable(item) for item in value)
+        return True
+
+    if defaults is not None:
+        if not isinstance(defaults, tuple):
+            return True
+        if any(is_mutable(value) for value in defaults):
+            return True
+    return bool(keyword_defaults)
+
+
 def _capture_live_callable_integrity(
     value: object | None,
     *,
@@ -814,81 +844,146 @@ def _capture_live_callable_integrity(
     """Capture the direct executable entrypoint selected at construction."""
     entrypoint = _live_callable_entrypoint(value, member_name=member_name)
     closure_cells = _live_callable_closure_cells(entrypoint)
+    defaults = getattr(entrypoint, "__defaults__", None)
+    keyword_defaults = getattr(entrypoint, "__kwdefaults__", None)
     # Cell identity alone is not enough: a verifier may close over a mutable
-    # mapping or list whose contents change after authority construction.  Keep
-    # only the existing non-egressing behavior digest, and only when a closure
-    # exists, so ordinary hot dispatch paths retain the lightweight identity
-    # check below.
+    # mapping/list or mutable default whose contents change after authority
+    # construction. Keep only the existing non-egressing behavior digest, and
+    # only when mutable behavior dependencies exist, so ordinary hot dispatch
+    # paths retain the lightweight identity check below.
+    requires_behavior_digest = bool(closure_cells) or _callable_defaults_have_mutable_state(
+        defaults,
+        keyword_defaults,
+    )
     closure_behavior_digest: str | None = None
-    if closure_cells:
+    if requires_behavior_digest:
         try:
             closure_behavior_digest = _callable_behavior_digest(entrypoint)
         except Exception:
-            # The structural binding still protects this process-local
-            # collaborator.  An unavailable digest must never be treated as a
-            # matching digest at time of use.
+            # An unavailable digest must never be treated as a matching digest
+            # at time of use whenever the callable has mutable behavior state.
             closure_behavior_digest = None
     return _LiveCallableIntegrityBinding(
         value=value,
         member_name=member_name,
         entrypoint=entrypoint,
         code=getattr(entrypoint, "__code__", None),
-        defaults=getattr(entrypoint, "__defaults__", None),
-        keyword_defaults=getattr(entrypoint, "__kwdefaults__", None),
+        defaults=defaults,
+        keyword_defaults=keyword_defaults,
         closure_cells=closure_cells,
+        requires_behavior_digest=requires_behavior_digest,
         closure_behavior_digest=closure_behavior_digest,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveCallableIntegrityChecker:
+    """Immutable process-local checker for captured callable collaborators."""
+
+    entrypoint_resolver: Callable[..., object | None]
+    closure_cells_resolver: Callable[[object | None], tuple[tuple[object, object], ...] | None]
+    behavior_digest: Callable[[object], str]
+    entrypoint_resolver_binding: _LiveCallableIntegrityBinding
+    closure_cells_resolver_binding: _LiveCallableIntegrityBinding
+    behavior_digest_binding: _LiveCallableIntegrityBinding
+
+    def __call__(
+        self,
+        binding: _LiveCallableIntegrityBinding,
+        current: object | None,
+    ) -> bool:
+        """Return whether the exact captured callable behavior remains usable."""
+        # These three helpers are the trusted roots for this process-local
+        # check. They deliberately have no defaults or closure state; a shape
+        # change therefore fails closed instead of being injected through a
+        # mutable function ``__kwdefaults__`` mapping.
+        for helper, helper_binding in (
+            (self.entrypoint_resolver, self.entrypoint_resolver_binding),
+            (self.closure_cells_resolver, self.closure_cells_resolver_binding),
+            (self.behavior_digest, self.behavior_digest_binding),
+        ):
+            if not (
+                helper is helper_binding.value
+                and helper is helper_binding.entrypoint
+                and getattr(helper, "__code__", None) is helper_binding.code
+                and helper_binding.defaults is None
+                and getattr(helper, "__defaults__", None) is None
+                and helper_binding.keyword_defaults is None
+                and getattr(helper, "__kwdefaults__", None) is None
+                and helper_binding.closure_cells == ()
+                and getattr(helper, "__closure__", None) is None
+            ):
+                return False
+        if current is not binding.value:
+            return False
+        try:
+            current_entrypoint = self.entrypoint_resolver(
+                current,
+                member_name=binding.member_name,
+            )
+        except Exception:
+            return False
+        if current_entrypoint is not binding.entrypoint:
+            return False
+        if binding.entrypoint is None:
+            return current is None
+        if getattr(current_entrypoint, "__code__", None) is not binding.code:
+            return False
+        if getattr(current_entrypoint, "__defaults__", None) is not binding.defaults:
+            return False
+        if getattr(current_entrypoint, "__kwdefaults__", None) is not binding.keyword_defaults:
+            return False
+        try:
+            current_closure_cells = self.closure_cells_resolver(current_entrypoint)
+        except Exception:
+            return False
+        if binding.closure_cells is None or current_closure_cells is None:
+            return False
+        if len(current_closure_cells) != len(binding.closure_cells):
+            return False
+        if not all(
+            current_cell is expected_cell and current_value is expected_value
+            for (current_cell, current_value), (expected_cell, expected_value) in zip(
+                current_closure_cells,
+                binding.closure_cells,
+                strict=True,
+            )
+        ):
+            return False
+        if not binding.requires_behavior_digest:
+            return True
+        # Any mutable closure/default state requires a safe behavior digest.
+        # A cyclic, oversized, or otherwise uninspectable graph is not proof
+        # of invariant behavior and therefore cannot authorize an effect.
+        if binding.closure_behavior_digest is None:
+            return False
+        try:
+            return self.behavior_digest(current_entrypoint) == binding.closure_behavior_digest
+        except Exception:
+            return False
+
+
+def _capture_live_callable_integrity_checker() -> _LiveCallableIntegrityChecker:
+    """Capture immutable trusted roots for one executor's live guard."""
+    entrypoint_resolver = _live_callable_entrypoint
+    closure_cells_resolver = _live_callable_closure_cells
+    behavior_digest = _callable_behavior_digest
+    return _LiveCallableIntegrityChecker(
+        entrypoint_resolver=entrypoint_resolver,
+        closure_cells_resolver=closure_cells_resolver,
+        behavior_digest=behavior_digest,
+        entrypoint_resolver_binding=_capture_live_callable_integrity(entrypoint_resolver),
+        closure_cells_resolver_binding=_capture_live_callable_integrity(closure_cells_resolver),
+        behavior_digest_binding=_capture_live_callable_integrity(behavior_digest),
     )
 
 
 def _live_callable_integrity_is_intact(
     binding: _LiveCallableIntegrityBinding,
     current: object | None,
-    *,
-    _entrypoint_resolver: Callable[..., object | None] = _live_callable_entrypoint,
-    _closure_cells_resolver: Callable[[object | None], tuple[tuple[object, object], ...] | None] = (
-        _live_callable_closure_cells
-    ),
-    _behavior_digest: Callable[[object], str] = _callable_behavior_digest,
 ) -> bool:
-    """Return whether execution will use its construction-time entrypoint.
-
-    The helper dependencies are captured in defaults deliberately.  Executors
-    retain this function object at construction, so replacing this module's
-    helper name later cannot turn a live authority guard into an allow-all.
-    """
-    if current is not binding.value:
-        return False
-    current_entrypoint = _entrypoint_resolver(current, member_name=binding.member_name)
-    if current_entrypoint is not binding.entrypoint:
-        return False
-    if binding.entrypoint is None:
-        return current is None
-    if getattr(current_entrypoint, "__code__", None) is not binding.code:
-        return False
-    if getattr(current_entrypoint, "__defaults__", None) is not binding.defaults:
-        return False
-    if getattr(current_entrypoint, "__kwdefaults__", None) is not binding.keyword_defaults:
-        return False
-    current_closure_cells = _closure_cells_resolver(current_entrypoint)
-    if binding.closure_cells is None or current_closure_cells is None:
-        return False
-    if len(current_closure_cells) != len(binding.closure_cells):
-        return False
-    if not all(
-        current_cell is expected_cell and current_value is expected_value
-        for (current_cell, current_value), (expected_cell, expected_value) in zip(
-            current_closure_cells,
-            binding.closure_cells,
-            strict=True,
-        )
-    ):
-        return False
-    if binding.closure_behavior_digest is None:
-        return True
-    try:
-        return _behavior_digest(current_entrypoint) == binding.closure_behavior_digest
-    except Exception:
-        return False
+    """Compatibility wrapper for one fresh immutable live-integrity checker."""
+    return _capture_live_callable_integrity_checker()(binding, current)
 
 
 def _direct_module_member_paths(function: object, global_name: str) -> tuple[tuple[str, ...], ...]:
@@ -1007,39 +1102,80 @@ def _capture_runtime_dispatch_integrity(adapter: object) -> _RuntimeDispatchInte
     return _RuntimeDispatchIntegrityBinding(tuple(entrypoints), tuple(module_members))
 
 
-def _runtime_dispatch_integrity_is_intact(
-    binding: _RuntimeDispatchIntegrityBinding,
-    *,
-    _callable_integrity_checker: Callable[[_LiveCallableIntegrityBinding, object | None], bool] = (
-        _live_callable_integrity_is_intact
-    ),
-) -> bool:
-    """Return whether direct runtime dispatch code and module members are unchanged."""
-    if not all(
-        _callable_integrity_checker(entrypoint, entrypoint.value)
-        for entrypoint in binding.entrypoints
-    ):
-        return False
-    for member_binding in binding.module_members:
-        global_values = getattr(member_binding.source_function, "__globals__", None)
-        if not isinstance(global_values, Mapping):
-            return False
-        if global_values.get(member_binding.global_name) is not member_binding.module:
-            return False
-        current = member_binding.module
-        try:
-            for attribute in member_binding.path:
-                current = inspect.getattr_static(current, attribute)
-        except (AttributeError, TypeError):
-            return False
-        if not _live_value_is_intact(member_binding.value, current):
-            return False
-        if member_binding.callable_binding is not None and not _callable_integrity_checker(
-            member_binding.callable_binding,
-            current,
+@dataclass(frozen=True, slots=True)
+class _RuntimeDispatchIntegrityChecker:
+    """Immutable process-local runtime-dispatch checker for one executor."""
+
+    callable_integrity_checker: _LiveCallableIntegrityChecker
+    callable_integrity_checker_binding: _LiveCallableIntegrityBinding
+
+    def __call__(self, binding: _RuntimeDispatchIntegrityBinding) -> bool:
+        """Return whether direct runtime dispatch code and members are unchanged."""
+        checker = self.callable_integrity_checker
+        checker_binding = self.callable_integrity_checker_binding
+        # Do not trust a mutable field merely because this outer checker is
+        # frozen: hostile in-process code can use ``object.__setattr__``. The
+        # captured callable object's own ``__call__`` shape and identity must
+        # still match before it can assess a runtime entrypoint.
+        checker_entrypoint = type(checker).__call__
+        if not (
+            checker is checker_binding.value
+            and checker_binding.member_name is None
+            and checker_entrypoint is checker_binding.entrypoint
+            and getattr(checker_entrypoint, "__code__", None) is checker_binding.code
+            and getattr(checker_entrypoint, "__defaults__", None) is checker_binding.defaults
+            and getattr(checker_entrypoint, "__kwdefaults__", None)
+            is checker_binding.keyword_defaults
+            and checker_binding.closure_cells == ()
+            and getattr(checker_entrypoint, "__closure__", None) is None
         ):
             return False
-    return True
+        if not all(checker(entrypoint, entrypoint.value) for entrypoint in binding.entrypoints):
+            return False
+        for member_binding in binding.module_members:
+            global_values = getattr(member_binding.source_function, "__globals__", None)
+            if not isinstance(global_values, Mapping):
+                return False
+            if global_values.get(member_binding.global_name) is not member_binding.module:
+                return False
+            current = member_binding.module
+            try:
+                for attribute in member_binding.path:
+                    current = inspect.getattr_static(current, attribute)
+            except (AttributeError, TypeError):
+                return False
+            expected = member_binding.value
+            if expected is not current and not (
+                (expected is None or isinstance(expected, (bool, int, float, str, bytes)))
+                and type(current) is type(expected)
+                and current == expected
+            ):
+                return False
+            if member_binding.callable_binding is not None and not checker(
+                member_binding.callable_binding,
+                current,
+            ):
+                return False
+        return True
+
+
+def _capture_runtime_dispatch_integrity_checker(
+    callable_integrity_checker: _LiveCallableIntegrityChecker,
+) -> _RuntimeDispatchIntegrityChecker:
+    """Capture the live callable checker used by one runtime guard."""
+    return _RuntimeDispatchIntegrityChecker(
+        callable_integrity_checker=callable_integrity_checker,
+        callable_integrity_checker_binding=_capture_live_callable_integrity(
+            callable_integrity_checker
+        ),
+    )
+
+
+def _runtime_dispatch_integrity_is_intact(binding: _RuntimeDispatchIntegrityBinding) -> bool:
+    """Compatibility wrapper for one fresh immutable runtime checker."""
+    return _capture_runtime_dispatch_integrity_checker(_capture_live_callable_integrity_checker())(
+        binding
+    )
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -1333,7 +1469,7 @@ class ParallelACExecutor:
         self._leaf_dispatcher_factory = LeafDispatcher
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
-        live_callable_integrity_checker = _live_callable_integrity_is_intact
+        live_callable_integrity_checker = _capture_live_callable_integrity_checker()
         self._authority_bound_execution_collaborators = _AuthorityBoundExecutionCollaborators(
             leaf_dispatcher=_capture_live_callable_integrity(
                 self._leaf_dispatcher_factory,
@@ -1347,7 +1483,9 @@ class ParallelACExecutor:
         )
         self._runtime_dispatch_integrity = _capture_runtime_dispatch_integrity(adapter)
         self._runtime_dispatch_integrity_binding = self._runtime_dispatch_integrity
-        self._runtime_dispatch_integrity_checker = _runtime_dispatch_integrity_is_intact
+        self._runtime_dispatch_integrity_checker = _capture_runtime_dispatch_integrity_checker(
+            live_callable_integrity_checker
+        )
         self._runtime_dispatch_integrity_checker_binding = _capture_live_callable_integrity(
             self._runtime_dispatch_integrity_checker
         )
@@ -1471,16 +1609,21 @@ class ParallelACExecutor:
             checker = binding.integrity_checker
             checker_binding = binding.integrity_checker_binding
             # Do not resolve the predicate through the mutable module name at
-            # time of use.  Check the captured predicate's finite function
-            # shape before calling it, then let its default-captured helpers
-            # inspect the actual dispatcher and verifier.
+            # time of use. Check the captured callable object's ``__call__``
+            # implementation before it can inspect the dispatcher/verifier.
+            # This intentionally does not rely on a mutable function-default
+            # dependency map.
+            checker_entrypoint = type(checker).__call__
             checker_is_bound = (
                 checker is checker_binding.value
-                and checker is checker_binding.entrypoint
-                and getattr(checker, "__code__", None) is checker_binding.code
-                and getattr(checker, "__defaults__", None) is checker_binding.defaults
-                and getattr(checker, "__kwdefaults__", None) is checker_binding.keyword_defaults
+                and checker_binding.member_name is None
+                and checker_entrypoint is checker_binding.entrypoint
+                and getattr(checker_entrypoint, "__code__", None) is checker_binding.code
+                and getattr(checker_entrypoint, "__defaults__", None) is checker_binding.defaults
+                and getattr(checker_entrypoint, "__kwdefaults__", None)
+                is checker_binding.keyword_defaults
                 and checker_binding.closure_cells == ()
+                and getattr(checker_entrypoint, "__closure__", None) is None
             )
             return (
                 checker_is_bound
@@ -1507,13 +1650,17 @@ class ParallelACExecutor:
         try:
             checker = self._runtime_dispatch_integrity_checker
             checker_binding = self._runtime_dispatch_integrity_checker_binding
+            checker_entrypoint = type(checker).__call__
             checker_is_bound = (
                 checker is checker_binding.value
-                and checker is checker_binding.entrypoint
-                and getattr(checker, "__code__", None) is checker_binding.code
-                and getattr(checker, "__defaults__", None) is checker_binding.defaults
-                and getattr(checker, "__kwdefaults__", None) is checker_binding.keyword_defaults
+                and checker_binding.member_name is None
+                and checker_entrypoint is checker_binding.entrypoint
+                and getattr(checker_entrypoint, "__code__", None) is checker_binding.code
+                and getattr(checker_entrypoint, "__defaults__", None) is checker_binding.defaults
+                and getattr(checker_entrypoint, "__kwdefaults__", None)
+                is checker_binding.keyword_defaults
                 and checker_binding.closure_cells == ()
+                and getattr(checker_entrypoint, "__closure__", None) is None
             )
             return (
                 self._runtime_dispatch_integrity is self._runtime_dispatch_integrity_binding
