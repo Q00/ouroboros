@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 from typing import Any
 import uuid
 
@@ -37,7 +38,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier
 
-EXECUTION_AUTHORITY_VERSION = 2
+EXECUTION_AUTHORITY_VERSION = 3
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
 _MAX_IDENTITY_SCALAR_CHARS = 8_192
@@ -202,10 +203,23 @@ def runtime_execution_identity_contract(adapter: object) -> dict[str, object]:
     identity = provider()
     if not isinstance(identity, Mapping):
         raise ValueError("runtime execution identity contract is not a mapping")
-    normalized = _canonical_object(
+    projected = _project_explicit_identity(
         dict(identity),
         field="runtime execution identity contract",
     )
+    try:
+        _reject_sensitive_identity_fields(projected)
+    except ValueError:
+        # Provider-owned credential-bearing identity must never reach the public
+        # authority payload. Mark it unobserved so portability fails closed.
+        return {"version": 1, "observed": False}
+    normalized = _canonical_object(
+        projected,
+        field="runtime execution identity contract",
+    )
+    encoded = _canonical_json(normalized, field="runtime execution identity contract")
+    if len(encoded) > _MAX_IDENTITY_JSON_CHARS:
+        raise ValueError("runtime execution identity contract exceeds its budget")
     return {"version": 1, "observed": True, "identity": normalized}
 
 
@@ -450,28 +464,32 @@ def _resolved_executable(value: object, *, cwd: str | None) -> dict[str, object]
         realpath = os.path.realpath(expanded)
     generation: dict[str, int] | None = None
     content_digest: str | None = None
+    executable: bool | None = None
     if realpath is not None:
         try:
             digest = hashlib.sha256()
             with Path(realpath).open("rb") as executable_file:
-                stat = os.fstat(executable_file.fileno())
+                file_stat = os.fstat(executable_file.fileno())
                 while chunk := executable_file.read(1024 * 1024):
                     digest.update(chunk)
         except OSError:
             pass
         else:
             generation = {
-                "device": stat.st_dev,
-                "inode": stat.st_ino,
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
+                "device": file_stat.st_dev,
+                "inode": file_stat.st_ino,
+                "size": file_stat.st_size,
+                "mtime_ns": file_stat.st_mtime_ns,
+                "mode": stat.S_IMODE(file_stat.st_mode),
             }
             content_digest = "sha256:" + digest.hexdigest()
+            executable = bool(generation["mode"] & 0o111) and os.access(realpath, os.X_OK)
     return {
         "path": value,
         "realpath": realpath,
         "generation": generation,
         "content_digest": content_digest,
+        "executable": executable,
     }
 
 
@@ -509,6 +527,7 @@ def _runtime_executable_contract(adapter: object) -> dict[str, object]:
         or item.get("realpath") is not None
         and item.get("generation") is not None
         and item.get("content_digest") is not None
+        and item.get("executable") is True
         for item in (executable, launcher)
     )
     return {
@@ -649,13 +668,13 @@ def _runtime_skill_dispatcher_contract(adapter: object) -> dict[str, object]:
     }
 
 
-def _class_implementation_contract(adapter: object) -> dict[str, object]:
-    """Bind one object's class hierarchy without inspecting its instance state."""
+def _class_implementation_contract_for_type(runtime_type: type[object]) -> dict[str, object]:
+    """Bind one class hierarchy without inspecting mutable instance state."""
     classes: list[str] = []
     members: dict[str, object] = {}
     modules: dict[str, object] = {}
     durable = True
-    for runtime_class in type(adapter).__mro__:
+    for runtime_class in runtime_type.__mro__:
         if runtime_class is object:
             continue
         qualified_name = f"{runtime_class.__module__}.{runtime_class.__qualname__}"
@@ -722,6 +741,11 @@ def _class_implementation_contract(adapter: object) -> dict[str, object]:
     }
 
 
+def _class_implementation_contract(adapter: object) -> dict[str, object]:
+    """Bind one object's class hierarchy without inspecting its instance state."""
+    return _class_implementation_contract_for_type(type(adapter))
+
+
 def _safe_class_implementation_contract(value: object) -> dict[str, object]:
     try:
         return _class_implementation_contract(value)
@@ -759,25 +783,108 @@ def _instance_declared_method_overrides(value: object) -> dict[str, object]:
     return overrides
 
 
-def _executor_implementation_contract(executor: object | None) -> dict[str, object]:
+def _static_executor_component_contract(component: type[object]) -> dict[str, object]:
+    """Bind a class-selected execution component without constructing it."""
+    try:
+        implementation = _class_implementation_contract_for_type(component)
+    except Exception as exc:
+        return {
+            "mode": "static_type",
+            "stability": "process_local",
+            "type": f"{component.__module__}.{component.__qualname__}",
+            "instance_nonce": uuid.uuid4().hex,
+            "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+        }
+    durable = implementation.get("stability") == "durable"
+    contract: dict[str, object] = {
+        "mode": "static_type",
+        "stability": "durable" if durable else "process_local",
+        "type": f"{component.__module__}.{component.__qualname__}",
+        "implementation": implementation,
+    }
+    if not durable:
+        contract["instance_nonce"] = uuid.uuid4().hex
+    return contract
+
+
+def _executor_component_contract(component: object) -> dict[str, object]:
+    """Describe one explicit executor-owned effect component.
+
+    A class-selected dispatcher is static executor behavior and can be durable.
+    A live helper instance, such as a session-signal hub, owns mutable
+    attempt-time state. Record its presence and implementation but never
+    serialize its queue, event store, or active targets into the baseline.
+    """
+    if component is None:
+        return {"mode": "none", "stability": "durable"}
+    if isinstance(component, type):
+        return _static_executor_component_contract(component)
+    return {
+        "mode": "live_instance",
+        "stability": "process_local",
+        "type": _qualified_type(component),
+        "implementation": _safe_class_implementation_contract(component),
+        "instance_nonce": uuid.uuid4().hex,
+    }
+
+
+def _executor_component_contracts(
+    components: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if components is None:
+        return {}
+    try:
+        if len(components) > _MAX_IDENTITY_ITEMS or not all(
+            isinstance(name, str) and name for name in components
+        ):
+            raise ValueError("executor components are invalid")
+        return {
+            name: _executor_component_contract(component) for name, component in components.items()
+        }
+    except Exception as exc:
+        return {
+            "unobserved": {
+                "mode": "process_local",
+                "stability": "process_local",
+                "instance_nonce": uuid.uuid4().hex,
+                "reason": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            }
+        }
+
+
+def _executor_implementation_contract(
+    executor: object | None,
+    *,
+    components: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Bind the concrete effect-owning executor or fail closed when absent."""
+    component_contracts = _executor_component_contracts(components)
     if executor is None:
         return {
-            "version": 1,
+            "version": 2,
             "mode": "unbound",
             "stability": "process_local",
             "instance_nonce": uuid.uuid4().hex,
+            "components": component_contracts,
         }
     implementation = _safe_class_implementation_contract(executor)
     instance_overrides = _instance_declared_method_overrides(executor)
-    durable = implementation.get("stability") == "durable" and not instance_overrides
+    durable = (
+        implementation.get("stability") == "durable"
+        and not instance_overrides
+        and all(
+            isinstance(component, Mapping) and component.get("stability") == "durable"
+            for component in component_contracts.values()
+        )
+    )
     contract: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "mode": "bound",
         "type": _qualified_type(executor),
         "stability": "durable" if durable else "process_local",
         "implementation": implementation,
         "instance_overrides": instance_overrides,
+        "components": component_contracts,
     }
     if not durable:
         contract["instance_nonce"] = uuid.uuid4().hex
@@ -1408,6 +1515,7 @@ class ExecutionAuthorityContract:
         workspace: str | None,
         execution_policy: Mapping[str, object],
         executor: object | None = None,
+        executor_components: Mapping[str, object] | None = None,
         workspace_identity: Mapping[str, object] | None = None,
         workspace_generation: Mapping[str, object] | None = None,
         resolved_routing: ResolvedRuntimeAuthority | None = None,
@@ -1416,7 +1524,10 @@ class ExecutionAuthorityContract:
     ) -> ExecutionAuthorityContract:
         data = {
             "version": EXECUTION_AUTHORITY_VERSION,
-            "executor": _executor_implementation_contract(executor),
+            "executor": _executor_implementation_contract(
+                executor,
+                components=executor_components,
+            ),
             "workspace": canonical_workspace_authority(
                 workspace,
                 identity=workspace_identity,

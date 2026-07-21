@@ -986,6 +986,9 @@ class ParallelACExecutor:
         # successful decomposed child is re-executed in an isolated workspace to
         # measure its parent-tier baseline spend. See ``shadow_replay`` module.
         self._shadow_replay_enabled = shadow_replay_enabled
+        # Capture the selected dispatch implementation once. The authority
+        # baseline binds this factory, and execution uses the same factory.
+        self._leaf_dispatcher_factory = LeafDispatcher
         self._session_signal_hub = session_signal_hub
         self._atomic_verifier = atomic_verifier
         self._coordinator = LevelCoordinator(
@@ -1011,7 +1014,10 @@ class ParallelACExecutor:
             adapter
         )
         self._validate_dispatch_rate_policy(adapter, self._dispatch_rate_policy)
-        self._dispatch_rate_gate = self._dispatch_rate_policy.build_gate()
+        dispatch_rate_gate = self._dispatch_rate_policy.build_gate()
+        if dispatch_rate_gate.enabled is not self._dispatch_rate_policy.gate_enabled:
+            raise ValueError("dispatch rate gate disagrees with the resolved policy")
+        self._dispatch_rate_gate = dispatch_rate_gate
         # Param degradations already surfaced this run, keyed by (param, support),
         # so the operator is told once rather than on every dispatch.
         self._announced_param_degradations: set[tuple[str, str]] = set()
@@ -1049,6 +1055,10 @@ class ParallelACExecutor:
             adapter=adapter,
             verifier=atomic_verifier,
             executor=self,
+            executor_components={
+                "leaf_dispatcher": self._leaf_dispatcher_factory,
+                "session_signal_hub": self._session_signal_hub,
+            },
             workspace=workspace if isinstance(workspace, str) else os.getcwd(),
             workspace_identity=workspace_authority_identity,
             execution_policy=execution_policy,
@@ -1093,6 +1103,8 @@ class ParallelACExecutor:
         adapter: AgentRuntime,
         policy: ResolvedDispatchRatePolicy,
     ) -> None:
+        if type(policy) is not ResolvedDispatchRatePolicy:
+            raise ValueError("dispatch rate policy must use the canonical policy type")
         backend_attr = getattr(adapter, "runtime_backend", "")
         backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
         self_governs = bool(getattr(adapter, "self_governs_rate_limit", False))
@@ -4550,7 +4562,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
-            await LeafDispatcher(self).stream(
+            await self._leaf_dispatcher_factory(self).stream(
                 state=dispatch_state,
                 prompt=prompt,
                 tools=tools,
@@ -4652,7 +4664,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
-                        await LeafDispatcher(self).stream(
+                        await self._leaf_dispatcher_factory(self).stream(
                             state=dispatch_state,
                             prompt=(
                                 render_inform_signal_prompt(queued_signal.signal)

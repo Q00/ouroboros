@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.orchestrator import parallel_executor as parallel_executor_module
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, RuntimeHandle
 from ouroboros.orchestrator.claude_worker_runtime import ClaudeWorkerTransport
 from ouroboros.orchestrator.codex_mcp_runtime import CodexMcpWorkerTransport
@@ -19,6 +20,7 @@ from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.pi_runtime import PiRuntime
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
 from ouroboros.orchestrator.rate_limit import ResolvedDispatchRatePolicy
+from ouroboros.orchestrator.synapse import SessionSignalHub
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from ouroboros.orchestrator.worker_runtime import LeaderDrivenWorkerRuntime
 
@@ -123,6 +125,16 @@ class _BypassDispatchRateExecutor(ParallelACExecutor):
         system_prompt: str | None,
     ) -> None:
         del prompt, system_prompt
+
+
+class _ReplacementLeafDispatcher:
+    """Distinct dispatch implementation for authority collision coverage."""
+
+    def __init__(self, executor: ParallelACExecutor) -> None:
+        self.executor = executor
+
+    async def stream(self, **_: object) -> None:
+        return None
 
 
 class _StableDispatcher:
@@ -282,6 +294,21 @@ def test_executable_content_drift_changes_authority_with_restored_stat(tmp_path)
     os.utime(executable, ns=(previous.st_atime_ns, previous.st_mtime_ns))
     changed = _contract(runtime=_Runtime(cli_path=str(executable)))
     assert baseline.fingerprint != changed.fingerprint
+
+
+def test_non_executable_runtime_target_fails_closed_and_changes_authority(tmp_path) -> None:
+    executable = tmp_path / "runtime-cli"
+    executable.write_text("one", encoding="utf-8")
+    os.chmod(executable, 0o755)
+    baseline = _contract(runtime=_Runtime(cli_path=str(executable)))
+
+    os.chmod(executable, 0o644)
+    changed = _contract(runtime=_Runtime(cli_path=str(executable)))
+
+    assert baseline.fingerprint != changed.fingerprint
+    assert baseline.portable_across_processes is True
+    assert changed.data["runtime"]["executable"]["observed"] is False
+    assert changed.portable_across_processes is False
 
 
 def test_runtime_execution_body_and_parser_drift_change_authority() -> None:
@@ -498,6 +525,21 @@ def test_sensitive_transport_identity_fails_closed_without_leaking() -> None:
     assert "sentinel-secret" not in contract.canonical_json
 
 
+def test_sensitive_runtime_identity_fails_closed_without_leaking() -> None:
+    class SensitiveRuntime(_Runtime):
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {
+                "effective_model_observed": True,
+                "api_token": "sentinel-secret",
+            }
+
+    contract = _contract(runtime=SensitiveRuntime())
+
+    assert contract.data["runtime"]["execution_identity"] == {"version": 1, "observed": False}
+    assert contract.portable_across_processes is False
+    assert "sentinel-secret" not in contract.canonical_json
+
+
 def test_codex_transport_live_pool_is_excluded_from_static_identity() -> None:
     transport = CodexMcpWorkerTransport(cli_path="/usr/bin/true")
     baseline = _worker_contract(
@@ -649,6 +691,92 @@ def test_executor_implementation_override_changes_authority(tmp_path) -> None:
     assert baseline.fingerprint != bypassed.fingerprint
     assert baseline.data["executor"]["stability"] == "durable"
     assert bypassed.data["executor"]["stability"] == "durable"
+
+
+def test_leaf_dispatcher_replacement_changes_executor_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    kwargs = {
+        "adapter": runtime,
+        "event_store": AsyncMock(),
+        "task_cwd": str(tmp_path),
+        "dispatch_rate_policy": ResolvedDispatchRatePolicy.resolve(
+            backend="test-runtime",
+            self_governs_rate_limit=False,
+            requests_per_minute=1,
+            tokens_per_minute=None,
+        ),
+    }
+
+    baseline = ParallelACExecutor(**kwargs).execution_authority  # type: ignore[arg-type]
+    monkeypatch.setattr(parallel_executor_module, "LeafDispatcher", _ReplacementLeafDispatcher)
+    replaced = ParallelACExecutor(**kwargs).execution_authority  # type: ignore[arg-type]
+
+    assert baseline.fingerprint != replaced.fingerprint
+    component = replaced.data["executor"]["components"]["leaf_dispatcher"]
+    assert component["mode"] == "static_type"
+    assert component["type"].endswith("._ReplacementLeafDispatcher")
+
+
+def test_live_session_signal_hub_makes_executor_authority_process_local(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    kwargs = {
+        "adapter": runtime,
+        "event_store": AsyncMock(),
+        "task_cwd": str(tmp_path),
+        "dispatch_rate_policy": ResolvedDispatchRatePolicy.resolve(
+            backend="test-runtime",
+            self_governs_rate_limit=False,
+            requests_per_minute=1,
+            tokens_per_minute=None,
+        ),
+    }
+
+    baseline = ParallelACExecutor(**kwargs).execution_authority  # type: ignore[arg-type]
+    with_hub = ParallelACExecutor(
+        **kwargs,
+        session_signal_hub=SessionSignalHub(),
+    ).execution_authority  # type: ignore[arg-type]
+
+    assert baseline.fingerprint != with_hub.fingerprint
+    assert with_hub.portable_across_processes is False
+    component = with_hub.data["executor"]["components"]["session_signal_hub"]
+    assert component["mode"] == "live_instance"
+    assert component["stability"] == "process_local"
+
+
+def test_noncanonical_dispatch_rate_policy_is_rejected(tmp_path) -> None:
+    class DormantRatePolicy(ResolvedDispatchRatePolicy):
+        def build_gate(self):  # type: ignore[no-untyped-def]
+            return ResolvedDispatchRatePolicy.resolve(
+                backend=self.backend,
+                self_governs_rate_limit=False,
+                requests_per_minute=None,
+                tokens_per_minute=None,
+            ).build_gate()
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    policy = DormantRatePolicy(
+        backend="test-runtime",
+        owner="ouroboros",
+        observed=True,
+        self_governs_rate_limit=False,
+        requests_per_minute=1,
+        tokens_per_minute=None,
+    )
+
+    with pytest.raises(ValueError, match="canonical policy type"):
+        ParallelACExecutor(
+            adapter=runtime,  # type: ignore[arg-type]
+            event_store=AsyncMock(),
+            task_cwd=str(tmp_path),
+            dispatch_rate_policy=policy,
+        )
 
 
 def test_delegated_skill_interceptor_configuration_changes_authority(tmp_path) -> None:
