@@ -69,6 +69,10 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
 _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
+# The data_context answer contract must reach the subagent WHOLE — a torn form
+# defeats its informed-consent purpose (the code contract is truncated at the
+# generic budget above; see Q00/ouroboros#1671 follow-ups). Pinned by tests.
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 6_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1343,6 +1347,7 @@ def build_interview_question_advisory_subagents(
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
         data_policy = raw_lane.get("data_policy")
+        lane_answer_contract = raw_lane.get("answer_contract")
 
         if lane_id == "code_context":
             lane_task = (
@@ -1384,12 +1389,21 @@ def build_interview_question_advisory_subagents(
                 "skip returning a result."
             )
             data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
+            answer_contract_json = _bounded_json(
+                lane_answer_contract,
+                _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+            )
             extra = (
                 "## Data Access Policy\n"
                 f"```json\n{data_policy_json}\n```\n"
-                "Include a proposed_queries list (possibly empty) in your output: "
-                "each entry names the MCP tool, the query or arguments you would "
-                "run, and what the result would decide."
+                "## Answer Contract\n"
+                f"```json\n{answer_contract_json}\n```\n"
+                "For this lane the generic Output section below is superseded: "
+                "return EXACTLY one JSON object matching the answer contract's "
+                "response_model_schema. It exists so the confirming user can "
+                "decide with full context — executed evidence, deliberately "
+                "unexecuted proposed_queries with their source_class, and "
+                "caveats."
             )
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
@@ -1472,6 +1486,8 @@ forwarding anything back to ouroboros_interview."""
         }
         if isinstance(data_policy, Mapping):
             lane_context["data_policy"] = dict(data_policy)
+        if isinstance(lane_answer_contract, Mapping):
+            lane_context["answer_contract"] = dict(lane_answer_contract)
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",

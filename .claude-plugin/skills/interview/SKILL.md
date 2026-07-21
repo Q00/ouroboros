@@ -199,7 +199,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      so the parent session can run them after user confirmation. Aggregates
      only, never raw rows; treat error-shaped tool output as no evidence. The
      lane payload carries a machine-readable `data_policy` block — enforce it
-     when your runtime has a permission system.
+     when your runtime has a permission system — and an `answer_contract`
+     (`data_evidence_answer.v1`): the lane returns exactly that structured
+     report (executed evidence, unexecuted proposed_queries with
+     source_class, caveats). Unlike the code contract it has no
+     auto-confirmed grade — every data answer goes through user
+     confirmation, and the form exists so the user decides with full
+     context. Execute `proposed_queries` only after the user confirms.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one

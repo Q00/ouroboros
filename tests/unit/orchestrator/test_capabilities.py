@@ -4992,6 +4992,77 @@ def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -
     assert evidence["max_evidence_chars"] == 2000
 
 
+def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> None:
+    """The data lane's answer contract has no grade clause (Q00/ouroboros#1671).
+
+    Unlike ``code_fact_investigation_answer.v1`` there is no
+    ``prefix_semantics`` and no auto-confirmed path — every data answer
+    requires user confirmation, and the form exists so the confirming user
+    decides with full context (evidence, unexecuted proposed_queries with
+    source_class, caveats). The serialized contract must also fit WHOLE in
+    the subagent prompt budget: a torn form defeats informed consent.
+    """
+    import json
+
+    from ouroboros.mcp.tools.subagent import (
+        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+        _bounded_json,
+    )
+
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
+    contract = lane_by_id["data_context"]["answer_contract"]
+
+    assert contract["contract_id"] == "data_evidence_answer.v1"
+    # No grade clause: confirmation is unconditional, auto-confirm nonexistent.
+    assert "prefix_semantics" not in contract
+    assert "auto-confirmed" not in json.dumps(contract["response_model_schema"])
+    schema = contract["response_model_schema"]
+    Draft202012Validator.check_schema(schema)
+    assert schema["properties"]["requires_user_confirmation"] == {"const": True}
+    # Proposed queries are executed only by the parent after user confirmation.
+    assert contract["proposed_query_semantics"] == {
+        "execution": "parent_session_only_after_user_confirmation",
+        "auto_execution": "forbidden",
+    }
+    # Informed-consent fields the confirming user needs are required.
+    for field in ("data_needed", "finding", "evidence", "proposed_queries", "confidence"):
+        assert field in schema["required"]
+    # Whole-form delivery invariant: the rendered contract is never truncated.
+    rendered = _bounded_json(contract, _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS)
+    assert "[truncated]" not in rendered
+
+    validator = Draft202012Validator(schema)
+    noop = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    validator.validate(noop)
+    # A data-needed answer must carry evidence or proposed queries.
+    empty_but_needed = {**noop, "data_needed": True}
+    assert list(validator.iter_errors(empty_but_needed))
+    proposer = {
+        **noop,
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "proposed_queries": [
+            {
+                "tool_name": "clickhouse_query",
+                "query": "SELECT count(DISTINCT user_id) FROM events WHERE ...",
+                "expected_decision": "Whether the flow is actually used.",
+                "source_class": "external",
+            }
+        ],
+    }
+    validator.validate(proposer)
+
+
 def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> None:
     """v1-in-place lane additions require explicit host compatibility rules."""
     metadata = ouroboros_tool_capability_metadata("ouroboros_interview")

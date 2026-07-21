@@ -475,6 +475,126 @@ def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, A
     return tuple(capabilities)
 
 
+def _data_context_answer_contract() -> dict[str, Any]:
+    """Return the answer contract for the data_context advisory lane.
+
+    Unlike ``code_fact_investigation_answer.v1`` this contract has NO grade
+    clause (``prefix_semantics``) and no auto-confirmed path: every data
+    answer requires user confirmation, because data evidence is point-in-time
+    and cannot be cheaply re-verified the way a manifest exact-match can
+    (Q00/ouroboros#1671). The contract's job is informed consent — the form
+    must give the confirming user everything needed to judge: what was
+    executed (evidence), what was deliberately NOT executed and why
+    (proposed_queries with source_class), and validity caveats.
+
+    Kept intentionally compact: the serialized contract must fit whole inside
+    the subagent prompt JSON budget (see the truncation of the code contract
+    at ``_INTERVIEW_ADVISORY_MAX_JSON_CHARS``).
+    """
+    answer_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "lane_id",
+            "data_needed",
+            "finding",
+            "confidence",
+            "evidence",
+            "proposed_queries",
+            "requires_user_confirmation",
+        ],
+        "properties": {
+            "lane_id": {"const": "data_context"},
+            "data_needed": {"type": "boolean"},
+            "finding": {"type": "string", "minLength": 1, "maxLength": 600},
+            "confidence": {"enum": ["reported_by_tool", "inferred", "no_evidence"]},
+            "evidence": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["source", "query_summary", "value"],
+                    "properties": {
+                        "source": {"type": "string", "maxLength": 120},
+                        "query_summary": {"type": "string", "maxLength": 300},
+                        "value": {"type": "string", "maxLength": 400},
+                        "observed_at": {"type": "string", "maxLength": 40},
+                    },
+                },
+            },
+            "proposed_queries": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["tool_name", "query", "expected_decision", "source_class"],
+                    "properties": {
+                        "tool_name": {"type": "string", "maxLength": 120},
+                        "query": {"type": "string", "maxLength": 400},
+                        "expected_decision": {"type": "string", "maxLength": 300},
+                        "source_class": {
+                            "enum": [
+                                "metered",
+                                "external",
+                                "side_effect_ambiguous",
+                                "unknown",
+                            ]
+                        },
+                    },
+                },
+            },
+            "requires_user_confirmation": {"const": True},
+            "caveats": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {"type": "string", "maxLength": 200},
+            },
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"data_needed": {"const": False}}},
+                "then": {
+                    "properties": {
+                        "confidence": {"const": "no_evidence"},
+                        "evidence": {"maxItems": 0},
+                        "proposed_queries": {"maxItems": 0},
+                    }
+                },
+            },
+            {
+                "if": {"properties": {"data_needed": {"const": True}}},
+                "then": {
+                    "anyOf": [
+                        {"properties": {"evidence": {"minItems": 1}}, "required": ["evidence"]},
+                        {
+                            "properties": {"proposed_queries": {"minItems": 1}},
+                            "required": ["proposed_queries"],
+                        },
+                    ]
+                },
+            },
+        ],
+    }
+    return {
+        "contract_id": "data_evidence_answer.v1",
+        "scope": "single_data_context_advisory_lane",
+        "response_model_schema": answer_schema,
+        "proposed_query_semantics": {
+            "execution": "parent_session_only_after_user_confirmation",
+            "auto_execution": "forbidden",
+        },
+        "runtime_instruction": (
+            "Fill this form so the confirming user can decide with full "
+            "context: what you executed (evidence with tool, query, value), "
+            "what you deliberately did not execute and why (proposed_queries "
+            "with source_class), and point-in-time caveats. Every data answer "
+            "requires user confirmation; there is no auto-confirmed grade."
+        ),
+    }
+
+
 def _data_context_lane_policy() -> dict[str, Any]:
     """Return the machine-readable data-access policy for the data_context lane.
 
@@ -667,6 +787,20 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "tool names for tool-dense sessions."
                             ),
                         },
+                        "answer_contract": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["contract_id", "response_model_schema"],
+                            "properties": {
+                                "contract_id": {"const": "data_evidence_answer.v1"},
+                            },
+                            "description": (
+                                "Structured report form for data lanes: no grade "
+                                "clause, every answer requires user confirmation; "
+                                "the form exists so the confirming user decides "
+                                "with full context."
+                            ),
+                        },
                     },
                 },
             },
@@ -762,6 +896,7 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "capability": "call_mcp",
             "required": False,
             "data_policy": _data_context_lane_policy(),
+            "answer_contract": _data_context_answer_contract(),
         },
         {
             "lane_id": "ambiguity_contrarian",

@@ -779,6 +779,10 @@ class TestBuildInterviewQuestionAdvisorySubagents:
             "aggregate_only": True,
             "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
         }
+        answer_contract = {
+            "contract_id": "data_evidence_answer.v1",
+            "response_model_schema": {"type": "object"},
+        }
         request = {
             "session_id": "sess-123",
             "question_identity": "interview-question:0123456789abcdef",
@@ -791,6 +795,7 @@ class TestBuildInterviewQuestionAdvisorySubagents:
                     "purpose": "Fetch data evidence for data-driven decisions.",
                     "required": False,
                     "data_policy": data_policy,
+                    "answer_contract": answer_contract,
                 },
             ],
         }
@@ -805,6 +810,7 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert payload.context["capability"] == "call_mcp"
         assert payload.context["required"] is False
         assert payload.context["data_policy"] == data_policy
+        assert payload.context["answer_contract"] == answer_contract
         # The proposer contract must be in the prompt: pre-call relevance
         # gate, proposed queries for metered sources, no-op as completion
         # signal, aggregates-only evidence, skeptical error handling.
@@ -815,6 +821,33 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert "Never run mutating operations" in payload.prompt
         assert "no evidence, not as evidence" in payload.prompt
         assert "## Data Access Policy" in payload.prompt
+        # The answer contract form ships whole and supersedes the generic
+        # output shape for this lane.
+        assert "## Answer Contract" in payload.prompt
+        assert "data_evidence_answer.v1" in payload.prompt
+        assert "superseded" in payload.prompt
+
+    def test_data_context_real_contract_ships_untruncated_in_prompt(self) -> None:
+        """The real metadata lane's contract must fit whole in the prompt."""
+        from ouroboros.orchestrator.capabilities.interview_schemas import (
+            _interview_question_advisory_fanout_metadata,
+        )
+
+        lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "user_question_first": True,
+            "lanes": lanes,
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        data_payload = next(p for p in payloads if p.context["lane_id"] == "data_context")
+        assert "## Answer Contract" in data_payload.prompt
+        assert "data_evidence_answer.v1" in data_payload.prompt
+        assert "[truncated]" not in data_payload.prompt
 
     def test_non_data_lanes_do_not_carry_data_policy(self) -> None:
         request = {
