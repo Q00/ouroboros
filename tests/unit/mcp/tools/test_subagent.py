@@ -773,6 +773,68 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert payloads[0].context["user_question_first"] is True
         assert payloads[1].context["persona"] == "contrarian"
 
+    def test_data_context_lane_builds_read_only_proposer_payload(self) -> None:
+        data_policy = {
+            "read_only": True,
+            "aggregate_only": True,
+            "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
+        }
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "data_context",
+                    "capability": "call_mcp",
+                    "purpose": "Fetch data evidence for data-driven decisions.",
+                    "required": False,
+                    "data_policy": data_policy,
+                },
+            ],
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert len(payloads) == 1
+        payload = payloads[0]
+        assert payload.title == "Interview advisory: data_context"
+        assert payload.agent == "researcher"
+        assert payload.context["lane_id"] == "data_context"
+        assert payload.context["capability"] == "call_mcp"
+        assert payload.context["required"] is False
+        assert payload.context["data_policy"] == data_policy
+        # The proposer contract must be in the prompt: pre-call relevance
+        # gate, proposed queries for metered sources, no-op as completion
+        # signal, aggregates-only evidence, skeptical error handling.
+        assert "BEFORE any tool call" in payload.prompt
+        assert "proposed_queries" in payload.prompt
+        assert "no-op finding" in payload.prompt
+        assert "never raw rows" in payload.prompt
+        assert "Never run mutating operations" in payload.prompt
+        assert "no evidence, not as evidence" in payload.prompt
+        assert "## Data Access Policy" in payload.prompt
+
+    def test_non_data_lanes_do_not_carry_data_policy(self) -> None:
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Q?",
+            "lanes": [
+                {
+                    "lane_id": "answer_simplifier",
+                    "capability": "run_lateral_review",
+                    "persona": "simplifier",
+                    "required": True,
+                },
+            ],
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert "data_policy" not in payloads[0].context
+
     def test_requires_question_identity(self) -> None:
         with pytest.raises(ValueError, match="question_identity"):
             build_interview_question_advisory_subagents(

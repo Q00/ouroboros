@@ -1172,8 +1172,8 @@ def build_interview_subagent(
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
 1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
+2. Then add a compact helper from: code_context, web_context, data_context,
+   ambiguity_contrarian, answer_simplifier, architecture_implications.
 3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
 
     transcript_section = ""
@@ -1336,10 +1336,13 @@ def build_interview_question_advisory_subagents(
 
         persona = str(raw_lane.get("persona") or "").strip()
         agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+            "researcher"
+            if capability in {"inspect_code", "web_research", "call_mcp"}
+            else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
+        data_policy = raw_lane.get("data_policy")
 
         if lane_id == "code_context":
             lane_task = (
@@ -1355,6 +1358,39 @@ def build_interview_question_advisory_subagents(
                 "If no current web facts are needed, return that no-op finding."
             )
             extra = "Use web research only when the answer depends on current external facts."
+        elif lane_id == "data_context":
+            # Read-only proposer lane (Q00/ouroboros#1671): relevance is decided
+            # before any tool call, direct execution covers only local free
+            # read-only lookups, and everything metered or side-effect-ambiguous
+            # comes back as proposed queries for the parent session to run
+            # after user confirmation.
+            lane_task = (
+                "Decide from the question text alone, BEFORE any tool call, "
+                "whether the answer depends on data evidence (metrics, database "
+                "or warehouse facts, usage numbers). If it does not, return the "
+                "no-op finding immediately. If it does, discover data-related "
+                "MCP tools available in this runtime by their names and "
+                "descriptions. Directly execute only obviously local, free, "
+                "read-only lookups. For metered, external, or "
+                "side-effect-ambiguous sources, do NOT execute: return the "
+                "queries you would run as proposed_queries so the parent "
+                "session can run them after user confirmation. Never run "
+                "mutating operations. Return aggregates and summaries only — "
+                "never raw rows — and scrub anything that looks like PII. "
+                "Treat error-shaped tool output (for example an HTTP 200 body "
+                "carrying an error envelope) as no evidence, not as evidence. "
+                "If this runtime has no MCP or data-tool access, return the "
+                "no-op finding: the no-op IS your completion signal, so never "
+                "skip returning a result."
+            )
+            data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
+            extra = (
+                "## Data Access Policy\n"
+                f"```json\n{data_policy_json}\n```\n"
+                "Include a proposed_queries list (possibly empty) in your output: "
+                "each entry names the MCP tool, the query or arguments you would "
+                "run, and what the result would decide."
+            )
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
                 "Challenge the question and the likely answer. Identify hidden "
@@ -1421,25 +1457,28 @@ Return a compact JSON object with:
 Keep it brief. The parent session will synthesize multiple advisory lanes before
 forwarding anything back to ouroboros_interview."""
 
+        lane_context: dict[str, Any] = {
+            "session_id": session_id,
+            "question_identity": question_identity,
+            "question": question,
+            "lane_id": lane_id,
+            "capability": capability,
+            "required": required,
+            "persona": persona or None,
+            "user_question_first": bool(request.get("user_question_first")),
+            "synthesis_contract": dict(synthesis_contract)
+            if isinstance(synthesis_contract, Mapping)
+            else {},
+        }
+        if isinstance(data_policy, Mapping):
+            lane_context["data_policy"] = dict(data_policy)
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",
                 title=f"Interview advisory: {lane_id}",
                 agent=agent,
                 prompt=prompt,
-                context={
-                    "session_id": session_id,
-                    "question_identity": question_identity,
-                    "question": question,
-                    "lane_id": lane_id,
-                    "capability": capability,
-                    "required": required,
-                    "persona": persona or None,
-                    "user_question_first": bool(request.get("user_question_first")),
-                    "synthesis_contract": dict(synthesis_contract)
-                    if isinstance(synthesis_contract, Mapping)
-                    else {},
-                },
+                context=lane_context,
             )
         )
 
@@ -2630,6 +2669,7 @@ class FanoutRecord:
     correlation_key: str
     expected_keys: tuple[str, ...]
     synthesizer_input: dict[str, Any]
+    required_keys: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2638,19 +2678,31 @@ class FanoutRecord:
             "session_id": self.session_id,
             "correlation_key": self.correlation_key,
             "expected_keys": list(self.expected_keys),
+            "required_keys": list(self.required_keys),
             "synthesizer_input": self.synthesizer_input,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> FanoutRecord:
         raw_input = data.get("synthesizer_input")
+        expected_keys = tuple(str(key) for key in data.get("expected_keys") or ())
+        raw_required = data.get("required_keys")
+        # Records persisted before the required/optional split (Q00/ouroboros
+        # #1671) carry no required_keys field: treat every expected key as
+        # required, preserving the original all-keys completion gate.
+        required_keys = (
+            tuple(str(key) for key in raw_required)
+            if isinstance(raw_required, (list, tuple))
+            else expected_keys
+        )
         return cls(
             fanout_id=str(data["fanout_id"]),
             kind=str(data["kind"]),
             session_id=str(data.get("session_id") or ""),
             correlation_key=str(data.get("correlation_key") or ""),
-            expected_keys=tuple(str(key) for key in data.get("expected_keys") or ()),
+            expected_keys=expected_keys,
             synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
+            required_keys=required_keys,
         )
 
 
@@ -2700,12 +2752,16 @@ class FanoutRegistry:
         expected_keys: list[str],
         synthesizer_input: dict[str, Any],
         fanout_id: str | None = None,
+        required_keys: list[str] | None = None,
     ) -> str:
         """Persist a fan-out record and return its ``fanout_id``.
 
         A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
         supplied by the caller) and stamped into the returned value so the
         producer can echo it into the emitted meta. Persistence is best-effort.
+        ``required_keys`` names the subset of ``expected_keys`` that gates
+        completion; when omitted every expected key is required (the original
+        all-keys gate).
         """
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
         record = FanoutRecord(
@@ -2715,6 +2771,7 @@ class FanoutRegistry:
             correlation_key=correlation_key,
             expected_keys=tuple(expected_keys),
             synthesizer_input=synthesizer_input,
+            required_keys=tuple(required_keys if required_keys is not None else expected_keys),
         )
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
@@ -2848,12 +2905,23 @@ def register_question_advisory_fanout(
     the human's answer easier), so submission routes to a deterministic
     aggregation that returns the correlated lane outputs in dispatch order for
     the host to synthesize.
+
+    Only ``required: true`` lanes gate completion (Q00/ouroboros#1671): a host
+    that cannot run an optional lane (for example ``data_context`` on a runtime
+    without MCP access) must not pin the fan-out at ``status="partial"``
+    forever. Optional lanes that were submitted still aggregate; missing ones
+    are reported as ``missing_optional_keys`` on the complete outcome.
     """
     expected_keys: list[str] = []
+    required_keys: list[str] = []
     for payload in payloads:
-        lane_id = _payload_lane_id(payload.to_dict())
+        payload_dict = payload.to_dict()
+        lane_id = _payload_lane_id(payload_dict)
         if lane_id and lane_id not in expected_keys:
             expected_keys.append(lane_id)
+            context = payload_dict.get("context")
+            if isinstance(context, Mapping) and bool(context.get("required")):
+                required_keys.append(lane_id)
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
@@ -2861,6 +2929,7 @@ def register_question_advisory_fanout(
         expected_keys=expected_keys,
         synthesizer_input={"lane_ids": list(expected_keys)},
         fanout_id=fanout_id,
+        required_keys=required_keys,
     )
 
 
@@ -2879,10 +2948,14 @@ def submit_fanout_results(
     * Unknown ``fanout_id`` → ``status="unknown_fanout_id"`` (clean error).
     * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
       record → ``status="correlation_mismatch"`` (clean error).
-    * Missing expected keys → ``status="partial"`` + ``missing_keys`` (the host
+    * Missing required keys → ``status="partial"`` + ``missing_keys`` (the host
       may resubmit with the remaining lanes).
-    * Complete set → route to the revived synthesizer for the record ``kind``
-      and return its structured outcome under ``status="complete"``.
+    * All required keys present → route to the revived synthesizer for the
+      record ``kind`` and return its structured outcome under
+      ``status="complete"``. Optional keys that never arrived are reported as
+      ``missing_optional_keys`` instead of pinning the fan-out at ``partial``
+      (Q00/ouroboros#1671); records persisted without a required/optional
+      split treat every expected key as required.
     """
     record = registry.load(fanout_id)
     if record is None:
@@ -2914,15 +2987,20 @@ def submit_fanout_results(
         provided[str(key)] = result.get("content")
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
-    if missing_keys:
+    missing_required = [key for key in record.required_keys if key not in provided]
+    if missing_required:
         return {
             "status": "partial",
             "fanout_id": fanout_id,
             "kind": record.kind,
             "missing_keys": missing_keys,
+            "missing_required_keys": missing_required,
             "received_keys": sorted(provided),
             "expected_keys": list(record.expected_keys),
         }
+    # Every remaining missing key is optional: proceed to synthesis without it
+    # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
+    missing_optional = missing_keys
 
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
@@ -2937,6 +3015,7 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "kind": record.kind,
             "correlation_key": record.correlation_key,
+            "missing_optional_keys": missing_optional,
             "result": outcome,
         }
 
@@ -2952,6 +3031,7 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "kind": record.kind,
             "correlation_key": record.correlation_key,
+            "missing_optional_keys": missing_optional,
             "result": outcome,
         }
 
@@ -2971,6 +3051,7 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "kind": record.kind,
             "correlation_key": record.correlation_key,
+            "missing_optional_keys": missing_optional,
             "result": outcome,
         }
 

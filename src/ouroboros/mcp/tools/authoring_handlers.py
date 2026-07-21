@@ -709,7 +709,12 @@ def _build_question_advisory_request(
         "advisory_goal": "help_human_answer_interview_question",
         "parallel_preference": advisory["parallel_preference"],
         "sequential_fallback": dict(advisory["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "allowed_capabilities": [
+            "inspect_code",
+            "web_research",
+            "run_lateral_review",
+            "call_mcp",
+        ],
         "lanes": list(advisory["lanes"]),
         "synthesis_contract": dict(advisory["synthesis_contract"]),
         "mcp_tool_capability": mcp_tool_capability,

@@ -4947,15 +4947,62 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     assert set(lane_by_id) == {
         "code_context",
         "web_context",
+        "data_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
     }
     assert lane_by_id["code_context"]["capability"] == "inspect_code"
     assert lane_by_id["web_context"]["capability"] == "web_research"
+    assert lane_by_id["data_context"]["capability"] == "call_mcp"
     assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
     assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
     assert lane_by_id["architecture_implications"]["persona"] == "architect"
+
+
+def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -> None:
+    """The data_context lane is a read-only proposer (Q00/ouroboros#1671).
+
+    The machine-readable ``data_policy`` block is what hosts with permission
+    systems enforce; the lane prompt is the fallback. The evidence policy caps
+    what can flow into persisted interview state (aggregates only, no raw
+    rows, PII scrub) — a ship blocker per the discussion, so pin it here.
+    """
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
+    data_lane = lane_by_id["data_context"]
+
+    assert data_lane["required"] is False
+    policy = data_lane["data_policy"]
+    assert policy["read_only"] is True
+    assert policy["aggregate_only"] is True
+    assert policy["relevance_gate"] == "decide_from_question_text_before_any_tool_call"
+    assert policy["direct_execution_scope"] == "local_free_read_only_lookups_only"
+    assert policy["metered_or_uncertain_sources"] == "return_proposed_queries_without_executing"
+    assert policy["error_shaped_tool_output"] == "return_no_evidence_finding"
+    assert "drop" in policy["forbidden_operation_patterns"]
+    assert "save" in policy["forbidden_operation_patterns"]
+
+    evidence = policy["evidence_policy"]
+    assert evidence["aggregates_only"] is True
+    assert evidence["raw_rows_allowed"] is False
+    assert evidence["pii_scrub_required"] is True
+    assert evidence["max_evidence_items"] == 5
+    assert evidence["max_evidence_chars"] == 2000
+
+
+def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> None:
+    """v1-in-place lane additions require explicit host compatibility rules."""
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+
+    assert fanout["contract_id"] == "interview_question_advisory_fanout.v1"
+    assert fanout["lane_compatibility_rules"] == {
+        "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+        "unsupported_capability": "dispatch_and_return_noop_finding",
+        "noop_finding_is_completion_signal": True,
+    }
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:

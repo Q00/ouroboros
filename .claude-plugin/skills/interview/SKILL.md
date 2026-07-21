@@ -191,12 +191,29 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
+   - `data_context` — fetch data evidence (metrics, DB/warehouse facts) only
+     when the answer is a data-driven decision. Decide relevance from the
+     question text BEFORE any tool call. Directly execute only obviously
+     local, free, read-only MCP lookups; for metered or side-effect-ambiguous
+     sources return proposed queries as findings instead of executing them,
+     so the parent session can run them after user confirmation. Aggregates
+     only, never raw rows; treat error-shaped tool output as no evidence. The
+     lane payload carries a machine-readable `data_policy` block — enforce it
+     when your runtime has a permission system.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
      concise draft answer.
    - `architecture_implications` — check whether the answer changes ownership,
      interfaces, rollout, or system shape.
+
+   Lane compatibility rules (the lane set can grow within the v1 contract):
+   - Unknown `lane_id` → dispatch it with its payload prompt as-is, or skip it
+     if your runtime cannot; never fail the fanout over it.
+   - Unsupported `capability` (e.g. `call_mcp` on a runtime without MCP
+     access) → still dispatch the lane and return its no-op finding. The
+     no-op finding IS the completion signal — never silently skip submitting
+     a lane's result.
 
    Synthesize advisory results into a compact helper for the user: 2-3 answer
    options, one recommended draft, or a short "I found these ambiguities" note.

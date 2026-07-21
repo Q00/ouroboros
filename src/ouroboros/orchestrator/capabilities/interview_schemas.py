@@ -475,6 +475,47 @@ def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, A
     return tuple(capabilities)
 
 
+def _data_context_lane_policy() -> dict[str, Any]:
+    """Return the machine-readable data-access policy for the data_context lane.
+
+    Prompt text alone is too weak for a lane that touches production data
+    stores (Q00/ouroboros#1671). Hosts with permission systems get this block
+    to enforce; the lane prompt restates it as the fallback. The lane is a
+    read-only *proposer*: it directly executes only obviously local, free,
+    read-only lookups and returns everything else as proposed queries for the
+    parent session to run after user confirmation.
+    """
+    return {
+        "read_only": True,
+        "aggregate_only": True,
+        "relevance_gate": "decide_from_question_text_before_any_tool_call",
+        "direct_execution_scope": "local_free_read_only_lookups_only",
+        "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
+        "error_shaped_tool_output": "return_no_evidence_finding",
+        "forbidden_operation_patterns": [
+            "insert",
+            "update",
+            "delete",
+            "drop",
+            "alter",
+            "truncate",
+            "create",
+            "grant",
+            "write",
+            "save",
+            "upload",
+            "publish",
+        ],
+        "evidence_policy": {
+            "max_evidence_items": 5,
+            "max_evidence_chars": 2000,
+            "aggregates_only": True,
+            "raw_rows_allowed": False,
+            "pii_scrub_required": True,
+        },
+    }
+
+
 def _interview_question_advisory_request_schema() -> dict[str, Any]:
     """Return the runtime request model for per-question answer assistance."""
     return {
@@ -567,7 +608,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                    "enum": ["inspect_code", "web_research", "run_lateral_review", "call_mcp"],
                 },
             },
             "lanes": {
@@ -583,6 +624,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "enum": [
                                 "code_context",
                                 "web_context",
+                                "data_context",
                                 "ambiguity_contrarian",
                                 "answer_simplifier",
                                 "architecture_implications",
@@ -591,13 +633,40 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                            "enum": [
+                                "inspect_code",
+                                "web_research",
+                                "run_lateral_review",
+                                "call_mcp",
+                            ],
                         },
                         "persona": {
                             "type": "string",
                             "enum": ["researcher", "contrarian", "simplifier", "architect"],
                         },
                         "required": {"type": "boolean"},
+                        "data_policy": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["read_only", "aggregate_only"],
+                            "properties": {
+                                "read_only": {"const": True},
+                                "aggregate_only": {"const": True},
+                            },
+                            "description": (
+                                "Machine-readable read-only policy for data lanes; "
+                                "hosts with permission systems can enforce it, the "
+                                "lane prompt is the fallback."
+                            ),
+                        },
+                        "known_data_tools": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Optional host/config-provided hint list of data MCP "
+                                "tool names for tool-dense sessions."
+                            ),
+                        },
                     },
                 },
             },
@@ -683,6 +752,18 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "required": False,
         },
         {
+            "lane_id": "data_context",
+            "purpose": (
+                "Fetch data evidence (metrics, DB/warehouse facts) only when the "
+                "answer is a data-driven decision; execute only local free "
+                "read-only lookups directly and return proposed queries for "
+                "metered or side-effect-ambiguous sources."
+            ),
+            "capability": "call_mcp",
+            "required": False,
+            "data_policy": _data_context_lane_policy(),
+        },
+        {
             "lane_id": "ambiguity_contrarian",
             "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
             "capability": "run_lateral_review",
@@ -720,6 +801,13 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "request_model_schema": _interview_question_advisory_request_schema(),
         "lanes": lanes,
+        "lane_compatibility_rules": {
+            # v1-in-place lane additions (Q00/ouroboros#1671): hosts must not
+            # break on lanes or capabilities they do not recognise.
+            "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+            "unsupported_capability": "dispatch_and_return_noop_finding",
+            "noop_finding_is_completion_signal": True,
+        },
         "synthesis_contract": {
             "output_shape": "answer_advisory",
             "max_options": 3,
@@ -736,7 +824,10 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "runtime_instruction": (
             "Show the MCP interview question to the user first, then fan out "
             "advisory lanes for code context, current web facts when needed, "
+            "data evidence when the answer is a data-driven decision, "
             "ambiguity critique, simplification, and architecture implications. "
+            "A lane whose capability this runtime cannot support must still "
+            "return its no-op finding — the no-op is the completion signal. "
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "

@@ -32,9 +32,11 @@ from ouroboros.mcp.tools.subagent import (
     FanoutRecord,
     FanoutRegistry,
     build_fanout_subagents,
+    build_interview_question_advisory_subagents,
     build_subagent_payload,
     register_code_investigation_fanout,
     register_lateral_persona_fanout,
+    register_question_advisory_fanout,
     stamp_fanout_meta,
     submit_fanout_results,
 )
@@ -457,6 +459,153 @@ async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any
     assert out["status"] == "partial"
     assert out["missing_keys"] == lane_keys[1:]
     assert out["received_keys"] == [lane_keys[0]]
+
+
+# --------------------------------------------------------------------------- #
+# Optional-lane completion semantics (Q00/ouroboros#1671)
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_advisory_payloads() -> list[Any]:
+    """Advisory payloads with one optional data lane and two required lanes."""
+    request = {
+        "session_id": "sess-optional-lanes",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": [
+            {
+                "lane_id": "data_context",
+                "capability": "call_mcp",
+                "purpose": "Fetch data evidence.",
+                "required": False,
+                "data_policy": {"read_only": True, "aggregate_only": True},
+            },
+            {
+                "lane_id": "ambiguity_contrarian",
+                "capability": "run_lateral_review",
+                "persona": "contrarian",
+                "purpose": "Find hidden assumptions.",
+                "required": True,
+            },
+            {
+                "lane_id": "answer_simplifier",
+                "capability": "run_lateral_review",
+                "persona": "simplifier",
+                "purpose": "Make it easy to answer.",
+                "required": True,
+            },
+        ],
+    }
+    return build_interview_question_advisory_subagents(request)
+
+
+def test_register_question_advisory_fanout_records_required_subset(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-optional-lanes",
+        payloads=_mixed_advisory_payloads(),
+    )
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.expected_keys == ("data_context", "ambiguity_contrarian", "answer_simplifier")
+    assert record.required_keys == ("ambiguity_contrarian", "answer_simplifier")
+
+
+def test_advisory_completes_when_only_optional_lanes_missing(tmp_path: Any) -> None:
+    """A host that cannot run an optional lane must not pin the fan-out.
+
+    Before #1671 every emitted lane was an expected completion key, so a
+    runtime without MCP access that skipped ``data_context`` was stuck at
+    ``status="partial"`` forever.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-optional-lanes",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-optional-lanes",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["missing_optional_keys"] == ["data_context"]
+    aggregated = out["result"]["aggregated_outputs"]
+    assert [item["lane_id"] for item in aggregated] == [
+        "ambiguity_contrarian",
+        "answer_simplifier",
+    ]
+
+
+def test_advisory_submitted_optional_lane_still_aggregates(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-optional-lanes",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-optional-lanes",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": "data-evidence"},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["missing_optional_keys"] == []
+    aggregated = out["result"]["aggregated_outputs"]
+    assert [item["lane_id"] for item in aggregated] == [
+        "data_context",
+        "ambiguity_contrarian",
+        "answer_simplifier",
+    ]
+
+
+def test_advisory_missing_required_lane_is_still_partial(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-optional-lanes",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-optional-lanes",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["missing_required_keys"] == ["answer_simplifier"]
+    # missing_keys keeps listing every missing lane (backward-compatible).
+    assert out["missing_keys"] == ["data_context", "answer_simplifier"]
+
+
+def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
+    """Records persisted before the required/optional split keep the old gate."""
+    record = FanoutRecord.from_dict(
+        {
+            "fanout_id": "fanout_legacy",
+            "kind": FANOUT_KIND_QUESTION_ADVISORY,
+            "session_id": "s1",
+            "correlation_key": "context.lane_id",
+            "expected_keys": ["code_context", "answer_simplifier"],
+            "synthesizer_input": {"lane_ids": ["code_context", "answer_simplifier"]},
+        }
+    )
+    assert record.required_keys == ("code_context", "answer_simplifier")
 
 
 # --------------------------------------------------------------------------- #
