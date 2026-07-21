@@ -239,12 +239,24 @@ class InvestmentSpec(BaseModel, frozen=True):
 
 
 class AcceptanceCriterionSpec(BaseModel, frozen=True):
-    """Structured success contract for one acceptance criterion."""
+    """Structured success contract for one acceptance criterion.
+
+    ``expected_artifacts`` entries are exact file or directory paths relative
+    to the run workspace. They are not descriptive artifact labels: the
+    execution verifier resolves every entry literally and requires it to
+    exist.
+    """
 
     description: str
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
-    expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
+    expected_artifacts: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Exact file or directory paths relative to the run workspace; "
+            "each path is resolved literally and must exist"
+        ),
+    )
     output_assertion: str | None = Field(default=None)
     investment: InvestmentSpec | None = Field(default=None)
 

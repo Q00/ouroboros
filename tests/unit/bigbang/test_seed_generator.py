@@ -1223,3 +1223,7 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "sub-step of a sibling" in system_prompt.lower()
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+        assert "exact file or directory path relative to the run workspace" in system_prompt
+        assert "schema v2 outputs" in system_prompt
+        assert "artifacts: NONE" in system_prompt
+        assert "concrete `verify` command" in system_prompt

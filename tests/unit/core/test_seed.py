@@ -408,6 +408,15 @@ class TestSeed:
         assert second.description == "Tasks can be created"
         assert second.verify_command is None
 
+    def test_expected_artifacts_schema_documents_literal_workspace_paths(self) -> None:
+        """The Seed schema exposes the runner's literal path contract."""
+        field = AcceptanceCriterionSpec.model_fields["expected_artifacts"]
+
+        assert field.description is not None
+        assert "Exact file or directory paths" in field.description
+        assert "relative to the run workspace" in field.description
+        assert "resolved literally" in field.description
+
     def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
         """Exit-code success phrases are redundant with verify_command exit status."""
         for phrase in (
