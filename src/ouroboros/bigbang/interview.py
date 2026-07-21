@@ -1179,14 +1179,18 @@ class InterviewEngine:
                 "\n\nAnswer prefixes the caller may use:\n"
                 "- [from-code]: Caller-supplied existing-system context (factual).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Caller-supplied external context."
+                "- [from-research]: Caller-supplied external context.\n"
+                "- [from-data]: Caller-supplied data evidence "
+                "(factual at query time, may be stale)."
             )
         else:
             dynamic_header += (
                 "\n\nAnswer prefixes the caller may use:\n"
                 "- [from-code]: Existing codebase state (factual, read from files).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+                "- [from-research]: Externally researched information (API docs, pricing, compatibility).\n"
+                "- [from-data]: Data evidence from metrics/DB/warehouse queries "
+                "(factual at query time, may be stale — treat as description, not decision)."
             )
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:

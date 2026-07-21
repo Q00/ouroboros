@@ -206,6 +206,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      auto-confirmed grade — every data answer goes through user
      confirmation, and the form exists so the user decides with full
      context. Execute `proposed_queries` only after the user confirms.
+     When forwarding a user-confirmed data-derived answer to
+     `ouroboros_interview`, prefix it `[from-data]` and keep the
+     point-in-time caveat in the text (e.g. `[from-data] 78% of MAU are on
+     the free tier (as of 2026-07-21)`), so the engine reads it as
+     description rather than user preference.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one

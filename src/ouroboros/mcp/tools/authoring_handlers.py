@@ -953,10 +953,21 @@ def _interview_reasoning_meta(
 
 
 def _classify_interview_answer_source(answer: str) -> str:
-    """Return a coarse provenance class for an ``ooo interview`` answer."""
+    """Return a coarse provenance class for an ``ooo interview`` answer.
+
+    ``data_fact`` / ``research_fact`` are user-adopted external facts: the
+    human confirmed them before forwarding, but unlike ``repo_fact`` they are
+    point-in-time and not cheaply re-verifiable, so the intent guard treats
+    them like a typed human answer (WARN on contract change) rather than
+    silently passing them as evidence.
+    """
     lowered = str(answer).lstrip().casefold()
     if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
         return "repo_fact"
+    if lowered.startswith("[from-data]"):
+        return "data_fact"
+    if lowered.startswith("[from-research]"):
+        return "research_fact"
     if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
         return "generated"
     if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
