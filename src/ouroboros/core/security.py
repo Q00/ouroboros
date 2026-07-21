@@ -90,6 +90,16 @@ SENSITIVE_VALUE_PATTERNS = (
 _GENERIC_CREDENTIAL_VALUE_PATTERN = re.compile(
     r"(?i)^(?:api-[A-Za-z0-9_-]{20,}|token\s+[A-Za-z0-9_-]{20,})$"
 )
+# The same generic forms can occur inside a command or diagnostic sentence.
+# Require the opaque payload so ordinary prose such as ``token budget`` and
+# ``API-first design`` remains semantic data, while a credential cannot evade
+# durable-event redaction merely by being embedded in a longer string.
+_GENERIC_CREDENTIAL_TEXT_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])"
+    r"(?P<label>api-|token\s+)"
+    r"(?P<credential>[A-Za-z0-9_-]{20,})"
+    r"(?![A-Za-z0-9_-])"
+)
 
 # A full value that is a credential should be treated differently from an
 # otherwise useful diagnostic sentence that happens to contain one.  The
@@ -261,6 +271,8 @@ def is_sensitive_value(value: Any) -> bool:
         return True
     if _GENERIC_CREDENTIAL_VALUE_PATTERN.fullmatch(normalized_value):
         return True
+    if _GENERIC_CREDENTIAL_TEXT_PATTERN.search(normalized_value):
+        return True
     if any(pattern.match(normalized_value) for pattern in SENSITIVE_VALUE_PATTERNS):
         return True
 
@@ -306,6 +318,10 @@ def redact_sensitive_text(value: str, *, replacement: str = "[redacted]") -> str
     redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", value)
     redacted = _SECRET_LABEL_PATTERN.sub(lambda match: f"{match.group(1)}{replacement}", redacted)
     redacted = _BEARER_PATTERN.sub(f"Bearer {replacement}", redacted)
+    redacted = _GENERIC_CREDENTIAL_TEXT_PATTERN.sub(
+        lambda match: f"{match.group('label')}{replacement}",
+        redacted,
+    )
     return _HIGH_CONFIDENCE_SECRET_PATTERN.sub(replacement, redacted)
 
 

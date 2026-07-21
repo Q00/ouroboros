@@ -161,6 +161,23 @@ class TestSensitiveDetection:
         assert is_sensitive_value("api-" + "a" * 20) is True
         assert is_sensitive_value("token " + "a" * 20) is True
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        (
+            ("retry with token " + "a" * 20, "retry with token [redacted]"),
+            ("retry with api-" + "a" * 20, "retry with api-[redacted]"),
+        ),
+    )
+    def test_embedded_generic_credential_text_is_sensitive_and_redacted(
+        self,
+        value: str,
+        expected: str,
+    ) -> None:
+        """A generic opaque token cannot evade detection inside diagnostic prose."""
+
+        assert is_sensitive_value(value) is True
+        assert redact_sensitive_text(value) == expected
+
     def test_diagnostic_text_with_embedded_secret_remains_sensitive(self) -> None:
         """Global credential detection remains fail-closed for diagnostics."""
         text = "command: deploy --api-key sk-live-SECRET123"

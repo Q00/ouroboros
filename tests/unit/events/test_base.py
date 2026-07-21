@@ -348,9 +348,11 @@ class TestBaseEventVersion:
 def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_keys() -> None:
     """Persistence redacts credentials but preserves replay and dedupe keys."""
     secret = "ghp_" + "a" * 36
+    generic_secret = "a" * 20
     payload = {
         "runtime_backend": "\u034f" + secret,
         "nested": {"label": "\u200b" + secret},
+        "detail": f"retry with token {generic_secret}",
         secret: "not-a-secret-value",
         "api_key": "unprefixed-provider-credential-1234567890",
         "semantic_ac_key": "ac_123",
@@ -369,6 +371,7 @@ def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_key
 
     assert sanitized["runtime_backend"] == "<REDACTED>"
     assert sanitized["nested"]["label"] == "<REDACTED>"
+    assert sanitized["detail"] == "retry with token [redacted]"
     assert secret not in sanitized
     assert sanitized["api_key"] == "<REDACTED>"
     assert sanitized["semantic_ac_key"] == "ac_123"
@@ -381,6 +384,8 @@ def test_persistence_sanitizer_redacts_credentials_without_dropping_protocol_key
     assert "unprefixed-provider-credential-1234567890" not in str(persisted)
     assert secret not in str(sanitized)
     assert secret not in str(persisted)
+    assert generic_secret not in str(sanitized)
+    assert generic_secret not in str(persisted)
 
 
 def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
