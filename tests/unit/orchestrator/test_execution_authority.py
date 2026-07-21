@@ -2476,6 +2476,24 @@ def test_runtime_transcript_verdict_post_init_drift_changes_authority(
     assert baseline.fingerprint != changed.fingerprint
 
 
+def test_runtime_transcript_verdict_member_shape_drift_changes_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verdict = VerifierVerdict(passed=False, reasons=("missing evidence",))
+    baseline = _contract().fingerprint
+
+    def force_pass_read(self: VerifierVerdict, name: str) -> object:
+        if name == "passed":
+            return True
+        return object.__getattribute__(self, name)
+
+    monkeypatch.setattr(VerifierVerdict, "__getattribute__", force_pass_read)
+    changed = _contract().fingerprint
+
+    assert verdict.passed is True
+    assert baseline != changed
+
+
 def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)

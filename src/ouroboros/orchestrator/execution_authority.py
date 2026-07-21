@@ -1299,7 +1299,20 @@ def _transcript_verdict_type_contract(value: type[object]) -> dict[str, object]:
 
     required_members = ("__init__", "__post_init__", "__setattr__")
     members: dict[str, object] = {}
+    member_shape: dict[str, str] = {}
     missing = object()
+    for member_name, raw_member in vars(value).items():
+        if not isinstance(member_name, str):
+            raise ValueError("runtime transcript verifier result member name is invalid")
+        if isinstance(raw_member, (classmethod, staticmethod, property)):
+            kind = "descriptor"
+        elif inspect.isfunction(raw_member):
+            kind = "function"
+        elif callable(raw_member):
+            kind = "callable"
+        else:
+            kind = "data"
+        member_shape[_sha256(member_name)] = kind
     for member_name in required_members:
         raw_member = inspect.getattr_static(value, member_name, missing)
         if isinstance(raw_member, (classmethod, staticmethod)):
@@ -1316,6 +1329,14 @@ def _transcript_verdict_type_contract(value: type[object]) -> dict[str, object]:
         "type": _opaque_type_identity_digest(value),
         "member_digest": _sha256(
             _canonical_json(members, field="runtime transcript verifier result members")
+        ),
+        # A newly inserted special method (for example ``__getattribute__``)
+        # can change how a verdict is consumed without changing the selected
+        # construction methods above. Bind the full member *shape* as an
+        # opaque digest while excluding comparison/repr implementation details
+        # that are unrelated to transcript acceptance.
+        "member_shape_digest": _sha256(
+            _canonical_json(member_shape, field="runtime transcript verifier result member shape")
         ),
     }
 
