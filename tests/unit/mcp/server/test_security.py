@@ -254,9 +254,7 @@ class TestInputValidator:
                         "key": "ambiguity_contrarian",
                         "content": {
                             "finding": "logs exist; that does not make them usable",
-                            "suggested_options": [
-                                "read local logs; exclude analytics || fallback"
-                            ],
+                            "suggested_options": ["read local logs; exclude analytics || fallback"],
                         },
                     }
                 ],

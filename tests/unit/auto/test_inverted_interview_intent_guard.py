@@ -108,8 +108,7 @@ def test_interview_answer_source_classifier_maps_data_and_research_prefixes() ->
 
     assert _classify_interview_answer_source("[from-data] 78% of MAU are free tier") == "data_fact"
     assert (
-        _classify_interview_answer_source("[from-research] API limit is 100 rps")
-        == "research_fact"
+        _classify_interview_answer_source("[from-research] API limit is 100 rps") == "research_fact"
     )
     assert _classify_interview_answer_source("[from-code] FastAPI per manifest") == "repo_fact"
     assert _classify_interview_answer_source("just my preference") == "human"
