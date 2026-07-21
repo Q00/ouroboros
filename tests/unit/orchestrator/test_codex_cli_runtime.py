@@ -20,6 +20,7 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
 
@@ -865,22 +866,46 @@ class TestCodexCliRuntime:
         assert message.resume_handle.approval_mode == "acceptEdits"
         assert message.resume_handle.metadata == seeded_handle.metadata
 
-    def test_convert_command_execution_event(self) -> None:
-        """Converts command execution items to Bash tool messages."""
+    def test_convert_command_execution_events_are_correlated_start_and_result(self) -> None:
+        """Codex item lifecycle events become one correlated Bash pair."""
         runtime = CodexCliRuntime(cli_path="codex")
 
-        messages = runtime._convert_event(
+        started = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "item_42",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        completed = runtime._convert_event(
             {
                 "type": "item.completed",
-                "item": {"type": "command_execution", "command": "pytest -q"},
+                "item": {
+                    "id": "item_42",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "aggregated_output": "1 passed in 0.01s",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
             },
             current_handle=None,
         )
 
-        assert len(messages) == 1
-        message = messages[0]
-        assert message.tool_name == "Bash"
-        assert message.data["tool_input"]["command"] == "pytest -q"
+        assert len(started) == len(completed) == 1
+        start, result = started[0], completed[0]
+        assert start.tool_name == result.tool_name == "Bash"
+        assert start.data["tool_input"] == result.data["tool_input"] == {"command": "pytest -q"}
+        assert start.data["tool_call_id"] == result.data["tool_call_id"] == "item_42"
+        assert start.data["runtime_event_type"] == "tool.started"
+        assert result.data["runtime_event_type"] == "tool.completed"
+        assert result.data["subtype"] == "tool_result"
+        assert result.content == "1 passed in 0.01s"
 
     def test_convert_command_execution_preserves_output_metadata(self) -> None:
         """Command output must remain available for fat-harness verification."""
@@ -890,10 +915,14 @@ class TestCodexCliRuntime:
             {
                 "type": "item.completed",
                 "item": {
+                    "id": "item_metadata",
                     "type": "command_execution",
                     "command": "pytest",
                     "output": "1 passed in 0.01s",
                     "exit_code": 0,
+                    "status": "completed",
+                    "success": True,
+                    "ok": True,
                 },
             },
             current_handle=None,
@@ -905,6 +934,19 @@ class TestCodexCliRuntime:
         assert message.data["tool_input"]["command"] == "pytest"
         assert message.data["output"] == "1 passed in 0.01s"
         assert message.data["exit_code"] == 0
+        assert message.data["success"] is True
+        assert message.data["ok"] is True
+
+        projected = project_runtime_message(message)
+        assert projected.message_type == "tool_result"
+        assert projected.content == "1 passed in 0.01s"
+        assert projected.runtime_metadata["runtime_event_type"] == "tool.completed"
+        assert projected.runtime_metadata["tool_call_id"] == "item_metadata"
+        assert projected.runtime_metadata["output"] == "1 passed in 0.01s"
+        assert projected.runtime_metadata["exit_code"] == 0
+        assert projected.runtime_metadata["status"] == "completed"
+        assert projected.runtime_metadata["success"] is True
+        assert projected.runtime_metadata["ok"] is True
 
     def test_convert_command_execution_preserves_aggregated_output_metadata(self) -> None:
         """Current Codex JSONL aggregated output remains available to the verifier."""
@@ -959,7 +1001,78 @@ class TestCodexCliRuntime:
         assert message.data["stdout"] == "1 passed in 0.01s"
         assert message.data["exit_code"] == 0
         assert message.data["status"] == "completed"
-        assert message.data["subtype"] == "success"
+        assert message.data["success"] is True
+        assert message.data["subtype"] == "tool_result"
+
+    def test_convert_failed_command_preserves_failure_and_output(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        [message] = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_failed_command",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "aggregated_output": "1 failed in 0.02s",
+                    "exit_code": 1,
+                    "status": "failed",
+                    "success": False,
+                    "ok": False,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert message.content == "1 failed in 0.02s"
+        assert message.data["runtime_event_type"] == "tool.failed"
+        assert message.data["is_error"] is True
+        assert message.data["success"] is False
+        assert message.data["ok"] is False
+        assert message.data["tool_result"]["is_error"] is True
+
+    def test_convert_failed_file_change_and_mcp_completion_remain_failed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        file_messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_failed_patch",
+                    "type": "file_change",
+                    "changes": [{"path": "src/app.py", "kind": "update"}],
+                    "status": "failed",
+                },
+            },
+            current_handle=None,
+        )
+        [mcp_result] = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_failed_mcp",
+                    "type": "mcp_tool_call",
+                    "server": "minimal",
+                    "tool": "count",
+                    "arguments": {"n": 1},
+                    "status": "failed",
+                    "error": {"message": "user cancelled MCP tool call"},
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(file_messages) == 2
+        file_start, file_result = file_messages
+        assert file_start.data["tool_call_id"] == file_result.data["tool_call_id"]
+        assert file_result.data["runtime_event_type"] == "tool.failed"
+        assert file_result.data["is_error"] is True
+        assert file_result.data["tool_result"]["is_error"] is True
+        assert mcp_result.tool_name == "count"
+        assert mcp_result.content == "user cancelled MCP tool call"
+        assert mcp_result.data["runtime_event_type"] == "tool.failed"
+        assert mcp_result.data["is_error"] is True
+        assert mcp_result.data["tool_result"]["is_error"] is True
 
     def test_convert_file_change_event_emits_each_changed_file(self) -> None:
         """Multi-file Codex changes should create one proof message per path."""
@@ -969,6 +1082,7 @@ class TestCodexCliRuntime:
             {
                 "type": "item.completed",
                 "item": {
+                    "id": "item_patch",
                     "type": "file_change",
                     "changes": [
                         {"path": "/tmp/project/hello.py"},
@@ -979,13 +1093,25 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert [message.tool_name for message in messages] == ["Edit", "Edit"]
+        assert [message.tool_name for message in messages] == ["Edit"] * 4
         assert [message.data["tool_input"]["file_path"] for message in messages] == [
             "/tmp/project/hello.py",
+            "/tmp/project/hello.py",
+            "/tmp/project/test_hello.py",
             "/tmp/project/test_hello.py",
         ]
-        assert all(message.data["subtype"] == "success" for message in messages)
-        assert all(message.data["runtime_event_type"] == "tool.completed" for message in messages)
+        first_start, first_result, second_start, second_result = messages
+        assert first_start.data["tool_call_id"] == first_result.data["tool_call_id"]
+        assert second_start.data["tool_call_id"] == second_result.data["tool_call_id"]
+        assert first_start.data["tool_call_id"] != second_start.data["tool_call_id"]
+        assert first_start.data["tool_call_id"].startswith("item_patch:path:")
+        assert second_start.data["tool_call_id"].startswith("item_patch:path:")
+        assert [message.data["runtime_event_type"] for message in messages] == [
+            "tool.started",
+            "tool.completed",
+            "tool.started",
+            "tool.completed",
+        ]
 
     def test_convert_turn_completed_with_usage_emits_system_usage_message(self) -> None:
         """turn.completed with token usage surfaces a non-final system message."""

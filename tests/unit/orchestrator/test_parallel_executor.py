@@ -28,6 +28,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
@@ -1041,6 +1042,45 @@ def test_tests_passed_respects_correlated_bash_result_status(
             task_cwd=None,
         )
         is expected
+    )
+
+
+def test_codex_command_pair_provides_successful_test_evidence_to_deliver_gate() -> None:
+    """Representative Codex JSONL proves a completed test run to verification."""
+    runtime = CodexCliRuntime(cli_path="codex")
+    command = "pytest tests/test_app.py -q"
+    started = runtime._convert_event(
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_test_1",
+                "type": "command_execution",
+                "command": command,
+                "status": "in_progress",
+            },
+        },
+        current_handle=None,
+    )
+    completed = runtime._convert_event(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_test_1",
+                "type": "command_execution",
+                "command": command,
+                "aggregated_output": "1 passed in 0.01s",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        current_handle=None,
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(*started, *completed),
+        task_cwd=None,
     )
 
 

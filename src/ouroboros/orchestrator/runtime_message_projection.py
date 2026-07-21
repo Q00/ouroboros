@@ -245,6 +245,12 @@ def serialize_runtime_message_metadata(
         if isinstance(recovery_discontinuity, Mapping):
             metadata["recovery_discontinuity"] = dict(recovery_discontinuity)
 
+    normalized_runtime_event_type = runtime_event_type(message)
+    if normalized_runtime_event_type:
+        # Message-level lifecycle data is more specific than the latest
+        # session-handle state (for example, a tool result on a running turn).
+        metadata["runtime_event_type"] = normalized_runtime_event_type
+
     subtype = message_subtype(message)
     if subtype:
         metadata["subtype"] = subtype
@@ -277,6 +283,20 @@ def serialize_runtime_message_metadata(
             metadata["is_error"] = raw_is_error
         else:
             metadata["is_error_invalid"] = True
+
+    for key in ("output", "stdout", "stderr", "result_preview", "status"):
+        value = message.data.get(key)
+        if isinstance(value, str) and value.strip():
+            metadata[key] = value.strip()
+
+    exit_code = message.data.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        metadata["exit_code"] = exit_code
+
+    for key in ("success", "ok"):
+        value = message.data.get(key)
+        if isinstance(value, bool):
+            metadata[key] = value
 
     permission_request_id = message.data.get("permission_request_id")
     if isinstance(permission_request_id, str) and permission_request_id.strip():

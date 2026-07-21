@@ -45,6 +45,7 @@ from ouroboros.orchestrator.adapter import (
     SubagentOrchestration,
     TaskResult,
 )
+from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result, serialize_tool_result
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -136,6 +137,12 @@ _RUNTIME_PROFILE_METADATA_KEYS = (
 _RUNTIME_CODEX_PROFILE_METADATA_KEYS = (
     "codex_profile",
     "codex_cli_profile",
+)
+_CODEX_TOOL_ITEM_TYPES = frozenset(
+    {"command_execution", "file_change", "mcp_tool_call", "web_search"}
+)
+_CODEX_FAILED_TOOL_STATUSES = frozenset(
+    {"cancelled", "canceled", "declined", "error", "failed", "timed_out", "timeout"}
 )
 
 
@@ -1754,13 +1761,302 @@ class CodexCliRuntime:
                 data.setdefault(target_key, value.strip())
         for key in ("exit_code", "exitCode", "returncode", "return_code"):
             value = source.get(key)
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool):
                 data.setdefault("exit_code", value)
                 break
-        if source.get("success") is True:
-            data.setdefault("subtype", "success")
-        if source.get("ok") is True:
-            data.setdefault("subtype", "success")
+        for key in ("success", "ok", "is_error"):
+            value = source.get(key)
+            if isinstance(value, bool):
+                data.setdefault(key, value)
+
+    @staticmethod
+    def _extract_item_id(item: Mapping[str, Any]) -> str | None:
+        """Return the stable Codex thread-item identity when present."""
+        for key in ("id", "item_id", "itemId"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _tool_call_id(self, item: Mapping[str, Any], *, file_path: str | None = None) -> str | None:
+        """Derive an evidence correlation id from the Codex item id.
+
+        A Codex ``file_change`` item can cover several paths but supplies only
+        one item id.  Hashing the path gives each projected Edit pair a stable,
+        bounded identity without embedding an arbitrary workspace path in the
+        identifier itself.
+        """
+        item_id = self._extract_item_id(item)
+        if item_id is None:
+            return None
+        if file_path is None:
+            return item_id
+        path_digest = hashlib.sha256(file_path.encode("utf-8")).hexdigest()[:16]
+        return f"{item_id}:path:{path_digest}"
+
+    @staticmethod
+    def _extract_mcp_tool_name(item: Mapping[str, Any]) -> str:
+        """Resolve the tool name from both legacy and current Codex shapes."""
+        for key in ("name", "tool"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "mcp_tool"
+
+    def _extract_tool_result_text(
+        self,
+        item: Mapping[str, Any],
+        *,
+        tool_name: str,
+        file_path: str | None = None,
+        failed: bool,
+    ) -> str:
+        """Extract human-readable completion output without dropping failures."""
+        parts: list[str] = []
+        seen: set[str] = set()
+        for key in (
+            "aggregated_output",
+            "aggregatedOutput",
+            "output",
+            "stdout",
+            "stderr",
+            "result_preview",
+            "resultPreview",
+            "result",
+            "error",
+            "message",
+            "text",
+        ):
+            text = self._extract_text(item.get(key))
+            if text and text not in seen:
+                seen.add(text)
+                parts.append(text)
+        if parts:
+            return "\n".join(parts)
+        if file_path is not None:
+            state = "failed" if failed else "completed"
+            return f"File change {state}: {file_path}"
+        if failed:
+            return f"{tool_name} failed."
+        return ""
+
+    @staticmethod
+    def _tool_item_failed(item: Mapping[str, Any], metadata: Mapping[str, Any]) -> bool:
+        """Return True when a terminal Codex item carries any failure signal."""
+        status = metadata.get("status")
+        if isinstance(status, str) and status.strip().lower() in _CODEX_FAILED_TOOL_STATUSES:
+            return True
+
+        exit_code = metadata.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+            return True
+
+        if metadata.get("success") is False or metadata.get("ok") is False:
+            return True
+        if metadata.get("is_error") is True:
+            return True
+
+        error = item.get("error")
+        return not (error is None or error == "" or error == {})
+
+    def _build_codex_tool_start(
+        self,
+        *,
+        item: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        content: str,
+        handle: RuntimeHandle | None,
+        tool_call_id: str | None,
+        preserve_item_metadata: bool = True,
+    ) -> AgentMessage:
+        """Build one normalized tool-start message from a Codex item."""
+        extra_data = self._extract_command_metadata(item) if preserve_item_metadata else {}
+        extra_data.update(
+            {
+                "runtime_event_type": "tool.started",
+                "tool_name": tool_name,
+            }
+        )
+        if tool_call_id is not None:
+            extra_data["tool_call_id"] = tool_call_id
+        return self._build_tool_message(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            content=content,
+            handle=handle,
+            extra_data=extra_data,
+        )
+
+    def _build_codex_tool_result(
+        self,
+        *,
+        item: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        handle: RuntimeHandle | None,
+        tool_call_id: str | None,
+        file_path: str | None = None,
+    ) -> AgentMessage:
+        """Build one normalized terminal tool result with explicit success state."""
+        metadata = self._extract_command_metadata(item)
+        failed = self._tool_item_failed(item, metadata)
+        runtime_event_type = "tool.failed" if failed else "tool.completed"
+        result_text = self._extract_tool_result_text(
+            item,
+            tool_name=tool_name,
+            file_path=file_path,
+            failed=failed,
+        )
+        result_meta = {
+            **metadata,
+            "runtime_event_type": runtime_event_type,
+        }
+        if tool_call_id is not None:
+            result_meta["tool_call_id"] = tool_call_id
+        tool_result = serialize_tool_result(
+            normalize_runtime_tool_result(
+                result_text,
+                is_error=failed,
+                meta=result_meta,
+            )
+        )
+        extra_data: dict[str, Any] = {
+            **metadata,
+            "subtype": "tool_result",
+            "runtime_event_type": runtime_event_type,
+            "tool_name": tool_name,
+            "tool_result": tool_result,
+            "is_error": failed,
+        }
+        if tool_call_id is not None:
+            extra_data["tool_call_id"] = tool_call_id
+        return self._build_tool_message(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            content=result_text,
+            handle=handle,
+            extra_data=extra_data,
+        )
+
+    def _convert_codex_tool_item(
+        self,
+        *,
+        event_type: str,
+        item: dict[str, Any],
+        item_type: str,
+        current_handle: RuntimeHandle | None,
+    ) -> list[AgentMessage]:
+        """Convert a Codex tool item into correlated start/result messages."""
+        if item_type == "command_execution":
+            command = self._extract_command(item)
+            if not command:
+                return []
+            tool_name = "Bash"
+            tool_input = {"command": command}
+            tool_call_id = self._tool_call_id(item)
+            if event_type == "item.started":
+                return [
+                    self._build_codex_tool_start(
+                        item=item,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        content=f"Calling tool: Bash: {command}",
+                        handle=current_handle,
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            return [
+                self._build_codex_tool_result(
+                    item=item,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    handle=current_handle,
+                    tool_call_id=tool_call_id,
+                )
+            ]
+
+        if item_type == "mcp_tool_call":
+            tool_name = self._extract_mcp_tool_name(item)
+            tool_input = self._extract_tool_input(item)
+            tool_call_id = self._tool_call_id(item)
+            if event_type == "item.started":
+                return [
+                    self._build_codex_tool_start(
+                        item=item,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        content=f"Calling tool: {tool_name}",
+                        handle=current_handle,
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            return [
+                self._build_codex_tool_result(
+                    item=item,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    handle=current_handle,
+                    tool_call_id=tool_call_id,
+                )
+            ]
+
+        if item_type == "file_change":
+            file_paths = self._extract_paths(item)
+            messages: list[AgentMessage] = []
+            for file_path in file_paths:
+                tool_input = {"file_path": file_path}
+                tool_call_id = self._tool_call_id(item, file_path=file_path)
+                start = self._build_codex_tool_start(
+                    item=item,
+                    tool_name="Edit",
+                    tool_input=tool_input,
+                    content=f"Calling tool: Edit: {file_path}",
+                    handle=current_handle,
+                    tool_call_id=tool_call_id,
+                    # Codex emits file_change only at item.completed. Keep its
+                    # terminal status on the result, not on the synthetic call.
+                    preserve_item_metadata=event_type == "item.started",
+                )
+                messages.append(start)
+                if event_type == "item.completed":
+                    messages.append(
+                        self._build_codex_tool_result(
+                            item=item,
+                            tool_name="Edit",
+                            tool_input=tool_input,
+                            handle=current_handle,
+                            tool_call_id=tool_call_id,
+                            file_path=file_path,
+                        )
+                    )
+            return messages
+
+        query = self._extract_text(item.get("query")) or self._extract_text(item)
+        tool_input = {"query": query}
+        tool_call_id = self._tool_call_id(item)
+        if event_type == "item.started":
+            return [
+                self._build_codex_tool_start(
+                    item=item,
+                    tool_name="WebSearch",
+                    tool_input=tool_input,
+                    content=f"Calling tool: WebSearch: {query}"
+                    if query
+                    else "Calling tool: WebSearch",
+                    handle=current_handle,
+                    tool_call_id=tool_call_id,
+                )
+            ]
+        return [
+            self._build_codex_tool_result(
+                item=item,
+                tool_name="WebSearch",
+                tool_input=tool_input,
+                handle=current_handle,
+                tool_call_id=tool_call_id,
+            )
+        ]
 
     def _build_tool_message(
         self,
@@ -1804,13 +2100,24 @@ class CodexCliRuntime:
                 ]
             return []
 
-        if event_type == "item.completed":
+        if event_type in {"item.started", "item.completed"}:
             item = event.get("item")
             if not isinstance(item, dict):
                 return []
 
             item_type = item.get("type")
             if not isinstance(item_type, str):
+                return []
+
+            if item_type in _CODEX_TOOL_ITEM_TYPES:
+                return self._convert_codex_tool_item(
+                    event_type=event_type,
+                    item=item,
+                    item_type=item_type,
+                    current_handle=current_handle,
+                )
+
+            if event_type == "item.started":
                 return []
 
             if item_type == "agent_message":
@@ -1831,67 +2138,6 @@ class CodexCliRuntime:
                         content=content,
                         data={"thinking": content},
                         resume_handle=current_handle,
-                    )
-                ]
-
-            if item_type == "command_execution":
-                command = self._extract_command(item)
-                if not command:
-                    return []
-                return [
-                    self._build_tool_message(
-                        tool_name="Bash",
-                        tool_input={"command": command},
-                        content=f"Calling tool: Bash: {command}",
-                        handle=current_handle,
-                        extra_data=self._extract_command_metadata(item),
-                    )
-                ]
-
-            if item_type == "mcp_tool_call":
-                tool_name = item.get("name") if isinstance(item.get("name"), str) else "mcp_tool"
-                tool_input = self._extract_tool_input(item)
-                return [
-                    self._build_tool_message(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        content=f"Calling tool: {tool_name}",
-                        handle=current_handle,
-                    )
-                ]
-
-            if item_type == "file_change":
-                file_paths = self._extract_paths(item)
-                if not file_paths:
-                    return []
-                return [
-                    self._build_tool_message(
-                        tool_name="Edit",
-                        tool_input={"file_path": file_path},
-                        content=f"Calling tool: Edit: {file_path}",
-                        handle=current_handle,
-                        # This branch is reached only for Codex's
-                        # ``item.completed`` file_change event. Preserve that
-                        # source completion status so evidence validation does
-                        # not mistake it for an unconfirmed Edit dispatch.
-                        extra_data={
-                            "subtype": "success",
-                            "runtime_event_type": "tool.completed",
-                        },
-                    )
-                    for file_path in file_paths
-                ]
-
-            if item_type == "web_search":
-                query = self._extract_text(item)
-                return [
-                    self._build_tool_message(
-                        tool_name="WebSearch",
-                        tool_input={"query": query},
-                        content=f"Calling tool: WebSearch: {query}"
-                        if query
-                        else "Calling tool: WebSearch",
-                        handle=current_handle,
                     )
                 ]
 
