@@ -34,6 +34,12 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
 
+`artifacts` / `expected_artifacts` semantics:
+- Every entry is an exact file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
+- NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
+- If no exact path is known, write `artifacts: NONE` and provide a concrete `verify` command instead.
+- File or directory existence can be a complete contract. For a stateful artifact that can still be pending or blocked, also provide a `verify` command that checks its semantic state.
+
 `expect` / `output_assertion` semantics:
 - Use `expect` ONLY for a literal string that the verify command prints to stdout verbatim, such as `OK` or `5 passed`.
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.

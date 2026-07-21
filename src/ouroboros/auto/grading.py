@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any
 
@@ -249,6 +250,27 @@ class GradeGate:
             )
         for index, criterion_spec in enumerate(seed.acceptance_criteria):
             criterion = ac_text(criterion_spec)
+            if isinstance(criterion_spec, AcceptanceCriterionSpec):
+                invalid_artifacts = _invalid_expected_artifacts(criterion_spec.expected_artifacts)
+                if invalid_artifacts:
+                    rendered = ", ".join(repr(artifact) for artifact in invalid_artifacts)
+                    findings.append(
+                        GradeFinding(
+                            "invalid_expected_artifact",
+                            "high",
+                            (
+                                "expected_artifacts contains values that are not exact "
+                                f"workspace-relative paths: {rendered}"
+                            ),
+                            f"acceptance_criteria[{index}].expected_artifacts",
+                            (
+                                "Replace descriptive labels with exact file or directory "
+                                "paths relative to the run workspace. If no exact path is "
+                                "known, remove expected_artifacts and add a concrete "
+                                "verify_command."
+                            ),
+                        )
+                    )
             if _is_vague(criterion):
                 findings.append(
                     GradeFinding(
@@ -532,6 +554,34 @@ def _is_observable(value: str | AcceptanceCriterionSpec) -> bool:
         r"\b(http\s+)?status\s+2\d\d\b",
     )
     return any(re.search(pattern, lowered) for pattern in observable_patterns)
+
+
+def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
+    """Return artifact entries that cannot be concrete workspace-relative paths.
+
+    Path syntax cannot distinguish every directory name from prose. Keep this
+    deliberately conservative: reject paths that are absolute, escape through
+    ``..``, or are bare multi-word labels without a path separator or filename
+    suffix. Concrete paths containing spaces remain valid when their structure
+    makes the path intent explicit (for example ``docs/User Guide.md``).
+    """
+    invalid: list[str] = []
+    for artifact in artifacts:
+        posix_path = PurePosixPath(artifact)
+        windows_path = PureWindowsPath(artifact)
+        if (
+            posix_path.is_absolute()
+            or windows_path.is_absolute()
+            or ".." in posix_path.parts
+            or ".." in windows_path.parts
+        ):
+            invalid.append(artifact)
+            continue
+        if any(character.isspace() for character in artifact):
+            has_path_separator = "/" in artifact or "\\" in artifact
+            if not has_path_separator and not posix_path.suffix:
+                invalid.append(artifact)
+    return tuple(invalid)
 
 
 def _is_concrete_final_report_observation(value: str) -> bool:
