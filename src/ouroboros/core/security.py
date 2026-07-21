@@ -52,9 +52,7 @@ SENSITIVE_FIELD_NAMES = frozenset(
 SENSITIVE_PREFIXES = (
     "sk-",
     "pk-",
-    "api-",
     "bearer ",
-    "token ",
     "secret_",
     "AIza",
     # Common provider credentials that are otherwise easy to place under a
@@ -84,6 +82,13 @@ SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"glpat-[A-Za-z0-9_-]{20,}"),
     re.compile(r"hf_[A-Za-z0-9]{20,}"),
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+
+# ``api-`` and ``token `` also begin ordinary prose such as ``API-first`` and
+# ``token budget``. Keep their direct-value detection only for a sufficiently
+# long opaque payload, while provider-specific prefixes above remain strict.
+_GENERIC_CREDENTIAL_VALUE_PATTERN = re.compile(
+    r"(?i)^(?:api-[A-Za-z0-9_-]{20,}|token\s+[A-Za-z0-9_-]{20,})$"
 )
 
 # A full value that is a credential should be treated differently from an
@@ -130,13 +135,12 @@ _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
     r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r")\b"
 )
-# ``api-``, ``token ``, and ``secret_`` are useful only as direct value
-# prefixes. Looking for them after every delimiter would classify natural text
-# such as ``API-first`` and ordinary persistence keys such as
+# ``secret_`` is useful only as a direct value prefix. Looking for it after
+# every delimiter would classify ordinary persistence keys such as
 # ``quoted_secret_preview`` as credentials. Provider-shaped prefixes remain
 # detectable after a delimiter (for example ``branch-ghp_...``).
 _DELIMITED_CREDENTIAL_PREFIXES = tuple(
-    prefix for prefix in SENSITIVE_PREFIXES if prefix not in {"api-", "token ", "secret_"}
+    prefix for prefix in SENSITIVE_PREFIXES if prefix != "secret_"
 )
 
 
@@ -254,6 +258,8 @@ def is_sensitive_value(value: Any) -> bool:
     value_lower = normalized_value.lower()
 
     if any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES):
+        return True
+    if _GENERIC_CREDENTIAL_VALUE_PATTERN.fullmatch(normalized_value):
         return True
     if any(pattern.match(normalized_value) for pattern in SENSITIVE_VALUE_PATTERNS):
         return True

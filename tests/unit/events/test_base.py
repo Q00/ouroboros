@@ -388,6 +388,8 @@ def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
     payload = {
         "goal": "Implement token budget accounting",
         "criterion": "Adopt an API-first design",
+        "direct_goal": "token budget accounting",
+        "direct_criterion": "API-first design",
     }
 
     sanitized = sanitize_event_data_for_persistence(payload)
@@ -401,3 +403,5 @@ def test_persistence_sanitizer_preserves_benign_security_terms() -> None:
     assert sanitized == payload
     assert persisted["goal"] == payload["goal"]
     assert persisted["criterion"] == payload["criterion"]
+    assert persisted["direct_goal"] == payload["direct_goal"]
+    assert persisted["direct_criterion"] == payload["direct_criterion"]
