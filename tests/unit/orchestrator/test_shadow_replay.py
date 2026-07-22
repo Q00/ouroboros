@@ -527,6 +527,48 @@ class TestShadowReplayHarness:
         assert data["is_decomposed_child"] is True
 
     @pytest.mark.asyncio
+    async def test_verifier_entry_drift_stops_shadow_replay_before_baseline_effect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        factory = MagicMock()
+        monkeypatch.setattr("ouroboros.orchestrator.runtime_factory.create_agent_runtime", factory)
+        store, events = _capturing_event_store()
+        executor = _executor_with_router(task_cwd=str(tmp_path), store=store)
+        injected = False
+
+        def injected_verifier(**_: object) -> object:
+            nonlocal injected
+            injected = True
+            return object()
+
+        monkeypatch.setattr(
+            ParallelACExecutor,
+            "_run_atomic_verifier_pass",
+            injected_verifier,
+        )
+
+        with isolated_workspace(str(tmp_path)) as isolated_cwd:
+            assert isolated_cwd is not None
+            await run_shadow_replay(
+                executor,
+                runtime_identity=_identity(),
+                execution_id="exec_frugal",
+                session_id="sess",
+                ac_index=1,
+                is_sub_ac=True,
+                prompt="do the thing",
+                system_prompt="system",
+                tools=["Read"],
+                decomposition_trustworthy=True,
+                ac_content="Implement a thing",
+                isolated_cwd=isolated_cwd,
+            )
+
+        factory.assert_not_called()
+        assert injected is False
+        assert _shadow_events(events) == []
+
+    @pytest.mark.asyncio
     async def test_runtime_without_strict_isolation_contract_is_never_executed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

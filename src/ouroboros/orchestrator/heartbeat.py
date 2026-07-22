@@ -15,18 +15,53 @@ Any runtime can participate — just call acquire/release.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
+import re
+from threading import RLock
+
+try:  # pragma: no cover - exercised on Unix CI; fallback supports Windows imports
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
 LOCK_DIR = Path.home() / ".ouroboros" / "locks"
+_LEASE_OPERATION_LOCK = RLock()
+_HELD_LEASE_FDS: dict[str, int] = {}
+_SAFE_LOCK_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
 def _ensure_dir() -> Path:
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     return LOCK_DIR
+
+
+def _clear_held_leases_after_fork() -> None:
+    """Drop inherited lease descriptors in a post-fork child.
+
+    Advisory-lock state is tied to an open file description. If a child
+    retained a copied descriptor, a dead parent could leave its liveness lease
+    locked until the unrelated child exits. Do not acquire the inherited
+    RLock here: a vanished parent thread may have owned it at fork time.
+    """
+    global _HELD_LEASE_FDS, _LEASE_OPERATION_LOCK
+
+    inherited_fds = tuple(_HELD_LEASE_FDS.values())
+    _HELD_LEASE_FDS = {}
+    _LEASE_OPERATION_LOCK = RLock()
+    for fd in inherited_fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_clear_held_leases_after_fork)
 
 
 def _get_process_start_time(pid: int) -> float | None:
@@ -72,8 +107,14 @@ def _get_process_start_time(pid: int) -> float | None:
 
 
 def lock_path(session_id: str) -> Path:
-    """Return the lock file path for a given session."""
-    return _ensure_dir() / session_id
+    """Return a containment-safe lock path for a given session identifier."""
+    if isinstance(session_id, str) and _SAFE_LOCK_SESSION_ID.fullmatch(session_id) is not None:
+        return _ensure_dir() / session_id
+    # Old/corrupt persisted session ids still need an observer-safe lookup.
+    # New process-local registrations reject them before any effect or lease is
+    # created, while this digest prevents a legacy value from escaping LOCK_DIR.
+    raw = str(session_id).encode("utf-8", "surrogatepass")
+    return _ensure_dir() / f"__invalid_session_id__{hashlib.sha256(raw).hexdigest()}"
 
 
 def acquire(session_id: str) -> None:
@@ -87,7 +128,57 @@ def acquire(session_id: str) -> None:
     payload = f"{pid}:{start_time}" if start_time else str(pid)
 
     path = lock_path(session_id)
-    path.write_text(payload)
+    # Keep an advisory exclusive lock open for the holder's lifetime. This
+    # lets a later process safely distinguish a stale file (lock obtainable)
+    # from a live lease (lock busy) without overwriting or deleting the latter.
+    # The file payload remains human-readable diagnostic evidence; the held FD
+    # is the race-free ownership primitive.
+    with _LEASE_OPERATION_LOCK:
+        if session_id in _HELD_LEASE_FDS and is_owned_by_current_process(session_id):
+            return
+
+        path_existed = path.exists()
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_acquired = False
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_acquired = True
+                except BlockingIOError as exc:
+                    raise OSError(f"session liveness lease is held: {session_id}") from exc
+            elif path_existed and not is_owned_by_current_process(session_id):
+                # On platforms without ``fcntl`` preserve safety by refusing
+                # to replace any extant lease rather than guessing it is stale.
+                raise OSError(f"session liveness lease is already held: {session_id}")
+
+            if (
+                path_existed
+                and is_holder_alive(session_id)
+                and not is_owned_by_current_process(session_id)
+            ):
+                raise OSError(f"session liveness lease is held: {session_id}")
+
+            if is_owned_by_current_process(session_id):
+                _HELD_LEASE_FDS[session_id] = fd
+                fd = -1  # ownership transferred to the process-lifetime registry
+                return
+
+            os.ftruncate(fd, 0)
+            os.write(fd, payload.encode("utf-8"))
+            os.fsync(fd)
+            _HELD_LEASE_FDS[session_id] = fd
+            fd = -1  # ownership transferred to the process-lifetime registry
+        except Exception:
+            if lock_acquired and fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if fd >= 0:
+                os.close(fd)
     log.info(
         "session_lock.acquired",
         extra={"session_id": session_id, "pid": pid},
@@ -97,23 +188,40 @@ def acquire(session_id: str) -> None:
 def release(session_id: str) -> None:
     """Release a session lock when execution completes or is cancelled."""
     path = lock_path(session_id)
-    try:
-        path.unlink(missing_ok=True)
-        log.info(
-            "session_lock.released",
-            extra={"session_id": session_id},
-        )
-    except OSError:
-        pass
+    with _LEASE_OPERATION_LOCK:
+        fd = _HELD_LEASE_FDS.pop(session_id, None)
+        try:
+            path.unlink(missing_ok=True)
+            log.info(
+                "session_lock.released",
+                extra={"session_id": session_id},
+            )
+        except OSError:
+            pass
+        finally:
+            if fd is not None:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def release_if_owned_by_current_process(session_id: str) -> bool:
     """Release a session lock only when the current process owns it."""
-    if not is_owned_by_current_process(session_id):
-        return False
+    # ``acquire`` cannot replace an extant lease, and this lock serializes two
+    # local cleanup paths. Once ownership has been checked, no other normal
+    # owner can create a replacement until this unlink has completed.
+    with _LEASE_OPERATION_LOCK:
+        if not is_owned_by_current_process(session_id):
+            return False
 
-    release(session_id)
-    return True
+        release(session_id)
+        return True
 
 
 def is_owned_by_current_process(session_id: str) -> bool:
@@ -182,7 +290,12 @@ def is_holder_alive(session_id: str) -> bool:
     2. The recorded PID is running
     3. The process start time matches (guards against PID recycling)
 
-    Returns False if no lock exists or the holder is confirmed dead.
+    Returns False if no lock exists or the holder is confirmed dead. This
+    observer never unlinks malformed or stale records: deleting after a
+    non-atomic read could remove a newly acquired lease from another process.
+    Stale filenames are harmless because session ids are unique; a caller that
+    deliberately reuses one must resolve it explicitly rather than overwrite
+    liveness evidence.
     """
     path = lock_path(session_id)
     if not path.exists():
@@ -200,19 +313,22 @@ def is_holder_alive(session_id: str) -> bool:
     except ValueError:
         return False
 
-    recorded_start = float(parts[1]) if len(parts) > 1 and parts[1] != "None" else None
-
-    if not is_process_identity_alive(pid, recorded_start):
-        release(session_id)  # Clean up stale lock
+    try:
+        recorded_start = float(parts[1]) if len(parts) > 1 and parts[1] != "None" else None
+    except ValueError:
+        # A malformed lease cannot prove that a compatible process owns this
+        # session. Treat it as unheld without deleting it: a fresh owner may
+        # have atomically replaced the observation between read and cleanup.
         return False
 
-    return True
+    return is_process_identity_alive(pid, recorded_start)
 
 
 def get_alive_sessions() -> set[str]:
     """Return session IDs with live lock holders.
 
-    Scans the lock directory, verifies each, and cleans up stale entries.
+    Scans the lock directory and verifies each entry without deleting stale
+    paths from an observer race.
     """
     alive: set[str] = set()
     lock_dir = _ensure_dir()

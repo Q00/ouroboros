@@ -608,7 +608,11 @@ class TestInFlightCancellation:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            tracker = SessionTracker.create("exec_test", sample_seed.metadata.seed_id)
+            tracker = SessionTracker.create(
+                str(kwargs["execution_id"]),
+                str(kwargs["seed_id"]),
+                session_id=str(kwargs["session_id"]),
+            )
             return Result.ok(tracker)
 
         # Set up the cancellation to trigger at the right time
@@ -661,7 +665,13 @@ class TestInFlightCancellation:
         mock_event_store.query_events = AsyncMock(return_value=[])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_test", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def tracking_check(session_id):
             check_calls.append(session_id)
@@ -725,7 +735,13 @@ class TestSessionLifecycleTracking:
         mock_event_store.query_events = AsyncMock(return_value=[])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_test", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             with patch.object(runner._session_repo, "mark_completed", return_value=Result.ok(None)):
@@ -757,7 +773,13 @@ class TestSessionLifecycleTracking:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_crash", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             result = await runner.execute_seed(

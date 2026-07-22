@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -17,6 +17,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
     ParallelACExecutor,
 )
+from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
 class _AtomicDecompositionRuntime:
@@ -66,7 +67,7 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
     depth: int,
 ) -> None:
     """Nested AC execution should stop recursing once decomposition returns ATOMIC."""
-    executor = ParallelACExecutor(
+    executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
@@ -81,7 +82,7 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
             reasons=("explicit_atomic",),
         )
     )
-    executor._execute_atomic_ac = AsyncMock(
+    execute_atomic_ac = AsyncMock(
         return_value=ACExecutionResult(
             ac_index=depth + 1,
             ac_content=f"Atomic at depth {depth}",
@@ -90,31 +91,27 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
             depth=depth,
         )
     )
+    executor._execute_atomic_ac = execute_atomic_ac
+    executor._test_single_ac_calls = []
 
-    with patch.object(
-        executor,
-        "_execute_single_ac",
-        wraps=executor._execute_single_ac,
-    ) as execute_single_ac_spy:
-        result = await executor._execute_single_ac(
-            ac_index=depth + 1,
-            ac_content=f"Atomic at depth {depth}",
-            session_id=f"sess_atomic_depth_{depth}",
-            tools=["Read"],
-            tool_catalog=None,
-            system_prompt="system",
-            seed_goal="Preserve ATOMIC termination",
-            depth=depth,
-            execution_id=f"exec_atomic_depth_{depth}",
-        )
+    result = await executor._execute_single_ac(
+        ac_index=depth + 1,
+        ac_content=f"Atomic at depth {depth}",
+        session_id=f"sess_atomic_depth_{depth}",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="Preserve ATOMIC termination",
+        depth=depth,
+        execution_id=f"exec_atomic_depth_{depth}",
+    )
 
     assert result.success is True
     assert result.is_decomposed is False
     assert result.depth == depth
     executor._try_decompose_ac.assert_awaited_once()
-    executor._execute_atomic_ac.assert_awaited_once()
-    assert len(execute_single_ac_spy.await_args_list) == 1
-    assert execute_single_ac_spy.await_args.kwargs["depth"] == depth
+    execute_atomic_ac.assert_awaited_once()
+    assert [call["depth"] for call in executor._test_single_ac_calls] == [depth]
 
 
 class _CapturingDecompositionRuntime:

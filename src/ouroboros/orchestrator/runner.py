@@ -88,6 +88,23 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.execution_authority import (
+    _claim_process_local_authority_generation,
+    _discard_process_local_authority_generation,
+    _has_live_process_local_authority_registration,
+    _live_process_local_authority_generation,
+    _mint_process_local_authority_generation,
+    _process_local_authority_contract,
+    _ProcessLocalAuthorityGeneration,
+    _register_process_local_authority_generation,
+    _release_process_local_authority_generation,
+    _retire_process_local_authority_generation,
+    constructor_model_contract,
+    runtime_execution_proves_effective_model,
+    valid_constructor_model_contract,
+    valid_process_local_authority_contract,
+    valid_runtime_execution_identity_contract,
+)
 from ouroboros.orchestrator.execution_guidance import (
     ExecutionGuidanceBundle,
     resolve_execution_guidance,
@@ -543,7 +560,7 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 1
+EXECUTION_CONTRACT_VERSION = 2
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -784,6 +801,9 @@ class OrchestratorRunner:
             )
         self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
+        self._process_local_authorities: dict[
+            tuple[str, str], _ProcessLocalAuthorityGeneration
+        ] = {}
         self._execution_guidance: ExecutionGuidanceBundle | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
@@ -1270,22 +1290,34 @@ class OrchestratorRunner:
         self._active_sessions[execution_id] = session_id
         acquire_lock(session_id)
 
-    def _unregister_session(self, execution_id: str, session_id: str) -> None:
+    def _unregister_session(
+        self,
+        execution_id: str,
+        session_id: str,
+        *,
+        release_liveness_lease: bool = True,
+    ) -> None:
         """Unregister a session after execution completes.
 
         Called at the end of execution (success, failure, or cancellation)
-        to clean up tracking state and remove the heartbeat file.
+        to clean up tracking state and normally remove the heartbeat file. A
+        deliberately paused process-local session keeps its liveness lease:
+        the claim is released so its original owner can resume it, while other
+        runners must still recognize that the live capability has not crashed.
 
         Args:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
+            release_liveness_lease: Whether this lifecycle path is terminal and
+                may remove the PID liveness lease.
         """
         from ouroboros.orchestrator.heartbeat import (
             release_if_owned_by_current_process as release_lock,
         )
 
         self._active_sessions.pop(execution_id, None)
-        release_lock(session_id)
+        if release_liveness_lease:
+            release_lock(session_id)
 
     def _cleanup_pre_execution_state(
         self,
@@ -1293,8 +1325,19 @@ class OrchestratorRunner:
         session_id: str | None,
         *,
         session_registered: bool,
+        retire_authority: bool = True,
     ) -> None:
-        """Release pre-loop runner state after setup fails."""
+        """Release pre-loop runner state after an aborted execution path.
+
+        A setup failure or externally cancelled task does not leave a valid
+        same-process continuation.  Retire its live capability before releasing
+        bookkeeping so a stale tracker cannot become an alternate resume path.
+        """
+        if retire_authority and execution_id is not None and session_id is not None:
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
         if session_registered and execution_id is not None and session_id is not None:
             self._unregister_session(execution_id, session_id)
         if self._task_workspace is not None:
@@ -1584,145 +1627,378 @@ class OrchestratorRunner:
         runtimes that expose no constructor model at all; current-format resume
         then fails closed because the effective pin cannot be verified.
         """
-        try:
-            raw_model = inspect.getattr_static(self._adapter, "_model")
-        except AttributeError:
-            return {"observed": False}
-        if raw_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(raw_model, str):
-            return {"observed": False}
-
-        normalized_model: object = raw_model.strip() or None
-        normalizer_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "_normalize_model",
-            None,
-        )
-        if normalizer_descriptor is not None:
-            try:
-                normalizer = object.__getattribute__(self._adapter, "_normalize_model")
-                normalized_model = normalizer(raw_model)
-            except Exception:
-                return {"observed": False}
-        if normalized_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(normalized_model, str) or not normalized_model.strip():
-            return {"observed": False}
-        return {"observed": True, "model": normalized_model.strip()}
+        return constructor_model_contract(self._adapter)
 
     @staticmethod
     def _valid_constructor_model_contract(value: object) -> bool:
         """Return whether a persisted constructor-model contract is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        observed = value.get("observed")
-        if observed is not True:
-            return False
-        model = value.get("model")
-        return set(value) == {"observed", "model"} and (
-            model is None or isinstance(model, str) and bool(model.strip())
-        )
+        return valid_constructor_model_contract(value)
 
     def _runtime_execution_identity_contract(self) -> dict[str, Any]:
-        """Return backend-specific resolved execution inputs, when observable.
+        """Return no cross-process identity for a legacy dynamic runtime.
 
-        The generic constructor-model pin is sufficient for runtimes whose
-        model is fully selected by ``_model``. Some runtimes have an additional
-        resolved execution profile, though: Codex can choose a provider/model
-        through ``runtime_profile`` / ``--profile`` while ``_model`` remains
-        ``None``. Bundled runtimes may expose ``execution_identity_contract`` to
-        persist those command-relevant inputs without teaching the runner every
-        backend's private configuration model.
+        Foundation A intentionally does not execute a runtime-owned identity
+        provider here.  That provider may itself resolve mutable helpers,
+        profile files, handler caches, or launcher state.  A live
+        process-local generation below controls same-process resume instead.
         """
-
-        provider_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "execution_identity_contract",
-            None,
-        )
-        if provider_descriptor is None:
-            return {"version": 1, "observed": False}
-
-        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
-        identity = provider()
-        if not isinstance(identity, Mapping):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
-        try:
-            encoded = json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            normalized_identity = json.loads(encoded)
-        except (TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={
-                    "adapter_type": type(self._adapter).__name__,
-                    "cause": str(exc),
-                },
-            ) from exc
-        if not isinstance(normalized_identity, dict):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
-        return {
-            "version": 1,
-            "observed": True,
-            "identity": normalized_identity,
-        }
+        return {"version": 1, "observed": False}
 
     @staticmethod
     def _valid_runtime_execution_identity_contract(value: object) -> bool:
         """Return whether a persisted backend execution identity is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        version = value.get("version")
-        observed = value.get("observed")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != 1
-            or not isinstance(observed, bool)
-        ):
-            return False
-        if not observed:
-            return set(value) == {"version", "observed"}
-        identity = value.get("identity")
-        if (
-            set(value) != {"version", "observed", "identity"}
-            or not isinstance(identity, Mapping)
-            or not identity
-        ):
-            return False
-        try:
-            json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            return False
-        return True
+        return valid_runtime_execution_identity_contract(value)
 
     @staticmethod
     def _runtime_execution_proves_effective_model(value: object) -> bool:
         """Return whether a backend identity observed a concrete model/profile."""
-        if not OrchestratorRunner._valid_runtime_execution_identity_contract(value):
+        return runtime_execution_proves_effective_model(value)
+
+    @staticmethod
+    def _begin_process_local_authority_generation() -> _ProcessLocalAuthorityGeneration:
+        """Mint one fresh live-only authority generation for a new session.
+
+        The generation is deliberately returned to the caller rather than kept
+        in a mutable runner-wide slot.  A single runner can prepare several
+        sessions concurrently, and each preparation must retain its exact
+        generation through contract creation and registry binding.
+        """
+        return _mint_process_local_authority_generation()
+
+    @staticmethod
+    def _process_local_authority_contract(
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> dict[str, object]:
+        """Build evidence-only scope data for one issued live generation."""
+        return _process_local_authority_contract(generation)
+
+    def _has_live_process_local_authority(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """Check live authority before restoring runtime-controlled state."""
+        if not isinstance(raw_contract, Mapping):
             return False
-        if not isinstance(value, Mapping) or value.get("observed") is not True:
+        authority = raw_contract.get("foundation_a_authority")
+        return (
+            _live_process_local_authority_generation(
+                session_id,
+                execution_id,
+                authority,
+                self._adapter,
+            )
+            is not None
+        )
+
+    def _has_live_process_local_authority_registration(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """See a local capability without granting another adapter its use.
+
+        This distinction lets an observer reject safely when another live
+        adapter owns the generation, instead of turning a valid paused or
+        transitioning session into a false crash recovery.
+        """
+        if not isinstance(raw_contract, Mapping):
             return False
-        identity = value.get("identity")
-        return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
+        return _has_live_process_local_authority_registration(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+        )
+
+    def _process_local_authority_held_elsewhere(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """Return whether another live owner retains this process-local session.
+
+        A different adapter must never receive the opaque capability, but it
+        must also never turn a valid owner into a false crash-recovery path.
+        The in-process registration covers a foreign adapter in this PID; the
+        PID lease covers a holder in another process.  The exact adapter's own
+        capability is intentionally excluded so normal non-paused validation
+        continues to report the session state rather than an ownership error.
+        """
+        if self._has_live_process_local_authority(session_id, execution_id, raw_contract):
+            return False
+        if self._has_live_process_local_authority_registration(
+            session_id,
+            execution_id,
+            raw_contract,
+        ):
+            return True
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+
+        return is_holder_alive(session_id)
+
+    def _live_process_local_authority_generation(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> _ProcessLocalAuthorityGeneration | None:
+        """Return the registry-issued generation for an already-live session."""
+        if not isinstance(raw_contract, Mapping):
+            return None
+        return _live_process_local_authority_generation(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+            self._adapter,
+        )
+
+    def _claim_process_local_authority_generation(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> tuple[_ProcessLocalAuthorityGeneration | None, bool]:
+        """Claim a live capability before any effectful session work begins."""
+        if not isinstance(raw_contract, Mapping):
+            return None, False
+        return _claim_process_local_authority_generation(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+            self._adapter,
+        )
+
+    def _release_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Make a deliberately paused session resumable in this process again."""
+        _release_process_local_authority_generation(
+            session_id,
+            execution_id,
+            self._adapter,
+        )
+
+    def _register_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        execution_contract: Mapping[str, object],
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> None:
+        """Bind the persisted correlation record to its live process capability."""
+        authority = execution_contract.get("foundation_a_authority")
+        if (
+            not valid_process_local_authority_contract(authority)
+            or authority.get("correlation_id") != generation.correlation_id
+        ):
+            raise OrchestratorError(
+                message="Cannot create an invalid process-local execution authority",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "invalid": "foundation_a_authority",
+                },
+            )
+        from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
+
+        try:
+            _register_process_local_authority_generation(
+                session_id,
+                execution_id,
+                generation,
+                self._adapter,
+            )
+        except ValueError as exc:
+            raise OrchestratorError(
+                message="Cannot register process-local execution authority",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(exc),
+                },
+            ) from exc
+        self._process_local_authorities[(session_id, execution_id)] = generation
+        # Establish the cross-process liveness record as soon as a session owns
+        # a live capability, before a detached caller can observe its persisted
+        # RUNNING tracker.  It is a lease/liveness marker, never authority.
+        try:
+            acquire_session_lock(session_id)
+        except OSError as exc:
+            # A registry entry without its liveness lease would let another
+            # process misclassify a durable RUNNING tracker as crashed. Undo
+            # the exact binding before returning the setup failure.
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            raise OrchestratorError(
+                message="Cannot establish process-local execution liveness lease",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(exc),
+                },
+            ) from exc
+
+    def _retire_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Discard a terminal session's capability only when this adapter owns it."""
+        retired = _retire_process_local_authority_generation(
+            session_id,
+            execution_id,
+            self._adapter,
+        )
+        if retired:
+            from ouroboros.orchestrator.heartbeat import (
+                release_if_owned_by_current_process as release_session_lock,
+            )
+
+            release_session_lock(session_id)
+        self._process_local_authorities.pop((session_id, execution_id), None)
+        return retired
+
+    def _discard_process_local_authority(
+        self,
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> None:
+        """Discard an unregistered capability after failed preparation."""
+        _discard_process_local_authority_generation(generation)
+
+    @staticmethod
+    def _process_local_resume_unavailable_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Return the explicit non-fallback outcome for a lost live generation."""
+        return OrchestratorError(
+            message=(
+                "Cannot resume this process-local execution after its live authority "
+                "generation is unavailable; start a new attempt."
+            ),
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_resume_unavailable",
+            },
+        )
+
+    @staticmethod
+    def _process_local_execution_in_progress_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Return the non-terminal outcome for a concurrent same-process claim."""
+        return OrchestratorError(
+            message="This process-local execution is already active in this process.",
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_execution_in_progress",
+            },
+        )
+
+    @staticmethod
+    def _process_local_authority_held_elsewhere_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Reject an observer without revoking another adapter's live binding."""
+        return OrchestratorError(
+            message=(
+                "This process-local execution is retained by another live runtime "
+                "adapter or process."
+            ),
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_authority_held_elsewhere",
+            },
+        )
+
+    async def _mark_process_local_resume_unavailable(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Terminally record a lost local capability without trying a fallback."""
+        error = self._process_local_resume_unavailable_error(session_id, execution_id)
+        try:
+            result = await self._session_repo.mark_failed(
+                session_id,
+                error.message,
+                error.details,
+            )
+            if result.is_err:
+                log.warning(
+                    "orchestrator.runner.process_local_resume_terminal_mark_failed",
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    error=str(result.error),
+                )
+        except Exception as exc:  # pragma: no cover - best-effort terminal record
+            log.warning(
+                "orchestrator.runner.process_local_resume_terminal_mark_raised",
+                session_id=session_id,
+                execution_id=execution_id,
+                error=str(exc),
+            )
+        self._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        return error
+
+    async def _mark_preparation_failed_best_effort(
+        self,
+        *,
+        tracker: SessionTracker,
+        message: str,
+        details: Mapping[str, Any],
+    ) -> str | None:
+        """Record a post-start preparation failure without masking cleanup.
+
+        ``create_session`` has already written a RUNNING durable tracker by
+        the time initial progress is persisted.  If that second write fails,
+        leave neither an apparently resumable RUNNING session nor a live
+        process-local capability behind.  A persistence failure while writing
+        this terminal state is reported as diagnostics, never allowed to skip
+        authority retirement.
+        """
+        try:
+            result = await self._session_repo.mark_failed(
+                tracker.session_id,
+                message,
+                dict(details),
+            )
+        except Exception as exc:  # pragma: no cover - defensive persistence boundary
+            log.warning(
+                "orchestrator.runner.prepare_terminal_mark_raised",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=str(exc),
+            )
+            return str(exc)
+        if result.is_err:
+            log.warning(
+                "orchestrator.runner.prepare_terminal_mark_failed",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=str(result.error),
+            )
+            return str(result.error)
+        return None
 
     def _validate_resume_handle_execution_identity(
         self,
@@ -2003,6 +2279,7 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         seed_fingerprint: str | None = None,
+        authority_generation: _ProcessLocalAuthorityGeneration | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -2026,8 +2303,22 @@ class OrchestratorRunner:
             resolved_seed_fingerprint = self._seed_semantics_fingerprint(seed)
         if resolved_seed_fingerprint is not None:
             proof_contract["seed_fingerprint"] = resolved_seed_fingerprint
+        if authority_generation is None:
+            # Diagnostics and contract-validation callers need attribution
+            # shape, not a live capability. Do not mint a registry issuance
+            # here: there is no session lifecycle that could register and
+            # retire it. The random correlation remains evidence-only, and
+            # cannot be claimed or registered without an explicit generation.
+            authority_contract: dict[str, object] = {
+                "version": 1,
+                "scope": "process_local",
+                "correlation_id": uuid4().hex,
+            }
+        else:
+            authority_contract = self._process_local_authority_contract(authority_generation)
         return {
             "version": EXECUTION_CONTRACT_VERSION,
+            "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
@@ -2274,6 +2565,7 @@ class OrchestratorRunner:
         progress: Mapping[str, Any],
         *,
         seed: Seed | None = None,
+        authority_generation: _ProcessLocalAuthorityGeneration | None = None,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
@@ -2285,7 +2577,10 @@ class OrchestratorRunner:
         if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
             self._validate_legacy_resume_identity(progress, seed=seed)
             self._execution_guidance = self._resolve_guidance_bundle(())
-            self._execution_contract = self._build_execution_contract(seed=seed)
+            self._execution_contract = self._build_execution_contract(
+                seed=seed,
+                authority_generation=authority_generation,
+            )
             # One unavoidable recomputation migrates a legacy session. Persist the
             # resolved contract now so every later resume restores this exact policy
             # instead of drifting again with each environment/config change.
@@ -2308,14 +2603,18 @@ class OrchestratorRunner:
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        raw_authority = raw_contract.get("foundation_a_authority")
         if (
             not isinstance(raw_proof, Mapping)
             or not isinstance(raw_routing, Mapping)
             or not isinstance(raw_resume, Mapping)
+            or not valid_process_local_authority_contract(raw_authority)
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
-                details={"missing": "frugality_proof, model_routing, or resume"},
+                details={
+                    "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
+                },
             )
 
         self._restore_guidance_contract(raw_contract)
@@ -2504,6 +2803,9 @@ class OrchestratorRunner:
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
         )
+        process_local_authority = valid_process_local_authority_contract(
+            raw_contract.get("foundation_a_authority")
+        )
         model_override_support = getattr(
             getattr(self._adapter, "capabilities", None),
             "model_override_support",
@@ -2513,6 +2815,7 @@ class OrchestratorRunner:
             constructor_model_value is None
             and not effective_model_observed
             and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
+            and not process_local_authority
         ):
             raise OrchestratorError(
                 message="Cannot resume because the effective runtime model is unverifiable",
@@ -2530,10 +2833,18 @@ class OrchestratorRunner:
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
-            self._execution_contract = self._build_execution_contract(
+            replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+                authority_generation=authority_generation,
             )
+            # Only the public resume path reaches this branch with a live,
+            # registry-issued generation.  Preserve the persisted diagnostics
+            # in direct contract-validation calls so those calls cannot mint a
+            # replacement correlation id by accident.
+            if authority_generation is None:
+                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
+            self._execution_contract = replacement
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
@@ -2552,11 +2863,8 @@ class OrchestratorRunner:
     def _proof_cohort_identity(
         event_data: Mapping[str, Any],
     ) -> tuple[str, str, str, int, str, str, str] | None:
-        """Extract the exact fail-closed identity tuple from a session start."""
-        raw_seed_id = event_data.get("seed_id")
+        """Reject cross-run proof cohorts for Foundation A process-local runs."""
         raw_contract = event_data.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-        if not isinstance(raw_seed_id, str) or not raw_seed_id.strip():
-            return None
         if not isinstance(raw_contract, Mapping):
             return None
         raw_version = raw_contract.get("version")
@@ -2566,79 +2874,11 @@ class OrchestratorRunner:
             or raw_version != EXECUTION_CONTRACT_VERSION
         ):
             return None
-        proof_contract = raw_contract.get("frugality_proof")
-        if not isinstance(proof_contract, Mapping):
-            return None
-        routing_contract = raw_contract.get("model_routing")
-        if not isinstance(routing_contract, Mapping):
-            return None
-        guidance_contract = raw_contract.get("guidance")
-        if guidance_contract is None:
-            guidance_fingerprint = "legacy:no-declared-guidance"
-        elif isinstance(guidance_contract, Mapping):
-            guidance_fingerprint = guidance_contract.get("rendered_fragment_hash")
-            if (
-                guidance_contract.get("provenance_scope") != "ouroboros_declared_guidance_only"
-                or not isinstance(guidance_fingerprint, str)
-                or not guidance_fingerprint.startswith("sha256:")
-                or len(guidance_fingerprint) != 71
-            ):
-                return None
-        else:
-            return None
-        runtime_backend = routing_contract.get("runtime_backend")
-        llm_backend = routing_contract.get("llm_backend")
-        permission_mode = routing_contract.get("permission_mode")
-        constructor_model = routing_contract.get("constructor_model")
-        runtime_execution = routing_contract.get("runtime_execution")
-        if (
-            not isinstance(runtime_backend, str)
-            or not runtime_backend.strip()
-            or not isinstance(llm_backend, str)
-            or not llm_backend.strip()
-            or not OrchestratorRunner._valid_permission_mode_contract(permission_mode)
-            or not OrchestratorRunner._valid_constructor_model_contract(constructor_model)
-            or not OrchestratorRunner._valid_runtime_execution_identity_contract(runtime_execution)
-        ):
-            return None
-        protocol_version = proof_contract.get("protocol_version")
-        project_root = proof_contract.get("project_root")
-        workspace_path = proof_contract.get("workspace_path")
-        routing_fingerprint = proof_contract.get("routing_fingerprint")
-        seed_fingerprint = proof_contract.get("seed_fingerprint")
-        if (
-            isinstance(protocol_version, bool)
-            or not isinstance(protocol_version, int)
-            or protocol_version < 1
-        ):
-            return None
-        if not isinstance(project_root, str) or not project_root.strip():
-            return None
-        if not isinstance(workspace_path, str) or not workspace_path.strip():
-            return None
-        if (
-            not isinstance(routing_fingerprint, str)
-            or len(routing_fingerprint) != 64
-            or any(char not in "0123456789abcdef" for char in routing_fingerprint)
-        ):
-            return None
-        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(routing_contract):
-            return None
-        if (
-            not isinstance(seed_fingerprint, str)
-            or len(seed_fingerprint) != 64
-            or any(char not in "0123456789abcdef" for char in seed_fingerprint)
-        ):
-            return None
-        return (
-            raw_seed_id.strip(),
-            project_root.strip(),
-            workspace_path.strip(),
-            protocol_version,
-            routing_fingerprint,
-            seed_fingerprint,
-            guidance_fingerprint,
-        )
+        # Foundation A's current correlation record is diagnostic attribution
+        # only.  It must not form a replay, idempotency, trust, or cross-run
+        # proof cohort key.  A future portable authority needs its own reviewed
+        # consumer rule rather than falling through this legacy proof path.
+        return None
 
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
         """Create a dependency analyzer wired to the active LLM backend when available.
@@ -3481,6 +3721,10 @@ class OrchestratorRunner:
             )
             for ev in session_events:
                 if ev.type in _terminal_event_types:
+                    self._retire_process_local_authority(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     log.info(
                         "orchestrator.runner.cancel_skipped_terminal",
                         execution_id=execution_id,
@@ -3522,6 +3766,10 @@ class OrchestratorRunner:
                 )
             )
 
+        self._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
         await self._report_frugality_retrospective(
             execution_id=execution_id,
             session_id=session_id,
@@ -3789,6 +4037,10 @@ class OrchestratorRunner:
 
         # Clean up session tracking
         self._unregister_session(execution_id, session_id)
+        self._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
         if self._task_workspace is not None:
             release_lock(self._task_workspace.lock_path)
 
@@ -3918,7 +4170,11 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
-        session_result = await self.prepare_session(seed, execution_id=execution_id)
+        session_result = await self.prepare_session(
+            seed,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
         if session_result.is_err:
             return Result.err(session_result.error)
 
@@ -3946,39 +4202,107 @@ class OrchestratorRunner:
         immediately and then start the actual runtime work asynchronously.
         """
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
+        resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
+        # A generation belongs to this one preparation call.  Do not store it
+        # in a runner-wide mutable slot: concurrent preparations must not share
+        # a capability or correlation id.
+        authority_generation = self._begin_process_local_authority_generation()
         try:
             execution_contract = await asyncio.to_thread(
                 self._build_execution_contract,
                 seed=seed,
+                authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
         except OrchestratorError as exc:
+            self._discard_process_local_authority(authority_generation)
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
             return Result.err(exc)
         self._execution_contract = execution_contract
-        session_result = await self._session_repo.create_session(
-            execution_id=exec_id,
-            seed_id=seed.metadata.seed_id,
-            session_id=session_id,
-            seed_goal=seed.goal,
-            runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            llm_backend=getattr(self._adapter, "llm_backend", None),
-            execution_contract=execution_contract,
-        )
+
+        # Establish the exact capability and PID liveness lease before any
+        # durable RUNNING tracker can be reconstructed by an observer.  The
+        # resolved session id is allocated locally for that purpose rather
+        # than delegated to SessionRepository after its start event is written.
+        try:
+            self._register_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+                execution_contract=execution_contract,
+                generation=authority_generation,
+            )
+        except OrchestratorError as exc:
+            self._discard_process_local_authority(authority_generation)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return Result.err(exc)
+
+        try:
+            session_result = await self._session_repo.create_session(
+                execution_id=exec_id,
+                seed_id=seed.metadata.seed_id,
+                session_id=resolved_session_id,
+                seed_goal=seed.goal,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                llm_backend=getattr(self._adapter, "llm_backend", None),
+                execution_contract=execution_contract,
+            )
+        except Exception as exc:
+            self._retire_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return Result.err(
+                OrchestratorError(
+                    message=f"Failed to create session: {exc}",
+                    details={"execution_id": exec_id, "session_id": resolved_session_id},
+                )
+            )
 
         if session_result.is_err:
+            self._retire_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to create session: {session_result.error}",
-                    details={"execution_id": exec_id, "session_id": session_id},
+                    details={"execution_id": exec_id, "session_id": resolved_session_id},
                 )
             )
 
         tracker = session_result.value
+        if tracker.session_id != resolved_session_id or tracker.execution_id != exec_id:
+            # The registration and its early lease were established for the
+            # caller-supplied durable identity before ``create_session`` wrote
+            # ``session.started``.  Accepting a repository response for a
+            # different identity would attach that capability to a tracker that
+            # was never protected during publication.  This is a repository
+            # contract violation, not a reason to mutate or terminalize the
+            # unrelated returned tracker.
+            self._retire_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return Result.err(
+                OrchestratorError(
+                    message="Session repository returned an unexpected session identity",
+                    details={
+                        "expected_session_id": resolved_session_id,
+                        "expected_execution_id": exec_id,
+                        "returned_session_id": tracker.session_id,
+                        "returned_execution_id": tracker.execution_id,
+                    },
+                )
+            )
         initial_progress: dict[str, Any] = {
             "fat_harness_mode": self._fat_harness_mode,
             "messages_processed": 0,
@@ -3986,35 +4310,62 @@ class OrchestratorRunner:
         }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
-        progress_result = await self._session_repo.track_progress(
-            tracker.session_id,
-            initial_progress,
-        )
-        if progress_result.is_err:
-            fail_result = await self._session_repo.mark_failed(
+        try:
+            progress_result = await self._session_repo.track_progress(
                 tracker.session_id,
-                "Failed to persist initial session contract",
-                {
-                    "execution_id": tracker.execution_id,
-                    "fat_harness_mode": self._fat_harness_mode,
-                    "cause": str(progress_result.error),
-                },
+                initial_progress,
+            )
+        except Exception as exc:
+            progress_exception_details: dict[str, Any] = {
+                "session_id": tracker.session_id,
+                "execution_id": tracker.execution_id,
+                "fat_harness_mode": self._fat_harness_mode,
+                "cause": str(exc),
+            }
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to persist initial session contract",
+                details=progress_exception_details,
+            )
+            self._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
             )
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
-
-            details: dict[str, Any] = {
+            if terminal_mark_error is not None:
+                progress_exception_details["terminal_mark_error"] = terminal_mark_error
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to persist initial session contract",
+                    details=progress_exception_details,
+                )
+            )
+        if progress_result.is_err:
+            progress_result_details: dict[str, Any] = {
                 "session_id": tracker.session_id,
                 "execution_id": tracker.execution_id,
                 "fat_harness_mode": self._fat_harness_mode,
                 "cause": str(progress_result.error),
             }
-            if fail_result.is_err:
-                details["terminal_mark_error"] = str(fail_result.error)
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to persist initial session contract",
+                details=progress_result_details,
+            )
+            self._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+
+            if terminal_mark_error is not None:
+                progress_result_details["terminal_mark_error"] = terminal_mark_error
             return Result.err(
                 OrchestratorError(
                     message="Failed to persist initial session contract",
-                    details=details,
+                    details=progress_result_details,
                 )
             )
 
@@ -4038,30 +4389,73 @@ class OrchestratorRunner:
         set_console_logging(self._debug)
 
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-        if raw_contract is not None:
-            if not isinstance(raw_contract, Mapping):
-                self._cleanup_pre_execution_state(
-                    tracker.execution_id,
-                    tracker.session_id,
-                    session_registered=False,
+        if tracker.status in (
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        ):
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=f"Session is in terminal state {tracker.status.value}, cannot execute",
+                    details={"session_id": tracker.session_id, "status": tracker.status.value},
                 )
+            )
+
+        # This API may execute only the tracker returned by ``prepare_session``.
+        # A legacy/reconstructed tracker with no contract is not a new-session
+        # shortcut: it has no Foundation A generation and must fail closed before
+        # prompts, tool setup, or any runtime-owned provider are consulted.
+        authority_generation, authority_claimed = self._claim_process_local_authority_generation(
+            tracker.session_id,
+            exec_id,
+            raw_contract,
+        )
+        if authority_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        if authority_generation is None:
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
                 return Result.err(
-                    OrchestratorError(
-                        message="Cannot execute with an invalid execution contract",
-                        details={"invalid": "execution_contract"},
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
                     )
                 )
-            try:
-                await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
-                self._execution_guidance_delivery_mode()
-            except OrchestratorError as exc:
-                self._cleanup_pre_execution_state(
-                    tracker.execution_id,
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
                     tracker.session_id,
-                    session_registered=False,
+                    tracker.execution_id,
                 )
-                return Result.err(exc)
-            self._execution_contract = dict(raw_contract)
+            )
+        try:
+            await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
+            self._execution_guidance_delivery_mode()
+        except OrchestratorError as exc:
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(exc)
+        self._execution_contract = dict(raw_contract)
 
         log.info(
             "orchestrator.runner.execute_started",
@@ -4599,7 +4993,21 @@ class OrchestratorRunner:
             )
 
             # Clean up session tracking
-            self._unregister_session(exec_id, tracker.session_id)
+            if terminal_status != "paused":
+                self._retire_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                )
+            else:
+                self._release_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                )
+            self._unregister_session(
+                exec_id,
+                tracker.session_id,
+                release_liveness_lease=terminal_status != "paused",
+            )
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
 
@@ -4627,6 +5035,10 @@ class OrchestratorRunner:
                     messages_processed=messages_processed,
                     start_time=start_time,
                 )
+            self._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
             self._unregister_session(exec_id, tracker.session_id)
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
@@ -4654,6 +5066,10 @@ class OrchestratorRunner:
             await self._session_repo.mark_failed(
                 tracker.session_id,
                 str(e),
+            )
+            self._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
             )
             await self._event_store.append(
                 create_execution_terminal_event(
@@ -5041,7 +5457,21 @@ class OrchestratorRunner:
         )
 
         # Clean up session tracking
-        self._unregister_session(exec_id, tracker.session_id)
+        if terminal_status != "paused":
+            self._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+        else:
+            self._release_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+        self._unregister_session(
+            exec_id,
+            tracker.session_id,
+            release_liveness_lease=terminal_status != "paused",
+        )
         await clear_cancellation(tracker.session_id)
         if self._task_workspace is not None:
             release_lock(self._task_workspace.lock_path)
@@ -5159,11 +5589,117 @@ class OrchestratorRunner:
                 )
             )
 
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            error = await self._mark_process_local_resume_unavailable(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            return Result.err(error)
+
+        # A RUNNING tracker with a current Foundation A contract belongs to an
+        # active process while its early liveness lease is held.  If the lease
+        # is gone and this process has no live registry capability, the prior
+        # owner has crashed or exited and Foundation A must terminally reject it
+        # rather than leave a restartable-looking RUNNING session stranded.
+        if tracker.status != SessionStatus.PAUSED:
+            own_live_authority = self._has_live_process_local_authority(
+                session_id,
+                tracker.execution_id,
+                raw_contract,
+            )
+            held_elsewhere = (
+                not own_live_authority
+                and self._process_local_authority_held_elsewhere(
+                    session_id,
+                    tracker.execution_id,
+                    raw_contract,
+                )
+            )
+            if not own_live_authority and not held_elsewhere:
+                error = await self._mark_process_local_resume_unavailable(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._cleanup_pre_execution_state(
+                    tracker.execution_id,
+                    session_id,
+                    session_registered=False,
+                )
+                return Result.err(error)
+            if held_elsewhere:
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        session_id,
+                        tracker.execution_id,
+                    )
+                )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+                retire_authority=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=f"Session is not paused and cannot resume ({tracker.status.value})",
+                    details={
+                        "session_id": session_id,
+                        "status": tracker.status.value,
+                        "resume_blocked": "session_not_paused",
+                    },
+                )
+            )
+
+        # This is intentionally before Foundation A contract restoration,
+        # resume-handle selection, and every runtime-owned identity provider.
+        # The durable correlation id cannot recreate this process's capability.
+        authority_generation, authority_claimed = self._claim_process_local_authority_generation(
+            session_id,
+            tracker.execution_id,
+            raw_contract,
+        )
+        if authority_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
+                    session_id,
+                    tracker.execution_id,
+                )
+            )
+        if authority_generation is None:
+            if self._process_local_authority_held_elsewhere(
+                session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        session_id,
+                        tracker.execution_id,
+                    )
+                )
+            error = await self._mark_process_local_resume_unavailable(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+            )
+            return Result.err(error)
+
         try:
             execution_contract_changed = await asyncio.to_thread(
                 self._restore_execution_contract,
                 tracker.progress,
                 seed=seed,
+                authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
         except OrchestratorError as exc:
@@ -5257,6 +5793,13 @@ Note: This is a resumed session. Please continue from where execution was interr
                 activity_map=resume_strategy.get_activity_map(),
             )
             await self._replay_workflow_state(session_id, state_tracker)
+        except asyncio.CancelledError:
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=session_registered,
+            )
+            raise
         except Exception as e:
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
@@ -5516,7 +6059,21 @@ Note: This is a resumed session. Please continue from where execution was interr
             await clear_cancellation(session_id)
 
             # Clean up session tracking
-            self._unregister_session(tracker.execution_id, session_id)
+            if terminal_status != "paused":
+                self._retire_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+            else:
+                self._release_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+            self._unregister_session(
+                tracker.execution_id,
+                session_id,
+                release_liveness_lease=terminal_status != "paused",
+            )
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
 
@@ -5532,6 +6089,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
             )
 
+        except asyncio.CancelledError:
+            if await is_cancellation_requested(session_id):
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._unregister_session(tracker.execution_id, session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            raise
         except Exception as e:
             log.exception(
                 "orchestrator.runner.resume_failed",
@@ -5550,6 +6123,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     status="failed",
                     error_message=str(e),
                 )
+            )
+            await self._session_repo.mark_failed(session_id, str(e))
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
             )
             await self._report_frugality_retrospective(
                 execution_id=tracker.execution_id,

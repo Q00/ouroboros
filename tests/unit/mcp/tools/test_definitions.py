@@ -168,6 +168,9 @@ class TestExecuteSeedHandler:
             def __init__(self, *args: object, fat_harness_mode: bool, **kwargs: object) -> None:
                 captured_modes.append(fat_harness_mode)
 
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
+
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(fresh_tracker)
 
@@ -295,6 +298,9 @@ class TestExecuteSeedHandler:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
+
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(tracker)
 
@@ -379,6 +385,9 @@ class TestExecuteSeedHandler:
         class FakeRunner:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
+
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
 
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(running_tracker)
