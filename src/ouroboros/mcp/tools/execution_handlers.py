@@ -847,9 +847,35 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             result = await session_repo.reconstruct_session(tracker.session_id)
         except Exception:
             result = None
-        if result is not None and result.is_ok and result.value.status == SessionStatus.PAUSED:
-            self._remember_process_local_owner(result.value, runner)
+        terminal_record_observed = False
+        if result is not None and result.is_ok:
+            status = result.value.status
+            if status == SessionStatus.PAUSED:
+                self._remember_process_local_owner(result.value, runner)
+                if self._process_local_resume_owners.get(tracker.session_id) is runner:
+                    return True, None
+            elif status in (
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            ):
+                # An explicit terminal record is the one durable observation
+                # that may evict a retained owner while its handler unwinds.
+                terminal_record_observed = True
+
+        raw_contract = tracker.progress.get("execution_contract")
+        # Read errors, Result.err, and RUNNING (or a future nonterminal state)
+        # are inconclusive during post-run reconciliation. Preserve the owner
+        # only while its opaque capability still proves it is live. A durable
+        # terminal record is intentionally the one exception.
+        if not terminal_record_observed and runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            raw_contract,
+        ):
+            self._remember_process_local_owner(tracker, runner)
             return self._process_local_resume_owners.get(tracker.session_id) is runner, None
+
         owned_event_store: EventStore | None = None
         if self._process_local_resume_owners.get(tracker.session_id) is runner:
             self._process_local_resume_owners.pop(tracker.session_id, None)
