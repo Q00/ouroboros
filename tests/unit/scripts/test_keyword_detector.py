@@ -408,3 +408,15 @@ class TestHookProtocol:
         output = json.loads(capsys.readouterr().out)
         context = output["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:status" in context
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_deeply_nested_raw_json_falls_back_without_crashing(self, _first, capsys):
+        raw_prompt = "[" * 10_000 + "]" * 10_000
+        with (
+            patch("sys.stdin") as mock_stdin,
+            patch.object(_mod.json, "loads", side_effect=RecursionError),
+        ):
+            mock_stdin.read.return_value = raw_prompt
+            main()
+
+        assert capsys.readouterr().out == ""

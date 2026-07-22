@@ -279,7 +279,7 @@ def _extract_prompt(hook_input: str) -> str:
     """Extract prompt text from a hook payload, falling back to raw stdin."""
     try:
         payload = json.loads(hook_input)
-    except ValueError:
+    except (ValueError, RecursionError):
         return hook_input
 
     if (
