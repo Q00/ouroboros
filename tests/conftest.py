@@ -22,6 +22,30 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 os.environ["OUROBOROS_DASHBOARD"] = "0"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolate_heartbeat_locks_per_test_worker(tmp_path_factory):
+    """Keep xdist workers from competing over illustrative session IDs.
+
+    Unit tests intentionally use short deterministic IDs (for example
+    ``sess_1``). Production's liveness lease correctly rejects those IDs when
+    two independent processes own them concurrently, but xdist workers are
+    independent processes too. Give each worker a private lock directory while
+    preserving real lease semantics within that worker.
+    """
+    from ouroboros.orchestrator import heartbeat
+
+    previous_lock_dir = heartbeat.LOCK_DIR
+    heartbeat.LOCK_DIR = tmp_path_factory.mktemp("heartbeat-locks")
+    try:
+        yield
+    finally:
+        # A cancellation-focused test may deliberately leave a session alive.
+        # Close those descriptors before pytest tears down the worker.
+        for session_id in tuple(heartbeat._HELD_LEASE_FDS):
+            heartbeat.release(session_id)
+        heartbeat.LOCK_DIR = previous_lock_dir
+
+
 @pytest.fixture(autouse=True)
 def block_runner_real_llm_adapter(monkeypatch):
     """Block execute_seed's dependency analysis from spawning real agent CLIs.
