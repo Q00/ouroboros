@@ -39,6 +39,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runner import (
+    EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
     OrchestratorResult,
     OrchestratorRunner,
@@ -61,6 +62,29 @@ def _task_workspace() -> TaskWorkspace:
         branch="ooo/orch_test",
         lock_path="/tmp/worktree/.locks/repo/orch_test.json",
     )
+
+
+def _attach_live_process_local_contract(
+    runner: OrchestratorRunner,
+    tracker: SessionTracker,
+    seed: Seed,
+    *,
+    session_id: str,
+) -> SessionTracker:
+    """Build the same-process capability required by resume-focused tests."""
+    if not isinstance(getattr(runner._adapter, "llm_backend", None), str):
+        runner._adapter.llm_backend = "test-llm"
+    if not isinstance(getattr(runner._adapter, "_model", None), str):
+        runner._adapter._model = "test-model"
+    generation = runner._begin_process_local_authority_generation()
+    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    runner._register_process_local_authority(
+        session_id=session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=contract,
+        generation=generation,
+    )
+    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 
 def test_seed_investment_detection_supports_legacy_string_criteria(sample_seed: Seed) -> None:
@@ -664,7 +688,13 @@ class TestOrchestratorRunner:
         from ouroboros.core.types import Result
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -723,7 +753,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -770,21 +806,27 @@ class TestOrchestratorRunner:
                 session_id="orch_prepared",
             )
 
-        assert result.is_ok
-        assert result.value.session_id == tracker.session_id
-        assert result.value.progress["fat_harness_mode"] is False
-        assert result.value.messages_processed == 0
-        assert runner._execution_contract is not None
-        create_session.assert_awaited_once_with(
-            execution_id="exec_prepared",
-            seed_id=sample_seed.metadata.seed_id,
-            session_id="orch_prepared",
-            seed_goal=sample_seed.goal,
-            # Backend is forwarded so the live dashboard can provider-tag the run.
-            runtime_backend=runner._adapter.runtime_backend,
-            llm_backend=runner._adapter.llm_backend,
-            execution_contract=runner._execution_contract,
-        )
+        try:
+            assert result.is_ok
+            assert result.value.session_id == tracker.session_id
+            assert result.value.progress["fat_harness_mode"] is False
+            assert result.value.messages_processed == 0
+            assert runner._execution_contract is not None
+            create_session.assert_awaited_once_with(
+                execution_id="exec_prepared",
+                seed_id=sample_seed.metadata.seed_id,
+                session_id="orch_prepared",
+                seed_goal=sample_seed.goal,
+                # Backend is forwarded so the live dashboard can provider-tag the run.
+                runtime_backend=runner._adapter.runtime_backend,
+                llm_backend=runner._adapter.llm_backend,
+                execution_contract=runner._execution_contract,
+            )
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
     @pytest.mark.asyncio
     async def test_prepare_session_fails_when_initial_contract_cannot_persist(
@@ -828,6 +870,7 @@ class TestOrchestratorRunner:
             "orch_prepared",
             "Failed to persist initial session contract",
             {
+                "session_id": "orch_prepared",
                 "execution_id": "exec_prepared",
                 "fat_harness_mode": False,
                 "cause": "store unavailable",
@@ -862,7 +905,11 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert result.value == orchestrator_result
-        prepare_session.assert_awaited_once_with(sample_seed, execution_id="exec_delegated")
+        prepare_session.assert_awaited_once_with(
+            sample_seed,
+            execution_id="exec_delegated",
+            session_id=None,
+        )
         execute_precreated.assert_awaited_once_with(
             seed=sample_seed,
             tracker=tracker,
@@ -898,7 +945,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -954,7 +1007,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -1167,7 +1226,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -1255,7 +1320,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -1316,7 +1387,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_failed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -1342,6 +1419,12 @@ class TestOrchestratorRunner:
             "exec_usage_limit",
             sample_seed.metadata.seed_id,
             session_id="sess_usage_limit",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
         )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -1416,7 +1499,13 @@ class TestOrchestratorRunner:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         mark_failed = AsyncMock(return_value=Result.ok(None))
 
@@ -1500,7 +1589,11 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
-        tracker = SessionTracker.create("exec_setup", sample_seed.metadata.seed_id)
+        tracker = SessionTracker.create(
+            "exec_setup",
+            sample_seed.metadata.seed_id,
+            session_id="orch_setup",
+        )
 
         with (
             patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
@@ -1515,7 +1608,11 @@ class TestOrchestratorRunner:
             patch.object(runner, "_unregister_session") as unregister_mock,
             patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
         ):
-            result = await runner.execute_seed(sample_seed, execution_id="exec_setup")
+            result = await runner.execute_seed(
+                sample_seed,
+                execution_id="exec_setup",
+                session_id=tracker.session_id,
+            )
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_setup", tracker.session_id)
@@ -1539,7 +1636,11 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
-        tracker = SessionTracker.create("exec_tools", sample_seed.metadata.seed_id)
+        tracker = SessionTracker.create(
+            "exec_tools",
+            sample_seed.metadata.seed_id,
+            session_id="orch_tools",
+        )
 
         with (
             patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
@@ -1547,7 +1648,11 @@ class TestOrchestratorRunner:
             patch.object(runner, "_unregister_session") as unregister_mock,
             patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
         ):
-            result = await runner.execute_seed(sample_seed, execution_id="exec_tools")
+            result = await runner.execute_seed(
+                sample_seed,
+                execution_id="exec_tools",
+                session_id=tracker.session_id,
+            )
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_tools", tracker.session_id)
@@ -1630,9 +1735,8 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
         )
-
         with (
             patch.object(
                 runner._session_repo,
@@ -1686,7 +1790,7 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
         )
 
         with (
@@ -1728,7 +1832,13 @@ class TestOrchestratorRunner:
             fat_harness_mode=False,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
+        )
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume_tool_setup",
         )
 
         with (
@@ -1741,10 +1851,10 @@ class TestOrchestratorRunner:
             patch.object(runner, "_unregister_session") as unregister_mock,
             patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_tool_setup", sample_seed)
 
         assert result.is_err
-        unregister_mock.assert_called_once_with("exec_resume", "sess_resume")
+        unregister_mock.assert_called_once_with("exec_resume", "sess_resume_tool_setup")
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
@@ -1775,7 +1885,13 @@ class TestOrchestratorRunner:
     ) -> None:
         """Recoverable resume bootstrap failures should not poison the session."""
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
+        )
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume_recoverable",
         )
         runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
 
@@ -1816,7 +1932,7 @@ class TestOrchestratorRunner:
                 AsyncMock(return_value=False),
             ) as retrospective,
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_recoverable", sample_seed)
 
         assert result.is_ok
         assert result.value.success is False
@@ -1824,6 +1940,10 @@ class TestOrchestratorRunner:
         mark_paused.assert_awaited_once()
         mark_failed.assert_not_called()
         retrospective.assert_not_awaited()
+        runner._retire_process_local_authority(
+            session_id="sess_resume_recoverable",
+            execution_id=running_tracker.execution_id,
+        )
 
     def test_recoverable_failure_ignores_ordinary_429(
         self,
@@ -2189,6 +2309,12 @@ class TestOrchestratorRunner:
         paused_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
         )
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_paused",
+        )
         runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -2214,7 +2340,7 @@ class TestOrchestratorRunner:
                 AsyncMock(return_value=Result.ok(None)),
             ) as mark_completed,
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_paused", sample_seed)
 
         assert result.is_ok
         assert result.value.success is True
@@ -2317,9 +2443,15 @@ class TestOrchestratorRunner:
             native_session_id="sess_runtime",
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
         )
         running_tracker = running_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume_runtime_handle",
+        )
 
         captured_kwargs: dict[str, Any] = {}
 
@@ -2344,7 +2476,7 @@ class TestOrchestratorRunner:
             patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
             patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_runtime_handle", sample_seed)
 
         assert result.is_ok
         resume_handle = captured_kwargs["resume_handle"]
@@ -2479,13 +2611,19 @@ class TestOrchestratorRunner:
         """Resume should rebuild workflow state from persisted progress before streaming."""
         runtime_handle = RuntimeHandle(backend="opencode", native_session_id="oc-session-123")
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
         )
         running_tracker = running_tracker.with_progress(
             {
                 "runtime": runtime_handle.to_dict(),
                 "messages_processed": 4,
             }
+        )
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume_progress",
         )
 
         async def mock_reconstruct(*args: Any, **kwargs: Any):
@@ -2507,7 +2645,7 @@ class TestOrchestratorRunner:
             BaseEvent(
                 type="orchestrator.progress.updated",
                 aggregate_type="session",
-                aggregate_id="sess_resume",
+                aggregate_id="sess_resume_progress",
                 data={
                     "message_type": "assistant",
                     "content_preview": "[AC_COMPLETE: 1] Finished the first criterion.",
@@ -2524,7 +2662,7 @@ class TestOrchestratorRunner:
             patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
             patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_progress", sample_seed)
 
         assert result.is_ok
         workflow_events = [
@@ -2782,6 +2920,12 @@ class TestOrchestratorRunner:
             fat_harness_mode=True,
         )
         tracker = SessionTracker.create("exec_profile_prompt", sample_seed.metadata.seed_id)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -2838,6 +2982,12 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            single_ac_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -2893,6 +3043,12 @@ class TestOrchestratorRunner:
         )
         tracker = SessionTracker.create("exec_investment_single", investment_seed.metadata.seed_id)
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            investment_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -2946,6 +3102,12 @@ class TestOrchestratorRunner:
             investment_seed.metadata.seed_id,
         )
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            investment_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -3004,6 +3166,12 @@ class TestOrchestratorRunner:
             investment_seed.metadata.seed_id,
         )
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            investment_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -3049,6 +3217,12 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -3084,6 +3258,12 @@ class TestOrchestratorRunner:
 
         tracker = SessionTracker.create("exec_forced", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
         expected = Result.ok(
             OrchestratorResult(
                 success=True,
@@ -3537,7 +3717,13 @@ class TestOrchestratorRunner:
         from ouroboros.core.types import Result
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -4225,7 +4411,13 @@ class TestOrchestratorRunnerWithMCP:
 
         # Mock session creation
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -4378,7 +4570,13 @@ class TestCancellationPolling:
         mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event]])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_cancelled(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -4420,7 +4618,13 @@ class TestCancellationPolling:
         mock_event_store.query_events = AsyncMock(return_value=[])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_mark_completed(*args: Any, **kwargs: Any):
             return Result.ok(None)
@@ -4458,11 +4662,17 @@ class TestCancellationPolling:
 
         mock_adapter.execute_task = mock_execute
 
-        cancel_event = create_session_cancelled_event("sess_resume", "User requested")
+        cancel_event = create_session_cancelled_event("sess_resume_cancelled", "User requested")
         mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
 
         running_tracker = SessionTracker.create("exec_resume", "seed_1").with_status(
-            SessionStatus.RUNNING
+            SessionStatus.PAUSED
+        )
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume_cancelled",
         )
 
         async def mock_reconstruct(*args: Any, **kwargs: Any):
@@ -4475,7 +4685,7 @@ class TestCancellationPolling:
             patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
             patch.object(runner._session_repo, "mark_cancelled", mock_mark_cancelled),
         ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+            result = await runner.resume_session("sess_resume_cancelled", sample_seed)
 
         assert result.is_ok
         assert result.value.success is False

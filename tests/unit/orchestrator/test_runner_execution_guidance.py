@@ -110,7 +110,7 @@ def test_resume_rejects_changed_guidance_content(tmp_path: Path) -> None:
         )
 
 
-def test_proof_cohort_identity_includes_guidance_hash(tmp_path: Path) -> None:
+def test_process_local_contract_never_forms_a_guidance_proof_cohort(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     guided, _store = _runner(tmp_path, ("team",))
     unguided, _store = _runner(tmp_path, ())
@@ -128,10 +128,8 @@ def test_proof_cohort_identity_includes_guidance_hash(tmp_path: Path) -> None:
         }
     )
 
-    assert guided_identity is not None
-    assert unguided_identity is not None
-    assert guided_identity != unguided_identity
-    assert guided_identity[-1] != unguided_identity[-1]
+    assert guided_identity is None
+    assert unguided_identity is None
 
 
 @pytest.mark.asyncio
@@ -155,18 +153,31 @@ async def test_each_new_run_reloads_declared_guidance(tmp_path: Path) -> None:
             AsyncMock(return_value=Result.ok(None)),
         ),
     ):
-        first = await runner.prepare_session(_seed(), execution_id="exec-one")
+        first = await runner.prepare_session(
+            _seed(),
+            execution_id="exec-one",
+            session_id=trackers[0].session_id,
+        )
         assert first.is_ok
         assert runner._execution_contract is not None
         first_hash = runner._execution_contract["guidance"]["rendered_fragment_hash"]
 
         path.write_text("Second version.\n", encoding="utf-8")
-        second = await runner.prepare_session(_seed(), execution_id="exec-two")
+        second = await runner.prepare_session(
+            _seed(),
+            execution_id="exec-two",
+            session_id=trackers[1].session_id,
+        )
         assert second.is_ok
         assert runner._execution_contract is not None
         second_hash = runner._execution_contract["guidance"]["rendered_fragment_hash"]
 
     assert first_hash != second_hash
+    for tracker in trackers:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
 
 def test_legacy_contract_resumes_without_newly_configured_guidance(tmp_path: Path) -> None:
@@ -312,7 +323,12 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         ),
         patch.object(runner, "_evaluate_frugality_proof", AsyncMock()),
     ):
-        result = await runner.execute_seed(_seed(), parallel=False)
+        result = await runner.execute_seed(
+            _seed(),
+            execution_id=tracker.execution_id,
+            session_id=tracker.session_id,
+            parallel=False,
+        )
 
     assert result.is_ok
     assert call_order.index("orchestrator.guidance.injected") < call_order.index(
@@ -335,6 +351,15 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
         seed.metadata.seed_id,
         session_id="sess-guidance-parallel",
     )
+    generation = runner._begin_process_local_authority_generation()
+    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    runner._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=contract,
+        generation=generation,
+    )
+    tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
     expected = Result.ok(
         OrchestratorResult(
             success=True,
@@ -344,23 +369,29 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
     )
     tool_catalog = assemble_session_tool_catalog(["Read"])
 
-    with (
-        patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
-        patch.object(
-            runner,
-            "_get_merged_tools",
-            AsyncMock(return_value=(["Read"], None, tool_catalog)),
-        ),
-        patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
-    ):
-        result = await runner.execute_precreated_session(seed, tracker, parallel=True)
+    try:
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+            ),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(seed, tracker, parallel=True)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
     assert result is expected
     assert sentinel in execute.await_args.kwargs["system_prompt"]
 
 
 @pytest.mark.asyncio
-async def test_fresh_runner_executes_precreated_session_with_persisted_guidance(
+async def test_fresh_runner_rejects_precreated_session_with_persisted_guidance(
     tmp_path: Path,
 ) -> None:
     sentinel = "GUIDANCE_SENTINEL_PRECREATED"
@@ -394,62 +425,41 @@ async def test_fresh_runner_executes_precreated_session_with_persisted_guidance(
     assert prepared.is_ok
 
     executing_runner, _store = _runner(tmp_path, ())
-    captured: dict[str, Any] = {}
+    get_tools = AsyncMock(side_effect=AssertionError("fresh runner must stop before setup"))
+    executing_runner._get_merged_tools = get_tools
 
-    async def execute_task(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
-        del args
-        captured.update(kwargs)
-        yield AgentMessage(
-            type="result",
-            content="[TASK_COMPLETE]",
-            data={"subtype": "success"},
-        )
-
-    executing_runner._adapter.execute_task = execute_task
-    tool_catalog = assemble_session_tool_catalog(["Read"])
-    with (
-        patch.object(
-            executing_runner._session_repo,
-            "track_progress",
-            AsyncMock(return_value=Result.ok(None)),
-        ),
-        patch.object(
-            executing_runner._session_repo,
-            "mark_completed",
-            AsyncMock(return_value=Result.ok(None)),
-        ),
-        patch.object(
-            executing_runner,
-            "_check_startup_cancellation",
-            AsyncMock(return_value=False),
-        ),
-        patch.object(
-            executing_runner,
-            "_get_merged_tools",
-            AsyncMock(return_value=(["Read"], None, tool_catalog)),
-        ),
-        patch.object(executing_runner, "_evaluate_frugality_proof", AsyncMock()),
-    ):
+    try:
         result = await executing_runner.execute_precreated_session(
             seed,
             prepared.value,
             parallel=False,
         )
+    finally:
+        preparing_runner._retire_process_local_authority(
+            session_id=prepared.value.session_id,
+            execution_id=prepared.value.execution_id,
+        )
 
-    assert result.is_ok
-    assert executing_runner._project_guidance_ids == ()
-    assert sentinel in captured["system_prompt"]
+    assert result.is_err
+    assert result.error.details["resume_blocked"] == "process_local_authority_held_elsewhere"
+    get_tools.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_resume_delivers_persisted_guidance_to_adapter_system_prompt(tmp_path: Path) -> None:
+async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system_prompt(
+    tmp_path: Path,
+) -> None:
     sentinel = "GUIDANCE_SENTINEL_RESUME"
     _write_guidance(tmp_path, "team", f"Preserve project conventions. {sentinel}\n")
     original, _store = _runner(tmp_path, ("team",))
     seed = _seed()
-    persisted_contract = original._build_execution_contract(seed=seed)
+    generation = original._begin_process_local_authority_generation()
+    persisted_contract = original._build_execution_contract(
+        seed=seed,
+        authority_generation=generation,
+    )
 
-    resumed, event_store = _runner(tmp_path, ())
+    resumed, event_store = original, _store
     event_store.replay = AsyncMock(return_value=[])
     tracker = SessionTracker.create(
         "exec-guidance-resume",
@@ -461,6 +471,12 @@ async def test_resume_delivers_persisted_guidance_to_adapter_system_prompt(tmp_p
             EXECUTION_CONTRACT_PROGRESS_KEY: persisted_contract,
             "messages_processed": 0,
         }
+    )
+    resumed._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=persisted_contract,
+        generation=generation,
     )
     captured: dict[str, Any] = {}
 
@@ -475,33 +491,39 @@ async def test_resume_delivers_persisted_guidance_to_adapter_system_prompt(tmp_p
 
     resumed._adapter.execute_task = execute_task
     tool_catalog = assemble_session_tool_catalog(["Read"])
-    with (
-        patch.object(
-            resumed._session_repo,
-            "reconstruct_session",
-            AsyncMock(return_value=Result.ok(tracker)),
-        ),
-        patch.object(
-            resumed._session_repo,
-            "track_progress",
-            AsyncMock(return_value=Result.ok(None)),
-        ),
-        patch.object(
-            resumed._session_repo,
-            "mark_completed",
-            AsyncMock(return_value=Result.ok(None)),
-        ),
-        patch.object(
-            resumed,
-            "_get_merged_tools",
-            AsyncMock(return_value=(["Read"], None, tool_catalog)),
-        ),
-        patch.object(resumed, "_evaluate_frugality_proof", AsyncMock()),
-    ):
-        result = await resumed.resume_session(tracker.session_id, seed)
+    try:
+        with (
+            patch.object(
+                resumed._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(tracker)),
+            ),
+            patch.object(
+                resumed._session_repo,
+                "track_progress",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch.object(
+                resumed._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch.object(
+                resumed,
+                "_get_merged_tools",
+                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+            ),
+            patch.object(resumed, "_evaluate_frugality_proof", AsyncMock()),
+        ):
+            result = await resumed.resume_session(tracker.session_id, seed)
+    finally:
+        resumed._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
     assert result.is_ok
-    assert resumed._project_guidance_ids == ()
+    assert resumed._project_guidance_ids == ("team",)
     assert sentinel in captured["system_prompt"]
     guidance_events = [
         call.args[0]

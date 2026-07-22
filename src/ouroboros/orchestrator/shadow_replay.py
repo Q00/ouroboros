@@ -313,6 +313,14 @@ async def _run_shadow_replay_inner(
         )
         return
 
+    # This experiment has its own ephemeral workspace and never decides the
+    # live AC's acceptance, but it still must not sidestep the executor's six
+    # captured entry roots. Import lazily to avoid the module cycle: the
+    # executor imports this harness at module load time.
+    from ouroboros.orchestrator.parallel_executor import _invoke_execution_authority_guard
+
+    _invoke_execution_authority_guard(executor)
+
     router = executor._model_router
     if router is None:
         # Model routing dormant → no parent tier to price the baseline at.
@@ -619,7 +627,17 @@ async def _baseline_semantically_accepted(
         has_expected_artifacts=has_expected_artifacts,
         verify_gate_active=verify_gate_active,
     )
-    verifier_verdict = executor._run_atomic_verifier_pass(
+    # Do not look up ``executor._run_atomic_verifier_pass`` dynamically here.
+    # The live executor registered a constructor-captured root, and the registry
+    # both revalidates that root and invokes it directly.
+    from ouroboros.orchestrator.parallel_executor import (
+        _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS,
+        _invoke_execution_authority_entry,
+    )
+
+    verifier_verdict = _invoke_execution_authority_entry(
+        executor,
+        _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS,
         ac_content=ac_content,
         final_message=terminal.content,
         success=True,

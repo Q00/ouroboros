@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.core.seed import AcceptanceCriterionSpec, InvestmentSpec
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
+from ouroboros.orchestrator.parallel_executor import ACExecutionResult
+from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
 @pytest.mark.asyncio
 async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic() -> None:
     """Composite ACs should keep recursing until the soft depth safety net is reached."""
-    executor = ParallelACExecutor(
+    executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
@@ -41,7 +42,9 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
             depth=int(kwargs["depth"]),
         )
 
-    executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+    execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+    executor._execute_atomic_ac = execute_atomic_ac
+    executor._test_single_ac_calls = []
     investment = InvestmentSpec(
         difficulty="high",
         stakes="high",
@@ -54,24 +57,19 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         investment=investment,
     )
 
-    with patch.object(
-        executor,
-        "_execute_single_ac",
-        wraps=executor._execute_single_ac,
-    ) as execute_single_ac_spy:
-        result = await executor._execute_single_ac(
-            ac_index=1,
-            ac_content="Root composite AC",
-            session_id="sess_recursive_depth",
-            tools=["Read", "Edit"],
-            tool_catalog=None,
-            system_prompt="system",
-            seed_goal="Support recursive decomposition",
-            depth=0,
-            execution_id="exec_recursive_depth",
-            ac_spec=parent_spec,
-            investment_spec=investment,
-        )
+    result = await executor._execute_single_ac(
+        ac_index=1,
+        ac_content="Root composite AC",
+        session_id="sess_recursive_depth",
+        tools=["Read", "Edit"],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="Support recursive decomposition",
+        depth=0,
+        execution_id="exec_recursive_depth",
+        ac_spec=parent_spec,
+        investment_spec=investment,
+    )
 
     assert result.success is True
     assert result.is_decomposed is True
@@ -95,11 +93,11 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
 
     assert [
         (
-            int(call.kwargs["ac_index"]),
-            str(call.kwargs["ac_content"]),
-            int(call.kwargs["depth"]),
+            int(call["ac_index"]),
+            str(call["ac_content"]),
+            int(call["depth"]),
         )
-        for call in execute_single_ac_spy.await_args_list
+        for call in executor._test_single_ac_calls
     ] == [
         (1, "Root composite AC", 0),
         (100, "Composite depth 1", 1),
@@ -112,7 +110,7 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
     assert executor._try_decompose_ac.await_count == 5
     assert [
         (int(call.kwargs["ac_index"]), int(call.kwargs["depth"]))
-        for call in executor._execute_atomic_ac.await_args_list
+        for call in execute_atomic_ac.await_args_list
     ] == [
         (1000000, 3),
         (1000001, 3),
@@ -120,8 +118,7 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         (101, 1),
     ]
     assert [
-        call.kwargs["node_identity"].display_path
-        for call in executor._execute_atomic_ac.await_args_list
+        call.kwargs["node_identity"].display_path for call in execute_atomic_ac.await_args_list
     ] == [
         "2.1.1.1",
         "2.1.1.2",
@@ -133,7 +130,7 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
             call.kwargs["parent_ac_index"],
             call.kwargs["sub_ac_index"],
         )
-        for call in executor._execute_atomic_ac.await_args_list
+        for call in execute_atomic_ac.await_args_list
     ] == [
         (None, None),
         (None, None),
@@ -141,9 +138,6 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         (1, 1),
     ]
     assert all(
-        call.kwargs["investment_spec"] is investment
-        for call in executor._execute_atomic_ac.await_args_list
+        call.kwargs["investment_spec"] is investment for call in execute_atomic_ac.await_args_list
     )
-    assert all(
-        call.kwargs["ac_spec"] is None for call in executor._execute_atomic_ac.await_args_list
-    )
+    assert all(call.kwargs["ac_spec"] is None for call in execute_atomic_ac.await_args_list)

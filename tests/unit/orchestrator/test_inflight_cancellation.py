@@ -23,6 +23,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import (
     CANCELLATION_CHECK_INTERVAL,
+    EXECUTION_CONTRACT_PROGRESS_KEY,
     ExecutionCancelledError,
     OrchestratorRunner,
     clear_cancellation,
@@ -100,6 +101,27 @@ def sample_seed():
         ontology_schema=OntologySchema(name="Test", description="Test"),
         metadata=SeedMetadata(ambiguity_score=0.1),
     )
+
+
+def _attach_live_process_local_contract(
+    runner: OrchestratorRunner,
+    tracker: SessionTracker,
+    seed: Any,
+) -> SessionTracker:
+    """Give direct precreated-session tests their creating-process capability."""
+    if not isinstance(getattr(runner._adapter, "llm_backend", None), str):
+        runner._adapter.llm_backend = "test-llm"
+    if not isinstance(getattr(runner._adapter, "_model", None), str):
+        runner._adapter._model = "test-model"
+    generation = runner._begin_process_local_authority_generation()
+    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    runner._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=contract,
+        generation=generation,
+    )
+    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 
 # =============================================================================
@@ -565,7 +587,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_boundary", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         call_count = 0
 
@@ -605,7 +633,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_full", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             with patch.object(runner._session_repo, "mark_completed", return_value=Result.ok(None)):
@@ -637,7 +671,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_int", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def tracking_check(session_id):
             check_points.append(len(check_points) + 1)
@@ -670,7 +710,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_unreg", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_check(session_id):
             return True  # Always cancel
@@ -699,6 +745,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_task_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             stream_started.set()
@@ -777,6 +824,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_terminal_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
         completed_tracker = tracker.with_status(SessionStatus.COMPLETED)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -839,6 +887,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_unrequested_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             stream_started.set()
@@ -898,7 +947,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_partial", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         call_count = 0
 

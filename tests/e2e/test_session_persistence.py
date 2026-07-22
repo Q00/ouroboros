@@ -314,21 +314,17 @@ class TestSessionReconstruction:
 class TestSessionResumption:
     """Test session resumption functionality."""
 
-    async def test_resume_running_session(
+    async def test_same_process_paused_session_resumes(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test resuming a running session."""
+        """A paused session resumes only through its creating process."""
         mock_claude_agent_adapter.add_successful_execution(final_message="Resumed and completed")
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],
@@ -338,21 +334,17 @@ class TestSessionResumption:
         assert result.is_ok
         assert result.value.success
 
-    async def test_resume_preserves_session_id(
+    async def test_same_process_resume_preserves_session_id(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test that resuming preserves the original session ID."""
+        """Same-process resume preserves the original session ID."""
         mock_claude_agent_adapter.add_successful_execution()
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],
@@ -407,14 +399,43 @@ class TestSessionResumption:
 
         assert result.is_err
 
-    async def test_resume_accumulates_messages(
+    async def test_legacy_running_session_is_terminally_rejected(
+        self,
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
+    ) -> None:
+        """A persisted legacy RUNNING tracker cannot recreate local authority."""
+        repo = SessionRepository(event_store)
+        session_id = "legacy_running_session"
+        create_result = await repo.create_session(
+            execution_id="exec_legacy_running",
+            seed_id=sample_seed.metadata.seed_id,
+            session_id=session_id,
+        )
+        assert create_result.is_ok
+
+        runner = OrchestratorRunner(
+            adapter=mock_claude_agent_adapter,
+            event_store=event_store,
+            console=MagicMock(),
+        )
+        result = await runner.resume_session(session_id, sample_seed)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "process_local_resume_unavailable"
+        reconstructed = await repo.reconstruct_session(session_id)
+        assert reconstructed.is_ok
+        assert reconstructed.value.status == SessionStatus.FAILED
+
+    async def test_same_process_resume_accumulates_messages(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test that resuming accumulates message count correctly."""
+        """Same-process resume accumulates its persisted message count."""
         # The persisted_session fixture tracks 2 progress events
         initial_messages = 2
 
@@ -432,11 +453,7 @@ class TestSessionResumption:
         ]
         mock_claude_agent_adapter.add_execution_sequence(messages)
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],
