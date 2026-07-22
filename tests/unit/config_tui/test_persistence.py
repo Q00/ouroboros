@@ -96,6 +96,18 @@ def test_unknown_key_rejected_without_writing(config_dir: Path) -> None:
     assert not (config_dir / "config.yaml").exists()
 
 
+def test_unknown_runtime_profile_child_rejected_when_section_is_null(config_dir: Path) -> None:
+    original = "orchestrator:\n  runtime_profile: null\n"
+    (config_dir / "config.yaml").write_text(original)
+
+    with pytest.raises(persistence.ConfigWriteError, match="Unknown config key"):
+        persistence.apply_config_values(
+            {"orchestrator.runtime_profile.not_a_real_key_xyz": "value"}
+        )
+
+    assert (config_dir / "config.yaml").read_text() == original
+
+
 def test_invalid_value_rolls_back_file(config_dir: Path) -> None:
     persistence.apply_config_values({"orchestrator.runtime_backend": "codex"})
     before = (config_dir / "config.yaml").read_text()
