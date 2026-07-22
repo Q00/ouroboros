@@ -1,10 +1,21 @@
 """Unit tests for TUI widgets."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
+
+from rich.cells import cell_len
+from textual import events
+from textual.geometry import Size
 
 from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
+from ouroboros.tui.widgets.ac_tree import STATUS_ICONS as TREE_STATUS_ICONS
 from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.phase_progress import PhaseIndicator, PhaseProgressWidget
+
+
+def _resize_event(width: int = 30, height: int = 24) -> events.Resize:
+    """Create the smallest Resize event needed for direct handler tests."""
+    size = Size(width, height)
+    return events.Resize(size=size, virtual_size=size)
 
 
 class TestPhaseIndicator:
@@ -143,6 +154,15 @@ class TestACTreeWidget:
 
         assert widget.tree_data == tree_data
         assert widget.current_ac_id == "ac_123"
+
+    def test_root_label_is_cell_width_aware(self) -> None:
+        """A CJK root label must fit its display-cell budget with an ellipsis."""
+        widget = ACTreeWidget()
+
+        label = widget._format_root_label("가" * 100)
+
+        assert label.endswith("...")
+        assert cell_len(label) <= 30
 
     def test_update_tree(self) -> None:
         """Test updating tree data."""
@@ -378,7 +398,85 @@ class TestACTreeWidget:
         label = widget._format_node_label(node_data)
 
         assert "..." in label
-        assert long_content[:50] in label
+        assert long_content[:47] in label
+        assert long_content[:50] not in label
+
+    def test_format_node_label_uses_available_width(self) -> None:
+        widget = ACTreeWidget()
+        node_data = {"status": "pending", "content": "B" * 100, "is_atomic": False}
+
+        narrow = widget._format_node_label(node_data, max_width=15)
+        wide = widget._format_node_label(node_data, max_width=80)
+
+        assert "B" * 12 in narrow
+        assert "B" * 77 in wide
+        assert narrow != wide
+
+    def test_format_node_label_is_cell_width_aware_for_cjk(self) -> None:
+        widget = ACTreeWidget()
+        node_data = {
+            "status": "pending",
+            "content": "한글테스트문자열" * 10,
+            "is_atomic": False,
+        }
+
+        label = widget._format_node_label(node_data, max_width=20)
+
+        prefix = f"{TREE_STATUS_ICONS['pending']} "
+        assert label.startswith(prefix)
+        assert cell_len(label[len(prefix) :]) <= 20
+
+    def test_label_width_uses_actual_size_without_exceeding_narrow_panes(self) -> None:
+        widget = ACTreeWidget()
+
+        def width_for(size_width: int) -> int:
+            fake_size = type("Size", (), {"width": size_width, "height": 5})()
+            with patch.object(
+                ACTreeWidget, "size", new_callable=PropertyMock, return_value=fake_size
+            ):
+                return widget._label_max_width()
+
+        assert widget._label_max_width() == 50
+        assert width_for(10) == 10
+        assert width_for(25) == 20
+        assert width_for(100) == 80
+
+    def test_resize_retruncates_root_and_child_labels(self) -> None:
+        content = "N" * 100
+        tree_data = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": content,
+                    "status": "pending",
+                    "children_ids": ["child"],
+                },
+                "child": {
+                    "id": "child",
+                    "content": content,
+                    "status": "pending",
+                    "is_atomic": True,
+                    "children_ids": [],
+                },
+            },
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+        tree = next(item for item in widget.compose() if hasattr(item, "root"))
+        child = widget._node_map["child"]
+        initial_root = str(tree.root.label)
+        initial_child = str(child.label)
+
+        widget._label_max_width = lambda **_kwargs: 10  # type: ignore[method-assign]
+        widget.on_resize(_resize_event(width=25))
+
+        assert str(tree.root.label) != initial_root
+        assert str(child.label) != initial_child
+        assert content[:7] in str(tree.root.label)
+        assert content[:7] in str(child.label)
+
+    def test_resize_before_compose_is_safe(self) -> None:
+        ACTreeWidget().on_resize(_resize_event())
 
     def test_mark_node_atomic(self) -> None:
         """Test marking a node as atomic."""
@@ -547,3 +645,55 @@ class TestACProgressWidget:
 
         assert widget.completed_count == 1
         assert widget.total_count == 3  # Unchanged
+
+    def test_render_ac_item_uses_available_width(self) -> None:
+        widget = ACProgressWidget()
+        item = ACProgressItem(index=1, content="C" * 100, status="pending")
+
+        narrow = str(widget._render_ac_item(item, max_width=15).render())
+        wide = str(widget._render_ac_item(item, max_width=80).render())
+
+        assert "C" * 12 in narrow
+        assert "C" * 77 in wide
+        assert narrow != wide
+
+    def test_render_ac_item_is_cell_width_aware_for_unicode(self) -> None:
+        widget = ACProgressWidget()
+
+        for content in ("한글테스트문자열" * 10, "🙂" * 50, "e\u0301" * 80):
+            item = ACProgressItem(index=1, content=content, status="pending")
+            rendered = str(widget._render_ac_item(item, max_width=20).render())
+            content_part = rendered.split(". ", 1)[1]
+            assert cell_len(content_part) <= 20
+
+    def test_content_width_uses_actual_size_without_exceeding_narrow_panes(self) -> None:
+        widget = ACProgressWidget()
+
+        def width_for(size_width: int) -> int:
+            fake_size = type("Size", (), {"width": size_width, "height": 5})()
+            with patch.object(
+                ACProgressWidget, "size", new_callable=PropertyMock, return_value=fake_size
+            ):
+                return widget._content_max_width()
+
+        assert widget._content_max_width() == 45
+        assert width_for(10) == 10
+        assert width_for(25) == 20
+        assert width_for(100) == 80
+
+    def test_ellipsis_never_exceeds_a_tiny_width(self) -> None:
+        from ouroboros.tui.widgets.ac_progress import _truncate_to_cell_width as progress_truncate
+        from ouroboros.tui.widgets.ac_tree import _truncate_to_cell_width as tree_truncate
+
+        for truncate in (progress_truncate, tree_truncate):
+            for width in range(4):
+                assert cell_len(truncate("long content", width)) <= width
+            assert truncate("long content", 10).endswith("...")
+
+    def test_resize_recomposes_items(self) -> None:
+        widget = ACProgressWidget()
+        widget.refresh = MagicMock()  # type: ignore[method-assign]
+
+        widget.on_resize(_resize_event())
+
+        widget.refresh.assert_called_once_with(recompose=True)

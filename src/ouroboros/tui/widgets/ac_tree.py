@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.cells import cell_len, set_cell_size
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -26,6 +28,21 @@ STATUS_ICONS = {
     "completed": "[green][OK][/green]",
     "failed": "[red][X][/red]",
 }
+
+_DEFAULT_LABEL_WIDTH = 50
+_DEFAULT_ROOT_LABEL_WIDTH = 30
+_MIN_LABEL_WIDTH = 20
+_LABEL_WIDTH_RESERVED_CELLS = 20
+
+
+def _truncate_to_cell_width(content: str, width: int) -> str:
+    """Truncate text within a terminal display-cell budget."""
+    if cell_len(content) <= width:
+        return content
+
+    ellipsis = "..." if width >= 3 else "." * max(0, width)
+    content_budget = max(0, width - cell_len(ellipsis))
+    return set_cell_size(content, content_budget).rstrip() + ellipsis
 
 
 class ACTreeWidget(Widget):
@@ -119,6 +136,24 @@ class ACTreeWidget(Widget):
         self.tree_data = tree_data or {}
         self.current_ac_id = current_ac_id
 
+    def _label_max_width(self, *, default: int = _DEFAULT_LABEL_WIDTH) -> int:
+        """Return the current label budget, with a safe unmounted fallback."""
+        try:
+            width = self.size.width
+        except Exception:
+            width = 0
+
+        if width > 0:
+            return max(min(_MIN_LABEL_WIDTH, width), width - _LABEL_WIDTH_RESERVED_CELLS)
+        return default
+
+    def _format_root_label(self, content: str) -> str:
+        """Format the root label, which has no status-icon prefix."""
+        return _truncate_to_cell_width(
+            content,
+            self._label_max_width(default=_DEFAULT_ROOT_LABEL_WIDTH),
+        )
+
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label("AC Decomposition Tree", classes="header")
@@ -131,7 +166,7 @@ class ACTreeWidget(Widget):
             root_id = self.tree_data.get("root_id")
             root_label = "AC Tree"
             if root_id and root_id in nodes:
-                root_label = nodes[root_id].get("content", "AC Tree")[:30]
+                root_label = self._format_root_label(nodes[root_id].get("content", "AC Tree"))
 
             tree: Tree[str] = Tree(root_label)
             tree.show_root = True
@@ -169,12 +204,16 @@ class ACTreeWidget(Widget):
         self,
         node_data: dict[str, Any],
         is_current: bool = False,
+        *,
+        max_width: int | None = None,
     ) -> str:
         """Format display label for a tree node.
 
         Args:
             node_data: Data for the node.
             is_current: Whether this is the currently executing AC.
+            max_width: Optional explicit content budget used by tests. Normal
+                rendering derives it from the widget's current size.
 
         Returns:
             Formatted label with status icon and content.
@@ -183,8 +222,8 @@ class ACTreeWidget(Widget):
         content = node_data.get("content", "Unknown")
         is_atomic = node_data.get("is_atomic", False)
 
-        # Truncate content for display
-        display_content = content[:50] + "..." if len(content) > 50 else content
+        width = max_width if max_width is not None else self._label_max_width()
+        display_content = _truncate_to_cell_width(content, width)
 
         # Build label with status icon
         status_icon = STATUS_ICONS.get(status, "[ ]")
@@ -341,6 +380,33 @@ class ACTreeWidget(Widget):
                 continue
             is_current = node_id == self.current_ac_id
             tree_node.set_label(self._format_node_label(node_data, is_current))
+
+    def _resync_labels_for_current_width(self) -> None:
+        """Apply current-width labels to the root and every rendered node."""
+        if self._tree_widget is None or not self._node_map:
+            return
+
+        data = self._tree_data_cache or self.tree_data
+        nodes = data.get("nodes")
+        if not isinstance(nodes, dict):
+            return
+
+        root_id = data.get("root_id")
+        for node_id, tree_node in self._node_map.items():
+            node_data = nodes.get(node_id)
+            if not isinstance(node_data, dict):
+                continue
+            if node_id == root_id:
+                tree_node.set_label(self._format_root_label(node_data.get("content", "AC Tree")))
+            else:
+                tree_node.set_label(
+                    self._format_node_label(node_data, node_id == self.current_ac_id)
+                )
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recalculate root and node labels when the terminal width changes."""
+        del event
+        self._resync_labels_for_current_width()
 
     def update_node_status(self, ac_id: str, status: str) -> None:
         """Update status of a single node without recompose.
