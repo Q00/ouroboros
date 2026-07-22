@@ -376,7 +376,13 @@ def test_grade_gate_rejects_descriptive_expected_artifact_labels() -> None:
         ac=(
             AcceptanceCriterionSpec(
                 description="Outputs are available",
-                expected_artifacts=("schema v2 outputs", "user approval record"),
+                expected_artifacts=(
+                    "schema v2 outputs",
+                    "user approval record",
+                    "schema.v2 outputs",
+                    "schema v2 outputs.json",
+                    ".",
+                ),
             ),
         ),
     )
@@ -391,6 +397,9 @@ def test_grade_gate_rejects_descriptive_expected_artifact_labels() -> None:
     assert len(invalid) == 1
     assert "schema v2 outputs" in invalid[0].message
     assert "user approval record" in invalid[0].message
+    assert "schema.v2 outputs" in invalid[0].message
+    assert "schema v2 outputs.json" in invalid[0].message
+    assert "'.'" in invalid[0].message
     assert "verify_command" in invalid[0].repair_instruction
 
 

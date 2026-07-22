@@ -444,6 +444,12 @@ class TestSeed:
                 "verify_command": "python -c 'pass'",
             }
 
+    def test_output_assertion_schema_documents_combined_command_output(self) -> None:
+        field = AcceptanceCriterionSpec.model_fields["output_assertion"]
+
+        assert field.description is not None
+        assert "combined stdout and stderr" in field.description
+
     def test_output_assertion_preserves_distinctive_stdout_literals(self) -> None:
         """Real stdout literals survive normalization."""
         ok = AcceptanceCriterionSpec(

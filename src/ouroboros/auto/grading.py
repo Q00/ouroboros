@@ -574,16 +574,18 @@ def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
 
     Path syntax cannot distinguish every directory name from prose. Keep this
     deliberately conservative: reject paths that are absolute, escape through
-    ``..``, or are bare multi-word labels without a path separator or filename
-    suffix. Concrete paths containing spaces remain valid when their structure
-    makes the path intent explicit (for example ``docs/User Guide.md``).
+    ``..``, are the workspace root itself, or are bare multi-word labels without
+    an explicit path separator. Concrete paths containing spaces remain valid
+    when their structure makes the path intent explicit (for example
+    ``docs/User Guide.md``).
     """
     invalid: list[str] = []
     for artifact in artifacts:
         posix_path = PurePosixPath(artifact)
         windows_path = PureWindowsPath(artifact)
         if (
-            posix_path.is_absolute()
+            artifact in {".", "./", ".\\"}
+            or posix_path.is_absolute()
             or windows_path.is_absolute()
             or bool(windows_path.drive)
             or bool(windows_path.root)
@@ -594,7 +596,7 @@ def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
             continue
         if any(character.isspace() for character in artifact):
             has_path_separator = "/" in artifact or "\\" in artifact
-            if not has_path_separator and not posix_path.suffix:
+            if not has_path_separator:
                 invalid.append(artifact)
     return tuple(invalid)
 

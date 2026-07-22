@@ -257,7 +257,10 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             "each path is resolved literally and must exist"
         ),
     )
-    output_assertion: str | None = Field(default=None)
+    output_assertion: str | None = Field(
+        default=None,
+        description=("Literal string required in the verify command's combined stdout and stderr"),
+    )
     investment: InvestmentSpec | None = Field(default=None)
 
     @field_validator("description", mode="before")

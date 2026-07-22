@@ -41,9 +41,9 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 - File or directory existence can be a complete contract. For a stateful artifact that can still be pending or blocked, also provide a `verify` command that checks its semantic state.
 
 `expect` / `output_assertion` semantics:
-- Use `expect` ONLY for a literal string that the verify command prints to stdout verbatim, such as `OK` or `5 passed`.
+- Use `expect` ONLY for a literal string present verbatim in the verify command's combined stdout and stderr, such as `OK` or `5 passed`.
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
-- If the command has no distinctive stdout literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
+- If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
 **Granularity contract (read carefully):**
 - Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
