@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any
 
@@ -16,7 +15,12 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+    expected_artifact_path_error,
+)
 
 
 class SeedGrade(StrEnum):
@@ -579,26 +583,9 @@ def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
     when their structure makes the path intent explicit (for example
     ``docs/User Guide.md``).
     """
-    invalid: list[str] = []
-    for artifact in artifacts:
-        posix_path = PurePosixPath(artifact)
-        windows_path = PureWindowsPath(artifact)
-        if (
-            artifact in {".", "./", ".\\"}
-            or posix_path.is_absolute()
-            or windows_path.is_absolute()
-            or bool(windows_path.drive)
-            or bool(windows_path.root)
-            or ".." in posix_path.parts
-            or ".." in windows_path.parts
-        ):
-            invalid.append(artifact)
-            continue
-        if any(character.isspace() for character in artifact):
-            has_path_separator = "/" in artifact or "\\" in artifact
-            if not has_path_separator:
-                invalid.append(artifact)
-    return tuple(invalid)
+    return tuple(
+        artifact for artifact in artifacts if expected_artifact_path_error(artifact) is not None
+    )
 
 
 def _is_concrete_final_report_observation(value: str) -> bool:

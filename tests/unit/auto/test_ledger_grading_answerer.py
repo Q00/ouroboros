@@ -417,6 +417,7 @@ def test_grade_gate_accepts_concrete_relative_file_and_directory_paths() -> None
                     "docs",
                     "dist/app",
                     "docs/User Guide.md",
+                    "./Build Outputs",
                 ),
             ),
         ),

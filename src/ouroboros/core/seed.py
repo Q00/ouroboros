@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import math
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any, Literal
 from uuid import uuid4
@@ -40,6 +41,31 @@ _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
     re.IGNORECASE,
 )
+
+
+def expected_artifact_path_error(artifact: str) -> str | None:
+    """Return why an expected-artifact value is not a safe relative path."""
+    if not artifact or any(ord(character) < 32 or ord(character) == 127 for character in artifact):
+        return "contains an empty value or control character"
+
+    posix_path = PurePosixPath(artifact)
+    windows_path = PureWindowsPath(artifact)
+    if not posix_path.parts:
+        return "resolves to the workspace root"
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or bool(windows_path.root)
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        return "is absolute or escapes workspace"
+    if any(character.isspace() for character in artifact):
+        has_explicit_relative_structure = "/" in artifact or "\\" in artifact
+        if not has_explicit_relative_structure:
+            return "is ambiguous prose; prefix a top-level spaced path with ./"
+    return None
 
 
 class ExitCondition(BaseModel, frozen=True):

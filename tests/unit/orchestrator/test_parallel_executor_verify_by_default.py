@@ -31,6 +31,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
+    _missing_expected_artifacts,
 )
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
@@ -86,6 +87,18 @@ async def test_verify_gate_passes_on_exit_zero(tmp_path: Any) -> None:
 
     assert outcome.passed is True
     assert outcome.reason is None
+
+
+def test_expected_artifact_runtime_uses_shared_path_grammar(tmp_path: Any) -> None:
+    spaced = tmp_path / "Build Outputs"
+    spaced.mkdir()
+
+    assert _missing_expected_artifacts(("./Build Outputs",), str(tmp_path)) == ()
+    invalid = _missing_expected_artifacts(("bad\x00path", ".", "../outside"), str(tmp_path))
+    assert len(invalid) == 3
+    assert "control character" in invalid[0]
+    assert "workspace root" in invalid[1]
+    assert "escapes workspace" in invalid[2]
 
 
 @pytest.mark.asyncio

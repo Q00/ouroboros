@@ -37,6 +37,7 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
 - NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
+- Prefix a top-level file or directory containing spaces with `./`, for example `./Build Outputs`; nested paths such as `docs/User Guide.md` are already explicit.
 - If no exact path is known, write `artifacts: NONE` and provide a concrete `verify` command instead.
 - File or directory existence can be a complete contract. For a stateful artifact that can still be pending or blocked, also provide a `verify` command that checks its semantic state.
 

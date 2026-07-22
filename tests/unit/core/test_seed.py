@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_texts,
+    expected_artifact_path_error,
 )
 
 
@@ -416,6 +417,27 @@ class TestSeed:
         assert "Exact file or directory paths" in field.description
         assert "relative to the run workspace" in field.description
         assert "resolved literally" in field.description
+
+    def test_expected_artifact_path_grammar(self) -> None:
+        for artifact in (
+            ".",
+            "./",
+            "bad\x00path",
+            "../outside",
+            r"D:outside",
+            r"\\server\share\outside",
+            "schema v2 outputs.json",
+        ):
+            assert expected_artifact_path_error(artifact) is not None
+
+        for artifact in (
+            "README.md",
+            "docs",
+            "docs/User Guide.md",
+            "./Build Outputs",
+            r"docs\User Guide.md",
+        ):
+            assert expected_artifact_path_error(artifact) is None
 
     def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
         """Exit-code success phrases are redundant with verify_command exit status."""
