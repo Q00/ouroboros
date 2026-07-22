@@ -133,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **interview**: Ensure first response is a direct question, not introduction
 - **mcp**: Correct uvx command syntax to use `--python 3.14 --from ouroboros-ai` for proper version resolution
 
-## [0.10.0] - 2026-02-19
+## [0.10.0] - 2026-02-14
 
 ### Added
 
