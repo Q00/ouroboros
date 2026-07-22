@@ -216,6 +216,18 @@ def test_closed_codex_runtime_binds_executable_and_timeout_configuration() -> No
     assert timeout_changed.portable_across_processes is True
     assert baseline.fingerprint != timeout_changed.fingerprint
 
+    working_directory_changed = _contract(
+        runtime=CodexCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/",
+            stdout_idle_timeout_seconds=30,
+        ),
+        verifier=structural_atomic_verifier,
+    )
+    assert working_directory_changed.portable_across_processes is True
+    assert baseline.fingerprint != working_directory_changed.fingerprint
+
     alternate_executable = shutil.which("true")
     if alternate_executable is not None and alternate_executable != sys.executable:
         executable_changed = _contract(

@@ -561,6 +561,7 @@ def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
             # User-provided skill directories and dispatchers are live behavior,
             # not a closed portable component in Foundation A.
             return {"observed": False}
+        cwd = object.__getattribute__(adapter, "_cwd")
         startup_timeout = object.__getattribute__(adapter, "_startup_output_timeout_seconds")
         stdout_timeout = object.__getattribute__(adapter, "_stdout_idle_timeout_seconds")
         process_shutdown_timeout = object.__getattribute__(
@@ -586,7 +587,9 @@ def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
         completed_shutdown_timeout,
     )
     if (
-        not all(value is None or _is_finite_number(value) for value in timeouts)
+        not isinstance(cwd, str)
+        or not cwd.strip()
+        or not all(value is None or _is_finite_number(value) for value in timeouts)
         or any(
             not isinstance(value, int) or isinstance(value, bool) or value < 0
             for value in (max_resume_retries, max_depth, max_stderr_lines)
@@ -596,8 +599,13 @@ def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
         or not all(isinstance(value, str) for value in child_session_env_keys)
     ):
         return {"observed": False}
+    try:
+        canonical_cwd = str(Path(cwd).expanduser().resolve(strict=False))
+    except (OSError, ValueError):
+        return {"observed": False}
     return _digest_descriptor(
         {
+            "working_directory": canonical_cwd,
             "startup_output_timeout_seconds": startup_timeout,
             "stdout_idle_timeout_seconds": stdout_timeout,
             "process_shutdown_timeout_seconds": process_shutdown_timeout,

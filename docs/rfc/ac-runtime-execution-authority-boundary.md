@@ -29,8 +29,9 @@ Only the closed built-in transcript verifier and an adapter whose *exact type*
 is in Foundation A's reviewed runtime implementation table can contribute
 durable identity. The runtime descriptor contains the adapter's explicit safe
 execution identity plus a bounded digest of the resolved CLI executable and a
-finite configuration table for timeouts, subprocess behavior, and child-session
-environment keys. It is represented by digests, never copied verbatim into
+finite configuration table for its canonical working directory, timeouts,
+subprocess behavior, and child-session environment keys. It is represented by
+digests, never copied verbatim into
 authority JSON. A credential-shaped or malformed value makes that runtime
 component unobserved/process-local. An unknown adapter implementation, a custom
 skills directory, or a custom skill dispatcher is executable only as
