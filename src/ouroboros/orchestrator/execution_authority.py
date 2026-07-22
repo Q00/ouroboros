@@ -17,19 +17,71 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
+import stat
 from typing import Any
 import uuid
 
+from ouroboros.orchestrator.antigravity_cli_runtime import AntigravityCLIRuntime
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
+from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
-EXECUTION_AUTHORITY_VERSION = 2
-EXECUTION_AUTHORITY_BOUNDARY_VERSION = 2
+EXECUTION_AUTHORITY_VERSION = 3
+EXECUTION_AUTHORITY_BOUNDARY_VERSION = 3
 
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
 _MAX_IDENTITY_SCALAR_CHARS = 8_192
 _MAX_IDENTITY_JSON_CHARS = 64_000
+_MAX_RUNTIME_EXECUTABLE_BYTES = 64 * 1024 * 1024
+
+# A portable runtime must be an exact built-in adapter implementation. This
+# table retains the real type object and its import-time dispatch root/code;
+# module/qualname strings are mutable and therefore cannot prove identity.
+# Adding or changing an implementation requires a version bump and review.
+_CLOSED_RUNTIME_IMPLEMENTATIONS: dict[type[object], tuple[str, object, object]] = {
+    AntigravityCLIRuntime: (
+        "antigravity-cli-runtime/v1",
+        AntigravityCLIRuntime.execute_task,
+        AntigravityCLIRuntime.execute_task.__code__,
+    ),
+    CodexCliRuntime: (
+        "codex-cli-runtime/v1",
+        CodexCliRuntime.execute_task,
+        CodexCliRuntime.execute_task.__code__,
+    ),
+    CopilotCliRuntime: (
+        "copilot-cli-runtime/v1",
+        CopilotCliRuntime.execute_task,
+        CopilotCliRuntime.execute_task.__code__,
+    ),
+    GeminiCLIRuntime: (
+        "gemini-cli-runtime/v1",
+        GeminiCLIRuntime.execute_task,
+        GeminiCLIRuntime.execute_task.__code__,
+    ),
+    GooseCliRuntime: (
+        "goose-cli-runtime/v1",
+        GooseCliRuntime.execute_task,
+        GooseCliRuntime.execute_task.__code__,
+    ),
+    GrokCliRuntime: (
+        "grok-cli-runtime/v1",
+        GrokCliRuntime.execute_task,
+        GrokCliRuntime.execute_task.__code__,
+    ),
+    ZcodeCLIRuntime: (
+        "zcode-cli-runtime/v1",
+        ZcodeCLIRuntime.execute_task,
+        ZcodeCLIRuntime.execute_task.__code__,
+    ),
+}
 
 _EXECUTOR_COMPONENT_VERSIONS = {
     "parallel_ac_executor": "parallel-ac-executor/v2",
@@ -430,10 +482,141 @@ def _runtime_label_descriptor(adapter: object, name: str) -> dict[str, object]:
     return _digest_descriptor(value.strip(), field=f"runtime {name}")
 
 
+def _runtime_implementation_descriptor(adapter: object) -> dict[str, object]:
+    """Return a reviewed identity for one exact built-in runtime type."""
+    runtime_type = type(adapter)
+    implementation = _CLOSED_RUNTIME_IMPLEMENTATIONS.get(runtime_type)
+    if implementation is None:
+        return {"observed": False}
+    version, expected_dispatch_root, expected_dispatch_code = implementation
+    dispatch_root = _static_callable_root(adapter, "execute_task")
+    if (
+        dispatch_root is not expected_dispatch_root
+        or _callable_code_identity(dispatch_root) is not expected_dispatch_code
+    ):
+        return {"observed": False}
+    return _digest_descriptor(
+        {
+            "type": f"{runtime_type.__module__}.{runtime_type.__qualname__}",
+            "version": version,
+        },
+        field="runtime implementation",
+    )
+
+
+def _runtime_executable_descriptor(adapter: object) -> dict[str, object]:
+    """Digest one bounded, resolved CLI executable without serializing its path."""
+    try:
+        configured_path = object.__getattribute__(adapter, "_cli_path")
+    except (AttributeError, TypeError):
+        return {"observed": False}
+    if not isinstance(configured_path, str) or not configured_path.strip():
+        return {"observed": False}
+
+    try:
+        candidate = Path(configured_path).expanduser()
+        if not candidate.is_absolute():
+            resolved_from_path = shutil.which(configured_path)
+            if resolved_from_path is None:
+                return {"observed": False}
+            candidate = Path(resolved_from_path)
+        executable_path = candidate.resolve(strict=True)
+        executable_stat = executable_path.stat()
+        executable_mode = stat.S_IMODE(executable_stat.st_mode)
+        if (
+            not stat.S_ISREG(executable_stat.st_mode)
+            or not executable_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            or executable_stat.st_size > _MAX_RUNTIME_EXECUTABLE_BYTES
+        ):
+            return {"observed": False}
+        digest = hashlib.sha256()
+        with executable_path.open("rb") as executable_file:
+            while chunk := executable_file.read(1024 * 1024):
+                digest.update(chunk)
+    except (OSError, ValueError):
+        return {"observed": False}
+
+    return _digest_descriptor(
+        {
+            "path": str(executable_path),
+            "generation": {
+                "device": executable_stat.st_dev,
+                "inode": executable_stat.st_ino,
+                "size": executable_stat.st_size,
+                "mtime_ns": executable_stat.st_mtime_ns,
+                "mode": executable_mode,
+            },
+            "content_digest": "sha256:" + digest.hexdigest(),
+        },
+        field="runtime executable",
+    )
+
+
+def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
+    """Digest the finite mutable execution settings of the CLI runtime family."""
+    try:
+        skills_dir = object.__getattribute__(adapter, "_skills_dir")
+        skill_dispatcher = object.__getattribute__(adapter, "_skill_dispatcher")
+        if skills_dir is not None or skill_dispatcher is not None:
+            # User-provided skill directories and dispatchers are live behavior,
+            # not a closed portable component in Foundation A.
+            return {"observed": False}
+        startup_timeout = object.__getattribute__(adapter, "_startup_output_timeout_seconds")
+        stdout_timeout = object.__getattribute__(adapter, "_stdout_idle_timeout_seconds")
+        process_shutdown_timeout = object.__getattribute__(
+            adapter,
+            "_process_shutdown_timeout_seconds",
+        )
+        completed_shutdown_timeout = object.__getattribute__(
+            adapter,
+            "_completed_process_group_shutdown_timeout_seconds",
+        )
+        max_resume_retries = object.__getattribute__(adapter, "_max_resume_retries")
+        max_depth = object.__getattribute__(adapter, "_max_ouroboros_depth")
+        max_stderr_lines = object.__getattribute__(adapter, "_max_stderr_lines")
+        use_process_group = object.__getattribute__(adapter, "_use_process_group")
+        child_session_env_keys = object.__getattribute__(adapter, "_child_session_env_keys")
+    except (AttributeError, TypeError):
+        return {"observed": False}
+
+    timeouts = (
+        startup_timeout,
+        stdout_timeout,
+        process_shutdown_timeout,
+        completed_shutdown_timeout,
+    )
+    if (
+        not all(value is None or _is_finite_number(value) for value in timeouts)
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in (max_resume_retries, max_depth, max_stderr_lines)
+        )
+        or not isinstance(use_process_group, bool)
+        or not isinstance(child_session_env_keys, (tuple, list, frozenset))
+        or not all(isinstance(value, str) for value in child_session_env_keys)
+    ):
+        return {"observed": False}
+    return _digest_descriptor(
+        {
+            "startup_output_timeout_seconds": startup_timeout,
+            "stdout_idle_timeout_seconds": stdout_timeout,
+            "process_shutdown_timeout_seconds": process_shutdown_timeout,
+            "completed_process_group_shutdown_timeout_seconds": completed_shutdown_timeout,
+            "max_resume_retries": max_resume_retries,
+            "max_ouroboros_depth": max_depth,
+            "max_stderr_lines": max_stderr_lines,
+            "use_process_group": use_process_group,
+            "child_session_env_keys": sorted(child_session_env_keys),
+        },
+        field="runtime execution configuration",
+    )
+
+
 def runtime_authority_contract(
     adapter: object,
     *,
     force_process_local: bool = False,
+    instance_nonce: str | None = None,
 ) -> dict[str, object]:
     """Return a finite, digest-only runtime descriptor.
 
@@ -460,6 +643,9 @@ def runtime_authority_contract(
     runtime_backend = _runtime_label_descriptor(adapter, "runtime_backend")
     llm_backend = _runtime_label_descriptor(adapter, "llm_backend")
     permission_mode = _runtime_label_descriptor(adapter, "permission_mode")
+    implementation = _runtime_implementation_descriptor(adapter)
+    executable = _runtime_executable_descriptor(adapter)
+    configuration = _runtime_configuration_descriptor(adapter)
     try:
         self_governs_rate_limit = object.__getattribute__(adapter, "self_governs_rate_limit")
     except (AttributeError, TypeError):
@@ -471,11 +657,14 @@ def runtime_authority_contract(
         and permission_mode["observed"] is True
         and execution_descriptor["observed"] is True
         and capabilities["observed"] is True
+        and implementation["observed"] is True
+        and executable["observed"] is True
+        and configuration["observed"] is True
         and isinstance(self_governs_rate_limit, bool)
         and not force_process_local
     )
     return {
-        "version": 2,
+        "version": 3,
         "stability": "durable" if portable_identity_observed else "process_local",
         # This is an explicit semantic witness, not a cosmetic copy of the
         # stability label. A durable runtime must have a finite direct dispatch
@@ -486,8 +675,14 @@ def runtime_authority_contract(
         "permission_mode": permission_mode,
         "execution_identity": execution_descriptor,
         "capabilities": capabilities,
+        "implementation": implementation,
+        "executable": executable,
+        "configuration": configuration,
         "self_governs_rate_limit": (
             self_governs_rate_limit if isinstance(self_governs_rate_limit, bool) else None
+        ),
+        "instance_nonce": (
+            None if portable_identity_observed else instance_nonce or uuid.uuid4().hex
         ),
     }
 
@@ -501,10 +696,14 @@ def _valid_runtime_authority(value: object) -> bool:
         "permission_mode",
         "execution_identity",
         "capabilities",
+        "implementation",
+        "executable",
+        "configuration",
         "self_governs_rate_limit",
         "portable_identity_observed",
+        "instance_nonce",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 2:
+    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 3:
         return False
     if value.get("stability") not in {"durable", "process_local"}:
         return False
@@ -516,6 +715,9 @@ def _valid_runtime_authority(value: object) -> bool:
             "permission_mode",
             "execution_identity",
             "capabilities",
+            "implementation",
+            "executable",
+            "configuration",
         )
     ):
         return False
@@ -531,6 +733,9 @@ def _valid_runtime_authority(value: object) -> bool:
             "permission_mode",
             "execution_identity",
             "capabilities",
+            "implementation",
+            "executable",
+            "configuration",
         )
     )
     if value.get("stability") == "durable":
@@ -538,9 +743,14 @@ def _valid_runtime_authority(value: object) -> bool:
             portable_identity_observed
             and descriptors_are_observed
             and isinstance(self_governs_rate_limit, bool)
+            and value.get("instance_nonce") is None
         )
-    return not portable_identity_observed and (
-        self_governs_rate_limit is None or isinstance(self_governs_rate_limit, bool)
+    nonce = value.get("instance_nonce")
+    return (
+        not portable_identity_observed
+        and (self_governs_rate_limit is None or isinstance(self_governs_rate_limit, bool))
+        and isinstance(nonce, str)
+        and len(nonce) == 32
     )
 
 
@@ -788,6 +998,7 @@ class ExecutionAuthorityContract:
         workspace: str | None,
         execution_policy: Mapping[str, object],
         verifier_instance_nonce: str | None = None,
+        runtime_instance_nonce: str | None = None,
         force_runtime_process_local: bool = False,
     ) -> ExecutionAuthorityContract:
         data = {
@@ -798,6 +1009,7 @@ class ExecutionAuthorityContract:
             "runtime": runtime_authority_contract(
                 adapter,
                 force_process_local=force_runtime_process_local,
+                instance_nonce=runtime_instance_nonce,
             ),
             "verifier": verifier_authority_contract(
                 verifier,
@@ -854,7 +1066,9 @@ class ExecutionAuthorityLiveBinding:
     executor: object | None
     executor_attribute_resolution_observable: bool
     adapter: object
+    runtime_instance_nonce: str | None
     verifier: Verifier | None
+    session_signal_hub: object | None
     dispatcher_type: object
     dispatcher: object | None
     dispatcher_executor: object | None
@@ -920,6 +1134,7 @@ class ExecutionAuthorityLiveBinding:
         workspace: str | None,
         execution_policy: Mapping[str, object],
         executor: object | None = None,
+        session_signal_hub: object | None = None,
         dispatcher: object | None = None,
         dispatcher_executor: object | None = None,
         dispatcher_stream_callable: object | None = None,
@@ -1185,7 +1400,8 @@ class ExecutionAuthorityLiveBinding:
         # finite implementation identity. Keep execution working, but do not
         # upgrade that adapter to a portable authority claim.
         force_runtime_process_local = force_runtime_process_local or (
-            not executor_attribute_resolution_observable
+            session_signal_hub is not None
+            or not executor_attribute_resolution_observable
             or adapter_dispatch_root is None
             or adapter_dispatch_code is None
             or not adapter_attribute_resolution_observable
@@ -1221,12 +1437,14 @@ class ExecutionAuthorityLiveBinding:
             )
             else uuid.uuid4().hex
         )
+        runtime_instance_nonce = uuid.uuid4().hex
         contract = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=verifier,
             workspace=workspace,
             execution_policy=execution_policy,
             verifier_instance_nonce=nonce,
+            runtime_instance_nonce=runtime_instance_nonce,
             force_runtime_process_local=force_runtime_process_local,
         )
         return cls(
@@ -1234,7 +1452,9 @@ class ExecutionAuthorityLiveBinding:
             executor=executor,
             executor_attribute_resolution_observable=executor_attribute_resolution_observable,
             adapter=adapter,
+            runtime_instance_nonce=runtime_instance_nonce,
             verifier=verifier,
+            session_signal_hub=session_signal_hub,
             dispatcher_type=dispatcher_type,
             dispatcher=dispatcher,
             dispatcher_executor=captured_dispatcher_executor,
@@ -1303,6 +1523,7 @@ class ExecutionAuthorityLiveBinding:
         rate_gate: object,
         workspace: str | None,
         execution_policy: Mapping[str, object],
+        session_signal_hub: object | None = None,
         executor: object | None = None,
         coordinator: object | None = None,
         coordinator_review_callable: object | None = None,
@@ -1314,6 +1535,8 @@ class ExecutionAuthorityLiveBinding:
         if executor is not self.executor:
             return False
         if adapter is not self.adapter or verifier is not self.verifier:
+            return False
+        if session_signal_hub is not self.session_signal_hub:
             return False
         if dispatcher_type is not self.dispatcher_type:
             return False
@@ -1528,6 +1751,7 @@ class ExecutionAuthorityLiveBinding:
                 workspace=workspace,
                 execution_policy=execution_policy,
                 verifier_instance_nonce=self.verifier_instance_nonce,
+                runtime_instance_nonce=self.runtime_instance_nonce,
                 force_runtime_process_local=self.force_runtime_process_local,
             )
         except (AttributeError, KeyError, TypeError, ValueError):

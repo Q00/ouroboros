@@ -314,7 +314,7 @@ async def _run_shadow_replay_inner(
         return
 
     # This experiment has its own ephemeral workspace and never decides the
-    # live AC's acceptance, but it still must not sidestep the executor's five
+    # live AC's acceptance, but it still must not sidestep the executor's six
     # captured entry roots. Import lazily to avoid the module cycle: the
     # executor imports this harness at module load time.
     from ouroboros.orchestrator.parallel_executor import _invoke_execution_authority_guard

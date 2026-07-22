@@ -767,6 +767,7 @@ def _make_execution_authority_guard(
         rate_gate_acquire_callable = captured_binding.rate_gate_acquire_callable
         coordinator = captured_binding.coordinator
         coordinator_review_callable = captured_binding.coordinator_review_callable
+        session_signal_hub = captured_binding.session_signal_hub
         get_attribute = object.__getattribute__
         if (
             get_attribute(current_executor, "_execution_authority_live_binding")
@@ -787,6 +788,7 @@ def _make_execution_authority_guard(
             or get_attribute(current_executor, "_coordinator") is not coordinator
             or get_attribute(current_executor, "_authority_coordinator_review")
             is not coordinator_review_callable
+            or get_attribute(current_executor, "_session_signal_hub") is not session_signal_hub
         ):
             raise ValueError("execution authority drifted before effect")
         if (
@@ -811,6 +813,7 @@ def _make_execution_authority_guard(
             rate_gate=rate_gate,
             workspace=workspace_builder_root(current_executor),
             execution_policy=policy_builder_root(current_executor),
+            session_signal_hub=session_signal_hub,
             dispatcher_stream_callable=dispatcher_stream_callable,
             rate_gate_acquire_callable=rate_gate_acquire_callable,
             coordinator=coordinator,
@@ -1646,6 +1649,7 @@ class ParallelACExecutor:
             rate_gate=self._dispatch_rate_gate,
             workspace=workspace_builder(),
             execution_policy=policy_builder(),
+            session_signal_hub=self._session_signal_hub,
             dispatcher_stream_callable=self._authority_leaf_dispatcher_stream,
             rate_gate_acquire_callable=self._authority_rate_gate_acquire_root,
             coordinator=self._authority_coordinator,
@@ -1686,7 +1690,10 @@ class ParallelACExecutor:
             expected_coordinator_type=_foundation_a_roots.level_coordinator_type,
             expected_coordinator_review_root=_foundation_a_roots.level_coordinator_review_root,
             expected_coordinator_review_code=_foundation_a_roots.level_coordinator_review_code,
-            force_runtime_process_local=not _foundation_a_internal_entry_roots_are_closed,
+            force_runtime_process_local=(
+                not _foundation_a_internal_entry_roots_are_closed
+                or self._session_signal_hub is not None
+            ),
         )
         self._execution_authority_live_binding = binding
         self._execution_authority = binding.contract
@@ -1752,6 +1759,7 @@ class ParallelACExecutor:
                 "_cross_harness_redispatch_enabled",
             ),
             "shadow_replay_enabled": get_attribute(self, "_shadow_replay_enabled"),
+            "session_signal_hub_enabled": get_attribute(self, "_session_signal_hub") is not None,
             "dispatch_rate": {
                 "algorithm": "rate-limit-gate/v1",
                 "backend": backend if isinstance(backend, str) else None,

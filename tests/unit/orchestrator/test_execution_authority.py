@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 import gc
 import json
+import shutil
+import sys
 from unittest.mock import AsyncMock, MagicMock
 import weakref
 
 import pytest
 
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.execution_authority import ExecutionAuthorityContract
 import ouroboros.orchestrator.parallel_executor as parallel_executor_module
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
@@ -74,7 +77,7 @@ class _Verifier:
 
 def _contract(
     *,
-    runtime: _Runtime | None = None,
+    runtime: object | None = None,
     verifier: object | None = None,
     workspace: str = "/tmp/workspace-a",
     policy: dict[str, object] | None = None,
@@ -123,7 +126,12 @@ def test_workspace_and_policy_drift_change_authority() -> None:
 
 
 def test_closed_builtin_verifier_can_be_portable() -> None:
-    authority = _contract(verifier=structural_atomic_verifier)
+    runtime = CodexCliRuntime(
+        cli_path=sys.executable,
+        model="test-model",
+        cwd="/tmp",
+    )
+    authority = _contract(runtime=runtime, verifier=structural_atomic_verifier)
 
     assert authority.portable_across_processes is True
     assert authority.data["verifier"] == {
@@ -132,6 +140,121 @@ def test_closed_builtin_verifier_can_be_portable() -> None:
         "stability": "durable",
         "version": 1,
     }
+
+
+def test_unknown_runtime_implementation_stays_process_local_and_unique() -> None:
+    class AlternateRuntime(_Runtime):
+        async def execute_task(self, **_: object) -> AsyncIterator[object]:
+            if False:  # pragma: no cover - implementation identity only
+                yield None
+
+    first = _contract(runtime=_Runtime())
+    second = _contract(runtime=AlternateRuntime())
+
+    assert first.portable_across_processes is False
+    assert second.portable_across_processes is False
+    assert first.fingerprint != second.fingerprint
+
+
+def test_runtime_type_name_spoof_cannot_claim_closed_implementation() -> None:
+    class SpoofedCodexRuntime(CodexCliRuntime):
+        pass
+
+    SpoofedCodexRuntime.__module__ = CodexCliRuntime.__module__
+    SpoofedCodexRuntime.__qualname__ = CodexCliRuntime.__qualname__
+    runtime = SpoofedCodexRuntime(
+        cli_path=sys.executable,
+        model="test-model",
+        cwd="/tmp",
+    )
+
+    authority = _contract(runtime=runtime, verifier=structural_atomic_verifier)
+
+    assert authority.portable_across_processes is False
+
+
+def test_preconstruction_builtin_dispatch_patch_stays_process_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def altered_execute_task(*_: object, **__: object) -> AsyncIterator[object]:
+        if False:  # pragma: no cover - implementation identity only
+            yield None
+
+    monkeypatch.setattr(CodexCliRuntime, "execute_task", altered_execute_task)
+    runtime = CodexCliRuntime(
+        cli_path=sys.executable,
+        model="test-model",
+        cwd="/tmp",
+    )
+
+    authority = _contract(runtime=runtime, verifier=structural_atomic_verifier)
+
+    assert authority.portable_across_processes is False
+
+
+def test_closed_codex_runtime_binds_executable_and_timeout_configuration() -> None:
+    baseline = _contract(
+        runtime=CodexCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/tmp",
+            stdout_idle_timeout_seconds=30,
+        ),
+        verifier=structural_atomic_verifier,
+    )
+    timeout_changed = _contract(
+        runtime=CodexCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/tmp",
+            stdout_idle_timeout_seconds=31,
+        ),
+        verifier=structural_atomic_verifier,
+    )
+
+    assert baseline.portable_across_processes is True
+    assert timeout_changed.portable_across_processes is True
+    assert baseline.fingerprint != timeout_changed.fingerprint
+
+    alternate_executable = shutil.which("true")
+    if alternate_executable is not None and alternate_executable != sys.executable:
+        executable_changed = _contract(
+            runtime=CodexCliRuntime(
+                cli_path=alternate_executable,
+                model="test-model",
+                cwd="/tmp",
+                stdout_idle_timeout_seconds=30,
+            ),
+            verifier=structural_atomic_verifier,
+        )
+        assert executable_changed.portable_across_processes is True
+        assert baseline.fingerprint != executable_changed.fingerprint
+
+
+def test_closed_codex_runtime_custom_skill_configuration_stays_process_local(
+    tmp_path,
+) -> None:
+    custom_skills = _contract(
+        runtime=CodexCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/tmp",
+            skills_dir=tmp_path,
+        ),
+        verifier=structural_atomic_verifier,
+    )
+    custom_dispatcher = _contract(
+        runtime=CodexCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/tmp",
+            skill_dispatcher=MagicMock(),
+        ),
+        verifier=structural_atomic_verifier,
+    )
+
+    assert custom_skills.portable_across_processes is False
+    assert custom_dispatcher.portable_across_processes is False
 
 
 def test_credential_shaped_runtime_identity_becomes_process_local_without_egress() -> None:
@@ -265,6 +388,27 @@ def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
     assert authority.data["execution_policy"]["identity_digest"].startswith("sha256:")
 
 
+def test_session_signal_hub_is_process_local_and_cannot_drift(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    hub = MagicMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+        session_signal_hub=hub,
+    )
+
+    assert executor.execution_authority.portable_across_processes is False
+    assert executor._execution_authority_policy()["session_signal_hub_enabled"] is True
+    executor._require_execution_authority_intact()
+
+    executor._session_signal_hub = MagicMock()
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
 def test_execution_authority_registry_does_not_keep_executor_alive(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)
@@ -322,7 +466,7 @@ def test_constructor_closure_ignores_a_poisoned_global_roots_bundle(tmp_path) ->
 
     assert executor._authority_transcript_verifier is original_verifier
     assert executor._authority_transcript_verifier is not injected_verifier
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
 
 
 def test_profile_policy_drift_changes_executor_authority(tmp_path) -> None:
@@ -550,7 +694,7 @@ def test_executor_rejects_postconstruction_runtime_attribute_resolution_drift(
         console=MagicMock(),
         task_cwd=str(tmp_path),
     )
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
 
     original_getattribute = _Runtime.__getattribute__
 
@@ -581,7 +725,7 @@ def test_executor_rejects_postconstruction_dispatcher_attribute_resolution_drift
         console=MagicMock(),
         task_cwd=str(tmp_path),
     )
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
 
     dispatcher_type = executor._authority_leaf_dispatcher_type
     original_getattribute = dispatcher_type.__getattribute__
@@ -612,7 +756,7 @@ def test_executor_rejects_postconstruction_coordinator_attribute_resolution_drif
         console=MagicMock(),
         task_cwd=str(tmp_path),
     )
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
 
     coordinator_type = type(executor._coordinator)
     original_getattribute = coordinator_type.__getattribute__
@@ -642,7 +786,7 @@ async def test_executor_rejects_rate_gate_attribute_resolution_drift_before_admi
         console=MagicMock(),
         task_cwd=str(tmp_path),
     )
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
 
     gate_type = type(executor._dispatch_rate_gate)
     original_getattribute = gate_type.__getattribute__
@@ -997,7 +1141,7 @@ def test_preconstruction_transcript_alias_patch_uses_closed_root(
     )
 
     assert executor._authority_transcript_verifier is not injected_verifier
-    assert executor.execution_authority.portable_across_processes is True
+    assert executor.execution_authority.portable_across_processes is False
     executor._require_execution_authority_intact()
 
 

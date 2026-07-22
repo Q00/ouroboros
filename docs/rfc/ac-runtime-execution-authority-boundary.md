@@ -9,7 +9,7 @@ trust reuse, dispatch, routing, or final acceptance on its own.
 | Component | Foundation A treatment | Later owner |
 | --- | --- | --- |
 | `ParallelACExecutor`, `LeafDispatcher`, `LevelCoordinator`, verification gate, and rate-gate algorithm | Closed, versioned implementation descriptors | Foundation A |
-| Runtime adapter | Explicit runtime descriptor supplied by the adapter; values are represented as safe digests | Foundation A |
+| Runtime adapter | Exact reviewed built-in adapter type plus a finite execution descriptor (runtime identity, executable generation/content, and closed process configuration); values are represented as safe digests. Unknown adapters and custom skill settings are process-local. | Foundation A |
 | Workspace | Resolved path identity represented as a digest | Foundation A |
 | Built-in transcript verifier | Closed, versioned verifier descriptor | Foundation A |
 | Custom verifier | Exact object identity for this process only; never portable solely because it has Python code, a closure, defaults, globals, or an identity method | Foundation A / process local |
@@ -25,14 +25,22 @@ prove arbitrary Python behavior is portable.
 
 ## Supported portable forms
 
-Only the closed built-in transcript verifier and an adapter with an explicit,
-safe runtime identity descriptor can contribute durable identity. The runtime
-descriptor is canonical JSON under a strict size/depth budget and is represented
-by a digest, never copied verbatim into authority JSON. A credential-shaped or
-malformed value makes that runtime component unobserved/process-local.
-A durable runtime also carries an explicit observation that its direct dispatch
-root was finite and observable; `stability` alone cannot promote an otherwise
-process-local descriptor.
+Only the closed built-in transcript verifier and an adapter whose *exact type*
+is in Foundation A's reviewed runtime implementation table can contribute
+durable identity. The runtime descriptor contains the adapter's explicit safe
+execution identity plus a bounded digest of the resolved CLI executable and a
+finite configuration table for timeouts, subprocess behavior, and child-session
+environment keys. It is represented by digests, never copied verbatim into
+authority JSON. A credential-shaped or malformed value makes that runtime
+component unobserved/process-local. An unknown adapter implementation, a custom
+skills directory, or a custom skill dispatcher is executable only as
+process-local state.
+
+A durable runtime also carries explicit observations for its reviewed
+implementation, direct dispatch root, executable, and configuration;
+`stability` alone cannot promote an otherwise process-local descriptor. The
+live guard binds the direct `execute_task` root and code identity so it rejects
+post-construction dispatch drift before an executor-owned effect.
 
 The implementation versions in `execution_authority.py` are reviewed source
 constants. Changing the behavior of a closed component requires an explicit
@@ -44,7 +52,8 @@ as a substitute for that review.
 Before an atomic dispatch or verifier pass, the executor verifies only the
 enumerated live roots:
 
-1. adapter object identity and current finite runtime descriptor;
+1. adapter object identity, exact reviewed implementation, and current finite
+   runtime descriptor, including its direct `execute_task` root/code identity;
 2. verifier object identity and its captured finite descriptor;
 3. captured `LeafDispatcher` instance, direct `stream` callable, and default
    attribute-resolution root;
@@ -60,6 +69,12 @@ enumerated live roots:
 8. the six original executor entry functions used by internal orchestration:
    single-AC execution, atomic execution, rate admission, decomposition
    dispatch, verifier dispatch, and the shell/filesystem verification gate.
+
+The execution policy records whether a `session_signal_hub` is enabled. A
+non-`None` hub is volatile process state and forces the baseline process-local;
+the live guard retains its exact identity and rejects replacement before the
+next effect. This preserves current signal behavior without asserting that a
+hub can be reproduced across processes.
 
 A replacement root fails closed. Mutation inside an arbitrary custom callable
 is deliberately not treated as a portable identity claim; it is process-local
@@ -120,3 +135,6 @@ Tests must show that:
 7. `portable_across_processes` grants no reuse or acceptance semantics.
 8. shadow replay rejects entry-root drift before creating its isolated baseline
    runtime and invokes its verifier through the captured entry root.
+9. unknown runtime implementations, custom skill directories/dispatchers, and
+   hub-enabled executors remain process-local; executable or closed timeout
+   configuration divergence changes a portable runtime fingerprint.
