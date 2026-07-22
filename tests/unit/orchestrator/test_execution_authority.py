@@ -767,6 +767,29 @@ def test_executor_rejects_rate_gate_bucket_time_and_method_drift(
         executor._require_execution_authority_intact()
 
 
+def test_executor_rejects_rate_gate_bucket_helper_code_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    def injected_prune(self: object, now: float) -> None:
+        del self, now
+
+    bucket_type = type(executor._dispatch_rate_gate._bucket)
+    monkeypatch.setattr(bucket_type._prune, "__code__", injected_prune.__code__)
+
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
 def test_executor_rejects_replaced_captured_leaf_dispatch_root(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)
@@ -1169,6 +1192,17 @@ def test_preconstruction_structural_verifier_code_drift_is_process_local() -> No
         authority = _contract(verifier=structural_atomic_verifier)
         assert authority.portable_across_processes is False
         assert authority.data["verifier"]["stability"] == "process_local"
+
+        runtime = _Runtime()
+        executor = ParallelACExecutor(
+            adapter=runtime,  # type: ignore[arg-type]
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            task_cwd="/tmp/workspace-a",
+            atomic_verifier=structural_atomic_verifier,
+        )
+        assert executor.execution_authority.portable_across_processes is False
+        executor._require_execution_authority_intact()
     finally:
         structural_atomic_verifier.__code__ = original_code
 

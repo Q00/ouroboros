@@ -40,6 +40,13 @@ _EXECUTOR_COMPONENT_VERSIONS = {
 _BUILTIN_TRANSCRIPT_VERIFIER = "runtime-transcript-verifier/v1"
 _BUILTIN_STRUCTURAL_VERIFIER = "structural-atomic-verifier/v1"
 _BUILTIN_STRUCTURAL_VERIFIER_CODE = structural_atomic_verifier.__code__
+_RATE_GATE_BUCKET_HELPER_NAMES = (
+    "_prune",
+    "_tokens_in_window",
+    "_snapshot",
+    "_request_wait_seconds",
+    "_token_wait_seconds",
+)
 
 
 def _canonical_json(value: object, *, field: str) -> str:
@@ -896,6 +903,7 @@ class ExecutionAuthorityLiveBinding:
     rate_gate_bucket_acquire_code: object | None
     rate_gate_bucket_force_reserve_root: object | None
     rate_gate_bucket_force_reserve_code: object | None
+    rate_gate_bucket_helper_roots: tuple[tuple[str, object | None, object | None], ...]
     rate_gate_bucket_binding_observable: bool
     verifier_instance_nonce: str | None
     force_runtime_process_local: bool
@@ -936,6 +944,9 @@ class ExecutionAuthorityLiveBinding:
         expected_rate_gate_bucket_acquire_code: object | None = None,
         expected_rate_gate_bucket_force_reserve_root: object | None = None,
         expected_rate_gate_bucket_force_reserve_code: object | None = None,
+        expected_rate_gate_bucket_helper_roots: (
+            tuple[tuple[str, object | None, object | None], ...] | None
+        ) = None,
         expected_coordinator_type: type[object] | None = None,
         expected_coordinator_review_root: object | None = None,
         expected_coordinator_review_code: object | None = None,
@@ -1025,6 +1036,7 @@ class ExecutionAuthorityLiveBinding:
         rate_gate_bucket_acquire_code: object | None = None
         rate_gate_bucket_force_reserve_root: object | None = None
         rate_gate_bucket_force_reserve_code: object | None = None
+        rate_gate_bucket_helper_roots: tuple[tuple[str, object | None, object | None], ...] = ()
         rate_gate_bucket_binding_observable = False
         try:
             rate_gate_max_wait_seconds = object.__getattribute__(rate_gate, "_max_wait_seconds")
@@ -1059,6 +1071,13 @@ class ExecutionAuthorityLiveBinding:
             rate_gate_bucket_force_reserve_code = _callable_code_identity(
                 rate_gate_bucket_force_reserve_root
             )
+            bucket_helper_roots: list[tuple[str, object | None, object | None]] = []
+            for name in _RATE_GATE_BUCKET_HELPER_NAMES:
+                helper_root = _static_callable_root(rate_gate_bucket, name)
+                bucket_helper_roots.append(
+                    (name, helper_root, _callable_code_identity(helper_root))
+                )
+            rate_gate_bucket_helper_roots = tuple(bucket_helper_roots)
             rate_gate_bucket_binding_observable = (
                 isinstance(rate_gate_bucket_config[0], str)
                 and (
@@ -1086,6 +1105,10 @@ class ExecutionAuthorityLiveBinding:
                 and rate_gate_bucket_acquire_code is not None
                 and rate_gate_bucket_force_reserve_root is not None
                 and rate_gate_bucket_force_reserve_code is not None
+                and all(
+                    helper_root is not None and helper_code is not None
+                    for _, helper_root, helper_code in rate_gate_bucket_helper_roots
+                )
             )
         except (AttributeError, TypeError):
             rate_gate_bucket = None
@@ -1135,6 +1158,20 @@ class ExecutionAuthorityLiveBinding:
             and rate_gate_bucket_force_reserve_root is expected_rate_gate_bucket_force_reserve_root
             and expected_rate_gate_bucket_force_reserve_code is not None
             and rate_gate_bucket_force_reserve_code is expected_rate_gate_bucket_force_reserve_code
+            and expected_rate_gate_bucket_helper_roots is not None
+            and len(rate_gate_bucket_helper_roots) == len(expected_rate_gate_bucket_helper_roots)
+            and all(
+                name == expected_name and root is expected_root and code is expected_code
+                for (name, root, code), (
+                    expected_name,
+                    expected_root,
+                    expected_code,
+                ) in zip(
+                    rate_gate_bucket_helper_roots,
+                    expected_rate_gate_bucket_helper_roots,
+                    strict=True,
+                )
+            )
         )
         coordinator_is_closed = coordinator is None or (
             expected_coordinator_type is not None
@@ -1170,8 +1207,19 @@ class ExecutionAuthorityLiveBinding:
             or not rate_gate_semantics_observable
             or not rate_gate_bucket_binding_observable
         )
+        # A pristine structural verifier is the one built-in verifier with a
+        # durable implementation descriptor. If its code was already changed
+        # before construction, keep it executable as a custom, process-local
+        # verifier with one stable live-instance nonce instead of generating a
+        # new nonce on every guard check.
         nonce = (
-            None if verifier is None or verifier is structural_atomic_verifier else uuid.uuid4().hex
+            None
+            if verifier is None
+            or (
+                verifier is structural_atomic_verifier
+                and verifier_code is _BUILTIN_STRUCTURAL_VERIFIER_CODE
+            )
+            else uuid.uuid4().hex
         )
         contract = ExecutionAuthorityContract.build(
             adapter=adapter,
@@ -1239,6 +1287,7 @@ class ExecutionAuthorityLiveBinding:
             rate_gate_bucket_acquire_code=rate_gate_bucket_acquire_code,
             rate_gate_bucket_force_reserve_root=rate_gate_bucket_force_reserve_root,
             rate_gate_bucket_force_reserve_code=rate_gate_bucket_force_reserve_code,
+            rate_gate_bucket_helper_roots=rate_gate_bucket_helper_roots,
             rate_gate_bucket_binding_observable=rate_gate_bucket_binding_observable,
             verifier_instance_nonce=nonce,
             force_runtime_process_local=force_runtime_process_local,
@@ -1378,6 +1427,10 @@ class ExecutionAuthorityLiveBinding:
                 is not self.rate_gate_bucket_force_reserve_code
             ):
                 return False
+            for name, root, code in self.rate_gate_bucket_helper_roots:
+                current_root = _static_callable_root(current_rate_gate_bucket, name)
+                if current_root is not root or _callable_code_identity(current_root) is not code:
+                    return False
         if (
             self.adapter_dispatch_root is not None
             and _static_callable_root(adapter, "execute_task") is not self.adapter_dispatch_root

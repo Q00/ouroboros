@@ -52,8 +52,9 @@ enumerated live roots:
    attribute-resolution root;
 5. captured rate-gate `acquire` callable, timing scalars, sleep root, bucket
    identity/configuration/time source, and direct admission roots
-   (`enabled`, `acquire`, and `force_reserve`), plus default attribute-resolution
-   roots;
+   (`enabled`, `acquire`, `force_reserve`, `_prune`, `_tokens_in_window`,
+   `_snapshot`, `_request_wait_seconds`, and `_token_wait_seconds`), plus
+   default attribute-resolution roots;
 6. adapter dispatch and attribute-resolution roots; and
 7. workspace and static policy descriptors; and
 8. the six original executor entry functions used by internal orchestration:
@@ -104,7 +105,7 @@ orchestration path, where effects use the closed-root invocation path.
 Tests must show that:
 
 1. workspace, adapter descriptor, static policy, verifier root/code, dispatcher
-   root, and rate-gate semantic drift are rejected before dispatch or
+   root, and rate-gate semantic/helper drift are rejected before dispatch or
    verification, including
    post-construction `__getattribute__` replacement on direct effect owners;
 2. custom closures/defaults/globals do not enter the canonical authority JSON

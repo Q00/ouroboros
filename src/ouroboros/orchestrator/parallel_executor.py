@@ -353,6 +353,7 @@ class _FoundationAClosedRoots:
     rate_gate_bucket_acquire_code: object | None
     rate_gate_bucket_force_reserve_root: object
     rate_gate_bucket_force_reserve_code: object | None
+    rate_gate_bucket_helper_roots: tuple[tuple[str, object | None, object | None], ...]
     transcript_verifier: Callable[..., VerifierVerdict]
     transcript_verifier_code: object
 
@@ -402,6 +403,25 @@ _FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_ROOT = SharedRateLimitBucket.acquire
 _FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE = SharedRateLimitBucket.acquire.__code__
 _FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT = SharedRateLimitBucket.force_reserve
 _FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE = SharedRateLimitBucket.force_reserve.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_HELPER_ROOTS = (
+    ("_prune", SharedRateLimitBucket._prune, SharedRateLimitBucket._prune.__code__),
+    (
+        "_tokens_in_window",
+        SharedRateLimitBucket._tokens_in_window,
+        SharedRateLimitBucket._tokens_in_window.__code__,
+    ),
+    ("_snapshot", SharedRateLimitBucket._snapshot, SharedRateLimitBucket._snapshot.__code__),
+    (
+        "_request_wait_seconds",
+        SharedRateLimitBucket._request_wait_seconds,
+        SharedRateLimitBucket._request_wait_seconds.__code__,
+    ),
+    (
+        "_token_wait_seconds",
+        SharedRateLimitBucket._token_wait_seconds,
+        SharedRateLimitBucket._token_wait_seconds.__code__,
+    ),
+)
 _FOUNDATION_A_TRANSCRIPT_VERIFIER = _verify_atomic_evidence_against_runtime_messages
 _FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE = _verify_atomic_evidence_against_runtime_messages.__code__
 _FOUNDATION_A_CLOSED_ROOTS = _FoundationAClosedRoots(
@@ -425,6 +445,7 @@ _FOUNDATION_A_CLOSED_ROOTS = _FoundationAClosedRoots(
     rate_gate_bucket_acquire_code=_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE,
     rate_gate_bucket_force_reserve_root=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT,
     rate_gate_bucket_force_reserve_code=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE,
+    rate_gate_bucket_helper_roots=_FOUNDATION_A_RATE_GATE_BUCKET_HELPER_ROOTS,
     transcript_verifier=_FOUNDATION_A_TRANSCRIPT_VERIFIER,
     transcript_verifier_code=_FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE,
 )
@@ -459,6 +480,7 @@ def _bind_foundation_a_roots(
     rate_gate_bucket_acquire_code = roots.rate_gate_bucket_acquire_code
     rate_gate_bucket_force_reserve_root = roots.rate_gate_bucket_force_reserve_root
     rate_gate_bucket_force_reserve_code = roots.rate_gate_bucket_force_reserve_code
+    rate_gate_bucket_helper_roots = roots.rate_gate_bucket_helper_roots
     transcript_verifier = roots.transcript_verifier
     transcript_verifier_code = roots.transcript_verifier_code
 
@@ -490,6 +512,7 @@ def _bind_foundation_a_roots(
                     rate_gate_bucket_acquire_code=rate_gate_bucket_acquire_code,
                     rate_gate_bucket_force_reserve_root=rate_gate_bucket_force_reserve_root,
                     rate_gate_bucket_force_reserve_code=rate_gate_bucket_force_reserve_code,
+                    rate_gate_bucket_helper_roots=rate_gate_bucket_helper_roots,
                     transcript_verifier=transcript_verifier,
                     transcript_verifier_code=transcript_verifier_code,
                 ),
@@ -1656,6 +1679,9 @@ class ParallelACExecutor:
             ),
             expected_rate_gate_bucket_force_reserve_code=(
                 _foundation_a_roots.rate_gate_bucket_force_reserve_code
+            ),
+            expected_rate_gate_bucket_helper_roots=(
+                _foundation_a_roots.rate_gate_bucket_helper_roots
             ),
             expected_coordinator_type=_foundation_a_roots.level_coordinator_type,
             expected_coordinator_review_root=_foundation_a_roots.level_coordinator_review_root,
