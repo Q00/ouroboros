@@ -927,10 +927,8 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         {
             "lane_id": "data_context",
             "purpose": (
-                "Fetch data evidence (metrics, DB/warehouse facts) only when the "
-                "answer is a data-driven decision; execute only local free "
-                "read-only lookups directly and return proposed queries for "
-                "metered or side-effect-ambiguous sources."
+                "Fetch data evidence (metrics, DB/warehouse facts) only when "
+                "the answer is a data-driven decision."
             ),
             "capability": "call_mcp",
             "required": False,
