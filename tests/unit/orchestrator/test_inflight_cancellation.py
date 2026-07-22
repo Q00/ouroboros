@@ -443,12 +443,12 @@ class TestCancellationErrorScenarios:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_handle_cancellation_mark_failed_retains_live_owner(
+    async def test_handle_cancellation_mark_failed_keeps_retryable_owner_without_route(
         self,
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
     ) -> None:
-        """A failed terminal write must not release a still-RUNNING owner."""
+        """A failed terminal write keeps liveness but releases the exiting worker route."""
         runner._register_session("exec_fail", "sess_fail")
         await request_cancellation("sess_fail")
         self._mock_running_session(runner, "sess_fail")
@@ -476,24 +476,26 @@ class TestCancellationErrorScenarios:
             )
 
         # Reporting cancellation while the durable tracker is still RUNNING
-        # would let another process misclassify it as a crashed owner. Keep the
-        # in-memory route, heartbeat, and request live for a retry instead.
+        # would let another process misclassify it as a crashed owner. Keep
+        # liveness and the request for retry, but the exiting coroutine must
+        # not leave a routable active-session entry behind.
         assert result.is_err
         assert result.error.message == (
             "Failed to persist cancellation; process-local authority remains live"
         )
         assert await is_cancellation_requested("sess_fail")
-        assert runner.active_sessions["exec_fail"] == "sess_fail"
+        assert "exec_fail" not in runner.active_sessions
+        assert result.error.details["resume_blocked"] == "cancellation_persistence_pending"
         await clear_cancellation("sess_fail")
         runner._unregister_session("exec_fail", "sess_fail")
 
     @pytest.mark.asyncio
-    async def test_handle_cancellation_mark_raises_retains_live_owner(
+    async def test_handle_cancellation_mark_raises_keeps_retryable_owner_without_route(
         self,
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
     ) -> None:
-        """An exception during terminal persistence retains the retryable owner."""
+        """An exception during terminal persistence releases the dead active route."""
         runner._register_session("exec_raise", "sess_raise")
         self._mock_running_session(runner, "sess_raise")
 
@@ -511,7 +513,8 @@ class TestCancellationErrorScenarios:
 
         assert result.is_err
         assert result.error.details["cause"] == "Unexpected DB crash"
-        assert runner.active_sessions["exec_raise"] == "sess_raise"
+        assert "exec_raise" not in runner.active_sessions
+        assert result.error.details["resume_blocked"] == "cancellation_persistence_pending"
         runner._unregister_session("exec_raise", "sess_raise")
 
     @pytest.mark.asyncio

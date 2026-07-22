@@ -202,6 +202,92 @@ produces the explicit terminal/new-attempt path above. A later C sub-slice may
 enable cross-process continuation only when every component is portable and its
 capsule contract is independently valid.
 
+## Process-local lifecycle ownership
+
+The process-local registry is the sole in-process owner of the authority
+generation's lifecycle.  It has a deliberately small state machine; runner,
+MCP execution, and public cancellation surfaces may request a transition, but
+they must not each infer a separate terminal lifecycle.
+
+```mermaid
+stateDiagram-v2
+    [*] --> registered: mint + register + acquire lease
+    registered --> claimed: atomically claim effects
+    claimed --> registered: pause or retryable cancellation failure\nrelease claim only
+    registered --> terminalizing: public terminalization reservation
+    terminalizing --> registered: durable write fails or caller is cancelled
+    terminalizing --> retired: durable terminal record + registry finalizer
+    claimed --> retired: owner persists terminal record + owner teardown
+    registered --> retired: setup abort or proven lost authority
+    retired --> [*]
+```
+
+`registered` holds the opaque generation, registration, heartbeat lease, and
+registered terminal finalizers. `claimed` adds the one exclusive right to
+perform effects. `terminalizing` is not a second effect owner: it is a
+reservation held only while a public terminal surface writes its durable record
+for an otherwise unclaimed paused owner. `retired` contains none of those
+resources. A session must never be both durably terminal and locally
+`registered` after a successful terminalization path completes.
+
+### Terminalization API
+
+The registry exposes four lifecycle operations, all keyed by the exact
+session/execution/correlation tuple:
+
+| Operation | Preconditions | Result |
+| --- | --- | --- |
+| `claim` | `registered`, no effect claim or reservation | moves to `claimed`; a competing caller receives the non-terminal in-progress block |
+| `release` | exact current effect owner | returns `claimed` to `registered`, preserving the registration and lease for a paused/retryable owner |
+| `begin_terminalization` | `registered` and unclaimed | reserves `terminalizing`; an active claim or another reservation is signalled instead of being terminalized underneath |
+| `retire_after_terminal_persistence` | a durable terminal record has already succeeded | atomically removes registration, claim/reservation, issuance, and finalizer set, then drains the captured finalizers |
+
+Only the final operation is allowed to run the retained-owner cleanup callbacks.
+The callbacks close retained `EventStore` instances, evict handler-held runners,
+release heartbeat/worktree state through their exact owner, and are idempotent.
+They are registered against the opaque live binding rather than reconstructed
+from persisted diagnostic data. If cancellation reaches the caller while this
+finalizer set is draining, the drain still completes every callback before that
+caller cancellation is re-raised. A cancelled or failing individual callback is
+logged and cannot prevent subsequent cleanup callbacks from running.
+
+Normal runner-owned completion persists its terminal tracker before performing
+its own teardown. A public terminal surface follows the same order, but first
+takes `begin_terminalization`; it has no authority to mint/reconstruct a
+runner. This gives the paused retained owner and the public MCP surface one
+shared transition instead of two competing cleanup paths.
+
+Authority-loss failure and public cancellation use an additional durable
+transition guard: `append_session_terminal_if_active`. It checks for an
+explicit session terminal event and appends the new terminal event in the same
+database transaction. For SQLite it takes the immediate write transaction;
+the per-session unique terminal-transition guard provides the same one-winner
+property on other supported stores. The outcome is either one durable winner or
+a successful no-op because another terminal event already won. A stale
+`PAUSED`/`RUNNING` snapshot therefore cannot append `FAILED` over a concurrent
+`CANCELLED` record after the registry has retired its local generation.
+
+### Cancellation and resume race matrix
+
+| Situation | Durable action | Local authority result | Caller-visible outcome |
+| --- | --- | --- | --- |
+| A local worker is `claimed`; public cancel arrives | Do not write a terminal record underneath it; publish the cooperative request | claim remains with worker until its orderly cancellation path | successful `cancellation_requested` response; worker performs persistence and teardown |
+| A local paused owner is `registered`; public cancel arrives | reserve first, publish request, then write `CANCELLED` | reservation blocks a concurrent resume claim; successful write retires and drains all finalizers | terminal cancellation response |
+| The paused-owner cancellation write fails or its caller is cancelled | no terminal record is reported | release only the reservation; preserve registration, lease, and published cancellation request | retryable error/caller cancellation; retained owner retries before any next effect |
+| Worker cancellation persistence fails | no false `CANCELLED`/`FAILED` record | release exiting worker's effect claim, active route, and worktree lock; retain registration, heartbeat, and cancellation request | typed `cancellation_persistence_pending`; next same-process resume retries cancellation before executing effects |
+| MCP execution wrapper receives `cancellation_persistence_pending` | must not call `mark_failed` | retains the exact owner and its liveness until a successful terminal write | retryable nonterminal error |
+| A stale paused/running snapshot observes authority retirement after a public terminal write | conditional terminal append finds the existing terminal event and does not append `FAILED` | no generation is recreated or retired a second time | fail-closed resume error while the durable terminal status remains unchanged |
+| A concurrent same-owner resume occurs during a claim or terminalization reservation | no competing terminal write | `claim` fails without releasing the live owner or its worktree state | `process_local_execution_in_progress` |
+| A foreign live process holds the heartbeat lease | must not terminalize a process it cannot signal | no local registration is manufactured or retired | retryable `process_local_authority_held_elsewhere` |
+| A terminal record is written through a public paused-owner cancellation | call `retire_after_terminal_persistence` only after the write | registry atomically detaches the opaque binding, then finalizers evict runner/cache/store and lease resources | later resume sees terminal state and cannot leak a retained owner |
+| A raw caller cancellation interrupts pre-effect contract/tool setup after a claim | first drain any published cooperative cancellation in a shielded task | successful cancellation retires normally; failed persistence releases only the claim/route/lock and preserves retryable authority | cancellation result or `cancellation_persistence_pending`, never `PAUSED → FAILED` through lost authority |
+
+The `claim` and terminalization reservation are intentionally the same mutual
+exclusion boundary. Thus a resume cannot acquire effects between public-cancel
+preflight and persistence. The implementation still treats an observed
+post-write active claim defensively: it republishes cancellation for that owner
+to complete orderly teardown rather than silently deleting its live state.
+
 ## Exit matrix
 
 The Foundation A implementation must demonstrate all of the following:
@@ -253,6 +339,26 @@ The Foundation A implementation must demonstrate all of the following:
 16. heartbeat lookup is contained for unsafe legacy ids, while observers retain
     stale/malformed lease files rather than deleting liveness evidence they did
     not own.
+17. a public terminalization reserves an unclaimed paused generation before its
+    durable write, blocks concurrent effect claims, and releases that reservation
+    without retiring the owner when the write or its caller fails;
+18. a failed worker cancellation write releases the departed effect claim,
+    active route, and worktree lock while preserving the live registration,
+    heartbeat, and cancellation request for an exact-owner retry;
+19. the MCP wrapper preserves that retryable cancellation state rather than
+    manufacturing `FAILED`, and a foreign live heartbeat receives a retryable
+    ownership block rather than an unsafe public terminal write;
+20. an externally persisted terminal record drains the exact retained runner,
+    handler cache, heartbeat, worktree ownership, and owned EventStore through
+    the registry's one finalizer path; and
+21. caller cancellation and a cancelled/failing finalizer cannot skip the
+    remaining registered finalizers or leave the registry reservation behind.
+22. competing `FAILED`/`CANCELLED` session lifecycle writes have exactly one
+    durable winner, and a stale pre-terminal tracker cannot overwrite that
+    terminal status after authority retirement; and
+23. a raw task cancellation in every claimed-but-pre-effect setup window drains
+    a published cooperative cancellation before generic cleanup, or preserves
+    the explicit retryable cancellation state for the next exact-owner resume.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

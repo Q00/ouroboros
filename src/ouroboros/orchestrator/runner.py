@@ -97,6 +97,7 @@ from ouroboros.orchestrator.execution_authority import (
     _process_local_authority_contract,
     _ProcessLocalAuthorityGeneration,
     _register_process_local_authority_generation,
+    _register_process_local_authority_terminal_finalizer,
     _release_process_local_authority_generation,
     _retire_process_local_authority_generation,
     constructor_model_contract,
@@ -1787,6 +1788,23 @@ class OrchestratorRunner:
             self._adapter,
         )
 
+    def _cleanup_process_local_authority_after_external_terminal(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Drop runner-local references after another surface wrote terminal state.
+
+        The registry has already invalidated the opaque capability.  This
+        callback intentionally cleans only runner-local bookkeeping; the
+        registry owns the liveness-lease release so it remains one operation.
+        """
+        self._process_local_authorities.pop((session_id, execution_id), None)
+        self._active_sessions.pop(execution_id, None)
+        if self._task_workspace is not None:
+            release_lock(self._task_workspace.lock_path)
+
     def _register_process_local_authority(
         self,
         *,
@@ -1828,6 +1846,28 @@ class OrchestratorRunner:
                 },
             ) from exc
         self._process_local_authorities[(session_id, execution_id)] = generation
+        if not _register_process_local_authority_terminal_finalizer(
+            session_id,
+            execution_id,
+            authority,
+            self._adapter,
+            ("runner", id(self)),
+            lambda: self._cleanup_process_local_authority_after_external_terminal(
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        ):
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            raise OrchestratorError(
+                message="Cannot register process-local terminal cleanup",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                },
+            )
         # Establish the cross-process liveness record as soon as a session owns
         # a live capability, before a detached caller can observe its persisted
         # RUNNING tracker.  It is a lease/liveness marker, never authority.
@@ -1938,7 +1978,7 @@ class OrchestratorRunner:
         """Terminally record a lost local capability without trying a fallback."""
         error = self._process_local_resume_unavailable_error(session_id, execution_id)
         try:
-            result = await self._session_repo.mark_failed(
+            result = await self._session_repo.mark_failed_if_active(
                 session_id,
                 error.message,
                 error.details,
@@ -1949,6 +1989,12 @@ class OrchestratorRunner:
                     session_id=session_id,
                     execution_id=execution_id,
                     error=str(result.error),
+                )
+            elif not result.value:
+                log.info(
+                    "orchestrator.runner.process_local_resume_terminal_already_persisted",
+                    session_id=session_id,
+                    execution_id=execution_id,
                 )
         except Exception as exc:  # pragma: no cover - best-effort terminal record
             log.warning(
@@ -4007,6 +4053,110 @@ class OrchestratorRunner:
             )
             return False
 
+    def _cancellation_persistence_pending_result(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        cause: object,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Leave a failed cancellation write retryable without stranding a claim.
+
+        The live registration and heartbeat remain as a truthful same-process
+        owner, and the cancellation request remains set.  The effectful claim,
+        active route, and worktree lock belong to the coroutine that is now
+        exiting, so they must be released for a retained owner to retry the
+        durable terminal write on a later resume request.
+        """
+        self._release_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        self._unregister_session(
+            execution_id,
+            session_id,
+            release_liveness_lease=False,
+        )
+        if self._task_workspace is not None:
+            release_lock(self._task_workspace.lock_path)
+        return Result.err(
+            OrchestratorError(
+                message="Failed to persist cancellation; process-local authority remains live",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(cause),
+                    "resume_blocked": "cancellation_persistence_pending",
+                    "cancellation_persistence_pending": True,
+                },
+            )
+        )
+
+    async def _drain_requested_cancellation_before_pre_execution_cleanup(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        messages_processed: int,
+        start_time: datetime,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Persist a published cancellation before abandoning a claimed setup.
+
+        A public cancellation can arrive after a resume/new-run claims the
+        generation but before the runner has registered its normal active
+        route.  Raw task cancellation in that window must not retire the
+        capability and leave a durable ``PAUSED`` tracker that a later resume
+        reclassifies as lost authority.  Run the normal cancellation lifecycle
+        in a shielded child task so a repeat caller cancellation cannot skip
+        the durable write or its retryable-pending cleanup.
+
+        Returns ``None`` when no cooperative cancellation is pending; otherwise
+        it returns the normal cancellation result.  A second raw cancellation
+        is re-raised after the child has drained its lifecycle work.
+        """
+        if not await is_cancellation_requested(session_id):
+            return None
+
+        task = asyncio.create_task(
+            self._handle_cancellation(
+                session_id=session_id,
+                execution_id=execution_id,
+                messages_processed=messages_processed,
+                start_time=start_time,
+            )
+        )
+        repeated_cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                repeated_cancellation = repeated_cancellation or exc
+
+        try:
+            result = task.result()
+        except asyncio.CancelledError as exc:
+            repeated_cancellation = repeated_cancellation or exc
+            result = self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause="cancellation lifecycle task cancelled",
+            )
+        except Exception as exc:  # pragma: no cover - defensive task boundary
+            log.exception(
+                "orchestrator.runner.pre_execution_cancellation_drain_failed",
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            result = self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+            )
+
+        if repeated_cancellation is not None:
+            raise repeated_cancellation
+        return result
+
     async def _handle_cancellation(
         self,
         session_id: str,
@@ -4118,15 +4268,10 @@ class OrchestratorRunner:
                 session_id=session_id,
                 error=str(exc),
             )
-            return Result.err(
-                OrchestratorError(
-                    message="Failed to persist cancellation; process-local authority remains live",
-                    details={
-                        "session_id": session_id,
-                        "execution_id": execution_id,
-                        "cause": str(exc),
-                    },
-                )
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
             )
         if cancel_result is not None and cancel_result.is_err:
             log.warning(
@@ -4134,15 +4279,10 @@ class OrchestratorRunner:
                 session_id=session_id,
                 error=str(cancel_result.error),
             )
-            return Result.err(
-                OrchestratorError(
-                    message="Failed to persist cancellation; process-local authority remains live",
-                    details={
-                        "session_id": session_id,
-                        "execution_id": execution_id,
-                        "cause": str(cancel_result.error),
-                    },
-                )
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=cancel_result.error,
             )
 
         # The session is now terminal.  It is safe to clear the request and
@@ -4552,10 +4692,16 @@ class OrchestratorRunner:
             await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
-            # The exclusive generation was claimed before contract restoration.
-            # A raw task cancellation must release that claim (and its lease)
-            # even though it intentionally does not write a terminal session
-            # record; callers still receive the original cancellation.
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 tracker.session_id,
@@ -4563,6 +4709,16 @@ class OrchestratorRunner:
             )
             raise
         except OrchestratorError as exc:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 tracker.session_id,
@@ -4686,13 +4842,16 @@ class OrchestratorRunner:
                 execution_plan=direct_graph.to_execution_plan(),
             )
         except asyncio.CancelledError:
-            if session_registered and await is_cancellation_requested(tracker.session_id):
-                return await self._handle_cancellation(
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
                 )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 exec_id,
                 tracker.session_id,
@@ -4700,6 +4859,16 @@ class OrchestratorRunner:
             )
             raise
         except Exception as e:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 exec_id,
                 tracker.session_id,
@@ -5740,6 +5909,59 @@ class OrchestratorRunner:
                     )
                 )
             if authority_generation is not None:
+                # A previous cancellation attempt may have failed its durable
+                # write after the worker stopped.  Its request remains live
+                # precisely so this retained owner can claim the generation
+                # and retry terminalization instead of stranding a claim or
+                # turning a RUNNING tracker into a normal resume.
+                # Register a route before the await so cancellation cleanup
+                # has one owner.  This probe is cancellation-safe: on raw task
+                # cancellation it releases only its claim/route and preserves
+                # the live registration and lease of the original owner.
+                try:
+                    self._register_session(tracker.execution_id, session_id)
+                    if await self._check_startup_cancellation(session_id):
+                        return await self._handle_cancellation(
+                            session_id=session_id,
+                            execution_id=tracker.execution_id,
+                            messages_processed=tracker.messages_processed,
+                            start_time=datetime.now(UTC),
+                        )
+                except asyncio.CancelledError:
+                    self._release_process_local_authority(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    self._unregister_session(
+                        tracker.execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                    if self._task_workspace is not None:
+                        release_lock(self._task_workspace.lock_path)
+                    raise
+                except Exception as exc:
+                    self._release_process_local_authority(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    self._unregister_session(
+                        tracker.execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                    if self._task_workspace is not None:
+                        release_lock(self._task_workspace.lock_path)
+                    return Result.err(
+                        OrchestratorError(
+                            message=f"Failed to inspect live process-local session: {exc}",
+                            details={
+                                "session_id": session_id,
+                                "execution_id": tracker.execution_id,
+                            },
+                        )
+                    )
+
                 # This runner still owns the live generation but the durable
                 # status is non-resumable. The probe claim was only for
                 # arbitration, so restore the pre-existing unclaimed state
@@ -5747,6 +5969,11 @@ class OrchestratorRunner:
                 self._release_process_local_authority(
                     session_id=session_id,
                     execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    session_id,
+                    release_liveness_lease=False,
                 )
                 return Result.err(
                     OrchestratorError(
@@ -5829,9 +6056,16 @@ class OrchestratorRunner:
             )
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
-            # Resume claims the exact live generation before restoration. Do
-            # not leave it permanently claimed if the caller cancels during
-            # this otherwise pre-effect setup window.
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
@@ -5839,6 +6073,16 @@ class OrchestratorRunner:
             )
             raise
         except OrchestratorError as exc:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
@@ -5851,6 +6095,18 @@ class OrchestratorRunner:
             # Register session for cancellation tracking
             self._register_session(tracker.execution_id, session_id)
             session_registered = True
+
+            # A public cancellation may have reserved this previously-paused
+            # owner between resume arbitration and registration.  Honor that
+            # request before restoring handles, assembling tools, or invoking
+            # any runtime effect.
+            if await self._check_startup_cancellation(session_id):
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=datetime.now(UTC),
+                )
 
             if execution_contract_changed and self._execution_contract is not None:
                 contract_progress = {
@@ -5930,6 +6186,16 @@ Note: This is a resumed session. Please continue from where execution was interr
             )
             await self._replay_workflow_state(session_id, state_tracker)
         except asyncio.CancelledError:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
@@ -5937,6 +6203,16 @@ Note: This is a resumed session. Please continue from where execution was interr
             )
             raise
         except Exception as e:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,

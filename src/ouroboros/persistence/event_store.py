@@ -17,7 +17,7 @@ from urllib.parse import unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, event, func, or_, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
@@ -26,7 +26,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.persistence.schema import events_table, metadata
+from ouroboros.persistence.schema import events_table, metadata, session_terminal_guards_table
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,13 @@ _RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
         "thread_id",
         "tool",
         "tool_name",
+    }
+)
+_SESSION_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "orchestrator.session.completed",
+        "orchestrator.session.failed",
+        "orchestrator.session.cancelled",
     }
 )
 
@@ -394,6 +401,122 @@ class EventStore:
             PersistenceError: If the append operation fails.
         """
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
+
+    async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
+        """Append one terminal session event only while no terminal event exists.
+
+        Returns ``True`` when ``event`` was inserted and ``False`` when another
+        terminal session event already won.  The check and append share one
+        transaction so a stale in-memory ``PAUSED`` tracker cannot overwrite a
+        concurrent durable cancellation with a later ``FAILED`` event.
+
+        This intentionally protects only the explicit session lifecycle event
+        family.  Callers that need a terminal transition must use a matching
+        ``orchestrator.session.*`` event; ordinary progress events remain
+        append-only observations.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_terminal_if_active",
+            )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(
+                event,
+                operation="append_session_terminal_if_active",
+            )
+        if event.aggregate_type != "session" or event.type not in _SESSION_TERMINAL_EVENT_TYPES:
+            raise PersistenceError(
+                "Conditional session terminal append requires an explicit terminal session event.",
+                operation="append_session_terminal_if_active",
+                table="events",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    # SQLite needs an immediate write transaction here. A
+                    # deferred SELECT followed by INSERT leaves a gap in which
+                    # another connection can commit the competing terminal
+                    # event. The unique guard below closes the same absent-row
+                    # race on every supported database backend.
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+
+                    try:
+                        terminal_query = (
+                            select(events_table.c.id)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                            )
+                            .limit(1)
+                        )
+                        existing_terminal = await conn.scalar(terminal_query)
+                        if existing_terminal is not None:
+                            if sqlite:
+                                await conn.rollback()
+                            elif transaction is not None:
+                                await transaction.rollback()
+                            return False
+
+                        try:
+                            async with conn.begin_nested():
+                                await conn.execute(
+                                    session_terminal_guards_table.insert().values(
+                                        session_id=event.aggregate_id,
+                                        terminal_event_id=event.id,
+                                        terminal_event_type=event.type,
+                                    )
+                                )
+                        except IntegrityError:
+                            # A concurrent conditional terminal transition won
+                            # the per-session unique guard. Roll back this
+                            # outer transaction before returning the successful
+                            # no-op result; the winner's event remains durable.
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            return False
+
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return True
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_terminal_if_active.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append terminal session event: {e}",
+                    operation="append_session_terminal_if_active",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from e
+        raise PersistenceError(
+            "Failed to conditionally append terminal session event after retries.",
+            operation="append_session_terminal_if_active",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
 
     async def append_with_rowid(
         self,
