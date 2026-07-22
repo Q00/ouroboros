@@ -46,12 +46,20 @@ globals, modules, environment maps, handler maps, cache contents, or opaque
 objects. Credential-shaped values are never serialized; they force the owning
 component to process-local.
 
-Every process-local component receives an opaque random nonce once per
-**authority generation**. `ExecutionAuthorityLiveBinding` retains that nonce
-for its same-instance integrity rechecks; a new executor/runtime capture gets a
-new nonce. Two instances may have similar visible configuration, but they
-cannot compare as a portable authority or accidentally authorize cross-process
-reuse.
+Every dynamically or unsafely identified process-local component receives an
+opaque random nonce once per **authority generation**.
+`ExecutionAuthorityLiveBinding` retains that nonce for its same-instance
+integrity rechecks; a new executor/runtime capture gets a new nonce. Two
+instances may have similar visible configuration, but they cannot compare as a
+portable authority or accidentally authorize cross-process reuse.
+
+More precisely, a nonce is attached to each component whose own identity is
+dynamic, unsafe, or otherwise not canonically observable. A valid declarative
+workspace or policy descriptor need not receive a separate nonce merely because
+another component makes the *whole* authority process-local. In Foundation A
+every current runtime is such a component, so its live nonce makes the complete
+authority generation process-local even when the workspace and policy retain
+their finite declarative descriptors.
 
 An authority generation additionally has a non-serializable live capability
 held in the process-local registry by session id. The persisted event contract
@@ -135,6 +143,12 @@ runtime-owned dynamic collaborator. If a `process_local` session has no live
 capability, resume terminates with a typed `process_local_resume_unavailable`
 outcome and an operator must start a new attempt; it must never silently fall
 back to a stale session, a cached pass, or a newly computed runtime descriptor.
+
+This is also a deployment boundary: a one-shot detached worker may retain an
+owner while it remains alive, but its handler-local runner and capability leave
+with that worker. A later request handled by a different worker therefore
+returns `process_local_resume_unavailable`; it is not a durable-resume path and
+must not attempt to recreate the prior owner from its stored correlation data.
 
 For a new process-local session, the runner validates/allocates the session id,
 registers the registry-minted capability, and acquires its PID-and-boot-time
