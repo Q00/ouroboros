@@ -59,7 +59,10 @@ def apply_config_values(values: Mapping[str, Any]) -> None:
             raise ConfigWriteError(error)
         target = data
         for part in keys[:-1]:
-            node = target.setdefault(part, {})
+            node = target.get(part)
+            if node is None:
+                node = {}
+                target[part] = node
             if not isinstance(node, dict):
                 msg = f"Cannot set nested key: {key} ({part!r} is not a section)"
                 raise ConfigWriteError(msg)

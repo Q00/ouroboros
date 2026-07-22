@@ -45,6 +45,44 @@ def test_apply_valid_values_persists(config_dir: Path) -> None:
     assert data["clarification"]["default_model"] == "my-model"
 
 
+def test_apply_nested_value_promotes_null_section(config_dir: Path) -> None:
+    (config_dir / "config.yaml").write_text(
+        yaml.dump(
+            {
+                "orchestrator": {
+                    "runtime_backend": "codex",
+                    "runtime_profile": None,
+                }
+            },
+            sort_keys=False,
+        )
+    )
+
+    persistence.apply_config_values(
+        {
+            "orchestrator.runtime_profile.stages.interview": "codex",
+            "clarification.default_model": "my-model",
+        }
+    )
+
+    data = _read(config_dir)
+    assert data["orchestrator"]["runtime_profile"] == {"stages": {"interview": "codex"}}
+    assert data["clarification"]["default_model"] == "my-model"
+
+
+def test_apply_nested_value_rejects_scalar_section(config_dir: Path) -> None:
+    original = "orchestrator:\n  runtime_profile: worker\n"
+    (config_dir / "config.yaml").write_text(original)
+
+    with pytest.raises(
+        persistence.ConfigWriteError,
+        match=r"'runtime_profile' is not a section",
+    ):
+        persistence.apply_config_values({"orchestrator.runtime_profile.stages.interview": "codex"})
+
+    assert (config_dir / "config.yaml").read_text() == original
+
+
 def test_apply_none_deletes_stage_override(config_dir: Path) -> None:
     persistence.apply_config_values({"orchestrator.runtime_profile.stages.execute": "codex"})
     persistence.apply_config_values({"orchestrator.runtime_profile.stages.execute": None})
@@ -56,6 +94,18 @@ def test_unknown_key_rejected_without_writing(config_dir: Path) -> None:
     with pytest.raises(persistence.ConfigWriteError, match="Unknown config key"):
         persistence.apply_config_values({"orchestrator.not_a_real_key_xyz": "value"})
     assert not (config_dir / "config.yaml").exists()
+
+
+def test_unknown_runtime_profile_child_rejected_when_section_is_null(config_dir: Path) -> None:
+    original = "orchestrator:\n  runtime_profile: null\n"
+    (config_dir / "config.yaml").write_text(original)
+
+    with pytest.raises(persistence.ConfigWriteError, match="Unknown config key"):
+        persistence.apply_config_values(
+            {"orchestrator.runtime_profile.not_a_real_key_xyz": "value"}
+        )
+
+    assert (config_dir / "config.yaml").read_text() == original
 
 
 def test_invalid_value_rolls_back_file(config_dir: Path) -> None:

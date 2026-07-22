@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
-from typing import Annotated
+from typing import Annotated, get_args, get_origin
 
 import typer
 import yaml
@@ -645,10 +645,16 @@ def _validate_key_path(keys: list[str]) -> str | None:
         # If not the last key, drill into the sub-model
         if i < len(keys) - 1:
             annotation = field_info.annotation
-            # Unwrap Optional, etc.
-            origin = getattr(annotation, "__origin__", None)
-            if origin is not None:
-                # Not a plain model type — can't drill further
+            # Unwrap Optional[T] / T | None so nested model fields remain
+            # schema-validated instead of falling through to Pydantic's
+            # default extra-field handling.
+            args = get_args(annotation)
+            non_none_args = tuple(arg for arg in args if arg is not type(None))
+            if len(non_none_args) == 1 and len(non_none_args) != len(args):
+                annotation = non_none_args[0]
+            # Generic containers have dynamic child keys; their value-level
+            # validators and the post-write load check enforce those entries.
+            if get_origin(annotation) is not None:
                 break
             if isinstance(annotation, type) and hasattr(annotation, "model_fields"):
                 model = annotation
