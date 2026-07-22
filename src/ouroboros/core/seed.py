@@ -324,11 +324,26 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if value is None:
             return ()
         if isinstance(value, str):
-            if not value.strip() or value.strip().upper() == "NONE":
+            if any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise ValueError("expected_artifacts entries cannot contain control characters")
+            stripped = value.strip(" ")
+            if not stripped or stripped.upper() == "NONE":
                 return ()
-            return tuple(item.strip() for item in value.split(",") if item.strip())
+            artifacts = tuple(item.strip(" ") for item in value.split(","))
+            if any(not artifact for artifact in artifacts):
+                raise ValueError("expected_artifacts entries cannot be empty")
+            return artifacts
         if isinstance(value, list | tuple | set):
-            return tuple(str(item).strip() for item in value if str(item).strip())
+            artifacts = tuple(str(item) for item in value)
+            if any(
+                not artifact
+                or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
+                for artifact in artifacts
+            ):
+                raise ValueError(
+                    "expected_artifacts entries cannot be empty or contain control characters"
+                )
+            return artifacts
         return value
 
     @property

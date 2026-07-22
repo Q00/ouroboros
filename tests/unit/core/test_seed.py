@@ -443,6 +443,23 @@ class TestSeed:
         ):
             assert expected_artifact_path_error(artifact) is None
 
+    @pytest.mark.parametrize(
+        "artifacts",
+        [
+            ("",),
+            ("report.txt\n",),
+            ("report.txt\t",),
+            ("report.txt\x7f",),
+            "report.txt\n",
+        ],
+    )
+    def test_expected_artifacts_reject_malformed_raw_entries(self, artifacts: object) -> None:
+        with pytest.raises(PydanticValidationError):
+            AcceptanceCriterionSpec(
+                description="artifact contract",
+                expected_artifacts=artifacts,  # type: ignore[arg-type]
+            )
+
     def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
         """Exit-code success phrases are redundant with verify_command exit status."""
         for phrase in (
