@@ -548,7 +548,7 @@ class TestSeedGeneratorExtraction:
 
     @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
-        """Generated contract assertions must be literal stdout, not status prose."""
+        """Generated contract assertions must be literal command output, not status prose."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
@@ -1213,7 +1213,13 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "artifacts: <comma-list or NONE>" in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
+        assert "combined stdout and stderr" in prompt
+        assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
+
+        retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
+        assert "combined stdout and stderr" in retry_prompt
+        assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt

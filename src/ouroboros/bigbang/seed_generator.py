@@ -572,8 +572,8 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
-ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
@@ -672,8 +672,8 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
-ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...

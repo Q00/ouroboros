@@ -422,6 +422,10 @@ class TestSeed:
         for artifact in (
             ".",
             "./",
+            "././",
+            ".//",
+            r".\.",
+            ".\\",
             "bad\x00path",
             "../outside",
             r"D:outside",

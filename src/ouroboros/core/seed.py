@@ -50,7 +50,7 @@ def expected_artifact_path_error(artifact: str) -> str | None:
 
     posix_path = PurePosixPath(artifact)
     windows_path = PureWindowsPath(artifact)
-    if not posix_path.parts:
+    if not posix_path.parts or not windows_path.parts:
         return "resolves to the workspace root"
     if (
         posix_path.is_absolute()
