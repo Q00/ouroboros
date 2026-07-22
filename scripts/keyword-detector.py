@@ -285,9 +285,10 @@ def _extract_prompt(hook_input: str) -> str:
     if (
         isinstance(payload, dict)
         and payload.get("hook_event_name") == "UserPromptSubmit"
-        and "prompt" in payload
+        and isinstance(payload.get("session_id"), str)
+        and isinstance(payload.get("prompt"), str)
     ):
-        return str(payload.get("prompt") or "")
+        return payload["prompt"]
     return hook_input
 
 

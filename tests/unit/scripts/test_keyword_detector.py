@@ -390,3 +390,21 @@ class TestHookProtocol:
         output = json.loads(capsys.readouterr().out)
         context = output["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:status" in context
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_hook_shaped_raw_json_without_session_id_remains_prompt(self, _first, _mcp, capsys):
+        raw_prompt = json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "explain this payload",
+                "command": "ooo status",
+            }
+        )
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = raw_prompt
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
