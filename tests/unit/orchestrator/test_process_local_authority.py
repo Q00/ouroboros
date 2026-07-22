@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
@@ -23,6 +24,9 @@ from ouroboros.orchestrator.runner import (
     OrchestratorError,
     OrchestratorResult,
     OrchestratorRunner,
+    clear_cancellation,
+    is_cancellation_requested,
+    request_cancellation,
 )
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 
@@ -485,6 +489,150 @@ async def test_precreated_execution_claim_allows_only_one_effectful_caller() -> 
     )
 
 
+@pytest.mark.asyncio
+async def test_precreated_setup_cancellation_releases_its_authority_claim() -> None:
+    """A raw cancellation during post-claim setup cannot permanently block resume."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-precreated-setup-cancel",
+        execution_id="exec-precreated-setup-cancel",
+    )
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runner.asyncio.to_thread",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+    assert not runner._has_live_process_local_authority(
+        tracker.session_id,
+        tracker.execution_id,
+        tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+    )
+    assert not heartbeat.is_holder_alive(tracker.session_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_setup_cancellation_releases_its_authority_claim() -> None:
+    """A raw cancellation during resume restoration cannot leave ``_claims`` set."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-resume-setup-cancel",
+        execution_id="exec-resume-setup-cancel",
+    )
+    paused = _paused(tracker)
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(paused))
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runner.asyncio.to_thread",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner.resume_session(paused.session_id, _seed())
+
+    assert not runner._has_live_process_local_authority(
+        tracker.session_id,
+        tracker.execution_id,
+        tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+    )
+    assert not heartbeat.is_holder_alive(tracker.session_id)
+
+
+@pytest.mark.asyncio
+async def test_cooperative_cancellation_persists_terminal_before_retiring_authority() -> None:
+    """The live owner remains observable until durable cancellation succeeds."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-cancel-terminal-order",
+        execution_id="exec-cancel-terminal-order",
+    )
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+    runner._report_frugality_retrospective = AsyncMock()
+
+    async def mark_cancelled(*_: object, **__: object) -> Result[None, object]:
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        return Result.ok(None)
+
+    runner._session_repo.mark_cancelled = mark_cancelled
+    await request_cancellation(tracker.session_id)
+
+    result = await runner._handle_cancellation(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        messages_processed=0,
+        start_time=tracker.start_time,
+    )
+
+    assert result.is_ok
+    assert not runner._has_live_process_local_authority(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert not heartbeat.is_holder_alive(tracker.session_id)
+
+
+@pytest.mark.asyncio
+async def test_cooperative_cancellation_retains_authority_when_terminal_write_fails() -> None:
+    """A failed durable cancellation cannot be reported after liveness is withdrawn."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-cancel-terminal-failure",
+        execution_id="exec-cancel-terminal-failure",
+    )
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+    runner._session_repo.mark_cancelled = AsyncMock(
+        return_value=Result.err(PersistenceError("durable cancellation unavailable"))
+    )
+    await request_cancellation(tracker.session_id)
+
+    try:
+        result = await runner._handle_cancellation(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+            messages_processed=0,
+            start_time=tracker.start_time,
+        )
+
+        assert result.is_err
+        assert result.error.message == (
+            "Failed to persist cancellation; process-local authority remains live"
+        )
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id in runner.active_sessions
+        assert await is_cancellation_requested(tracker.session_id)
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+
 def test_process_local_contract_is_not_a_cross_run_proof_cohort_key() -> None:
     runner = _runner()
     contract = runner._build_execution_contract(seed=_seed())
@@ -594,6 +742,71 @@ async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
     release_lock_mock.assert_called_once_with(workspace.lock_path)
+
+
+@pytest.mark.asyncio
+async def test_prepare_cancellation_after_registration_retires_lease() -> None:
+    """Cancellation in ``create_session`` cannot strand its early lease."""
+    runner = _runner()
+    session_id = "session-prepare-create-cancel"
+    execution_id = "exec-prepare-create-cancel"
+    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
+
+    with (
+        patch.object(
+            runner._session_repo,
+            "create_session",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner.prepare_session(
+            _seed(),
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
+    assert (session_id, execution_id) not in runner._process_local_authorities
+    assert not heartbeat.is_holder_alive(session_id)
+    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+
+
+@pytest.mark.asyncio
+async def test_prepare_cancellation_after_publication_terminalizes_then_retires() -> None:
+    """A cancelled initial-progress write cannot leave RUNNING without an owner."""
+    runner = _runner()
+    session_id = "session-prepare-progress-cancel"
+    execution_id = "exec-prepare-progress-cancel"
+    tracker = SessionTracker.create(
+        execution_id,
+        _seed().metadata.seed_id,
+        session_id=session_id,
+    )
+    mark_failed = AsyncMock(return_value=Result.ok(None))
+
+    with (
+        patch.object(
+            runner._session_repo,
+            "create_session",
+            AsyncMock(return_value=Result.ok(tracker)),
+        ),
+        patch.object(
+            runner._session_repo,
+            "track_progress",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch.object(runner._session_repo, "mark_failed", mark_failed),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner.prepare_session(
+            _seed(),
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
+    mark_failed.assert_awaited_once()
+    assert (session_id, execution_id) not in runner._process_local_authorities
+    assert not heartbeat.is_holder_alive(session_id)
 
 
 @pytest.mark.asyncio
