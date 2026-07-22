@@ -271,6 +271,19 @@ class GradeGate:
                             ),
                         )
                     )
+                if criterion_spec.output_assertion and not criterion_spec.verify_command:
+                    findings.append(
+                        GradeFinding(
+                            "invalid_output_assertion",
+                            "high",
+                            "output_assertion cannot be evaluated without verify_command",
+                            f"acceptance_criteria[{index}].output_assertion",
+                            (
+                                "Add a concrete verify_command whose output is checked by "
+                                "output_assertion, or remove output_assertion."
+                            ),
+                        )
+                    )
             if _is_vague(criterion):
                 findings.append(
                     GradeFinding(
@@ -572,6 +585,8 @@ def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
         if (
             posix_path.is_absolute()
             or windows_path.is_absolute()
+            or bool(windows_path.drive)
+            or bool(windows_path.root)
             or ".." in posix_path.parts
             or ".." in windows_path.parts
         ):
