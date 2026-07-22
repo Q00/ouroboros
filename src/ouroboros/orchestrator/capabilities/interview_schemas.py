@@ -1005,7 +1005,9 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm."
+            "chooses auto-confirm. Execute a data lane's proposed_queries only "
+            "after the user confirms, and forward user-confirmed data-derived "
+            "answers prefixed [from-data] with their point-in-time caveat."
         ),
     }
 

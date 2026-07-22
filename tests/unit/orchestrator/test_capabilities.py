@@ -4991,6 +4991,13 @@ def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -
     assert evidence["max_evidence_items"] == 5
     assert evidence["max_evidence_chars"] == 2000
 
+    # Host duties ride the wire contract, not skill prose (the skill stays
+    # thin like code_context): proposed-query gating and [from-data]
+    # forwarding are part of the versioned runtime_instruction.
+    instruction = fanout["runtime_instruction"]
+    assert "proposed_queries only after the user confirms" in instruction
+    assert "[from-data]" in instruction
+
 
 def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> None:
     """The data lane's answer contract has no grade clause (Q00/ouroboros#1671).

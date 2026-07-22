@@ -191,26 +191,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
-   - `data_context` — fetch data evidence (metrics, DB/warehouse facts) only
-     when the answer is a data-driven decision. Decide relevance from the
-     question text BEFORE any tool call. Directly execute only obviously
-     local, free, read-only MCP lookups; for metered or side-effect-ambiguous
-     sources return proposed queries as findings instead of executing them,
-     so the parent session can run them after user confirmation. Aggregates
-     only, never raw rows; treat error-shaped tool output as no evidence. The
-     lane payload carries a machine-readable `data_policy` block — enforce it
-     when your runtime has a permission system — and an `answer_contract`
-     (`data_evidence_answer.v1`): the lane returns exactly that structured
-     report (executed evidence, unexecuted proposed_queries with
-     source_class, caveats). Unlike the code contract it has no
-     auto-confirmed grade — every data answer goes through user
-     confirmation, and the form exists so the user decides with full
-     context. Execute `proposed_queries` only after the user confirms.
-     When forwarding a user-confirmed data-derived answer to
-     `ouroboros_interview`, prefix it `[from-data]` and keep the
-     point-in-time caveat in the text (e.g. `[from-data] 78% of MAU are on
-     the free tier (as of 2026-07-21)`), so the engine reads it as
-     description rather than user preference.
+   - `data_context` — fetch data evidence (metrics, DB/warehouse facts) via
+     the host's own data MCP tools when the answer is a data-driven decision.
+     The payload carries the full rules (`data_policy`, `answer_contract`).
+     Host duties: run returned `proposed_queries` only after the user
+     confirms, and forward user-confirmed data-derived answers prefixed
+     `[from-data]` with their point-in-time caveat.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -218,13 +204,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - `architecture_implications` — check whether the answer changes ownership,
      interfaces, rollout, or system shape.
 
-   Lane compatibility rules (the lane set can grow within the v1 contract):
-   - Unknown `lane_id` → dispatch it with its payload prompt as-is, or skip it
-     if your runtime cannot; never fail the fanout over it.
-   - Unsupported `capability` (e.g. `call_mcp` on a runtime without MCP
-     access) → still dispatch the lane and return its no-op finding. The
-     no-op finding IS the completion signal — never silently skip submitting
-     a lane's result.
+   The lane set can grow within v1 (see `lane_compatibility_rules`): dispatch
+   unknown lanes as-is or skip them, and dispatch unsupported capabilities
+   anyway — their no-op finding IS the completion signal, so never silently
+   drop a lane's result.
 
    Synthesize advisory results into a compact helper for the user: 2-3 answer
    options, one recommended draft, or a short "I found these ambiguities" note.
