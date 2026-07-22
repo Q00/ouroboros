@@ -282,7 +282,11 @@ def _extract_prompt(hook_input: str) -> str:
     except ValueError:
         return hook_input
 
-    if isinstance(payload, dict):
+    if (
+        isinstance(payload, dict)
+        and payload.get("hook_event_name") == "UserPromptSubmit"
+        and "prompt" in payload
+    ):
         return str(payload.get("prompt") or "")
     return hook_input
 

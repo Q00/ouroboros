@@ -379,3 +379,14 @@ class TestHookProtocol:
         context = output["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:qa" in context
         assert "ooo qa" in context
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_raw_json_object_text_without_hook_marker_remains_prompt(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = '{"command": "ooo status"}'
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
