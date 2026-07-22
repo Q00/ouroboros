@@ -746,6 +746,110 @@ def test_contract_conforming_data_lane_output_aggregates(tmp_path: Any) -> None:
     assert "data_context" in aggregated_lanes
 
 
+def test_violating_lane_output_is_rejected_before_persistence(tmp_path: Any) -> None:
+    """A contract-violating partial submission must never reach durable state.
+
+    Bot-review round-2 probe (PR #1703): raw rows, an email, and a token were
+    serialized into ``received_results`` because validation only ran at
+    completion. Validation now happens at the door: the violating output is
+    reported and excluded, and the persisted record never contains it.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-door",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-door", payloads=payloads
+    )
+
+    pii_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "user rows follow",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": False,
+        "raw_rows": ["alice@example.com", "token=sk-live-123"],
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-door",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": pii_output}],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    assert "data_context" not in out["received_keys"]
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-123" not in persisted
+
+
+def test_completed_fanout_is_terminal(tmp_path: Any) -> None:
+    """Replaying a completed fan-out cannot mutate the synthesized outcome."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-terminal",
+        payloads=_mixed_advisory_payloads(),
+    )
+    results = [
+        {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        {"key": "answer_simplifier", "content": "simplifier-advice"},
+    ]
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-terminal",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert first["status"] == "complete"
+
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-terminal",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "MUTATED"}],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.completed is True
+    assert record.received_results["ambiguity_contrarian"] == "contrarian-advice"
+
+
+def test_partial_reports_failed_accumulation_persistence(tmp_path: Any) -> None:
+    """A lost state write must not masquerade as an accepted submission."""
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-io-fail",
+        payloads=_mixed_advisory_payloads(),
+    )
+    with patch.object(FanoutRegistry, "save", return_value=False):
+        out = submit_fanout_results(
+            registry,
+            session_id="sess-io-fail",
+            correlation_key="context.lane_id",
+            results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+            fanout_id=fanout_id,
+        )
+    assert out["status"] == "partial"
+    assert out["accumulation_persisted"] is False
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

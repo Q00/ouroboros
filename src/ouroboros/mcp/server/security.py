@@ -543,8 +543,12 @@ class InputValidator:
                     pairs.extend(_collect_strings(v, f"{prefix}[{i}]"))
             return pairs
 
+        # The content-subtree exemption is scoped to the one tool with that
+        # shape so future tools with a `results` argument do not silently
+        # inherit the lexical-check bypass.
+        content_exempt_tool = tool_name == "ouroboros_submit_fanout_results"
         for key, value in _collect_strings(arguments):
-            if self._is_fanout_result_content_path(key):
+            if content_exempt_tool and self._is_fanout_result_content_path(key):
                 continue
             for pattern in dangerous_patterns:
                 if pattern in value:

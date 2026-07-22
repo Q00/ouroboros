@@ -2706,6 +2706,7 @@ class FanoutRecord:
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] = ()
     received_results: dict[str, Any] = field(default_factory=dict)
+    completed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2717,6 +2718,7 @@ class FanoutRecord:
             "required_keys": list(self.required_keys),
             "synthesizer_input": self.synthesizer_input,
             "received_results": self.received_results,
+            "completed": self.completed,
         }
 
     @classmethod
@@ -2742,6 +2744,7 @@ class FanoutRecord:
             synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
             required_keys=required_keys,
             received_results=dict(raw_received) if isinstance(raw_received, Mapping) else {},
+            completed=bool(data.get("completed")),
         )
 
 
@@ -2815,14 +2818,20 @@ class FanoutRegistry:
         self.save(record)
         return resolved_id
 
-    def save(self, record: FanoutRecord) -> None:
-        """Persist ``record`` (best-effort), overwriting any prior state.
+    def save(self, record: FanoutRecord) -> bool:
+        """Persist ``record``, overwriting any prior state.
 
         Used both by :meth:`register` and by partial-submission accumulation:
         ``submit_fanout_results`` merges newly submitted lane results into the
         record's ``received_results`` and re-saves, so a later resubmission of
         only the remaining lanes completes the fan-out as the public contract
         documents.
+
+        Returns ``True`` on success. A failed write is logged AND reported to
+        the caller so a partial submission does not claim its keys were
+        accumulated when they were lost (disk-full/read-only degradation):
+        the re-entry response surfaces it as ``accumulation_persisted=false``,
+        telling the host to resubmit those lanes together with the remainder.
         """
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
@@ -2837,6 +2846,8 @@ class FanoutRegistry:
                 kind=record.kind,
                 error=str(exc),
             )
+            return False
+        return True
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
@@ -3047,8 +3058,16 @@ def submit_fanout_results(
     * Unknown ``fanout_id`` → ``status="unknown_fanout_id"`` (clean error).
     * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
       record → ``status="correlation_mismatch"`` (clean error).
+    * A fan-out that already completed → ``status="already_complete"``: the
+      record is terminal, so a replay cannot mutate the synthesized outcome.
     * Missing required keys → ``status="partial"`` + ``missing_keys`` (the host
-      may resubmit with the remaining lanes).
+      may resubmit with the remaining lanes). Lanes with a registered answer
+      contract are validated BEFORE anything is persisted — a violating
+      output never enters durable state, is reported under
+      ``contract_violations``, and (if required) stays missing until a
+      conforming output is resubmitted. ``accumulation_persisted=false``
+      means the received keys could NOT be saved (I/O failure): resubmit
+      them together with the remaining lanes.
     * All required keys present → route to the revived synthesizer for the
       record ``kind`` and return its structured outcome under
       ``status="complete"``. Optional keys that never arrived are reported as
@@ -3062,6 +3081,16 @@ def submit_fanout_results(
             "status": "unknown_fanout_id",
             "fanout_id": fanout_id,
             "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
+        }
+    if record.completed:
+        return {
+            "status": "already_complete",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": (
+                "This fan-out already completed; its record is terminal and "
+                "late results cannot mutate the synthesized outcome."
+            ),
         }
     if record.session_id and session_id and record.session_id != session_id:
         return {
@@ -3085,16 +3114,25 @@ def submit_fanout_results(
             continue
         submitted[str(key)] = result.get("content")
 
+    # Contract validation happens at the door, BEFORE anything is merged or
+    # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
+    # skipped confirmation) must never enter the durable record.
+    raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
+    contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+    contract_violations = _lane_answer_contract_violations(contracts, submitted)
+    violating_lanes = {item["lane_id"] for item in contract_violations}
+    accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}
+
     # Accumulate across calls: earlier partial submissions were persisted on
     # the record, so "submit lane A, then submit the remaining lane B" reaches
     # completion exactly as the partial-retry contract documents. The latest
-    # submission wins on a per-key conflict.
-    provided: dict[str, Any] = {**record.received_results, **submitted}
+    # accepted submission wins on a per-key conflict.
+    provided: dict[str, Any] = {**record.received_results, **accepted}
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
     if missing_required:
-        registry.save(replace(record, received_results=provided))
+        persisted = registry.save(replace(record, received_results=provided))
         return {
             "status": "partial",
             "fanout_id": fanout_id,
@@ -3103,10 +3141,14 @@ def submit_fanout_results(
             "missing_required_keys": missing_required,
             "received_keys": sorted(provided),
             "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "accumulation_persisted": persisted,
         }
     # Every remaining missing key is optional: proceed to synthesis without it
     # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
     missing_optional = missing_keys
+    # Mark the record terminal so a later replay cannot mutate the outcome.
+    registry.save(replace(record, received_results=provided, completed=True))
 
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
@@ -3144,20 +3186,22 @@ def submit_fanout_results(
     if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize. Lanes that
-        # declared an answer contract (data_context) are validated against it
-        # FIRST: a violating output is excluded from the aggregation and
-        # surfaced under ``contract_violations`` instead of flowing unchecked
-        # toward user confirmation and persisted interview state.
-        raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
-        contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
-        contract_violations = _lane_answer_contract_violations(contracts, provided)
-        violating_lanes = {item["lane_id"] for item in contract_violations}
+        # order and hand them back for the host to synthesize. This batch was
+        # already contract-validated at the door; re-check the accumulated set
+        # as a belt against records persisted before door validation existed,
+        # so no violating output ever reaches the aggregation.
+        legacy_violations = [
+            item
+            for item in _lane_answer_contract_violations(contracts, provided)
+            if item["lane_id"] not in violating_lanes
+        ]
+        contract_violations = [*contract_violations, *legacy_violations]
+        excluded_lanes = {item["lane_id"] for item in contract_violations}
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
             for lane_id in lane_ids
-            if lane_id in provided and lane_id not in violating_lanes
+            if lane_id in provided and lane_id not in excluded_lanes
         ]
         outcome = _fanout_identity_synthesis(aggregated)
         return {

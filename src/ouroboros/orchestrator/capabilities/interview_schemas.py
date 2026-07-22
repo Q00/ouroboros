@@ -520,10 +520,20 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     # reaches the confirming user and persisted state.
                     "required": ["source", "query_summary", "value", "observed_at"],
                     "properties": {
-                        "source": {"type": "string", "maxLength": 120},
-                        "query_summary": {"type": "string", "maxLength": 300},
-                        "value": {"type": "string", "maxLength": 400},
-                        "observed_at": {"type": "string", "minLength": 1, "maxLength": 40},
+                        "source": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "query_summary": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "value": {"type": "string", "minLength": 1, "maxLength": 400},
+                        "observed_at": {
+                            "type": "string",
+                            "maxLength": 40,
+                            # ISO-8601-shaped: a date, optionally followed by a
+                            # time and zone offset. Draft 2020-12 validators do
+                            # not enforce "format", so the shape is a pattern.
+                            "pattern": (
+                                r"^\d{4}-\d{2}-\d{2}"
+                                r"([T ][0-9:.]+([Zz]|[+-]\d{2}:?\d{2})?)?$"
+                            ),
+                        },
                     },
                 },
             },
@@ -553,7 +563,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
             "caveats": {
                 "type": "array",
                 "maxItems": 5,
-                "items": {"type": "string", "maxLength": 200},
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
             },
         },
         "allOf": [

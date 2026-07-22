@@ -786,15 +786,15 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         interrupt=_OUROBOROS_DEFAULT_INTERRUPT_METADATA,
     ),
     "ouroboros_submit_fanout_results": _OuroborosToolCapabilitySpec(
-        # Re-entry synthesis is a read-only routing step: it reads persisted
-        # fan-out state and returns the correlated synthesis. The fan-out state
-        # write happens on the producer side, not here.
+        # Re-entry accumulates partial submissions on the persisted fan-out
+        # record and marks completed fan-outs terminal (Q00/ouroboros#1671),
+        # so it writes session state — it is no longer a read-only routing
+        # step even though the synthesis it returns is deterministic.
         execution_mode="status",
         companions=("ouroboros_interview", "ouroboros_lateral_think"),
-        side_effects=_OUROBOROS_SIDE_EFFECT_FREE_METADATA,
+        side_effects=("session_state_write",),
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
         interrupt=_OUROBOROS_READ_ONLY_INTERRUPT_METADATA,
-        mutation_class=CapabilityMutationClass.READ_ONLY,
     ),
     "ouroboros_evolve_step": _OuroborosToolCapabilitySpec(
         execution_mode="blocking",

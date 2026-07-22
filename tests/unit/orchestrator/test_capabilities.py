@@ -490,7 +490,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_start_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_start_execute_seed": ("workspace_write", "event_store_write"),
     "ouroboros_start_ralph": ("workspace_write", "event_store_write"),
-    "ouroboros_submit_fanout_results": (),
+    "ouroboros_submit_fanout_results": ("session_state_write",),
 }
 
 _EXPECTED_MUTATION_TARGETS_BY_SIDE_EFFECT = {
@@ -798,7 +798,6 @@ _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_query_events",
     "ouroboros_query_projection",
     "ouroboros_session_status",
-    "ouroboros_submit_fanout_results",
 }
 
 _EXPECTED_OUROBOROS_TOOL_RETRY = {
@@ -2831,7 +2830,9 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
-        "ouroboros_submit_fanout_results",
+        # ouroboros_submit_fanout_results is status-mode but NOT read-only:
+        # re-entry accumulates partial submissions and marks completed
+        # fan-outs terminal on the persisted record (Q00/ouroboros#1671).
     }
 
     assert expected_query_status_projection_tools == _EXPECTED_READ_ONLY_OUROBOROS_TOOLS
@@ -5094,6 +5095,23 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
     assert list(validator.iter_errors(missing_observed_at))
     missing_caveats = {k: v for k, v in executed.items() if k != "caveats"}
     assert list(validator.iter_errors(missing_caveats))
+    # Provenance must be substantive: empty strings and non-timestamp
+    # observed_at values are rejected (bot-review round-2 probe).
+    empty_source = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "source": ""}],
+    }
+    assert list(validator.iter_errors(empty_source))
+    bad_timestamp = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "not-a-timestamp"}],
+    }
+    assert list(validator.iter_errors(bad_timestamp))
+    date_only = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "2026-07-22"}],
+    }
+    validator.validate(date_only)
 
 
 def test_question_advisory_v1_schema_accepts_unknown_lanes_and_capabilities() -> None:

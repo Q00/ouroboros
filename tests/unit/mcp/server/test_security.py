@@ -291,6 +291,17 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
+    def test_validate_content_exemption_is_scoped_to_the_fanout_tool(self) -> None:
+        """Other tools with a results-shaped argument keep full lexical checks."""
+        validator = InputValidator()
+        result = validator.validate(
+            "some_future_tool",
+            {"results": [{"key": "x", "content": "run this; rm -rf /tmp/nope"}]},
+        )
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
+
     def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
         """Operator-supplied user_preferences carry freetext, never shell input."""
         validator = InputValidator()

@@ -242,7 +242,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      persona, or `code_facts`).
    A complete set returns the correlated synthesis to continue with; a partial
    set returns `status="partial"` with `missing_keys` so you can resubmit the
-   remaining lanes (partial submissions accumulate server-side). Only
+   remaining lanes (partial submissions accumulate server-side; if the
+   response carries `accumulation_persisted: false`, resubmit those lanes
+   again together with the remainder). A completed fanout is terminal —
+   late submissions return `status="already_complete"`. Only
    `required: true` lanes gate completion: once every required lane is
    submitted the fanout completes, and optional lanes that never arrived are
    listed as `missing_optional_keys` on the complete outcome — proceed to
