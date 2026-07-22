@@ -76,11 +76,17 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.execution_authority import (
     _has_live_process_local_authority_registration,
+    _register_process_local_authority_terminal_finalizer,
+    _retire_process_local_authority_after_terminal_persistence,
     valid_process_local_authority_contract,
 )
 from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.model_routing import tier_from_model_tier_arg
-from ouroboros.orchestrator.runner import OrchestratorRunner
+from ouroboros.orchestrator.runner import (
+    OrchestratorRunner,
+    clear_cancellation,
+    request_cancellation,
+)
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
@@ -94,6 +100,7 @@ _NONTERMINAL_PROCESS_LOCAL_RESUME_BLOCKS = frozenset(
         "process_local_execution_in_progress",
         "process_local_authority_held_elsewhere",
         "session_not_paused",
+        "cancellation_persistence_pending",
     }
 )
 
@@ -812,6 +819,71 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         """Release the handler-local pre-resume gate after the runner settles."""
         self._process_local_resume_handoffs.discard(session_id)
 
+    async def _release_terminal_process_local_owner(
+        self,
+        *,
+        session_id: str,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Drop this handler's retained references after a terminal transition."""
+        if self._process_local_resume_owners.get(session_id) is not runner:
+            return
+        self._process_local_resume_owners.pop(session_id, None)
+        owned_event_store = self._process_local_owned_event_stores.pop(session_id, None)
+        self._process_local_resume_handoffs.discard(session_id)
+        if owned_event_store is not None:
+            try:
+                close_result = owned_event_store.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception:
+                log.exception("mcp.tool.execute_seed.event_store_close_error")
+
+    async def _reconcile_terminal_process_local_owner(self, tracker: SessionTracker) -> None:
+        """Reconcile a terminal record through the registry-owned transition.
+
+        This is a defensive fallback for terminal records written outside this
+        handler.  The registry drains every registered runner/handler finalizer
+        together; a still-active effect claim is only signalled because it owns
+        its orderly terminal cleanup.
+        """
+        raw_contract = tracker.progress.get("execution_contract")
+        authority = (
+            raw_contract.get("foundation_a_authority")
+            if isinstance(raw_contract, Mapping)
+            else None
+        )
+        retired, claimed = await _retire_process_local_authority_after_terminal_persistence(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+        )
+        if claimed:
+            await request_cancellation(tracker.session_id)
+            return
+        if retired:
+            await clear_cancellation(tracker.session_id)
+            return
+
+        owner = self._process_local_resume_owners.get(tracker.session_id)
+        if owner is None:
+            return
+        if owner.active_sessions.get(tracker.execution_id) == tracker.session_id:
+            await request_cancellation(tracker.session_id)
+            return
+        owner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        owner._unregister_session(tracker.execution_id, tracker.session_id)
+        if owner._task_workspace is not None:
+            release_lock(owner._task_workspace.lock_path)
+        await clear_cancellation(tracker.session_id)
+        await self._release_terminal_process_local_owner(
+            session_id=tracker.session_id,
+            runner=owner,
+        )
+
     def _remember_process_local_owner(
         self,
         tracker: SessionTracker,
@@ -829,6 +901,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             self._process_local_resume_owners[tracker.session_id] = runner
             if owned_event_store is not None:
                 self._process_local_owned_event_stores[tracker.session_id] = owned_event_store
+            if isinstance(raw_contract, Mapping):
+                _register_process_local_authority_terminal_finalizer(
+                    tracker.session_id,
+                    tracker.execution_id,
+                    raw_contract.get("foundation_a_authority"),
+                    runner._adapter,
+                    ("execute-seed-handler", id(self), id(runner)),
+                    lambda: self._release_terminal_process_local_owner(
+                        session_id=tracker.session_id,
+                        runner=runner,
+                    ),
+                )
 
     async def _reconcile_process_local_owner(
         self,
@@ -1240,6 +1324,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         SessionStatus.CANCELLED,
                         SessionStatus.FAILED,
                     ):
+                        await self._reconcile_terminal_process_local_owner(tracker)
                         return Result.err(
                             MCPToolError(
                                 (

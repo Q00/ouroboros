@@ -61,6 +61,24 @@ events_table = Table(
     Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
 )
 
+# One durable compare-and-set guard for explicit terminal session lifecycle
+# events. The event stream remains append-only; this table only prevents two
+# concurrent terminal writers from both claiming the same session transition.
+session_terminal_guards_table = Table(
+    "session_terminal_guards",
+    metadata,
+    Column("session_id", String(128), primary_key=True),
+    Column("terminal_event_id", String(36), nullable=False),
+    Column("terminal_event_type", String(200), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 # Brownfield repos table - registered repositories/worktrees from brownfield scan.
 # Filesystem discovery is bounded to the scan root. Normal repo roots can add
 # Git-reported linked worktrees outside that root, but linked worktree seeds are

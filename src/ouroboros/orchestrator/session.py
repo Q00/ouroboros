@@ -841,6 +841,58 @@ class SessionRepository:
                 )
             )
 
+    async def mark_failed_if_active(
+        self,
+        session_id: str,
+        error_message: str,
+        error_details: dict[str, Any] | None = None,
+    ) -> Result[bool, PersistenceError]:
+        """Fail an active session without overwriting an existing terminal result.
+
+        ``False`` is a successful no-op: another terminal lifecycle event was
+        already durable.  The conditional append is used by process-local
+        authority recovery, where a stale in-memory snapshot must never turn a
+        user cancellation into a later failure.
+        """
+        event = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={
+                "error": error_message,
+                "error_details": error_details or {},
+                "failed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        try:
+            persisted = await self._event_store.append_session_terminal_if_active(event)
+            if persisted:
+                log.error(
+                    "orchestrator.session.failed",
+                    session_id=session_id,
+                    error=error_message,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.terminal_transition_preserved",
+                    session_id=session_id,
+                    requested_status=SessionStatus.FAILED.value,
+                )
+            return Result.ok(persisted)
+        except Exception as e:
+            log.exception(
+                "orchestrator.session.conditional_fail_failed",
+                session_id=session_id,
+                error=str(e),
+            )
+            return Result.err(
+                PersistenceError(
+                    message=f"Failed to conditionally mark session failed: {e}",
+                    details={"session_id": session_id},
+                )
+            )
+
     async def mark_paused(
         self,
         session_id: str,
@@ -946,6 +998,59 @@ class SessionRepository:
             return Result.err(
                 PersistenceError(
                     message=f"Failed to mark session cancelled: {e}",
+                    details={"session_id": session_id},
+                )
+            )
+
+    async def mark_cancelled_if_active(
+        self,
+        session_id: str,
+        reason: str,
+        cancelled_by: str = "user",
+    ) -> Result[bool, PersistenceError]:
+        """Cancel an active session without overwriting another terminal result.
+
+        ``False`` means the durable session was already terminal.  It is not a
+        persistence failure, and lets a public cancellation surface reconcile a
+        retained process-local owner without appending contradictory terminal
+        events.
+        """
+        event = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={
+                "reason": reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        try:
+            persisted = await self._event_store.append_session_terminal_if_active(event)
+            if persisted:
+                log.info(
+                    "orchestrator.session.cancelled",
+                    session_id=session_id,
+                    reason=reason,
+                    cancelled_by=cancelled_by,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.terminal_transition_preserved",
+                    session_id=session_id,
+                    requested_status=SessionStatus.CANCELLED.value,
+                )
+            return Result.ok(persisted)
+        except Exception as e:
+            log.exception(
+                "orchestrator.session.conditional_cancel_failed",
+                session_id=session_id,
+                error=str(e),
+            )
+            return Result.err(
+                PersistenceError(
+                    message=f"Failed to conditionally mark session cancelled: {e}",
                     details={"session_id": session_id},
                 )
             )
