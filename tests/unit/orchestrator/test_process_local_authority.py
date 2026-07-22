@@ -380,6 +380,51 @@ async def test_live_running_tracker_is_not_terminalized_by_another_runner() -> N
 
 
 @pytest.mark.asyncio
+async def test_same_owner_running_resume_preserves_its_worktree_and_claim() -> None:
+    """A concurrent resume must not release an active owner's workspace."""
+    owner = _runner()
+    tracker = await _prepare(
+        owner,
+        session_id="session-live-running-owner",
+        execution_id="exec-live-running-owner",
+    )
+    owner._task_workspace = SimpleNamespace(lock_path="/tmp/process-local-running.lock")
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = owner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+    owner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+    owner._session_repo.mark_failed = AsyncMock(return_value=Result.ok(None))
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            result = await owner.resume_session(tracker.session_id, _seed())
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "process_local_execution_in_progress"
+        release_lock_mock.assert_not_called()
+        owner._session_repo.mark_failed.assert_not_awaited()
+        assert owner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+    finally:
+        owner._release_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        owner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_terminal_precreated_tracker_retires_a_stale_live_authority() -> None:
     runner = _runner()
     prepared = await _prepare(
@@ -523,6 +568,56 @@ async def test_prepare_rolls_back_when_heartbeat_acquire_fails() -> None:
     assert result.error.message == "Cannot establish process-local execution liveness lease"
     assert (session_id, execution_id) not in runner._process_local_authorities
     assert not heartbeat.is_holder_alive(session_id)
+
+
+@pytest.mark.asyncio
+async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -> None:
+    """Cancellation before durable publication cannot leak a live generation."""
+    runner = _runner()
+    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-cancel.lock")
+    runner._task_workspace = workspace
+    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
+
+    with (
+        patch(
+            "ouroboros.orchestrator.runner.asyncio.to_thread",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await runner.prepare_session(
+            _seed(),
+            execution_id="exec-prepare-cancel",
+            session_id="session-prepare-cancel",
+        )
+
+    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+    release_lock_mock.assert_called_once_with(workspace.lock_path)
+
+
+@pytest.mark.asyncio
+async def test_prepare_unexpected_error_discards_issuance_and_releases_workspace() -> None:
+    """Unexpected pre-registration errors follow the same fail-closed cleanup."""
+    runner = _runner()
+    workspace = SimpleNamespace(lock_path="/tmp/process-local-prepare-error.lock")
+    runner._task_workspace = workspace
+    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
+
+    with (
+        patch.object(runner, "_build_execution_contract", side_effect=RuntimeError("boom")),
+        patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+    ):
+        result = await runner.prepare_session(
+            _seed(),
+            execution_id="exec-prepare-error",
+            session_id="session-prepare-error",
+        )
+
+    assert result.is_err
+    assert result.error.message == "Failed to prepare process-local execution authority"
+    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+    release_lock_mock.assert_called_once_with(workspace.lock_path)
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1240,55 @@ async def test_stale_retained_owner_closes_its_handler_owned_event_store() -> No
         handler._process_local_resume_owners.clear()
         handler._process_local_owned_event_stores.clear()
         handler._process_local_resume_handoffs.clear()
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconstruction", ("raises", "error", "running"))
+async def test_reconcile_retains_live_owner_on_inconclusive_reconstruction(
+    reconstruction: str,
+) -> None:
+    """Read failures and nonterminal snapshots cannot evict a live owner."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id=f"session-handler-inconclusive-{reconstruction}",
+        execution_id=f"exec-handler-inconclusive-{reconstruction}",
+    )
+    handler = ExecuteSeedHandler(event_store=_HandlerEventStore())
+    handler._remember_process_local_owner(
+        tracker,
+        runner,
+        owned_event_store=runner._event_store,
+    )
+    session_repo = MagicMock()
+    if reconstruction == "raises":
+        session_repo.reconstruct_session = AsyncMock(side_effect=OSError("observer unavailable"))
+    elif reconstruction == "error":
+        session_repo.reconstruct_session = AsyncMock(
+            return_value=Result.err("observer unavailable")
+        )
+    else:
+        session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+
+    try:
+        retained, event_store_to_close = await handler._reconcile_process_local_owner(
+            tracker=tracker,
+            runner=runner,
+            session_repo=session_repo,
+        )
+
+        assert retained is True
+        assert event_store_to_close is None
+        assert handler._process_local_resume_owners[tracker.session_id] is runner
+        assert handler._process_local_owned_event_stores[tracker.session_id] is runner._event_store
+        runner._event_store.close.assert_not_awaited()
+    finally:
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,

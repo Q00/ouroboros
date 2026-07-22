@@ -4211,6 +4211,23 @@ class OrchestratorRunner:
         # in a runner-wide mutable slot: concurrent preparations must not share
         # a capability or correlation id.
         authority_generation = self._begin_process_local_authority_generation()
+
+        def abort_process_local_preparation() -> None:
+            """Dispose every authority state reachable from an aborted prepare.
+
+            The registration may have completed before a later setup step
+            raises, while an earlier failure has only an unregistered issuance.
+            Both cleanup operations are idempotent and together leave no
+            capability or lease behind.
+            """
+            self._retire_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            self._discard_process_local_authority(authority_generation)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+
         try:
             execution_contract = await asyncio.to_thread(
                 self._build_execution_contract,
@@ -4218,18 +4235,10 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
-        except OrchestratorError as exc:
-            self._discard_process_local_authority(authority_generation)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
-            return Result.err(exc)
-        self._execution_contract = execution_contract
-
-        # Establish the exact capability and PID liveness lease before any
-        # durable RUNNING tracker can be reconstructed by an observer.  The
-        # resolved session id is allocated locally for that purpose rather
-        # than delegated to SessionRepository after its start event is written.
-        try:
+            # Establish the exact capability and PID liveness lease before any
+            # durable RUNNING tracker can be reconstructed by an observer. The
+            # resolved session id is allocated locally for that purpose rather
+            # than delegated to SessionRepository after its start event is written.
             self._register_process_local_authority(
                 session_id=resolved_session_id,
                 execution_id=exec_id,
@@ -4237,10 +4246,32 @@ class OrchestratorRunner:
                 generation=authority_generation,
             )
         except OrchestratorError as exc:
-            self._discard_process_local_authority(authority_generation)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            abort_process_local_preparation()
             return Result.err(exc)
+        except asyncio.CancelledError:
+            abort_process_local_preparation()
+            raise
+        except Exception as exc:
+            abort_process_local_preparation()
+            log.exception(
+                "orchestrator.runner.prepare_authority_failed",
+                execution_id=exec_id,
+                session_id=resolved_session_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to prepare process-local execution authority",
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        "cause": type(exc).__name__,
+                    },
+                )
+            )
+        except BaseException:
+            abort_process_local_preparation()
+            raise
+        self._execution_contract = execution_contract
 
         try:
             session_result = await self._session_repo.create_session(
@@ -5611,53 +5642,65 @@ class OrchestratorRunner:
         # owner has crashed or exited and Foundation A must terminally reject it
         # rather than leave a restartable-looking RUNNING session stranded.
         if tracker.status != SessionStatus.PAUSED:
-            own_live_authority = self._has_live_process_local_authority(
-                session_id,
-                tracker.execution_id,
-                raw_contract,
-            )
-            held_elsewhere = (
-                not own_live_authority
-                and self._process_local_authority_held_elsewhere(
+            authority_generation, authority_claimed = (
+                self._claim_process_local_authority_generation(
                     session_id,
                     tracker.execution_id,
                     raw_contract,
                 )
             )
-            if not own_live_authority and not held_elsewhere:
-                error = await self._mark_process_local_resume_unavailable(
+            if authority_claimed:
+                # The current runner is already performing effects. Do not
+                # release its worktree or downgrade the typed nonterminal
+                # ownership result to a generic state error.
+                return Result.err(
+                    self._process_local_execution_in_progress_error(
+                        session_id,
+                        tracker.execution_id,
+                    )
+                )
+            if authority_generation is not None:
+                # This runner still owns the live generation but the durable
+                # status is non-resumable. The probe claim was only for
+                # arbitration, so restore the pre-existing unclaimed state
+                # without touching its workspace or lease.
+                self._release_process_local_authority(
                     session_id=session_id,
                     execution_id=tracker.execution_id,
                 )
-                self._cleanup_pre_execution_state(
-                    tracker.execution_id,
-                    session_id,
-                    session_registered=False,
+                return Result.err(
+                    OrchestratorError(
+                        message=(
+                            f"Session is not paused and cannot resume ({tracker.status.value})"
+                        ),
+                        details={
+                            "session_id": session_id,
+                            "status": tracker.status.value,
+                            "resume_blocked": "session_not_paused",
+                        },
+                    )
                 )
-                return Result.err(error)
-            if held_elsewhere:
+            if self._process_local_authority_held_elsewhere(
+                session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
                 return Result.err(
                     self._process_local_authority_held_elsewhere_error(
                         session_id,
                         tracker.execution_id,
                     )
                 )
+            error = await self._mark_process_local_resume_unavailable(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
                 session_registered=False,
-                retire_authority=False,
             )
-            return Result.err(
-                OrchestratorError(
-                    message=f"Session is not paused and cannot resume ({tracker.status.value})",
-                    details={
-                        "session_id": session_id,
-                        "status": tracker.status.value,
-                        "resume_blocked": "session_not_paused",
-                    },
-                )
-            )
+            return Result.err(error)
 
         # This is intentionally before Foundation A contract restoration,
         # resume-handle selection, and every runtime-owned identity provider.
