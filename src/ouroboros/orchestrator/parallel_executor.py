@@ -32,13 +32,15 @@ from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import wraps
 import json
 import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
-from weakref import WeakKeyDictionary
+from weakref import ref
 
 import anyio
 from rich.console import Console
@@ -292,6 +294,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedMod
 from ouroboros.orchestrator.rate_limit import (
     RateLimitBackoff,
     RateLimitGate,
+    SharedRateLimitBucket,
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
 )
@@ -337,8 +340,19 @@ class _FoundationAClosedRoots:
     level_coordinator_review_root: object
     level_coordinator_review_code: object
     rate_gate_factory: Callable[..., RateLimitGate]
+    rate_gate_type: type[RateLimitGate]
     rate_gate_acquire_root: Callable[..., Awaitable[None]]
     rate_gate_acquire_code: object
+    rate_gate_sleep: object
+    rate_gate_sleep_code: object | None
+    rate_gate_bucket_type: type[SharedRateLimitBucket]
+    rate_gate_bucket_time: object
+    rate_gate_bucket_enabled_root: object
+    rate_gate_bucket_enabled_code: object | None
+    rate_gate_bucket_acquire_root: object
+    rate_gate_bucket_acquire_code: object | None
+    rate_gate_bucket_force_reserve_root: object
+    rate_gate_bucket_force_reserve_code: object | None
     transcript_verifier: Callable[..., VerifierVerdict]
     transcript_verifier_code: object
 
@@ -357,6 +371,8 @@ class _FoundationAInternalEntryRoots(NamedTuple):
     dispatch_decomposition_prompt_code: object
     run_atomic_verifier_pass_root: Callable[..., Any]
     run_atomic_verifier_pass_code: object
+    run_ac_verify_gate_root: Callable[..., Any]
+    run_ac_verify_gate_code: object
 
 
 # These names document the closed components. ``ParallelACExecutor.__init__``
@@ -369,8 +385,23 @@ _FOUNDATION_A_LEVEL_COORDINATOR_TYPE = LevelCoordinator
 _FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_ROOT = LevelCoordinator.run_review
 _FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_CODE = LevelCoordinator.run_review.__code__
 _FOUNDATION_A_RATE_GATE_FACTORY = build_rate_limit_gate
+_FOUNDATION_A_RATE_GATE_TYPE = RateLimitGate
 _FOUNDATION_A_RATE_GATE_ACQUIRE_ROOT = RateLimitGate.acquire
 _FOUNDATION_A_RATE_GATE_ACQUIRE_CODE = RateLimitGate.acquire.__code__
+_FOUNDATION_A_RATE_GATE_SLEEP = asyncio.sleep
+_FOUNDATION_A_RATE_GATE_SLEEP_CODE = asyncio.sleep.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_TYPE = SharedRateLimitBucket
+_FOUNDATION_A_RATE_GATE_BUCKET_TIME = time.monotonic
+_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT = SharedRateLimitBucket.enabled.fget
+_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_CODE = (
+    _FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT.__code__
+    if _FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT is not None
+    else None
+)
+_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_ROOT = SharedRateLimitBucket.acquire
+_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE = SharedRateLimitBucket.acquire.__code__
+_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT = SharedRateLimitBucket.force_reserve
+_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE = SharedRateLimitBucket.force_reserve.__code__
 _FOUNDATION_A_TRANSCRIPT_VERIFIER = _verify_atomic_evidence_against_runtime_messages
 _FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE = _verify_atomic_evidence_against_runtime_messages.__code__
 _FOUNDATION_A_CLOSED_ROOTS = _FoundationAClosedRoots(
@@ -381,8 +412,19 @@ _FOUNDATION_A_CLOSED_ROOTS = _FoundationAClosedRoots(
     level_coordinator_review_root=_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_ROOT,
     level_coordinator_review_code=_FOUNDATION_A_LEVEL_COORDINATOR_REVIEW_CODE,
     rate_gate_factory=_FOUNDATION_A_RATE_GATE_FACTORY,
+    rate_gate_type=_FOUNDATION_A_RATE_GATE_TYPE,
     rate_gate_acquire_root=_FOUNDATION_A_RATE_GATE_ACQUIRE_ROOT,
     rate_gate_acquire_code=_FOUNDATION_A_RATE_GATE_ACQUIRE_CODE,
+    rate_gate_sleep=_FOUNDATION_A_RATE_GATE_SLEEP,
+    rate_gate_sleep_code=_FOUNDATION_A_RATE_GATE_SLEEP_CODE,
+    rate_gate_bucket_type=_FOUNDATION_A_RATE_GATE_BUCKET_TYPE,
+    rate_gate_bucket_time=_FOUNDATION_A_RATE_GATE_BUCKET_TIME,
+    rate_gate_bucket_enabled_root=_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_ROOT,
+    rate_gate_bucket_enabled_code=_FOUNDATION_A_RATE_GATE_BUCKET_ENABLED_CODE,
+    rate_gate_bucket_acquire_root=_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_ROOT,
+    rate_gate_bucket_acquire_code=_FOUNDATION_A_RATE_GATE_BUCKET_ACQUIRE_CODE,
+    rate_gate_bucket_force_reserve_root=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_ROOT,
+    rate_gate_bucket_force_reserve_code=_FOUNDATION_A_RATE_GATE_BUCKET_FORCE_RESERVE_CODE,
     transcript_verifier=_FOUNDATION_A_TRANSCRIPT_VERIFIER,
     transcript_verifier_code=_FOUNDATION_A_TRANSCRIPT_VERIFIER_CODE,
 )
@@ -404,12 +446,24 @@ def _bind_foundation_a_roots(
     level_coordinator_review_root = roots.level_coordinator_review_root
     level_coordinator_review_code = roots.level_coordinator_review_code
     rate_gate_factory = roots.rate_gate_factory
+    rate_gate_type = roots.rate_gate_type
     rate_gate_acquire_root = roots.rate_gate_acquire_root
     rate_gate_acquire_code = roots.rate_gate_acquire_code
+    rate_gate_sleep = roots.rate_gate_sleep
+    rate_gate_sleep_code = roots.rate_gate_sleep_code
+    rate_gate_bucket_type = roots.rate_gate_bucket_type
+    rate_gate_bucket_time = roots.rate_gate_bucket_time
+    rate_gate_bucket_enabled_root = roots.rate_gate_bucket_enabled_root
+    rate_gate_bucket_enabled_code = roots.rate_gate_bucket_enabled_code
+    rate_gate_bucket_acquire_root = roots.rate_gate_bucket_acquire_root
+    rate_gate_bucket_acquire_code = roots.rate_gate_bucket_acquire_code
+    rate_gate_bucket_force_reserve_root = roots.rate_gate_bucket_force_reserve_root
+    rate_gate_bucket_force_reserve_code = roots.rate_gate_bucket_force_reserve_code
     transcript_verifier = roots.transcript_verifier
     transcript_verifier_code = roots.transcript_verifier_code
 
     def decorate(initializer: Callable[..., None]) -> Callable[..., None]:
+        @wraps(initializer)
         def bound(self: object, *args: object, **kwargs: object) -> None:
             initializer(
                 self,
@@ -423,8 +477,19 @@ def _bind_foundation_a_roots(
                     level_coordinator_review_root=level_coordinator_review_root,
                     level_coordinator_review_code=level_coordinator_review_code,
                     rate_gate_factory=rate_gate_factory,
+                    rate_gate_type=rate_gate_type,
                     rate_gate_acquire_root=rate_gate_acquire_root,
                     rate_gate_acquire_code=rate_gate_acquire_code,
+                    rate_gate_sleep=rate_gate_sleep,
+                    rate_gate_sleep_code=rate_gate_sleep_code,
+                    rate_gate_bucket_type=rate_gate_bucket_type,
+                    rate_gate_bucket_time=rate_gate_bucket_time,
+                    rate_gate_bucket_enabled_root=rate_gate_bucket_enabled_root,
+                    rate_gate_bucket_enabled_code=rate_gate_bucket_enabled_code,
+                    rate_gate_bucket_acquire_root=rate_gate_bucket_acquire_root,
+                    rate_gate_bucket_acquire_code=rate_gate_bucket_acquire_code,
+                    rate_gate_bucket_force_reserve_root=rate_gate_bucket_force_reserve_root,
+                    rate_gate_bucket_force_reserve_code=rate_gate_bucket_force_reserve_code,
                     transcript_verifier=transcript_verifier,
                     transcript_verifier_code=transcript_verifier_code,
                 ),
@@ -440,6 +505,7 @@ _FOUNDATION_A_ENTRY_EXECUTE_ATOMIC_AC = 1
 _FOUNDATION_A_ENTRY_AWAIT_DISPATCH_RATE_BUDGET = 2
 _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT = 3
 _FOUNDATION_A_ENTRY_RUN_ATOMIC_VERIFIER_PASS = 4
+_FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE = 5
 
 
 def _foundation_a_internal_entry_root_specs(
@@ -465,6 +531,11 @@ def _foundation_a_internal_entry_root_specs(
             roots.run_atomic_verifier_pass_root,
             roots.run_atomic_verifier_pass_code,
         ),
+        (
+            "_run_ac_verify_gate",
+            roots.run_ac_verify_gate_root,
+            roots.run_ac_verify_gate_code,
+        ),
     )
 
 
@@ -488,6 +559,7 @@ def _capture_foundation_a_internal_entry_roots(
             executor_type,
             "_run_atomic_verifier_pass",
         )
+        run_ac_verify_gate_root = type.__getattribute__(executor_type, "_run_ac_verify_gate")
         return _FoundationAInternalEntryRoots(
             executor_type=executor_type,
             execute_single_ac_root=execute_single_ac_root,
@@ -509,6 +581,8 @@ def _capture_foundation_a_internal_entry_roots(
                 run_atomic_verifier_pass_root,
                 "__code__",
             ),
+            run_ac_verify_gate_root=run_ac_verify_gate_root,
+            run_ac_verify_gate_code=object.__getattribute__(run_ac_verify_gate_root, "__code__"),
         )
     except (AttributeError, TypeError) as exc:
         raise ValueError("execution authority internal entry roots are not bindable") from exc
@@ -560,26 +634,41 @@ def _make_foundation_a_internal_entry_invokers(
 ) -> tuple[Callable[..., Any], ...]:
     """Close direct function calls over the constructor's finite root snapshot."""
 
+    executor_ref = ref(executor)
     execute_single_ac_root = roots.execute_single_ac_root
     execute_atomic_ac_root = roots.execute_atomic_ac_root
     await_dispatch_rate_budget_root = roots.await_dispatch_rate_budget_root
     dispatch_decomposition_prompt_root = roots.dispatch_decomposition_prompt_root
     run_atomic_verifier_pass_root = roots.run_atomic_verifier_pass_root
+    run_ac_verify_gate_root = roots.run_ac_verify_gate_root
 
-    def execute_single_ac(**kwargs: object) -> Any:
-        return execute_single_ac_root(executor, **kwargs)
+    def _require_captured_executor(current_executor: object) -> None:
+        if executor_ref() is not current_executor:
+            raise ValueError("execution authority entry root is unavailable")
 
-    def execute_atomic_ac(**kwargs: object) -> Any:
-        return execute_atomic_ac_root(executor, **kwargs)
+    def execute_single_ac(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return execute_single_ac_root(current_executor, **kwargs)
 
-    def await_dispatch_rate_budget(**kwargs: object) -> Any:
-        return await_dispatch_rate_budget_root(executor, **kwargs)
+    def execute_atomic_ac(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return execute_atomic_ac_root(current_executor, **kwargs)
 
-    def dispatch_decomposition_prompt(**kwargs: object) -> Any:
-        return dispatch_decomposition_prompt_root(executor, **kwargs)
+    def await_dispatch_rate_budget(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return await_dispatch_rate_budget_root(current_executor, **kwargs)
 
-    def run_atomic_verifier_pass(**kwargs: object) -> Any:
-        return run_atomic_verifier_pass_root(executor, **kwargs)
+    def dispatch_decomposition_prompt(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return dispatch_decomposition_prompt_root(current_executor, **kwargs)
+
+    def run_atomic_verifier_pass(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return run_atomic_verifier_pass_root(current_executor, **kwargs)
+
+    def run_ac_verify_gate(current_executor: object, **kwargs: object) -> Any:
+        _require_captured_executor(current_executor)
+        return run_ac_verify_gate_root(current_executor, **kwargs)
 
     return (
         execute_single_ac,
@@ -587,6 +676,7 @@ def _make_foundation_a_internal_entry_invokers(
         await_dispatch_rate_budget,
         dispatch_decomposition_prompt,
         run_atomic_verifier_pass,
+        run_ac_verify_gate,
     )
 
 
@@ -596,6 +686,7 @@ def _bind_foundation_a_internal_entry_roots(executor_type: type[Any]) -> type[An
     expected_roots = _capture_foundation_a_internal_entry_roots(executor_type)
     initializer = executor_type.__init__
 
+    @wraps(initializer)
     def bound(self: object, *args: object, **kwargs: object) -> None:
         if (
             "_foundation_a_internal_entry_roots" in kwargs
@@ -621,22 +712,14 @@ def _make_execution_authority_guard(
     executor: object,
     *,
     binding: ExecutionAuthorityLiveBinding,
-    authority_verifier: Verifier | None,
-    adapter: object,
-    dispatcher_type: object,
-    dispatcher: object,
-    transcript_verifier: object,
-    rate_gate: object,
-    dispatcher_stream_callable: Callable[..., Awaitable[None]],
-    rate_gate_acquire_callable: Callable[..., Awaitable[None]],
-    coordinator: object,
-    coordinator_review_callable: object,
     workspace_builder: Callable[[], str | None],
     policy_builder: Callable[[], dict[str, object]],
     internal_entry_roots: _FoundationAInternalEntryRoots,
-) -> Callable[[], None]:
+) -> Callable[[object], None]:
     """Capture Foundation A roots outside mutable executor instance fields."""
 
+    executor_ref = ref(executor)
+    binding_ref = ref(binding)
     binding_is_intact = ExecutionAuthorityLiveBinding.is_intact
     binding_is_intact_code = binding_is_intact.__code__
     workspace_builder_root = workspace_builder.__func__
@@ -646,23 +729,40 @@ def _make_execution_authority_guard(
     internal_entry_roots_are_current = _foundation_a_internal_entry_roots_are_current
     internal_entry_roots_are_current_code = internal_entry_roots_are_current.__code__
 
-    def guard() -> None:
+    def guard(current_executor: object) -> None:
+        captured_executor = executor_ref()
+        captured_binding = binding_ref()
+        if captured_executor is not current_executor or captured_binding is None:
+            raise ValueError("execution authority guard is unavailable")
+        authority_verifier = captured_binding.verifier
+        adapter = captured_binding.adapter
+        dispatcher_type = captured_binding.dispatcher_type
+        dispatcher = captured_binding.dispatcher
+        transcript_verifier = captured_binding.transcript_verifier
+        rate_gate = captured_binding.rate_gate
+        dispatcher_stream_callable = captured_binding.dispatcher_stream_callable
+        rate_gate_acquire_callable = captured_binding.rate_gate_acquire_callable
+        coordinator = captured_binding.coordinator
+        coordinator_review_callable = captured_binding.coordinator_review_callable
         get_attribute = object.__getattribute__
         if (
-            get_attribute(executor, "_execution_authority_live_binding") is not binding
-            or get_attribute(executor, "_authority_verifier") is not authority_verifier
-            or get_attribute(executor, "_atomic_verifier") is not authority_verifier
-            or get_attribute(executor, "_adapter") is not adapter
-            or get_attribute(executor, "_authority_leaf_dispatcher_type") is not dispatcher_type
-            or get_attribute(executor, "_authority_leaf_dispatcher") is not dispatcher
-            or get_attribute(executor, "_authority_transcript_verifier") is not transcript_verifier
-            or get_attribute(executor, "_dispatch_rate_gate") is not rate_gate
-            or get_attribute(executor, "_authority_leaf_dispatcher_stream")
+            get_attribute(current_executor, "_execution_authority_live_binding")
+            is not captured_binding
+            or get_attribute(current_executor, "_authority_verifier") is not authority_verifier
+            or get_attribute(current_executor, "_atomic_verifier") is not authority_verifier
+            or get_attribute(current_executor, "_adapter") is not adapter
+            or get_attribute(current_executor, "_authority_leaf_dispatcher_type")
+            is not dispatcher_type
+            or get_attribute(current_executor, "_authority_leaf_dispatcher") is not dispatcher
+            or get_attribute(current_executor, "_authority_transcript_verifier")
+            is not transcript_verifier
+            or get_attribute(current_executor, "_dispatch_rate_gate") is not rate_gate
+            or get_attribute(current_executor, "_authority_leaf_dispatcher_stream")
             is not dispatcher_stream_callable
-            or get_attribute(executor, "_authority_rate_gate_acquire_root")
+            or get_attribute(current_executor, "_authority_rate_gate_acquire_root")
             is not rate_gate_acquire_callable
-            or get_attribute(executor, "_coordinator") is not coordinator
-            or get_attribute(executor, "_authority_coordinator_review")
+            or get_attribute(current_executor, "_coordinator") is not coordinator
+            or get_attribute(current_executor, "_authority_coordinator_review")
             is not coordinator_review_callable
         ):
             raise ValueError("execution authority drifted before effect")
@@ -674,20 +774,20 @@ def _make_execution_authority_guard(
             is not internal_entry_roots_are_current_code
         ):
             raise ValueError("execution authority drifted before effect")
-        if not internal_entry_roots_are_current(executor, internal_entry_roots):
+        if not internal_entry_roots_are_current(current_executor, internal_entry_roots):
             raise ValueError("execution authority drifted before effect")
         if not binding_is_intact(
-            binding,
-            executor=executor,
+            captured_binding,
+            executor=current_executor,
             adapter=adapter,
             verifier=authority_verifier,
             dispatcher_type=dispatcher_type,
             dispatcher=dispatcher,
-            dispatcher_executor=executor,
+            dispatcher_executor=current_executor,
             transcript_verifier=transcript_verifier,
             rate_gate=rate_gate,
-            workspace=workspace_builder(),
-            execution_policy=policy_builder(),
+            workspace=workspace_builder_root(current_executor),
+            execution_policy=policy_builder_root(current_executor),
             dispatcher_stream_callable=dispatcher_stream_callable,
             rate_gate_acquire_callable=rate_gate_acquire_callable,
             coordinator=coordinator,
@@ -699,7 +799,7 @@ def _make_execution_authority_guard(
 
 
 def _make_execution_authority_registry() -> tuple[
-    Callable[[object, Callable[[], None], tuple[Callable[..., Any], ...]], None],
+    Callable[[object, Callable[[object], None], tuple[Callable[..., Any], ...]], None],
     Callable[[object], None],
     Callable[..., Any],
 ]:
@@ -710,33 +810,65 @@ def _make_execution_authority_registry() -> tuple[
     module closures in its own process.
     """
 
-    states: WeakKeyDictionary[
-        object,
-        tuple[Callable[[], None], tuple[Callable[..., Any], ...]],
-    ] = WeakKeyDictionary()
+    # ``WeakKeyDictionary`` delegates identity to user-defined ``__hash__`` and
+    # ``__eq__``. Foundation A deliberately supports process-local executor
+    # subclasses, including unhashable and equality-overriding ones, so keep a
+    # private identity-keyed table instead. Every lookup verifies the weak
+    # referent before use, which also makes delayed cleanup and ``id`` reuse
+    # safe. Values retain only the guard/invokers; those retain weak executor
+    # references and therefore cannot keep an executor alive.
+    states: dict[
+        int,
+        tuple[
+            ref[object],
+            Callable[[object], None],
+            tuple[Callable[..., Any], ...],
+        ],
+    ] = {}
+
+    def _lookup(
+        executor: object,
+    ) -> tuple[Callable[[object], None], tuple[Callable[..., Any], ...]]:
+        executor_id = id(executor)
+        state = states.get(executor_id)
+        if state is None:
+            raise ValueError("execution authority guard is unavailable")
+        executor_ref, guard, invokers = state
+        if executor_ref() is not executor:
+            # The stale entry may await a weakref callback, or its integer key
+            # may have been reused. Never dispatch through either case.
+            if executor_ref() is None:
+                states.pop(executor_id, None)
+            raise ValueError("execution authority guard is unavailable")
+        return guard, invokers
 
     def register(
         executor: object,
-        guard: Callable[[], None],
+        guard: Callable[[object], None],
         invokers: tuple[Callable[..., Any], ...],
     ) -> None:
-        states[executor] = (guard, invokers)
+        executor_id = id(executor)
+
+        def cleanup(executor_ref: ref[object]) -> None:
+            state = states.get(executor_id)
+            if state is not None and state[0] is executor_ref:
+                states.pop(executor_id, None)
+
+        executor_ref = ref(executor, cleanup)
+        states[executor_id] = (executor_ref, guard, invokers)
 
     def invoke_guard(executor: object) -> None:
-        try:
-            guard = states[executor][0]
-        except KeyError as exc:
-            raise ValueError("execution authority guard is unavailable") from exc
-        guard()
+        guard, _ = _lookup(executor)
+        guard(executor)
 
     def invoke_entry(executor: object, entry_index: int, **kwargs: object) -> Any:
         try:
-            guard, invokers = states[executor]
+            guard, invokers = _lookup(executor)
             invoker = invokers[entry_index]
-        except (IndexError, KeyError) as exc:
+        except IndexError as exc:
             raise ValueError("execution authority entry root is unavailable") from exc
-        guard()
-        return invoker(**kwargs)
+        guard(executor)
+        return invoker(executor, **kwargs)
 
     return register, invoke_guard, invoke_entry
 
@@ -1502,6 +1634,29 @@ class ParallelACExecutor:
             expected_transcript_verifier_code=_foundation_a_roots.transcript_verifier_code,
             expected_rate_gate_acquire_root=_foundation_a_roots.rate_gate_acquire_root,
             expected_rate_gate_acquire_code=_foundation_a_roots.rate_gate_acquire_code,
+            expected_rate_gate_type=_foundation_a_roots.rate_gate_type,
+            expected_rate_gate_sleep=_foundation_a_roots.rate_gate_sleep,
+            expected_rate_gate_sleep_code=_foundation_a_roots.rate_gate_sleep_code,
+            expected_rate_gate_bucket_type=_foundation_a_roots.rate_gate_bucket_type,
+            expected_rate_gate_bucket_time=_foundation_a_roots.rate_gate_bucket_time,
+            expected_rate_gate_bucket_enabled_root=(
+                _foundation_a_roots.rate_gate_bucket_enabled_root
+            ),
+            expected_rate_gate_bucket_enabled_code=(
+                _foundation_a_roots.rate_gate_bucket_enabled_code
+            ),
+            expected_rate_gate_bucket_acquire_root=(
+                _foundation_a_roots.rate_gate_bucket_acquire_root
+            ),
+            expected_rate_gate_bucket_acquire_code=(
+                _foundation_a_roots.rate_gate_bucket_acquire_code
+            ),
+            expected_rate_gate_bucket_force_reserve_root=(
+                _foundation_a_roots.rate_gate_bucket_force_reserve_root
+            ),
+            expected_rate_gate_bucket_force_reserve_code=(
+                _foundation_a_roots.rate_gate_bucket_force_reserve_code
+            ),
             expected_coordinator_type=_foundation_a_roots.level_coordinator_type,
             expected_coordinator_review_root=_foundation_a_roots.level_coordinator_review_root,
             expected_coordinator_review_code=_foundation_a_roots.level_coordinator_review_code,
@@ -1518,16 +1673,6 @@ class ParallelACExecutor:
             _make_execution_authority_guard(
                 self,
                 binding=binding,
-                authority_verifier=self._authority_verifier,
-                adapter=self._adapter,
-                dispatcher_type=self._authority_leaf_dispatcher_type,
-                dispatcher=self._authority_leaf_dispatcher,
-                transcript_verifier=self._authority_transcript_verifier,
-                rate_gate=self._dispatch_rate_gate,
-                dispatcher_stream_callable=self._authority_leaf_dispatcher_stream,
-                rate_gate_acquire_callable=self._authority_rate_gate_acquire_root,
-                coordinator=self._coordinator,
-                coordinator_review_callable=self._authority_coordinator_review,
                 workspace_builder=workspace_builder,
                 policy_builder=policy_builder,
                 internal_entry_roots=internal_entry_roots,
@@ -2492,7 +2637,12 @@ class ParallelACExecutor:
                         and (spec.verify_command or spec.expected_artifacts)
                     ):
                         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                        gate = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                        gate = await _invoke_execution_authority_entry(
+                            self,
+                            _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                            spec=spec,
+                            cwd=cwd,
+                        )
                         if not gate.passed:
                             executable.append(ac_idx)
                             log.info(
@@ -5381,7 +5531,12 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-                verify_gate_outcome = await self._run_ac_verify_gate(spec=ac_spec, cwd=cwd)
+                verify_gate_outcome = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                    spec=ac_spec,
+                    cwd=cwd,
+                )
 
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
@@ -5988,7 +6143,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 outcome=cached_outcome,
             )
         else:
-            outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+            outcome = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                spec=spec,
+                cwd=cwd,
+            )
         if outcome.passed:
             if not result.success and not result.is_blocked and not result.is_invalid:
                 from ouroboros.events.base import BaseEvent
@@ -6202,7 +6362,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=cached_outcome,
                 )
             else:
-                outcome = await self._run_ac_verify_gate(spec=spec, cwd=cwd)
+                outcome = await _invoke_execution_authority_entry(
+                    self,
+                    _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                    spec=spec,
+                    cwd=cwd,
+                )
             if not outcome.passed:
                 gated_out.add(ac_idx)
         return frozenset(gated_out)

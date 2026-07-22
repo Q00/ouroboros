@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import gc
 import json
 from unittest.mock import AsyncMock, MagicMock
+import weakref
 
 import pytest
 
@@ -167,6 +169,37 @@ def test_credential_alias_in_runtime_identity_becomes_process_local_without_egre
     assert secret not in authority.canonical_json
 
 
+@pytest.mark.parametrize(
+    "key_name",
+    (
+        "secretKey",
+        "secret_access_key",
+        "awsSecretAccessKey",
+        "accountKey",
+        "connectionString",
+        "masterKey",
+    ),
+)
+def test_secret_key_alias_in_runtime_identity_becomes_process_local(
+    key_name: str,
+) -> None:
+    secret = "opaque-provider-credential"
+
+    class CredentialRuntime(_Runtime):
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {
+                key_name: secret,
+                "effective_model_observed": True,
+            }
+
+    authority = _contract(runtime=CredentialRuntime())
+
+    assert authority.portable_across_processes is False
+    assert authority.data["runtime"]["stability"] == "process_local"
+    assert authority.data["runtime"]["execution_identity"] == {"observed": False}
+    assert secret not in authority.canonical_json
+
+
 def test_custom_verifier_credential_alias_never_enters_authority_json() -> None:
     secret = "gh" + "p_abcdefghijklmnopqrstuvwxyz1234567890"
 
@@ -190,6 +223,28 @@ def test_contract_deserialization_rejects_credential_shaped_member() -> None:
         ExecutionAuthorityContract(json.dumps(data, sort_keys=True, separators=(",", ":")))
 
 
+def test_contract_deserialization_rejects_promoted_process_local_runtime() -> None:
+    authority = _contract(runtime=_DynamicDispatchRuntime())
+    data = authority.data
+    assert data["runtime"]["portable_identity_observed"] is False
+    data["runtime"]["stability"] = "durable"
+
+    with pytest.raises(ValueError, match="invalid runtime"):
+        ExecutionAuthorityContract(json.dumps(data, sort_keys=True, separators=(",", ":")))
+
+
+def test_empty_runtime_identity_stays_process_local() -> None:
+    class EmptyIdentityRuntime(_Runtime):
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {}
+
+    authority = _contract(runtime=EmptyIdentityRuntime())
+
+    assert authority.portable_across_processes is False
+    assert authority.data["runtime"]["stability"] == "process_local"
+    assert authority.data["runtime"]["execution_identity"] == {"observed": False}
+
+
 def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)
@@ -208,6 +263,24 @@ def test_parallel_executor_exposes_one_authority_snapshot(tmp_path) -> None:
     assert authority.data["workspace"]["identity_digest"].startswith("sha256:")
     assert authority.data["runtime"]["execution_identity"]["digest"].startswith("sha256:")
     assert authority.data["execution_policy"]["identity_digest"].startswith("sha256:")
+
+
+def test_execution_authority_registry_does_not_keep_executor_alive(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+    executor_ref = weakref.ref(executor)
+
+    del executor
+    gc.collect()
+    gc.collect()
+
+    assert executor_ref() is None
 
 
 def test_public_constructor_rejects_caller_supplied_closed_roots(tmp_path) -> None:
@@ -623,6 +696,77 @@ async def test_executor_rejects_replaced_rate_gate_bucket_before_admission(tmp_p
     assert evil_bucket.called is False
 
 
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (("_max_wait_seconds", 0.0), ("_heartbeat_seconds", 0.0)),
+)
+def test_executor_rejects_rate_gate_scalar_semantic_drift(
+    tmp_path,
+    attribute: str,
+    replacement: float,
+) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    object.__setattr__(executor._dispatch_rate_gate, attribute, replacement)
+
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
+def test_executor_rejects_rate_gate_wait_collaborator_drift(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    async def injected_sleep(_: float) -> None:
+        return None
+
+    object.__setattr__(executor._dispatch_rate_gate, "_sleep", injected_sleep)
+
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
+def test_executor_rejects_rate_gate_bucket_time_and_method_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+    bucket = executor._dispatch_rate_gate._bucket
+
+    object.__setattr__(bucket, "_time", lambda: 0.0)
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+    object.__setattr__(bucket, "_time", parallel_executor_module.time.monotonic)
+
+    async def injected_force_reserve(*_: object, **__: object) -> object:
+        return object()
+
+    monkeypatch.setattr(type(bucket), "force_reserve", injected_force_reserve)
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
 def test_executor_rejects_replaced_captured_leaf_dispatch_root(tmp_path) -> None:
     runtime = _Runtime()
     runtime.working_directory = str(tmp_path)
@@ -977,6 +1121,58 @@ def test_executor_rejects_in_place_dispatcher_code_drift(tmp_path) -> None:
         dispatcher_type.stream.__code__ = original_code
 
 
+def test_executor_rejects_in_place_structural_verifier_code_drift(tmp_path) -> None:
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+        atomic_verifier=structural_atomic_verifier,
+    )
+    original_code = structural_atomic_verifier.__code__
+
+    def injected_structural_verifier(
+        *,
+        profile: object,
+        ac: str,
+        leaf_output: str,
+        record: object,
+    ) -> VerifierVerdict:
+        del profile, ac, leaf_output, record
+        return VerifierVerdict(passed=True)
+
+    structural_atomic_verifier.__code__ = injected_structural_verifier.__code__
+    try:
+        with pytest.raises(ValueError, match="execution authority drifted"):
+            executor._require_execution_authority_intact()
+    finally:
+        structural_atomic_verifier.__code__ = original_code
+
+
+def test_preconstruction_structural_verifier_code_drift_is_process_local() -> None:
+    original_code = structural_atomic_verifier.__code__
+
+    def injected_structural_verifier(
+        *,
+        profile: object,
+        ac: str,
+        leaf_output: str,
+        record: object,
+    ) -> VerifierVerdict:
+        del profile, ac, leaf_output, record
+        return VerifierVerdict(passed=True)
+
+    structural_atomic_verifier.__code__ = injected_structural_verifier.__code__
+    try:
+        authority = _contract(verifier=structural_atomic_verifier)
+        assert authority.portable_across_processes is False
+        assert authority.data["verifier"]["stability"] == "process_local"
+    finally:
+        structural_atomic_verifier.__code__ = original_code
+
+
 @pytest.mark.parametrize(
     "entry_name",
     (
@@ -985,6 +1181,7 @@ def test_executor_rejects_in_place_dispatcher_code_drift(tmp_path) -> None:
         "_await_dispatch_rate_budget",
         "_dispatch_decomposition_prompt",
         "_run_atomic_verifier_pass",
+        "_run_ac_verify_gate",
     ),
 )
 def test_executor_rejects_postconstruction_internal_entry_root_drift(
@@ -1064,6 +1261,52 @@ def test_executor_subclass_is_process_local_even_when_it_inherits_entry_roots(tm
     )
 
     assert executor.execution_authority.portable_across_processes is False
+
+
+def test_unhashable_executor_subclass_remains_executable_and_process_local(tmp_path) -> None:
+    class UnhashableExecutor(ParallelACExecutor):
+        __hash__ = None  # type: ignore[assignment]
+
+    runtime = _Runtime()
+    runtime.working_directory = str(tmp_path)
+    executor = UnhashableExecutor(
+        adapter=runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    assert executor.execution_authority.portable_across_processes is False
+    executor._require_execution_authority_intact()
+
+
+def test_equality_overriding_executor_subclasses_keep_distinct_registry_entries(tmp_path) -> None:
+    class EqualExecutor(ParallelACExecutor):
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, EqualExecutor)
+
+        __hash__ = object.__hash__
+
+    first_runtime = _Runtime(profile="first")
+    first_runtime.working_directory = str(tmp_path)
+    second_runtime = _Runtime(profile="second")
+    second_runtime.working_directory = str(tmp_path)
+    first = EqualExecutor(
+        adapter=first_runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+    second = EqualExecutor(
+        adapter=second_runtime,  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    assert first == second
+    first._require_execution_authority_intact()
+    second._require_execution_authority_intact()
 
 
 @pytest.mark.asyncio

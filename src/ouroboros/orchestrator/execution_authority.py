@@ -23,8 +23,8 @@ import uuid
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
 
-EXECUTION_AUTHORITY_VERSION = 1
-EXECUTION_AUTHORITY_BOUNDARY_VERSION = 1
+EXECUTION_AUTHORITY_VERSION = 2
+EXECUTION_AUTHORITY_BOUNDARY_VERSION = 2
 
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
@@ -32,13 +32,14 @@ _MAX_IDENTITY_SCALAR_CHARS = 8_192
 _MAX_IDENTITY_JSON_CHARS = 64_000
 
 _EXECUTOR_COMPONENT_VERSIONS = {
-    "parallel_ac_executor": "parallel-ac-executor/v1",
+    "parallel_ac_executor": "parallel-ac-executor/v2",
     "leaf_dispatcher": "leaf-dispatcher/v1",
     "level_coordinator": "level-coordinator/v1",
     "rate_limit_gate": "rate-limit-gate/v1",
 }
 _BUILTIN_TRANSCRIPT_VERIFIER = "runtime-transcript-verifier/v1"
 _BUILTIN_STRUCTURAL_VERIFIER = "structural-atomic-verifier/v1"
+_BUILTIN_STRUCTURAL_VERIFIER_CODE = structural_atomic_verifier.__code__
 
 
 def _canonical_json(value: object, *, field: str) -> str:
@@ -72,18 +73,33 @@ def _normalized_identity_key(value: str) -> str:
 def _is_sensitive_identity_key(value: str) -> bool:
     """Return whether an explicit identity key can carry a credential value."""
     compact = _normalized_identity_key(value)
-    return any(
-        marker in compact
-        for marker in (
-            "apikey",
-            "credential",
-            "password",
-            "authorization",
-            "bearer",
-            "privatekey",
-            "clientsecret",
+    return (
+        any(
+            marker in compact
+            for marker in (
+                "apikey",
+                "credential",
+                "password",
+                "authorization",
+                "bearer",
+                "privatekey",
+                "clientsecret",
+                "secretkey",
+                "accesskey",
+                "authkey",
+                "signingkey",
+                "encryptionkey",
+                "accountkey",
+                "masterkey",
+                "connectionstring",
+                "accesstoken",
+                "refreshtoken",
+                "sessiontoken",
+            )
         )
-    ) or compact.endswith(("token", "tokenvalue", "keyvalue", "secret"))
+        or compact.startswith("secret")
+        or compact.endswith(("token", "tokenvalue", "keyvalue", "secret", "secretvalue"))
+    )
 
 
 def _looks_like_credential(value: str) -> bool:
@@ -331,6 +347,11 @@ def runtime_execution_identity_contract(adapter: object) -> dict[str, object]:
         dict(identity),
         field="runtime execution identity contract",
     )
+    # An empty object carries no execution identity. Treat it like a missing
+    # provider declaration instead of allowing a digest of ``{}`` to witness
+    # portability.
+    if not normalized:
+        return {"version": 1, "observed": False}
     return {"version": 1, "observed": True, "identity": normalized}
 
 
@@ -415,13 +436,15 @@ def runtime_authority_contract(
     # This public descriptor builder must retain the finite live-root rule used
     # by ``ExecutionAuthorityLiveBinding``. A runtime with only dynamic
     # ``execute_task`` lookup remains executable, but cannot claim portability.
+    dispatch_root_observed = _has_observable_runtime_dispatch_root(adapter)
     if not force_process_local:
-        force_process_local = not _has_observable_runtime_dispatch_root(adapter)
+        force_process_local = not dispatch_root_observed
     try:
         execution = runtime_execution_identity_contract(adapter)
         execution_descriptor = (
             _digest_descriptor(execution["identity"], field="runtime execution identity")
-            if execution.get("observed") is True
+            if valid_runtime_execution_identity_contract(execution)
+            and execution.get("observed") is True
             else {"observed": False}
         )
     except (AttributeError, KeyError, TypeError, ValueError):
@@ -434,16 +457,23 @@ def runtime_authority_contract(
         self_governs_rate_limit = object.__getattribute__(adapter, "self_governs_rate_limit")
     except (AttributeError, TypeError):
         self_governs_rate_limit = False
-    stable = (
-        runtime_backend["observed"] is True
+    portable_identity_observed = (
+        dispatch_root_observed
+        and runtime_backend["observed"] is True
+        and llm_backend["observed"] is True
+        and permission_mode["observed"] is True
         and execution_descriptor["observed"] is True
         and capabilities["observed"] is True
         and isinstance(self_governs_rate_limit, bool)
         and not force_process_local
     )
     return {
-        "version": 1,
-        "stability": "durable" if stable else "process_local",
+        "version": 2,
+        "stability": "durable" if portable_identity_observed else "process_local",
+        # This is an explicit semantic witness, not a cosmetic copy of the
+        # stability label. A durable runtime must have a finite direct dispatch
+        # root as well as observed descriptor components.
+        "portable_identity_observed": portable_identity_observed,
         "runtime_backend": runtime_backend,
         "llm_backend": llm_backend,
         "permission_mode": permission_mode,
@@ -465,8 +495,9 @@ def _valid_runtime_authority(value: object) -> bool:
         "execution_identity",
         "capabilities",
         "self_governs_rate_limit",
+        "portable_identity_observed",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 1:
+    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 2:
         return False
     if value.get("stability") not in {"durable", "process_local"}:
         return False
@@ -481,8 +512,28 @@ def _valid_runtime_authority(value: object) -> bool:
         )
     ):
         return False
-    return value.get("self_governs_rate_limit") is None or isinstance(
-        value.get("self_governs_rate_limit"), bool
+    self_governs_rate_limit = value.get("self_governs_rate_limit")
+    portable_identity_observed = value.get("portable_identity_observed")
+    if not isinstance(portable_identity_observed, bool):
+        return False
+    descriptors_are_observed = all(
+        isinstance(value.get(name), Mapping) and value[name].get("observed") is True
+        for name in (
+            "runtime_backend",
+            "llm_backend",
+            "permission_mode",
+            "execution_identity",
+            "capabilities",
+        )
+    )
+    if value.get("stability") == "durable":
+        return (
+            portable_identity_observed
+            and descriptors_are_observed
+            and isinstance(self_governs_rate_limit, bool)
+        )
+    return not portable_identity_observed and (
+        self_governs_rate_limit is None or isinstance(self_governs_rate_limit, bool)
     )
 
 
@@ -525,7 +576,10 @@ def verifier_authority_contract(
             "stability": "durable",
             "implementation": _BUILTIN_TRANSCRIPT_VERIFIER,
         }
-    if verifier is structural_atomic_verifier:
+    if (
+        verifier is structural_atomic_verifier
+        and getattr(verifier, "__code__", None) is _BUILTIN_STRUCTURAL_VERIFIER_CODE
+    ):
         return {
             "version": 1,
             "mode": "structural_atomic",
@@ -628,6 +682,25 @@ def _callable_code_identity(value: object | None) -> object | None:
         return value.__code__
     except AttributeError:
         return None
+
+
+def _static_property_getter_root(value: object | None, member_name: str) -> object | None:
+    """Return a direct property getter without invoking dynamic lookup."""
+    if value is None:
+        return None
+    try:
+        descriptor = inspect.getattr_static(type(value), member_name)
+    except (AttributeError, TypeError):
+        return None
+    if not isinstance(descriptor, property):
+        return None
+    getter = descriptor.fget
+    return getter if callable(getter) else None
+
+
+def _is_finite_number(value: object) -> bool:
+    """Accept the finite scalar knobs owned by the rate-gate algorithm."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
 
 
 def _has_observable_runtime_dispatch_root(adapter: object) -> bool:
@@ -742,6 +815,7 @@ class ExecutionAuthorityContract:
     def portable_across_processes(self) -> bool:
         """Return only an identity-stability property, never reuse authority."""
         data = self.data
+        runtime = data.get("runtime")
         return (
             all(
                 isinstance(component, Mapping) and component.get("stability") == "durable"
@@ -753,6 +827,8 @@ class ExecutionAuthorityContract:
                     data.get("execution_policy"),
                 )
             )
+            and isinstance(runtime, Mapping)
+            and runtime.get("portable_identity_observed") is True
             and data.get("workspace", {}).get("observed") is True
             and data.get("execution_policy", {}).get("observed") is True
         )
@@ -763,7 +839,7 @@ class ExecutionAuthorityContract:
         return self.portable_across_processes
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ExecutionAuthorityLiveBinding:
     """The finite live roots that must remain identical before an effect."""
 
@@ -780,6 +856,7 @@ class ExecutionAuthorityLiveBinding:
     adapter_dispatch_code: object | None
     adapter_attribute_resolution_observable: bool
     verifier_root: object | None
+    verifier_code: object | None
     dispatcher_stream_root: object | None
     dispatcher_stream_code: object | None
     dispatcher_stream_callable: object | None
@@ -801,8 +878,24 @@ class ExecutionAuthorityLiveBinding:
     rate_gate_acquire_code: object | None
     rate_gate_acquire_callable: object | None
     rate_gate_attribute_resolution_observable: bool
+    rate_gate_max_wait_seconds: object | None
+    rate_gate_heartbeat_seconds: object | None
+    rate_gate_sleep: object | None
+    rate_gate_sleep_root: object | None
+    rate_gate_sleep_code: object | None
+    rate_gate_semantics_observable: bool
     rate_gate_bucket: object | None
     rate_gate_bucket_config: tuple[object, object, object, object] | None
+    rate_gate_bucket_attribute_resolution_observable: bool
+    rate_gate_bucket_time: object | None
+    rate_gate_bucket_time_root: object | None
+    rate_gate_bucket_time_code: object | None
+    rate_gate_bucket_enabled_root: object | None
+    rate_gate_bucket_enabled_code: object | None
+    rate_gate_bucket_acquire_root: object | None
+    rate_gate_bucket_acquire_code: object | None
+    rate_gate_bucket_force_reserve_root: object | None
+    rate_gate_bucket_force_reserve_code: object | None
     rate_gate_bucket_binding_observable: bool
     verifier_instance_nonce: str | None
     force_runtime_process_local: bool
@@ -832,6 +925,17 @@ class ExecutionAuthorityLiveBinding:
         expected_transcript_verifier_code: object | None = None,
         expected_rate_gate_acquire_root: object | None = None,
         expected_rate_gate_acquire_code: object | None = None,
+        expected_rate_gate_type: type[object] | None = None,
+        expected_rate_gate_sleep: object | None = None,
+        expected_rate_gate_sleep_code: object | None = None,
+        expected_rate_gate_bucket_type: type[object] | None = None,
+        expected_rate_gate_bucket_time: object | None = None,
+        expected_rate_gate_bucket_enabled_root: object | None = None,
+        expected_rate_gate_bucket_enabled_code: object | None = None,
+        expected_rate_gate_bucket_acquire_root: object | None = None,
+        expected_rate_gate_bucket_acquire_code: object | None = None,
+        expected_rate_gate_bucket_force_reserve_root: object | None = None,
+        expected_rate_gate_bucket_force_reserve_code: object | None = None,
         expected_coordinator_type: type[object] | None = None,
         expected_coordinator_review_root: object | None = None,
         expected_coordinator_review_code: object | None = None,
@@ -846,6 +950,7 @@ class ExecutionAuthorityLiveBinding:
             adapter
         )
         verifier_root = _static_callable_root(verifier, None)
+        verifier_code = _callable_code_identity(verifier_root)
         dispatcher_stream_root = _static_callable_root(dispatcher_type, "stream")
         dispatcher_stream_code = _callable_code_identity(dispatcher_stream_root)
         dispatcher_attribute_resolution_observable = _uses_default_instance_attribute_resolution(
@@ -902,10 +1007,31 @@ class ExecutionAuthorityLiveBinding:
         rate_gate_attribute_resolution_observable = _uses_default_instance_attribute_resolution(
             rate_gate
         )
+        rate_gate_max_wait_seconds: object | None = None
+        rate_gate_heartbeat_seconds: object | None = None
+        rate_gate_sleep: object | None = None
+        rate_gate_sleep_root: object | None = None
+        rate_gate_sleep_code: object | None = None
+        rate_gate_semantics_observable = False
         rate_gate_bucket: object | None = None
         rate_gate_bucket_config: tuple[object, object, object, object] | None = None
+        rate_gate_bucket_attribute_resolution_observable = False
+        rate_gate_bucket_time: object | None = None
+        rate_gate_bucket_time_root: object | None = None
+        rate_gate_bucket_time_code: object | None = None
+        rate_gate_bucket_enabled_root: object | None = None
+        rate_gate_bucket_enabled_code: object | None = None
+        rate_gate_bucket_acquire_root: object | None = None
+        rate_gate_bucket_acquire_code: object | None = None
+        rate_gate_bucket_force_reserve_root: object | None = None
+        rate_gate_bucket_force_reserve_code: object | None = None
         rate_gate_bucket_binding_observable = False
         try:
+            rate_gate_max_wait_seconds = object.__getattribute__(rate_gate, "_max_wait_seconds")
+            rate_gate_heartbeat_seconds = object.__getattribute__(rate_gate, "_heartbeat_seconds")
+            rate_gate_sleep = object.__getattribute__(rate_gate, "_sleep")
+            rate_gate_sleep_root = _static_callable_root(rate_gate_sleep, None)
+            rate_gate_sleep_code = _callable_code_identity(rate_gate_sleep_root)
             rate_gate_bucket = object.__getattribute__(rate_gate, "_bucket")
             rate_gate_bucket_config = (
                 object.__getattribute__(rate_gate_bucket, "_runtime_backend"),
@@ -913,17 +1039,53 @@ class ExecutionAuthorityLiveBinding:
                 object.__getattribute__(rate_gate_bucket, "_token_limit"),
                 object.__getattribute__(rate_gate_bucket, "_window_seconds"),
             )
+            rate_gate_bucket_attribute_resolution_observable = (
+                _uses_default_instance_attribute_resolution(rate_gate_bucket)
+            )
+            rate_gate_bucket_time = object.__getattribute__(rate_gate_bucket, "_time")
+            rate_gate_bucket_time_root = _static_callable_root(rate_gate_bucket_time, None)
+            rate_gate_bucket_time_code = _callable_code_identity(rate_gate_bucket_time_root)
+            rate_gate_bucket_enabled_root = _static_property_getter_root(
+                rate_gate_bucket,
+                "enabled",
+            )
+            rate_gate_bucket_enabled_code = _callable_code_identity(rate_gate_bucket_enabled_root)
+            rate_gate_bucket_acquire_root = _static_callable_root(rate_gate_bucket, "acquire")
+            rate_gate_bucket_acquire_code = _callable_code_identity(rate_gate_bucket_acquire_root)
+            rate_gate_bucket_force_reserve_root = _static_callable_root(
+                rate_gate_bucket,
+                "force_reserve",
+            )
+            rate_gate_bucket_force_reserve_code = _callable_code_identity(
+                rate_gate_bucket_force_reserve_root
+            )
             rate_gate_bucket_binding_observable = (
                 isinstance(rate_gate_bucket_config[0], str)
                 and (
                     rate_gate_bucket_config[1] is None
                     or isinstance(rate_gate_bucket_config[1], int)
+                    and not isinstance(rate_gate_bucket_config[1], bool)
                 )
                 and (
                     rate_gate_bucket_config[2] is None
                     or isinstance(rate_gate_bucket_config[2], int)
+                    and not isinstance(rate_gate_bucket_config[2], bool)
                 )
-                and isinstance(rate_gate_bucket_config[3], float)
+                and _is_finite_number(rate_gate_bucket_config[3])
+            )
+            rate_gate_semantics_observable = (
+                _is_finite_number(rate_gate_max_wait_seconds)
+                and _is_finite_number(rate_gate_heartbeat_seconds)
+                and rate_gate_sleep_root is not None
+                and rate_gate_sleep_code is not None
+                and rate_gate_bucket_attribute_resolution_observable
+                and rate_gate_bucket_time_root is not None
+                and rate_gate_bucket_enabled_root is not None
+                and rate_gate_bucket_enabled_code is not None
+                and rate_gate_bucket_acquire_root is not None
+                and rate_gate_bucket_acquire_code is not None
+                and rate_gate_bucket_force_reserve_root is not None
+                and rate_gate_bucket_force_reserve_code is not None
             )
         except (AttributeError, TypeError):
             rate_gate_bucket = None
@@ -945,11 +1107,34 @@ class ExecutionAuthorityLiveBinding:
             and transcript_verifier_code is expected_transcript_verifier_code
         )
         rate_gate_is_closed = (
-            expected_rate_gate_acquire_root is not None
+            expected_rate_gate_type is not None
+            and type(rate_gate) is expected_rate_gate_type
+            and expected_rate_gate_acquire_root is not None
             and rate_gate_acquire_root is expected_rate_gate_acquire_root
             and expected_rate_gate_acquire_code is not None
             and rate_gate_acquire_code is expected_rate_gate_acquire_code
             and rate_gate_acquire_callable is rate_gate_acquire_root
+            and rate_gate_semantics_observable
+            and expected_rate_gate_sleep is not None
+            and rate_gate_sleep is expected_rate_gate_sleep
+            and expected_rate_gate_sleep_code is not None
+            and rate_gate_sleep_code is expected_rate_gate_sleep_code
+            and expected_rate_gate_bucket_type is not None
+            and type(rate_gate_bucket) is expected_rate_gate_bucket_type
+            and expected_rate_gate_bucket_time is not None
+            and rate_gate_bucket_time is expected_rate_gate_bucket_time
+            and expected_rate_gate_bucket_enabled_root is not None
+            and rate_gate_bucket_enabled_root is expected_rate_gate_bucket_enabled_root
+            and expected_rate_gate_bucket_enabled_code is not None
+            and rate_gate_bucket_enabled_code is expected_rate_gate_bucket_enabled_code
+            and expected_rate_gate_bucket_acquire_root is not None
+            and rate_gate_bucket_acquire_root is expected_rate_gate_bucket_acquire_root
+            and expected_rate_gate_bucket_acquire_code is not None
+            and rate_gate_bucket_acquire_code is expected_rate_gate_bucket_acquire_code
+            and expected_rate_gate_bucket_force_reserve_root is not None
+            and rate_gate_bucket_force_reserve_root is expected_rate_gate_bucket_force_reserve_root
+            and expected_rate_gate_bucket_force_reserve_code is not None
+            and rate_gate_bucket_force_reserve_code is expected_rate_gate_bucket_force_reserve_code
         )
         coordinator_is_closed = coordinator is None or (
             expected_coordinator_type is not None
@@ -982,6 +1167,7 @@ class ExecutionAuthorityLiveBinding:
             )
             or not rate_gate_is_closed
             or not rate_gate_attribute_resolution_observable
+            or not rate_gate_semantics_observable
             or not rate_gate_bucket_binding_observable
         )
         nonce = (
@@ -1009,6 +1195,7 @@ class ExecutionAuthorityLiveBinding:
             adapter_dispatch_code=adapter_dispatch_code,
             adapter_attribute_resolution_observable=adapter_attribute_resolution_observable,
             verifier_root=verifier_root,
+            verifier_code=verifier_code,
             dispatcher_stream_root=dispatcher_stream_root,
             dispatcher_stream_code=dispatcher_stream_code,
             dispatcher_stream_callable=dispatcher_stream_callable,
@@ -1032,8 +1219,26 @@ class ExecutionAuthorityLiveBinding:
             rate_gate_acquire_code=rate_gate_acquire_code,
             rate_gate_acquire_callable=rate_gate_acquire_callable,
             rate_gate_attribute_resolution_observable=rate_gate_attribute_resolution_observable,
+            rate_gate_max_wait_seconds=rate_gate_max_wait_seconds,
+            rate_gate_heartbeat_seconds=rate_gate_heartbeat_seconds,
+            rate_gate_sleep=rate_gate_sleep,
+            rate_gate_sleep_root=rate_gate_sleep_root,
+            rate_gate_sleep_code=rate_gate_sleep_code,
+            rate_gate_semantics_observable=rate_gate_semantics_observable,
             rate_gate_bucket=rate_gate_bucket,
             rate_gate_bucket_config=rate_gate_bucket_config,
+            rate_gate_bucket_attribute_resolution_observable=(
+                rate_gate_bucket_attribute_resolution_observable
+            ),
+            rate_gate_bucket_time=rate_gate_bucket_time,
+            rate_gate_bucket_time_root=rate_gate_bucket_time_root,
+            rate_gate_bucket_time_code=rate_gate_bucket_time_code,
+            rate_gate_bucket_enabled_root=rate_gate_bucket_enabled_root,
+            rate_gate_bucket_enabled_code=rate_gate_bucket_enabled_code,
+            rate_gate_bucket_acquire_root=rate_gate_bucket_acquire_root,
+            rate_gate_bucket_acquire_code=rate_gate_bucket_acquire_code,
+            rate_gate_bucket_force_reserve_root=rate_gate_bucket_force_reserve_root,
+            rate_gate_bucket_force_reserve_code=rate_gate_bucket_force_reserve_code,
             rate_gate_bucket_binding_observable=rate_gate_bucket_binding_observable,
             verifier_instance_nonce=nonce,
             force_runtime_process_local=force_runtime_process_local,
@@ -1104,8 +1309,23 @@ class ExecutionAuthorityLiveBinding:
             and not _uses_default_instance_attribute_resolution(rate_gate)
         ):
             return False
-        if self.rate_gate_bucket_binding_observable:
+        if (
+            self.rate_gate_bucket_attribute_resolution_observable
+            and self.rate_gate_bucket is not None
+            and not _uses_default_instance_attribute_resolution(self.rate_gate_bucket)
+        ):
+            return False
+        if self.rate_gate_semantics_observable:
             try:
+                current_rate_gate_max_wait_seconds = object.__getattribute__(
+                    rate_gate,
+                    "_max_wait_seconds",
+                )
+                current_rate_gate_heartbeat_seconds = object.__getattribute__(
+                    rate_gate,
+                    "_heartbeat_seconds",
+                )
+                current_rate_gate_sleep = object.__getattribute__(rate_gate, "_sleep")
                 current_rate_gate_bucket = object.__getattribute__(rate_gate, "_bucket")
                 current_rate_gate_bucket_config = (
                     object.__getattribute__(current_rate_gate_bucket, "_runtime_backend"),
@@ -1113,11 +1333,49 @@ class ExecutionAuthorityLiveBinding:
                     object.__getattribute__(current_rate_gate_bucket, "_token_limit"),
                     object.__getattribute__(current_rate_gate_bucket, "_window_seconds"),
                 )
+                current_rate_gate_bucket_time = object.__getattribute__(
+                    current_rate_gate_bucket,
+                    "_time",
+                )
             except (AttributeError, TypeError):
                 return False
             if (
-                current_rate_gate_bucket is not self.rate_gate_bucket
+                not _is_finite_number(current_rate_gate_max_wait_seconds)
+                or not _is_finite_number(current_rate_gate_heartbeat_seconds)
+                or current_rate_gate_max_wait_seconds != self.rate_gate_max_wait_seconds
+                or current_rate_gate_heartbeat_seconds != self.rate_gate_heartbeat_seconds
+                or current_rate_gate_sleep is not self.rate_gate_sleep
+                or _static_callable_root(current_rate_gate_sleep, None)
+                is not self.rate_gate_sleep_root
+                or _callable_code_identity(_static_callable_root(current_rate_gate_sleep, None))
+                is not self.rate_gate_sleep_code
+                or current_rate_gate_bucket is not self.rate_gate_bucket
                 or current_rate_gate_bucket_config != self.rate_gate_bucket_config
+                or current_rate_gate_bucket_time is not self.rate_gate_bucket_time
+                or _static_callable_root(current_rate_gate_bucket_time, None)
+                is not self.rate_gate_bucket_time_root
+                or _callable_code_identity(
+                    _static_callable_root(current_rate_gate_bucket_time, None)
+                )
+                is not self.rate_gate_bucket_time_code
+                or _static_property_getter_root(current_rate_gate_bucket, "enabled")
+                is not self.rate_gate_bucket_enabled_root
+                or _callable_code_identity(
+                    _static_property_getter_root(current_rate_gate_bucket, "enabled")
+                )
+                is not self.rate_gate_bucket_enabled_code
+                or _static_callable_root(current_rate_gate_bucket, "acquire")
+                is not self.rate_gate_bucket_acquire_root
+                or _callable_code_identity(
+                    _static_callable_root(current_rate_gate_bucket, "acquire")
+                )
+                is not self.rate_gate_bucket_acquire_code
+                or _static_callable_root(current_rate_gate_bucket, "force_reserve")
+                is not self.rate_gate_bucket_force_reserve_root
+                or _callable_code_identity(
+                    _static_callable_root(current_rate_gate_bucket, "force_reserve")
+                )
+                is not self.rate_gate_bucket_force_reserve_code
             ):
                 return False
         if (
@@ -1134,6 +1392,12 @@ class ExecutionAuthorityLiveBinding:
         if (
             self.verifier_root is not None
             and _static_callable_root(verifier, None) is not self.verifier_root
+        ):
+            return False
+        if (
+            self.verifier_code is not None
+            and _callable_code_identity(_static_callable_root(verifier, None))
+            is not self.verifier_code
         ):
             return False
         if (

@@ -134,7 +134,7 @@ class TestDispatchRateGate:
         await executor._await_dispatch_rate_budget(prompt="hello", system_prompt=None)
 
     @pytest.mark.asyncio
-    async def test_await_dispatch_rate_budget_paces_through_active_gate(
+    async def test_await_dispatch_rate_budget_rejects_postconstruction_gate_semantic_drift(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
@@ -142,8 +142,10 @@ class TestDispatchRateGate:
         adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
         executor = _make_rate_gate_executor(adapter)
 
-        # Keep the authority-bound gate object and direct callable intact, but
-        # give its mutable clock/sleep state deterministic test doubles.
+        # Replacing behavior-changing collaborators after construction is no
+        # longer a valid deterministic-test seam: the authority guard must
+        # reject it before rate admission. RateLimitGate itself owns separate
+        # deterministic timing tests with injected collaborators at creation.
         clock = {"now": 0.0}
         slept: list[float] = []
 
@@ -155,10 +157,10 @@ class TestDispatchRateGate:
         executor._dispatch_rate_gate._sleep = fake_sleep
         executor._dispatch_rate_gate._heartbeat_seconds = 120.0
 
-        await executor._await_dispatch_rate_budget(prompt="a", system_prompt=None)
-        await executor._await_dispatch_rate_budget(prompt="b", system_prompt=None)
+        with pytest.raises(ValueError, match="execution authority drifted"):
+            await executor._await_dispatch_rate_budget(prompt="a", system_prompt=None)
 
-        assert slept == [60.0]  # second dispatch waited a full window
+        assert slept == []
 
 
 def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
