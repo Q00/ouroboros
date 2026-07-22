@@ -173,6 +173,30 @@ class TestSessionRegistration:
         assert "exec_1" in runner.active_sessions
         assert runner.active_sessions["exec_1"] == "sess_1"
 
+    def test_register_session_does_not_publish_when_lease_acquisition_fails(
+        self,
+        runner: OrchestratorRunner,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """A rejected foreign lease must not leave a cancel route behind."""
+        from ouroboros.orchestrator import heartbeat
+
+        monkeypatch.setattr(heartbeat, "LOCK_DIR", tmp_path)
+        path = heartbeat.lock_path("sess_held_elsewhere")
+        path.write_text("999999:0")
+
+        if heartbeat.fcntl is None:
+            pytest.skip("requires advisory file locks")
+
+        with (
+            patch.object(heartbeat.fcntl, "flock", side_effect=BlockingIOError),
+            pytest.raises(OSError, match="liveness lease is held"),
+        ):
+            runner._register_session("exec_held_elsewhere", "sess_held_elsewhere")
+
+        assert "exec_held_elsewhere" not in runner.active_sessions
+
     def test_unregister_session(self, runner: OrchestratorRunner) -> None:
         """Test unregistering a session."""
         runner._register_session("exec_1", "sess_1")

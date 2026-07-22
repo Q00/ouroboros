@@ -1287,8 +1287,11 @@ class OrchestratorRunner:
         """
         from ouroboros.orchestrator.heartbeat import acquire as acquire_lock
 
-        self._active_sessions[execution_id] = session_id
         acquire_lock(session_id)
+        # Do not publish an in-memory cancellation route before its liveness
+        # lease exists. A failed claim must not leave a routable, unowned
+        # session behind.
+        self._active_sessions[execution_id] = session_id
 
     def _unregister_session(
         self,
