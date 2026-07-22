@@ -22,18 +22,14 @@ import stat
 from typing import Any
 import uuid
 
-from ouroboros.orchestrator.antigravity_cli_runtime import AntigravityCLIRuntime
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
-from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
-from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
-from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
-EXECUTION_AUTHORITY_VERSION = 3
-EXECUTION_AUTHORITY_BOUNDARY_VERSION = 3
+EXECUTION_AUTHORITY_VERSION = 4
+EXECUTION_AUTHORITY_BOUNDARY_VERSION = 4
 
 _MAX_IDENTITY_DEPTH = 8
 _MAX_IDENTITY_ITEMS = 256
@@ -41,45 +37,18 @@ _MAX_IDENTITY_SCALAR_CHARS = 8_192
 _MAX_IDENTITY_JSON_CHARS = 64_000
 _MAX_RUNTIME_EXECUTABLE_BYTES = 64 * 1024 * 1024
 
-# A portable runtime must be an exact built-in adapter implementation. This
-# table retains the real type object and its import-time dispatch root/code;
+# A portable runtime must be an exact, fully-reviewed built-in adapter. This
+# initial Foundation A allowlist intentionally admits only Codex. Other CLI
+# backends retain backend-specific command/profile/launcher behavior and remain
+# process-local until each has its own complete finite descriptor. The table
+# retains the real type object and its import-time dispatch root/code;
 # module/qualname strings are mutable and therefore cannot prove identity.
 # Adding or changing an implementation requires a version bump and review.
 _CLOSED_RUNTIME_IMPLEMENTATIONS: dict[type[object], tuple[str, object, object]] = {
-    AntigravityCLIRuntime: (
-        "antigravity-cli-runtime/v1",
-        AntigravityCLIRuntime.execute_task,
-        AntigravityCLIRuntime.execute_task.__code__,
-    ),
     CodexCliRuntime: (
         "codex-cli-runtime/v1",
         CodexCliRuntime.execute_task,
         CodexCliRuntime.execute_task.__code__,
-    ),
-    CopilotCliRuntime: (
-        "copilot-cli-runtime/v1",
-        CopilotCliRuntime.execute_task,
-        CopilotCliRuntime.execute_task.__code__,
-    ),
-    GeminiCLIRuntime: (
-        "gemini-cli-runtime/v1",
-        GeminiCLIRuntime.execute_task,
-        GeminiCLIRuntime.execute_task.__code__,
-    ),
-    GooseCliRuntime: (
-        "goose-cli-runtime/v1",
-        GooseCliRuntime.execute_task,
-        GooseCliRuntime.execute_task.__code__,
-    ),
-    GrokCliRuntime: (
-        "grok-cli-runtime/v1",
-        GrokCliRuntime.execute_task,
-        GrokCliRuntime.execute_task.__code__,
-    ),
-    ZcodeCLIRuntime: (
-        "zcode-cli-runtime/v1",
-        ZcodeCLIRuntime.execute_task,
-        ZcodeCLIRuntime.execute_task.__code__,
     ),
 }
 
@@ -554,6 +523,13 @@ def _runtime_executable_descriptor(adapter: object) -> dict[str, object]:
 
 def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
     """Digest the finite mutable execution settings of the CLI runtime family."""
+    runtime_type = type(adapter)
+    if runtime_type is ZcodeCLIRuntime:
+        # Zcode can launch an app-bundle Electron executable or a PATH-resolved
+        # Node executable before its configured script. That external launcher
+        # chain is not a finite portable descriptor in Foundation A.
+        return {"observed": False}
+
     try:
         skills_dir = object.__getattribute__(adapter, "_skills_dir")
         skill_dispatcher = object.__getattribute__(adapter, "_skill_dispatcher")
@@ -577,6 +553,16 @@ def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
         max_stderr_lines = object.__getattribute__(adapter, "_max_stderr_lines")
         use_process_group = object.__getattribute__(adapter, "_use_process_group")
         child_session_env_keys = object.__getattribute__(adapter, "_child_session_env_keys")
+        copilot_runtime_profile = (
+            object.__getattribute__(adapter, "_runtime_profile")
+            if runtime_type is CopilotCliRuntime
+            else None
+        )
+        copilot_agent = (
+            object.__getattribute__(adapter, "_copilot_agent")
+            if runtime_type is CopilotCliRuntime
+            else None
+        )
     except (AttributeError, TypeError):
         return {"observed": False}
 
@@ -597,27 +583,44 @@ def _runtime_configuration_descriptor(adapter: object) -> dict[str, object]:
         or not isinstance(use_process_group, bool)
         or not isinstance(child_session_env_keys, (tuple, list, frozenset))
         or not all(isinstance(value, str) for value in child_session_env_keys)
+        or (
+            runtime_type is CopilotCliRuntime
+            and (
+                copilot_runtime_profile is not None
+                and (
+                    not isinstance(copilot_runtime_profile, str)
+                    or not copilot_runtime_profile.strip()
+                )
+                or copilot_agent is not None
+                and (not isinstance(copilot_agent, str) or not copilot_agent.strip())
+            )
+        )
     ):
         return {"observed": False}
     try:
         canonical_cwd = str(Path(cwd).expanduser().resolve(strict=False))
     except (OSError, ValueError):
         return {"observed": False}
-    return _digest_descriptor(
-        {
-            "working_directory": canonical_cwd,
-            "startup_output_timeout_seconds": startup_timeout,
-            "stdout_idle_timeout_seconds": stdout_timeout,
-            "process_shutdown_timeout_seconds": process_shutdown_timeout,
-            "completed_process_group_shutdown_timeout_seconds": completed_shutdown_timeout,
-            "max_resume_retries": max_resume_retries,
-            "max_ouroboros_depth": max_depth,
-            "max_stderr_lines": max_stderr_lines,
-            "use_process_group": use_process_group,
-            "child_session_env_keys": sorted(child_session_env_keys),
-        },
-        field="runtime execution configuration",
-    )
+    configuration: dict[str, object] = {
+        "working_directory": canonical_cwd,
+        "startup_output_timeout_seconds": startup_timeout,
+        "stdout_idle_timeout_seconds": stdout_timeout,
+        "process_shutdown_timeout_seconds": process_shutdown_timeout,
+        "completed_process_group_shutdown_timeout_seconds": completed_shutdown_timeout,
+        "max_resume_retries": max_resume_retries,
+        "max_ouroboros_depth": max_depth,
+        "max_stderr_lines": max_stderr_lines,
+        "use_process_group": use_process_group,
+        "child_session_env_keys": sorted(child_session_env_keys),
+    }
+    if runtime_type is CopilotCliRuntime:
+        # Copilot translates the resolved runtime profile to an --agent flag.
+        # Bind the exact stored value that command construction consumes.
+        configuration["copilot"] = {
+            "runtime_profile": copilot_runtime_profile,
+            "resolved_agent": copilot_agent,
+        }
+    return _digest_descriptor(configuration, field="runtime execution configuration")
 
 
 def runtime_authority_contract(
@@ -672,7 +675,7 @@ def runtime_authority_contract(
         and not force_process_local
     )
     return {
-        "version": 3,
+        "version": 4,
         "stability": "durable" if portable_identity_observed else "process_local",
         # This is an explicit semantic witness, not a cosmetic copy of the
         # stability label. A durable runtime must have a finite direct dispatch
@@ -711,7 +714,7 @@ def _valid_runtime_authority(value: object) -> bool:
         "portable_identity_observed",
         "instance_nonce",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 3:
+    if not isinstance(value, Mapping) or set(value) != required or value.get("version") != 4:
         return False
     if value.get("stability") not in {"durable", "process_local"}:
         return False

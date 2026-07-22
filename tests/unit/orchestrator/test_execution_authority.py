@@ -12,11 +12,13 @@ import pytest
 
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 from ouroboros.orchestrator.execution_authority import ExecutionAuthorityContract
 import ouroboros.orchestrator.parallel_executor as parallel_executor_module
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict, structural_atomic_verifier
+from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
 
 
 class _Runtime:
@@ -269,6 +271,41 @@ def test_closed_codex_runtime_custom_skill_configuration_stays_process_local(
     assert custom_dispatcher.portable_across_processes is False
 
 
+def test_copilot_runtime_binds_resolved_profile_agent() -> None:
+    plain = _contract(
+        runtime=CopilotCliRuntime(
+            cli_path=sys.executable,
+            model="test-model",
+            cwd="/tmp",
+        ),
+        verifier=structural_atomic_verifier,
+    )
+    worker_runtime = CopilotCliRuntime(
+        cli_path=sys.executable,
+        model="test-model",
+        cwd="/tmp",
+        runtime_profile="worker",
+    )
+    worker = _contract(runtime=worker_runtime, verifier=structural_atomic_verifier)
+
+    assert plain.portable_across_processes is False
+    assert worker.portable_across_processes is False
+    assert plain.data["runtime"]["configuration"] != worker.data["runtime"]["configuration"]
+
+    worker_runtime._copilot_agent = "different-agent"
+    changed = _contract(runtime=worker_runtime, verifier=structural_atomic_verifier)
+    assert changed.data["runtime"]["configuration"] != worker.data["runtime"]["configuration"]
+
+
+def test_zcode_runtime_with_external_launcher_chain_stays_process_local() -> None:
+    runtime = ZcodeCLIRuntime(cli_path=sys.executable, cwd="/tmp")
+
+    authority = _contract(runtime=runtime, verifier=structural_atomic_verifier)
+
+    assert authority.portable_across_processes is False
+    assert authority.data["runtime"]["configuration"] == {"observed": False}
+
+
 def test_credential_shaped_runtime_identity_becomes_process_local_without_egress() -> None:
     secret = "gh" + "p_abcdefghijklmnopqrstuvwxyz1234567890"
     authority = _contract(runtime=_Runtime(profile=secret))
@@ -417,6 +454,28 @@ def test_session_signal_hub_is_process_local_and_cannot_drift(tmp_path) -> None:
     executor._require_execution_authority_intact()
 
     executor._session_signal_hub = MagicMock()
+    with pytest.raises(ValueError, match="execution authority drifted"):
+        executor._require_execution_authority_intact()
+
+
+def test_executor_rejects_copilot_agent_drift(tmp_path) -> None:
+    runtime = CopilotCliRuntime(
+        cli_path=sys.executable,
+        model="test-model",
+        cwd=tmp_path,
+        runtime_profile="worker",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        task_cwd=str(tmp_path),
+    )
+
+    assert executor.execution_authority.portable_across_processes is False
+    executor._require_execution_authority_intact()
+
+    runtime._copilot_agent = "different-agent"
     with pytest.raises(ValueError, match="execution authority drifted"):
         executor._require_execution_authority_intact()
 
