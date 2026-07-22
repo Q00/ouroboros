@@ -28,7 +28,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
-from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
+from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
@@ -56,8 +56,8 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
-from ouroboros.orchestrator.rate_limit import RateLimitGate, SharedRateLimitBucket
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
@@ -138,11 +138,12 @@ class TestDispatchRateGate:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         monkeypatch.setenv("OUROBOROS_BACKEND_LIMITS", str(tmp_path / "absent.yaml"))
+        monkeypatch.setenv("OUROBOROS_OPENCODE_RPM", "1")
         adapter = _RateGateStubAdapter(runtime_backend="opencode", self_governs=False)
         executor = _make_rate_gate_executor(adapter)
 
-        # Swap in a deterministic gate (rpm=1, fake clock + sleep) to prove the
-        # executor's dispatch hook actually waits on the shared budget.
+        # Keep the authority-bound gate object and direct callable intact, but
+        # give its mutable clock/sleep state deterministic test doubles.
         clock = {"now": 0.0}
         slept: list[float] = []
 
@@ -150,15 +151,9 @@ class TestDispatchRateGate:
             slept.append(seconds)
             clock["now"] += seconds
 
-        bucket = SharedRateLimitBucket(
-            runtime_backend="opencode",
-            request_limit=1,
-            token_limit=None,
-            time_provider=lambda: clock["now"],
-        )
-        executor._dispatch_rate_gate = RateLimitGate(
-            bucket, heartbeat_seconds=120.0, sleep=fake_sleep
-        )
+        executor._dispatch_rate_gate._bucket._time = lambda: clock["now"]
+        executor._dispatch_rate_gate._sleep = fake_sleep
+        executor._dispatch_rate_gate._heartbeat_seconds = 120.0
 
         await executor._await_dispatch_rate_budget(prompt="a", system_prompt=None)
         await executor._await_dispatch_rate_budget(prompt="b", system_prompt=None)
@@ -182,7 +177,7 @@ def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
 
 def _make_executor() -> ParallelACExecutor:
     """Create an executor with mocked dependencies and muted event emitters."""
-    executor = ParallelACExecutor(
+    executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
@@ -8371,7 +8366,7 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     async def test_decomposed_ac_inlines_sub_ac_dispatch_into_single_ac(self) -> None:
         """Decomposed execution should recurse through _execute_single_ac without a helper path."""
-        executor = ParallelACExecutor(
+        executor = ProcessLocalTestExecutor(
             adapter=MagicMock(),
             event_store=AsyncMock(),
             console=MagicMock(),
@@ -8391,24 +8386,21 @@ class TestParallelACExecutor:
                 depth=int(kwargs["depth"]),
             )
 
-        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        executor._execute_atomic_ac = execute_atomic_ac
 
-        with patch.object(
-            executor,
-            "_execute_single_ac",
-            wraps=executor._execute_single_ac,
-        ) as execute_single_ac_spy:
-            result = await executor._execute_single_ac(
-                ac_index=1,
-                ac_content="Implement parser workflow",
-                session_id="sess_decompose",
-                tools=["Read", "Edit"],
-                tool_catalog=None,
-                system_prompt="system",
-                seed_goal="Ship parser workflow",
-                depth=0,
-                execution_id="exec_decompose",
-            )
+        executor._test_single_ac_calls = []
+        result = await executor._execute_single_ac(
+            ac_index=1,
+            ac_content="Implement parser workflow",
+            session_id="sess_decompose",
+            tools=["Read", "Edit"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship parser workflow",
+            depth=0,
+            execution_id="exec_decompose",
+        )
 
         assert hasattr(executor, "_execute_sub_acs") is False
         assert result.success is True
@@ -8420,23 +8412,23 @@ class TestParallelACExecutor:
         assert [sub_result.depth for sub_result in result.sub_results] == [1, 1]
         assert [
             (
-                int(call.kwargs["ac_index"]),
-                str(call.kwargs["ac_content"]),
-                int(call.kwargs["depth"]),
+                int(call["ac_index"]),
+                str(call["ac_content"]),
+                int(call["depth"]),
             )
-            for call in execute_single_ac_spy.await_args_list
+            for call in executor._test_single_ac_calls
         ] == [
             (1, "Implement parser workflow", 0),
             (100, "Extract parser", 1),
             (101, "Wire parser", 1),
         ]
         assert executor._try_decompose_ac.await_count == 3
-        assert executor._execute_atomic_ac.await_count == 2
+        assert execute_atomic_ac.await_count == 2
 
     @pytest.mark.asyncio
     async def test_top_level_decomposition_preserves_sub_ac_runtime_identity(self) -> None:
         """First-level decomposed children should still execute with sub-AC runtime metadata."""
-        executor = ParallelACExecutor(
+        executor = ProcessLocalTestExecutor(
             adapter=MagicMock(),
             event_store=AsyncMock(),
             console=MagicMock(),
@@ -8456,7 +8448,8 @@ class TestParallelACExecutor:
                 depth=int(kwargs["depth"]),
             )
 
-        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        executor._execute_atomic_ac = execute_atomic_ac
 
         await executor._execute_single_ac(
             ac_index=1,
@@ -8477,7 +8470,7 @@ class TestParallelACExecutor:
                 int(call.kwargs["parent_ac_index"]),
                 int(call.kwargs["sub_ac_index"]),
             )
-            for call in executor._execute_atomic_ac.await_args_list
+            for call in execute_atomic_ac.await_args_list
         ] == [
             (100, True, 1, 0),
             (101, True, 1, 1),
@@ -8486,7 +8479,7 @@ class TestParallelACExecutor:
     @pytest.mark.asyncio
     async def test_depth_three_forces_atomic_without_further_decomposition(self) -> None:
         """Depth 2 may still recurse, but depth 3 must execute atomically."""
-        executor = ParallelACExecutor(
+        executor = ProcessLocalTestExecutor(
             adapter=MagicMock(),
             event_store=AsyncMock(),
             console=MagicMock(),
@@ -8509,7 +8502,8 @@ class TestParallelACExecutor:
                 depth=int(kwargs["depth"]),
             )
 
-        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        executor._execute_atomic_ac = execute_atomic_ac
 
         result = await executor._execute_single_ac(
             ac_index=0,
@@ -8535,8 +8529,8 @@ class TestParallelACExecutor:
             True,
         ]
         executor._try_decompose_ac.assert_awaited_once()
-        assert executor._execute_atomic_ac.await_count == 2
-        assert [call.kwargs["depth"] for call in executor._execute_atomic_ac.await_args_list] == [
+        assert execute_atomic_ac.await_count == 2
+        assert [call.kwargs["depth"] for call in execute_atomic_ac.await_args_list] == [
             3,
             3,
         ]
@@ -8732,7 +8726,7 @@ class TestParallelACExecutor:
         """Leaf retries should not re-run composite decomposition or sibling dispatch."""
         event_store = AsyncMock()
         event_store.append = AsyncMock()
-        executor = ParallelACExecutor(
+        executor = ProcessLocalTestExecutor(
             adapter=MagicMock(),
             event_store=event_store,
             console=MagicMock(),
@@ -8765,7 +8759,8 @@ class TestParallelACExecutor:
                 depth=int(kwargs["depth"]),
             )
 
-        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+        executor._execute_atomic_ac = execute_atomic_ac
 
         result = await executor._execute_single_ac(
             ac_index=1,
@@ -8789,7 +8784,7 @@ class TestParallelACExecutor:
                 int(call.kwargs["depth"]),
                 int(call.kwargs["retry_attempt"]),
             )
-            for call in executor._execute_atomic_ac.await_args_list
+            for call in execute_atomic_ac.await_args_list
         ] == [
             (100, 1, 0),
             (100, 1, 1),
@@ -8802,7 +8797,7 @@ class TestParallelACExecutor:
             if call.args and call.args[0].type == "execution.ac.stall_detected"
         ]
         assert len(stall_events) == 1
-        first_leaf_identity = executor._execute_atomic_ac.await_args_list[0].kwargs["node_identity"]
+        first_leaf_identity = execute_atomic_ac.await_args_list[0].kwargs["node_identity"]
         assert (
             stall_events[0].aggregate_id == f"exec_atomic_retry_scope_{first_leaf_identity.node_id}"
         )
@@ -8819,7 +8814,7 @@ class TestParallelACExecutor:
         """Single-AC execution should convert an unrecoverable stall into a normal failure."""
         event_store = AsyncMock()
         event_store.append = AsyncMock()
-        executor = ParallelACExecutor(
+        executor = ProcessLocalTestExecutor(
             adapter=MagicMock(),
             event_store=event_store,
             console=MagicMock(),
@@ -8840,7 +8835,8 @@ class TestParallelACExecutor:
                 depth=int(kwargs["depth"]),
             )
 
-        executor._execute_atomic_ac = AsyncMock(side_effect=always_stall)
+        execute_atomic_ac = AsyncMock(side_effect=always_stall)
+        executor._execute_atomic_ac = execute_atomic_ac
 
         result = await executor._execute_single_ac(
             ac_index=2,
@@ -8857,10 +8853,9 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error == f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)"
         assert result.retry_attempt == MAX_STALL_RETRIES
-        assert executor._execute_atomic_ac.await_count == MAX_STALL_RETRIES + 1
+        assert execute_atomic_ac.await_count == MAX_STALL_RETRIES + 1
         assert [
-            int(call.kwargs["retry_attempt"])
-            for call in executor._execute_atomic_ac.await_args_list
+            int(call.kwargs["retry_attempt"]) for call in execute_atomic_ac.await_args_list
         ] == list(range(MAX_STALL_RETRIES + 1))
 
         stall_events = [
@@ -10853,7 +10848,10 @@ class TestParallelACExecutor:
         assert result.stages[1].outcome == StageExecutionOutcome.PARTIAL
 
     @pytest.mark.asyncio
-    async def test_records_coordinator_results_at_level_scope_without_ac_attribution(self) -> None:
+    async def test_records_coordinator_results_at_level_scope_without_ac_attribution(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Coordinator reconciliation should persist level-scoped events and artifacts only."""
         seed = _make_seed(
             "Update the shared module imports",
@@ -10866,48 +10864,51 @@ class TestParallelACExecutor:
             ),
             execution_levels=((0, 1),),
         )
+        coordinator_review = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=(
+                FileConflict(
+                    file_path="src/shared.py",
+                    ac_indices=(0, 1),
+                    resolved=True,
+                    resolution_description="Merged by coordinator",
+                ),
+            ),
+            review_summary="Resolved shared.py conflict",
+            fixes_applied=("Merged overlapping import edits",),
+            warnings_for_next_level=("Verify shared.py integration paths",),
+            duration_seconds=1.5,
+            session_id="coord-session-1",
+            session_scope_id="level_1_coordinator",
+            session_state_path=".ouroboros/execution_runtime/level_1_coordinator/session.json",
+            final_output=(
+                '{"review_summary":"Resolved shared.py conflict",'
+                '"fixes_applied":["Merged overlapping import edits"],'
+                '"warnings_for_next_level":["Verify shared.py integration paths"],'
+                '"conflicts_resolved":["src/shared.py"]}'
+            ),
+            messages=(
+                AgentMessage(
+                    type="assistant",
+                    content="Inspecting shared file",
+                    tool_name="Read",
+                    data={"tool_input": {"file_path": "src/shared.py"}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content="Reconciling overlap",
+                    data={"thinking": "Merge the import changes without changing behavior."},
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(return_value=coordinator_review),
+        )
         executor = _make_executor()
         executor._coordinator.detect_file_conflicts = MagicMock(
             return_value=[FileConflict(file_path="src/shared.py", ac_indices=(0, 1))]
-        )
-        executor._coordinator.run_review = AsyncMock(
-            return_value=CoordinatorReview(
-                level_number=1,
-                conflicts_detected=(
-                    FileConflict(
-                        file_path="src/shared.py",
-                        ac_indices=(0, 1),
-                        resolved=True,
-                        resolution_description="Merged by coordinator",
-                    ),
-                ),
-                review_summary="Resolved shared.py conflict",
-                fixes_applied=("Merged overlapping import edits",),
-                warnings_for_next_level=("Verify shared.py integration paths",),
-                duration_seconds=1.5,
-                session_id="coord-session-1",
-                session_scope_id="level_1_coordinator",
-                session_state_path=".ouroboros/execution_runtime/level_1_coordinator/session.json",
-                final_output=(
-                    '{"review_summary":"Resolved shared.py conflict",'
-                    '"fixes_applied":["Merged overlapping import edits"],'
-                    '"warnings_for_next_level":["Verify shared.py integration paths"],'
-                    '"conflicts_resolved":["src/shared.py"]}'
-                ),
-                messages=(
-                    AgentMessage(
-                        type="assistant",
-                        content="Inspecting shared file",
-                        tool_name="Read",
-                        data={"tool_input": {"file_path": "src/shared.py"}},
-                    ),
-                    AgentMessage(
-                        type="assistant",
-                        content="Reconciling overlap",
-                        data={"thinking": "Merge the import changes without changing behavior."},
-                    ),
-                ),
-            )
         )
 
         async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
@@ -10982,7 +10983,10 @@ class TestParallelACExecutor:
         )
 
     @pytest.mark.asyncio
-    async def test_returns_reconciled_level_contexts_for_retry_handoff(self) -> None:
+    async def test_returns_reconciled_level_contexts_for_retry_handoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Completed stage contexts should be returned for retry workspace handoff."""
         seed = _make_seed(
             "Land the shared runtime update",
@@ -10995,17 +10999,20 @@ class TestParallelACExecutor:
             ),
             execution_levels=((0, 1),),
         )
+        coordinator_review = CoordinatorReview(
+            level_number=1,
+            review_summary="Reconciled shared workspace",
+            fixes_applied=("Merged shared.py edits",),
+            warnings_for_next_level=("Retry AC 2 against the merged shared.py state",),
+        )
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(return_value=coordinator_review),
+        )
         executor = _make_executor()
         executor._coordinator.detect_file_conflicts = MagicMock(
             return_value=[FileConflict(file_path="src/shared.py", ac_indices=(0, 1))]
-        )
-        executor._coordinator.run_review = AsyncMock(
-            return_value=CoordinatorReview(
-                level_number=1,
-                review_summary="Reconciled shared workspace",
-                fixes_applied=("Merged shared.py edits",),
-                warnings_for_next_level=("Retry AC 2 against the merged shared.py state",),
-            )
         )
 
         async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:

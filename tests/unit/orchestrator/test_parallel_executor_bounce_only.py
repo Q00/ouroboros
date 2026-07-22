@@ -25,6 +25,7 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, ExecutionStage, S
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
 from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
+from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
 def _failed_result(*, failure_class: str = "SCOPE_CREEP") -> ACExecutionResult:
@@ -65,8 +66,8 @@ def _trusted_split(node_id: str) -> DecompositionDecisionRecord:
     )
 
 
-def _executor(*, max_depth: int = 3) -> ParallelACExecutor:
-    return ParallelACExecutor(
+def _executor(*, max_depth: int = 3) -> ProcessLocalTestExecutor:
+    return ProcessLocalTestExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
         event_store=AsyncMock(),
         console=MagicMock(),
@@ -263,7 +264,7 @@ async def test_restored_trusted_bounce_decision_dispatches_without_reclassificat
     executor = _executor()
     node = ExecutionNodeIdentity.root(execution_context_id="exec-restored", ac_index=0)
     executor._decomposition_decisions[node.node_id] = _trusted_split(node.node_id)
-    executor._execute_atomic_ac = AsyncMock(
+    execute_atomic_ac = AsyncMock(
         side_effect=lambda **kwargs: ACExecutionResult(
             ac_index=kwargs["ac_index"],
             ac_content=kwargs["ac_content"],
@@ -271,6 +272,7 @@ async def test_restored_trusted_bounce_decision_dispatches_without_reclassificat
             depth=kwargs["depth"],
         )
     )
+    executor._execute_atomic_ac = execute_atomic_ac
     executor._try_decompose_ac = AsyncMock()
     executor._request_bounce_classification = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
@@ -288,7 +290,7 @@ async def test_restored_trusted_bounce_decision_dispatches_without_reclassificat
     )
 
     assert result.is_decomposed is True
-    assert executor._execute_atomic_ac.await_count == 2
+    assert execute_atomic_ac.await_count == 2
     executor._try_decompose_ac.assert_not_awaited()
     executor._request_bounce_classification.assert_not_awaited()
 

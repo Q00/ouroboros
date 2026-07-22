@@ -88,6 +88,13 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.execution_authority import (
+    constructor_model_contract,
+    runtime_execution_identity_contract,
+    runtime_execution_proves_effective_model,
+    valid_constructor_model_contract,
+    valid_runtime_execution_identity_contract,
+)
 from ouroboros.orchestrator.execution_guidance import (
     ExecutionGuidanceBundle,
     resolve_execution_guidance,
@@ -1584,45 +1591,12 @@ class OrchestratorRunner:
         runtimes that expose no constructor model at all; current-format resume
         then fails closed because the effective pin cannot be verified.
         """
-        try:
-            raw_model = inspect.getattr_static(self._adapter, "_model")
-        except AttributeError:
-            return {"observed": False}
-        if raw_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(raw_model, str):
-            return {"observed": False}
-
-        normalized_model: object = raw_model.strip() or None
-        normalizer_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "_normalize_model",
-            None,
-        )
-        if normalizer_descriptor is not None:
-            try:
-                normalizer = object.__getattribute__(self._adapter, "_normalize_model")
-                normalized_model = normalizer(raw_model)
-            except Exception:
-                return {"observed": False}
-        if normalized_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(normalized_model, str) or not normalized_model.strip():
-            return {"observed": False}
-        return {"observed": True, "model": normalized_model.strip()}
+        return constructor_model_contract(self._adapter)
 
     @staticmethod
     def _valid_constructor_model_contract(value: object) -> bool:
         """Return whether a persisted constructor-model contract is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        observed = value.get("observed")
-        if observed is not True:
-            return False
-        model = value.get("model")
-        return set(value) == {"observed", "model"} and (
-            model is None or isinstance(model, str) and bool(model.strip())
-        )
+        return valid_constructor_model_contract(value)
 
     def _runtime_execution_identity_contract(self) -> dict[str, Any]:
         """Return backend-specific resolved execution inputs, when observable.
@@ -1636,31 +1610,9 @@ class OrchestratorRunner:
         backend's private configuration model.
         """
 
-        provider_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "execution_identity_contract",
-            None,
-        )
-        if provider_descriptor is None:
-            return {"version": 1, "observed": False}
-
-        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
-        identity = provider()
-        if not isinstance(identity, Mapping):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
         try:
-            encoded = json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            normalized_identity = json.loads(encoded)
-        except (TypeError, ValueError) as exc:
+            return runtime_execution_identity_contract(self._adapter)
+        except ValueError as exc:
             raise OrchestratorError(
                 message="Runtime returned an invalid execution identity contract",
                 details={
@@ -1668,61 +1620,16 @@ class OrchestratorRunner:
                     "cause": str(exc),
                 },
             ) from exc
-        if not isinstance(normalized_identity, dict):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
-        return {
-            "version": 1,
-            "observed": True,
-            "identity": normalized_identity,
-        }
 
     @staticmethod
     def _valid_runtime_execution_identity_contract(value: object) -> bool:
         """Return whether a persisted backend execution identity is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        version = value.get("version")
-        observed = value.get("observed")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != 1
-            or not isinstance(observed, bool)
-        ):
-            return False
-        if not observed:
-            return set(value) == {"version", "observed"}
-        identity = value.get("identity")
-        if (
-            set(value) != {"version", "observed", "identity"}
-            or not isinstance(identity, Mapping)
-            or not identity
-        ):
-            return False
-        try:
-            json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            return False
-        return True
+        return valid_runtime_execution_identity_contract(value)
 
     @staticmethod
     def _runtime_execution_proves_effective_model(value: object) -> bool:
         """Return whether a backend identity observed a concrete model/profile."""
-        if not OrchestratorRunner._valid_runtime_execution_identity_contract(value):
-            return False
-        if not isinstance(value, Mapping) or value.get("observed") is not True:
-            return False
-        identity = value.get("identity")
-        return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
+        return runtime_execution_proves_effective_model(value)
 
     def _validate_resume_handle_execution_identity(
         self,
