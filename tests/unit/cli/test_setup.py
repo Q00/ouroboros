@@ -85,11 +85,15 @@ class TestCodexSetup:
     def test_register_codex_mcp_server_honors_codex_home(self, tmp_path: Path) -> None:
         default_home = tmp_path / "home"
         default_home.mkdir()
-        codex_home = tmp_path / "custom-codex"
+        codex_home = default_home / "custom-codex"
 
         with (
             patch("pathlib.Path.home", return_value=default_home),
-            patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=True),
+            patch.dict(
+                os.environ,
+                {"HOME": str(default_home), "CODEX_HOME": "~/custom-codex"},
+                clear=True,
+            ),
             patch(
                 "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build",
                 return_value=False,

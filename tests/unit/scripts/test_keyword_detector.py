@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -34,17 +35,26 @@ class TestMcpConfiguration:
             stderr="",
         )
 
-    def test_codex_uses_effective_cli_registration(self):
-        with patch.object(_mod.subprocess, "run", return_value=self._codex_result()) as run:
+    def test_codex_uses_effective_cli_registration(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        with (
+            patch.dict(
+                os.environ,
+                {"HOME": str(home), "CODEX_HOME": "~/custom-codex"},
+                clear=True,
+            ),
+            patch.object(_mod.subprocess, "run", return_value=self._codex_result()) as run,
+        ):
             assert is_mcp_configured("codex") is True
 
-        run.assert_called_once_with(
-            ["codex", "mcp", "get", "ouroboros", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
+        call = run.call_args
+        assert call.args == (["codex", "mcp", "get", "ouroboros", "--json"],)
+        assert call.kwargs["env"]["CODEX_HOME"] == str(home / "custom-codex")
+        assert call.kwargs["capture_output"] is True
+        assert call.kwargs["text"] is True
+        assert call.kwargs["timeout"] == 3
+        assert call.kwargs["check"] is False
 
     def test_disabled_or_transportless_codex_registration_is_not_configured(self):
         disabled = self._codex_result(enabled=False)

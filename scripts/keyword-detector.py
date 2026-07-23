@@ -13,6 +13,7 @@ Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -164,6 +165,16 @@ def _usable_mcp_transport(server: object) -> bool:
     )
 
 
+def _codex_subprocess_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    codex_home = environment.get("CODEX_HOME", "").strip()
+    if codex_home:
+        environment["CODEX_HOME"] = str(Path(codex_home).expanduser())
+    else:
+        environment.pop("CODEX_HOME", None)
+    return environment
+
+
 def _codex_mcp_configured() -> bool:
     result = subprocess.run(
         ["codex", "mcp", "get", "ouroboros", "--json"],
@@ -171,6 +182,7 @@ def _codex_mcp_configured() -> bool:
         text=True,
         timeout=3,
         check=False,
+        env=_codex_subprocess_environment(),
     )
     if result.returncode != 0:
         return False
