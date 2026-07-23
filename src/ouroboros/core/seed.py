@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import math
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any, Literal
 from uuid import uuid4
@@ -40,6 +41,31 @@ _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
     re.IGNORECASE,
 )
+
+
+def expected_artifact_path_error(artifact: str) -> str | None:
+    """Return why an expected-artifact value is not a safe relative path."""
+    if not artifact or any(ord(character) < 32 or ord(character) == 127 for character in artifact):
+        return "contains an empty value or control character"
+
+    posix_path = PurePosixPath(artifact)
+    windows_path = PureWindowsPath(artifact)
+    if not posix_path.parts or not windows_path.parts:
+        return "resolves to the workspace root"
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or bool(windows_path.root)
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        return "is absolute or escapes workspace"
+    if any(character.isspace() for character in artifact):
+        has_explicit_relative_structure = "/" in artifact or "\\" in artifact
+        if not has_explicit_relative_structure:
+            return "is ambiguous prose; prefix a top-level spaced path with ./"
+    return None
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -239,13 +265,29 @@ class InvestmentSpec(BaseModel, frozen=True):
 
 
 class AcceptanceCriterionSpec(BaseModel, frozen=True):
-    """Structured success contract for one acceptance criterion."""
+    """Structured success contract for one acceptance criterion.
+
+    ``expected_artifacts`` entries are exact file or directory paths relative
+    to the run workspace. They are not descriptive artifact labels: the
+    execution verifier resolves every entry literally and requires it to
+    exist.
+    """
 
     description: str
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
-    expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
-    output_assertion: str | None = Field(default=None)
+    expected_artifacts: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Exact file or directory paths relative to the run workspace; "
+            "each path is resolved literally and must exist; prefix top-level "
+            "paths containing spaces with ./"
+        ),
+    )
+    output_assertion: str | None = Field(
+        default=None,
+        description=("Literal string required in the verify command's combined stdout and stderr"),
+    )
     investment: InvestmentSpec | None = Field(default=None)
 
     @field_validator("description", mode="before")
@@ -283,11 +325,26 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if value is None:
             return ()
         if isinstance(value, str):
-            if not value.strip() or value.strip().upper() == "NONE":
+            if any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise ValueError("expected_artifacts entries cannot contain control characters")
+            stripped = value.strip(" ")
+            if not stripped or stripped.upper() == "NONE":
                 return ()
-            return tuple(item.strip() for item in value.split(",") if item.strip())
+            artifacts = tuple(item.strip(" ") for item in value.split(","))
+            if any(not artifact for artifact in artifacts):
+                raise ValueError("expected_artifacts entries cannot be empty")
+            return artifacts
         if isinstance(value, list | tuple | set):
-            return tuple(str(item).strip() for item in value if str(item).strip())
+            artifacts = tuple(str(item) for item in value)
+            if any(
+                not artifact
+                or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
+                for artifact in artifacts
+            ):
+                raise ValueError(
+                    "expected_artifacts entries cannot be empty or contain control characters"
+                )
+            return artifacts
         return value
 
     @property

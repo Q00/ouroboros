@@ -35,10 +35,17 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
 
+`artifacts` / `expected_artifacts` semantics:
+- Every entry is an exact file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
+- NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
+- Prefix a top-level file or directory containing spaces with `./`, for example `./Build Outputs`; nested paths such as `docs/User Guide.md` are already explicit.
+- If no exact path is known, write `artifacts: NONE` and provide a concrete `verify` command instead.
+- File or directory existence can be a complete contract. For a stateful artifact that can still be pending or blocked, also provide a `verify` command that checks its semantic state.
+
 `expect` / `output_assertion` semantics:
-- Use `expect` ONLY for a literal string that the verify command prints to stdout verbatim, such as `OK` or `5 passed`.
+- Use `expect` ONLY for a literal string present verbatim in the verify command's combined stdout and stderr, such as `OK` or `5 passed`.
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
-- If the command has no distinctive stdout literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
+- If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
 **Granularity contract (read carefully):**
 - Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.

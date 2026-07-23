@@ -367,6 +367,119 @@ def test_grade_gate_accepts_expected_artifacts_success_contract() -> None:
     assert not any(finding.code == "missing_success_contract" for finding in result.findings)
 
 
+def test_grade_gate_rejects_descriptive_expected_artifact_labels() -> None:
+    """Prose labels cannot make a Seed runnable as literal artifact paths."""
+    ledger = SeedDraftLedger.from_goal("Create schema outputs and an approval record")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create schema outputs and an approval record",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Outputs are available",
+                expected_artifacts=(
+                    "schema v2 outputs",
+                    "user approval record",
+                    "schema.v2 outputs",
+                    "schema v2 outputs.json",
+                    ".",
+                ),
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    invalid = [
+        finding for finding in result.findings if finding.code == "invalid_expected_artifact"
+    ]
+    assert len(invalid) == 1
+    assert "schema v2 outputs" in invalid[0].message
+    assert "user approval record" in invalid[0].message
+    assert "schema.v2 outputs" in invalid[0].message
+    assert "schema v2 outputs.json" in invalid[0].message
+    assert "'.'" in invalid[0].message
+    assert "verify_command" in invalid[0].repair_instruction
+
+
+def test_grade_gate_accepts_concrete_relative_file_and_directory_paths() -> None:
+    """Exact relative paths, including structured paths with spaces, remain valid."""
+    ledger = SeedDraftLedger.from_goal("Create build and documentation artifacts")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create build and documentation artifacts",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Build and documentation artifacts exist",
+                expected_artifacts=(
+                    "README.md",
+                    "docs",
+                    "dist/app",
+                    "docs/User Guide.md",
+                    "./Build Outputs",
+                ),
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert result.may_run
+    assert not any(finding.code == "invalid_expected_artifact" for finding in result.findings)
+
+
+def test_grade_gate_rejects_windows_paths_outside_workspace() -> None:
+    ledger = SeedDraftLedger.from_goal("Create a workspace artifact")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_paths = (
+        r"\outside.txt",
+        r"D:folder\outside.txt",
+        r"D:\outside.txt",
+        r"\\server\share\outside.txt",
+    )
+    seed = _seed(
+        goal="Create a workspace artifact",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Artifact exists",
+                expected_artifacts=invalid_paths,
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    invalid = [
+        finding for finding in result.findings if finding.code == "invalid_expected_artifact"
+    ]
+    assert len(invalid) == 1
+    assert all(repr(path) in invalid[0].message for path in invalid_paths)
+
+
+def test_grade_gate_rejects_output_assertion_without_verify_command() -> None:
+    ledger = SeedDraftLedger.from_goal("Print a ready signal")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Print a ready signal",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Command output contains READY",
+                output_assertion="READY",
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    assert any(finding.code == "invalid_output_assertion" for finding in result.findings)
+
+
 def test_grade_gate_rejects_vacuous_coding_command_acceptance_criteria() -> None:
     """Do not let command-shaped wording bypass concrete observability."""
     ledger = SeedDraftLedger.from_goal("Create hello_auto.py and verify it with pytest")

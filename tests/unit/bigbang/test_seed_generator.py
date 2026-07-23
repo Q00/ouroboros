@@ -701,8 +701,55 @@ class TestSeedGeneratorExtraction:
             assert third.verify_command is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "malformed_artifacts",
+        (
+            ",",
+            "safe.txt,,other.txt",
+            "safe.txt | artifacts: other.txt",
+        ),
+    )
+    async def test_generate_retries_on_malformed_artifact_fields(
+        self, malformed_artifacts: str
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\nAC: Files exist | verify: pytest -q | "
+                f"artifacts: {malformed_artifacts} | expect: NONE\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\nAC: Files exist | verify: pytest -q | "
+                "artifacts: safe.txt, other.txt | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.expected_artifacts == ("safe.txt", "other.txt")
+
+    @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
-        """Generated contract assertions must be literal stdout, not status prose."""
+        """Generated contract assertions must be literal command output, not status prose."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
@@ -1367,7 +1414,13 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "artifacts: <comma-list or NONE>" in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
+        assert "combined stdout and stderr" in prompt
+        assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
+
+        retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
+        assert "combined stdout and stderr" in retry_prompt
+        assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt
@@ -1377,3 +1430,7 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "sub-step of a sibling" in system_prompt.lower()
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+        assert "exact file or directory path relative to the run workspace" in system_prompt
+        assert "schema v2 outputs" in system_prompt
+        assert "artifacts: NONE" in system_prompt
+        assert "concrete `verify` command" in system_prompt
