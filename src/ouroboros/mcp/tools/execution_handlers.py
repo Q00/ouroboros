@@ -866,33 +866,68 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         discarding the cancelled task reference.
         """
         try:
-            await runner._mark_process_local_resume_unavailable(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
-        except Exception:
-            log.exception(
-                "mcp.tool.execute_seed.unstarted_background_terminalization_failed",
-                session_id=tracker.session_id,
-            )
-        try:
-            await self._reconcile_terminal_process_local_owner(tracker)
-        except Exception:
-            log.exception(
-                "mcp.tool.execute_seed.unstarted_background_owner_cleanup_failed",
-                session_id=tracker.session_id,
-            )
-        if workspace is not None:
-            release_lock(workspace.lock_path)
-        if owned_event_store is not None:
             try:
-                close_result = owned_event_store.close()
-                if inspect.isawaitable(close_result):
-                    await close_result
+                terminalization_error = await runner._mark_process_local_resume_unavailable(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
             except Exception:
-                log.exception("mcp.tool.execute_seed.event_store_close_error")
-        if retained_resume_handoff:
-            self._finish_process_local_resume_handoff(tracker.session_id)
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_terminalization_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            if (
+                terminalization_error.details.get("resume_blocked")
+                == "terminal_persistence_pending"
+            ):
+                log.warning(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_persistence_pending",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            try:
+                reconstructed = await runner.session_repo.reconstruct_session(tracker.session_id)
+            except Exception:
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_reconstruct_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+            if reconstructed.is_err or reconstructed.value.status not in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }:
+                log.warning(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_unproven",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            retained_store = self._process_local_owned_event_stores.get(tracker.session_id)
+            try:
+                await self._reconcile_terminal_process_local_owner(reconstructed.value)
+            except Exception:
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_owner_cleanup_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+            if owned_event_store is not None and owned_event_store is not retained_store:
+                try:
+                    close_result = owned_event_store.close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except Exception:
+                    log.exception("mcp.tool.execute_seed.event_store_close_error")
+        finally:
+            if workspace is not None:
+                release_lock(workspace.lock_path)
+            if retained_resume_handoff:
+                self._finish_process_local_resume_handoff(tracker.session_id)
 
     async def _reconcile_terminal_process_local_owner(self, tracker: SessionTracker) -> None:
         """Reconcile a terminal record through the registry-owned transition.
