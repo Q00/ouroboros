@@ -793,16 +793,21 @@ def test_normalize_execution_acceptance_preserves_distinct_autoresearch_user_ac(
     assert "Final report must include the baseline val_bpb and memory." in normalized_texts
 
 
-def test_normalize_execution_acceptance_preserves_structured_contract_across_autoresearch() -> None:
-    """Finding #2 regression: autoresearch canonicalization keeps contracts.
+def test_normalize_execution_acceptance_transfers_contract_onto_autoresearch_canonical() -> None:
+    """Blocker regression: a covered structured source is not dropped or duplicated.
 
-    The autoresearch normalizer replaces source descriptions with its six fixed
-    canonical ACs, none of which the hello_auto matcher recognizes.  A source
-    that carried an explicit verification contract must not silently degrade to
-    a contractless canonical criterion — its evidence is re-appended verbatim.
+    When a source truly subsumed by a canonical autoresearch AC carries an
+    explicit verification contract, that contract is transferred ONTO the
+    canonical criterion — so execution/evaluation see exactly one contracted
+    baseline AC, not a contractless canonical plus a duplicate source.
     """
     from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
 
+    baseline_canonical = (
+        "The experiment ledger artifact contains a baseline entry written before any edit; "
+        "it includes measured command `/usr/bin/time -l uv run train.py`, inner command, "
+        "exit status, val_bpb, maximum resident set size bytes, and baseline status."
+    )
     baseline_spec = AcceptanceCriterionSpec(
         description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
         verify_command="/usr/bin/time -l uv run train.py",
@@ -824,16 +829,17 @@ def test_normalize_execution_acceptance_preserves_structured_contract_across_aut
 
     normalized = normalize_execution_acceptance(seed)
 
-    # The six canonical autoresearch ACs are present, and the structured source
-    # contract survives verbatim and reachable rather than being dropped.
+    # Exactly the six canonical ACs — no verbatim duplicate of the source.
     normalized_texts = ac_texts(normalized.acceptance_criteria)
-    assert baseline_spec.description in normalized_texts
+    assert baseline_spec.description not in normalized_texts
+    assert len(normalized_texts) == 6
+    # The baseline canonical AC now carries the source's verification contract.
     spec_map = _seed_ac_spec_map(normalized)
-    assert baseline_spec.description in spec_map
-    preserved = spec_map[baseline_spec.description]
-    assert preserved.verify_command == "/usr/bin/time -l uv run train.py"
-    assert preserved.expected_artifacts == ("experiment_ledger.json",)
-    assert preserved.output_assertion == "baseline recorded"
+    assert baseline_canonical in spec_map
+    transferred = spec_map[baseline_canonical]
+    assert transferred.verify_command == "/usr/bin/time -l uv run train.py"
+    assert transferred.expected_artifacts == ("experiment_ledger.json",)
+    assert transferred.output_assertion == "baseline recorded"
 
 
 def test_normalize_execution_acceptance_preserves_existing_autoresearch_runtime_context() -> None:

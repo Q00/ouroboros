@@ -363,12 +363,30 @@ def _restore_surviving_acceptance_specs(
 
     # Never let a canonicalization path drop an explicit contract/identity: any
     # source a normalizer replaced or dropped (e.g. the autoresearch rewrite the
-    # matcher above does not model) is restored verbatim at its source anchor.
+    # matcher above does not model) is restored at its source anchor.
+    autoresearch = bool(filtered) and _AUTORESEARCH_CANONICAL_AC[0] in filtered
     for index in list(remaining_indices):
-        criterion = original[index][0]
-        if _carries_explicit_contract(criterion):
-            _pop(index)
-            emissions.append((float(index), criterion))
+        criterion, source_text = original[index]
+        if not _carries_explicit_contract(criterion):
+            continue
+        if autoresearch:
+            subject = _unwrap_seed_repairer_original_requirement(source_text).strip()
+            covered, canonical_index = _autoresearch_coverage(subject)
+            if covered and canonical_index is not None:
+                # A structured source truly subsumed by a canonical AC: transfer
+                # its contract ONTO that canonical criterion instead of emitting
+                # a verbatim duplicate.  Otherwise execution/evaluation would
+                # enumerate both the contractless canonical AC and the source.
+                canonical_text = _AUTORESEARCH_CANONICAL_AC[canonical_index]
+                if _transfer_contract_to_emitted_canonical(
+                    emissions,
+                    canonical_text,
+                    criterion,  # type: ignore[arg-type]
+                ):
+                    _pop(index)
+                    continue
+        _pop(index)
+        emissions.append((float(index), criterion))
 
     emissions.sort(key=lambda item: item[0])
     # Normalization is loss-free: it never deletes a distinct caller-authorized
@@ -377,6 +395,39 @@ def _restore_surviving_acceptance_specs(
     # a pre-existing boundary limitation for such inputs, not something to fix by
     # discarding a valid Seed contract here.
     return tuple(emission for _anchor, emission in emissions)
+
+
+def _transfer_contract_to_emitted_canonical(
+    emissions: list[tuple[float, AcceptanceCriterionInput]],
+    canonical_text: str,
+    source: AcceptanceCriterionSpec,
+) -> bool:
+    """Attach a covered source's contract to its canonical AC, in place.
+
+    Returns whether the canonical AC was found and updated.  The canonical
+    criterion keeps its description and gains the source's verification
+    evidence, so the executor/evaluator sees exactly one contracted AC rather
+    than a contractless canonical plus a duplicate source.  An existing contract
+    on the canonical AC is never clobbered.
+    """
+    target = canonical_text.strip()
+    for position, (anchor, item) in enumerate(emissions):
+        if ac_text(item).strip() != target:
+            continue
+        if isinstance(item, AcceptanceCriterionSpec) and item.has_success_contract:
+            return True
+        emissions[position] = (
+            anchor,
+            AcceptanceCriterionSpec(
+                description=canonical_text,
+                verify_command=source.verify_command,
+                expected_artifacts=source.expected_artifacts,
+                output_assertion=source.output_assertion,
+                investment=source.investment,
+            ),
+        )
+        return True
+    return False
 
 
 def _collapse_canonical_acceptance_specs(
@@ -597,23 +648,51 @@ def _extract_autoresearch_repository_path(context_text: str) -> str:
     return ""
 
 
+# Each covered phrase names the canonical AC (by index into
+# ``_AUTORESEARCH_CANONICAL_AC``) that subsumes it, or ``None`` when it is folded
+# into the Seed's runtime-context extras rather than an executable AC.  The
+# index lets a structured source transfer its verification contract onto the
+# canonical criterion instead of being dropped or duplicated.
+_AUTORESEARCH_COVERED_PHRASES: tuple[tuple[str, int | None], ...] = (
+    ("seed has explicit runtime context", None),
+    ("seed preserves explicit runtime context", None),
+    ("seed requires execution to record a baseline", 0),
+    ("execution records baseline val_bpb before train.py experiments", 0),
+    ("seed requires up to two post-baseline experiments", 1),
+    ("seed requires every baseline and experiment ledger entry", 3),
+    ("seed requires final kept changes to limited to train.py", 4),
+    (
+        "seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, "
+        "missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes",
+        2,
+    ),
+)
+
+
+def _autoresearch_coverage(subject: str) -> tuple[bool, int | None]:
+    """Classify an autoresearch source against the canonical contract.
+
+    Returns ``(is_covered, canonical_index)``.  A covered phrase is matched by
+    prefix — the same rule the normalizer drops on — and ``canonical_index`` is
+    the AC that subsumes it, so a covered structured source can transfer its
+    verification contract onto that canonical criterion rather than being
+    dropped (losing evidence) or duplicated.
+    """
+    key = _criterion_key(subject)
+    for phrase, canonical_index in _AUTORESEARCH_COVERED_PHRASES:
+        if key.startswith(phrase):
+            return (True, canonical_index)
+    return (False, None)
+
+
 def _is_autoresearch_generic_or_covered(criterion: str) -> bool:
     key = _criterion_key(criterion)
     if key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
         return True
     if "command/api check returns stable observable output" in key:
         return True
-    covered_phrases = (
-        "seed has explicit runtime context",
-        "seed preserves explicit runtime context",
-        "seed requires execution to record a baseline",
-        "execution records baseline val_bpb before train.py experiments",
-        "seed requires up to two post-baseline experiments",
-        "seed requires every baseline and experiment ledger entry",
-        "seed requires final kept changes to limited to train.py",
-        "seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes",
-    )
-    return any(key.startswith(phrase) for phrase in covered_phrases)
+    covered, _canonical_index = _autoresearch_coverage(criterion)
+    return covered
 
 
 def _is_library_default_acceptance(criterion: str) -> bool:
