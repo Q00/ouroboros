@@ -1326,6 +1326,31 @@ class TestServeTransport:
         assert "/mcp" in route_paths
 
     @pytest.mark.asyncio
+    async def test_real_fastmcp_tools_list_preserves_parameter_descriptions(self) -> None:
+        from unittest.mock import patch
+
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        from ouroboros.mcp.tools.definitions import StartEvolveStepHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(StartEvolveStepHandler())
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+
+        tools = await adapter._mcp_server.list_tools()
+        tool = next(item for item in tools if item.name == "ouroboros_start_evolve_step")
+        description = tool.inputSchema["properties"]["seed_content"]["description"]
+
+        assert "YAML-formatted string" in description
+        assert "not JSON-shaped text or an object literal" in description
+        assert "before Ouroboros receives it" in description
+
+    @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
         """FastMCP tool wrapper routes through call_tool to enforce security checks."""
         from unittest.mock import MagicMock, patch

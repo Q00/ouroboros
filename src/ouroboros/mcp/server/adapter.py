@@ -15,8 +15,9 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
+from pydantic import Field
 import structlog
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
@@ -226,12 +227,16 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        annotation: Any = python_type if p.required else python_type | None
+        if p.description:
+            annotation = Annotated[annotation, Field(description=p.description)]
+
         if p.required:
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
-                    annotation=python_type,
+                    annotation=annotation,
                 )
             )
         else:
@@ -241,7 +246,7 @@ def _build_tool_signature_with_aliases(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     default=default,
-                    annotation=python_type | None,
+                    annotation=annotation,
                 )
             )
 
