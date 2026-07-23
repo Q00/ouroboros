@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 
 def _configure_utf8_stdio() -> None:
@@ -156,12 +157,18 @@ KEYWORD_MAP = [
 
 
 def is_mcp_configured() -> bool:
-    """Check if MCP server is registered in ~/.claude/mcp.json."""
+    """Check if the Ouroboros MCP server is registered for Claude or Codex."""
     try:
-        mcp_path = Path.home() / ".claude" / "mcp.json"
-        if not mcp_path.exists():
+        claude_path = Path.home() / ".claude" / "mcp.json"
+        if claude_path.exists() and "ouroboros" in claude_path.read_text():
+            return True
+
+        codex_path = Path.home() / ".codex" / "config.toml"
+        if not codex_path.exists():
             return False
-        return "ouroboros" in mcp_path.read_text()
+        codex_config = tomllib.loads(codex_path.read_text())
+        mcp_servers = codex_config.get("mcp_servers")
+        return isinstance(mcp_servers, dict) and isinstance(mcp_servers.get("ouroboros"), dict)
     except Exception:
         return False
 

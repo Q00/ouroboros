@@ -15,6 +15,38 @@ detect_keywords = _mod.detect_keywords
 SETUP_BYPASS_SKILLS = _mod.SETUP_BYPASS_SKILLS
 main = _mod.main
 is_first_time = _mod.is_first_time
+is_mcp_configured = _mod.is_mcp_configured
+
+
+class TestMcpConfiguration:
+    def test_codex_only_registration_is_configured(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            assert is_mcp_configured() is True
+
+    def test_codex_only_registration_routes_status_without_setup(self, tmp_path, capsys):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
+        payload = {
+            "session_id": "test-session",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
+        assert "/ouroboros:setup" not in context
 
 
 class TestFirstTimePrefs:
