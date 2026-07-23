@@ -305,6 +305,26 @@ class TestInterviewHandlerSubagentDispatch:
         assert '"read_only": true' in prompt
         assert "requires_user_confirmation" in prompt
 
+    async def test_plugin_child_prompt_renders_known_data_tools(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Round-6 suggestion: known_data_tools must reach the child prompt —
+        parent metadata alone is discarded by the bridge."""
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry
+
+        monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "clickhouse_query,metabase_card")
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=FanoutRegistry(tmp_path),
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert "clickhouse_query" in prompt
+        assert "metabase_card" in prompt
+
 
 # ---------------------------------------------------------------------------
 # EvaluateHandler

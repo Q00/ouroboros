@@ -728,6 +728,11 @@ def _build_question_advisory_request(
     return request
 
 
+# Known data tools from the environment are identifiers, not free text.
+_KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_MAX_KNOWN_DATA_TOOLS = 16
+
+
 def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Copy advisory lanes, injecting configured ``known_data_tools``.
 
@@ -738,11 +743,14 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
     mutated.
     """
     lanes = [dict(lane) for lane in advisory.get("lanes") or ()]
+    # Env values are untrusted prompt input: each entry must be a plain tool
+    # identifier (no whitespace/newlines that could smuggle prompt text), and
+    # the list is bounded.
     known_tools = [
         item.strip()
         for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
-        if item.strip()
-    ]
+        if item.strip() and _KNOWN_DATA_TOOL_NAME.match(item.strip())
+    ][:_MAX_KNOWN_DATA_TOOLS]
     if known_tools:
         for lane in lanes:
             if lane.get("lane_id") == "data_context" and "known_data_tools" not in lane:

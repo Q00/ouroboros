@@ -20,11 +20,22 @@ DATA_EVIDENCE_SECRET_PATTERN = (
     r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
     r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
 )
-# Phone shapes: international (+ then 7+ digits) or separator-grouped local
-# numbers. Comma-grouped magnitudes ("1,234,567") and ISO dates/times do not
-# match (comma and colon are not in the separator class, and date groups are
-# 2-digit).
-DATA_EVIDENCE_PHONE_PATTERN = r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b"
+# Standard credential header/assignment forms (bot-review round-6 probe):
+# an Authorization/Bearer phrase followed by a digit-bearing opaque value, a
+# password assignment (sensitive regardless of digits), or an AWS-style
+# access key id.
+DATA_EVIDENCE_AUTH_HEADER_PATTERN = (
+    r"\b(authorization|bearer)\b[:= ]+(?=[^\s]*\d)[A-Za-z0-9_.=/+-]{8,}"
+)
+DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
+DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
+# Phone shapes: international (+ then 7+ digits), separator-grouped local
+# numbers, or the US parenthesized area-code form. Comma-grouped magnitudes
+# ("1,234,567") and ISO dates/times do not match (comma and colon are not in
+# the separator class, and date groups are 2-digit).
+DATA_EVIDENCE_PHONE_PATTERN = (
+    r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b|\(\d{3}\)\s*\d{3}[-.\s]?\d{4}"
+)
 # A value that opens as a JSON list/object is serialized rows, not an
 # aggregate.
 DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"

@@ -1642,6 +1642,170 @@ def test_stale_records_are_swept_on_register(tmp_path: Any) -> None:
     assert (tmp_path / f"{fresh_id}.json").exists()
 
 
+def _minimal_data_output(value: str) -> dict[str, Any]:
+    return {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Aggregate finding.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "warehouse",
+                "query_summary": "count users",
+                "value": value,
+                "observed_at": "2026-07-23T09:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+
+
+def test_standard_credential_and_pii_forms_are_rejected() -> None:
+    """Bot-review round-6 probe: standard credential/PII forms must not pass.
+
+    ``Authorization: Bearer ...``, password assignments, AWS-style keys, and
+    parenthesized US phone numbers previously evaded the denylist.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for probe in (
+        "Authorization: Bearer abcdef123456",
+        "password=abcd1234",
+        "AKIAIOSFODNN7EXAMPLE credentials in use",
+        "call center at (415) 555-1212",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(probe)), probe
+
+    for clean in (
+        "authorization required for the premium tier",
+        "bearer of the top NPS score is the free plan",
+        "password rotation completed for 1,204 accounts",
+        "78% of MAU are on the free tier",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == [], clean
+
+
+def test_single_line_csv_rows_are_rejected() -> None:
+    """Bot-review round-6 probe: single-line raw rows are not aggregates."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for probe in (
+        "Alice Kim,premium; Bob Lee,free",
+        "Alice Kim, premium; Bob Lee, free",
+    ):
+        errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+        assert any("row-shaped" in error for error in errors), probe
+
+    # Metric prose with commas and a semicolon keeps its digits and stays
+    # valid — the roster rule only fires on digit-free delimited records.
+    metric = "revenue up 12%, churn down 3%; retention flat, NPS +4"
+    assert _data_evidence_boundary_violations(_minimal_data_output(metric)) == []
+
+
+def test_error_shaped_tool_output_is_not_evidence() -> None:
+    """Bot-review round-6 probe: an error envelope is a failed call.
+
+    The policy's ``error_shaped_tool_output`` rule requires a no-evidence
+    finding — ``HTTP 200 body: {"error": ...}`` must never persist as
+    ``reported_by_tool`` evidence.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = 'HTTP 200 body: {"error":"upstream timeout"}'
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("error-shaped" in error for error in errors)
+
+    for probe in ("HTTP 503 from warehouse", "HTTP/502 gateway response"):
+        errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+        assert any("error-shaped" in error for error in errors), probe
+
+    clean = "error rate 0.2% across 14,000 jobs"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_concurrent_submissions_terminalize_exactly_once(tmp_path: Any) -> None:
+    """Terminalization is concurrency-safe (bot-review round-6 probe).
+
+    Two concurrent full submissions previously both returned ``complete``
+    with divergent results. The per-fanout exclusive section serializes them:
+    exactly one completes, the other replays the terminal outcome.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-concurrent",
+        payloads=_mixed_advisory_payloads(),
+    )
+
+    def submit(marker: str) -> dict[str, Any]:
+        return submit_fanout_results(
+            registry,
+            session_id="sess-concurrent",
+            correlation_key="context.lane_id",
+            results=[
+                {"key": "ambiguity_contrarian", "content": f"contrarian-{marker}"},
+                {"key": "answer_simplifier", "content": f"simplifier-{marker}"},
+            ],
+            fanout_id=fanout_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(submit, ["a", "b"])
+
+    statuses = sorted([first["status"], second["status"]])
+    assert statuses == ["already_complete", "complete"]
+    completed = first if first["status"] == "complete" else second
+    replayed = second if first["status"] == "complete" else first
+    # The replay carries the SAME terminal outcome — never a divergent one.
+    assert replayed["result"] == completed["result"]
+
+
+def test_corrupt_utf8_record_degrades_cleanly(tmp_path: Any) -> None:
+    """A torn/corrupt record returns the documented clean outcome (round-6)."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-corrupt",
+        payloads=_mixed_advisory_payloads(),
+    )
+    assert fanout_id is not None
+    (tmp_path / f"{fanout_id}.json").write_bytes(b'{"fanout_id": "\xff\xfe broken')
+
+    assert registry.load(fanout_id) is None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-corrupt",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "unknown_fanout_id"
+
+
+def test_known_data_tools_env_is_bounded_and_identifier_validated(monkeypatch: Any) -> None:
+    """Env-sourced tool names are identifiers, not prompt text (round-6)."""
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS",
+        "clickhouse_query, bad name with spaces, evil\ninjection, " + "x" * 200 + ", metabase",
+    )
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-env-bounds",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase"]
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
@@ -1768,6 +1932,24 @@ async def test_submit_tool_bounds_input_size(tmp_path: Any) -> None:
         }
     )
     assert too_big.is_err
+
+    # Round-6 probe: non-dict items count against the caps too — 33 strings
+    # (330 KB) previously bypassed both limits by being filtered out first.
+    non_dict_flood = await submit.handle(
+        {
+            "fanout_id": "fanout_bounds",
+            "results": ["y" * 10_000 for _ in range(33)],
+        }
+    )
+    assert non_dict_flood.is_err
+
+    non_dict_big = await submit.handle(
+        {
+            "fanout_id": "fanout_bounds",
+            "results": ["y" * 300_000],
+        }
+    )
+    assert non_dict_big.is_err
 
 
 def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:

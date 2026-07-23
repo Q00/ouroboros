@@ -33,7 +33,8 @@ Payload structure:
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import hashlib
@@ -1170,6 +1171,7 @@ def _plugin_advisory_contract_section(
     lane_lines = []
     data_policy: Any = None
     data_contract: Any = None
+    known_data_tools: Any = None
     for lane in advisory_fanout_contract.get("lanes") or ():
         if not isinstance(lane, Mapping):
             continue
@@ -1181,6 +1183,7 @@ def _plugin_advisory_contract_section(
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
             data_contract = lane.get("answer_contract")
+            known_data_tools = lane.get("known_data_tools")
     fanout_line = (
         f"fanout_id: {advisory_fanout_id}"
         if advisory_fanout_id
@@ -1188,12 +1191,17 @@ def _plugin_advisory_contract_section(
     )
     policy_json = json.dumps(data_policy, ensure_ascii=False) if data_policy else "{}"
     contract_json = json.dumps(data_contract, ensure_ascii=False) if data_contract else "{}"
+    known_tools_line = (
+        f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
+        if isinstance(known_data_tools, list) and known_data_tools
+        else ""
+    )
     return f"""
 ### Advisory Re-entry Contract (actual values)
 {fanout_line}
 result_correlation_key: context.lane_id
 lanes:
-{chr(10).join(lane_lines)}
+{chr(10).join(lane_lines)}{known_tools_line}
 
 data_context data_policy (enforce, do not just read):
 {policy_json}
@@ -2878,7 +2886,7 @@ class FanoutRegistry:
 
         cutoff = time.time() - self._RECORD_RETENTION_SECONDS
         try:
-            entries = list(self._dir.glob("*.json"))
+            entries = [*self._dir.glob("*.json"), *self._dir.glob(".*.lock")]
         except OSError:
             return
         for path in entries:
@@ -2988,13 +2996,57 @@ class FanoutRegistry:
             return False
         return True
 
+    @contextmanager
+    def exclusive(self, fanout_id: str) -> Iterator[None]:
+        """Cross-process exclusive section for one fan-out record.
+
+        Terminalization is load → synthesize → replace: without mutual
+        exclusion two concurrent submissions can both observe an open record
+        and both return ``complete`` with divergent outcomes (bot-review
+        round-6 probe). An flock'd sidecar lock file serializes submissions
+        per ``fanout_id`` — the second submission then reloads the terminal
+        record and replays it. Where ``fcntl`` or the lock file are
+        unavailable the section degrades to best-effort (never an error).
+        """
+        if not self._valid_id(fanout_id):
+            yield
+            return
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            yield
+            return
+        locked = False
+        try:
+            try:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                locked = True
+            except (ImportError, OSError):
+                pass
+            yield
+        finally:
+            if locked:
+                try:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+            os.close(fd)
+
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt."""
         if not self._valid_id(fanout_id):
             return None
         try:
             content = self._path(fanout_id).read_text(encoding="utf-8")
-        except OSError:
+        # UnicodeError: a corrupt or legacy-torn record must degrade to the
+        # documented clean unknown/corrupt outcome, never an internal crash.
+        except (OSError, UnicodeError):
             return None
         try:
             data = json.loads(content)
@@ -3013,7 +3065,10 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
     # Function-level import: subagent.py is imported by orchestrator-side
     # modules, so the canonical pattern strings are pulled lazily.
     from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_EVIDENCE_AUTH_HEADER_PATTERN,
+        DATA_EVIDENCE_AWS_KEY_PATTERN,
         DATA_EVIDENCE_EMAIL_PATTERN,
+        DATA_EVIDENCE_PASSWORD_PATTERN,
         DATA_EVIDENCE_PHONE_PATTERN,
         DATA_EVIDENCE_SECRET_PATTERN,
     )
@@ -3021,6 +3076,17 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
     return (
         ("email-shaped (PII)", re.compile(DATA_EVIDENCE_EMAIL_PATTERN, re.IGNORECASE)),
         ("credential-shaped (secret)", re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)),
+        (
+            "authorization-header-shaped (secret)",
+            re.compile(DATA_EVIDENCE_AUTH_HEADER_PATTERN, re.IGNORECASE),
+        ),
+        (
+            "password-assignment-shaped (secret)",
+            re.compile(DATA_EVIDENCE_PASSWORD_PATTERN, re.IGNORECASE),
+        ),
+        # AWS access-key ids are uppercase by definition; case-insensitive
+        # matching would false-positive on ordinary prose.
+        ("aws-access-key-shaped (secret)", re.compile(DATA_EVIDENCE_AWS_KEY_PATTERN)),
         ("phone-shaped (PII)", re.compile(DATA_EVIDENCE_PHONE_PATTERN)),
     )
 
@@ -3052,7 +3118,34 @@ def _is_row_shaped_value(value: str) -> bool:
         return True
     # An aggregate is a SINGLE-LINE scalar statement: two customer rows
     # separated by one newline are raw data (bot-review round-5 probe).
-    return "\n" in stripped or "\r" in stripped
+    if "\n" in stripped or "\r" in stripped:
+        return True
+    # Single-line CSV rows (bot-review round-6 probe: "Alice Kim,premium;
+    # Bob Lee,free"): two or more letter,letter joints are field boundaries —
+    # prose puts a space after a comma, and thousands separators are
+    # digit,digit so neither trips this.
+    if len(re.findall(r"[A-Za-z],[A-Za-z]", stripped)) >= 2:
+        return True
+    # Semicolon-delimited record lists without a single numeric quantity:
+    # every ;-segment carrying a comma and no digit anywhere is a name/label
+    # roster, not a metric ("revenue up 12%, churn down 3%; ..." keeps its
+    # digits and stays valid).
+    segments = [segment for segment in stripped.split(";") if segment.strip()]
+    return (
+        len(segments) >= 2
+        and all("," in segment for segment in segments)
+        and not any(char.isdigit() for char in stripped)
+    )
+
+
+# Error-envelope shapes: a JSON error key or an HTTP 4xx/5xx status inside an
+# evidence value means the tool call FAILED — the policy requires a
+# no-evidence finding, never evidence ("error rate 0.2%" prose stays valid;
+# only the envelope shapes match).
+_DATA_EVIDENCE_ERROR_SHAPE = re.compile(
+    r"[\"']error[\"']\s*:|\bHTTP[ /]?[45]\d{2}\b|\btraceback \(most recent call last\)",
+    re.IGNORECASE,
+)
 
 
 def _parseable_timestamp(value: str) -> bool:
@@ -3103,6 +3196,13 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"evidence[{index}].value: row-shaped (list/object/multi-record) "
                 "content is raw evidence, not an aggregate"
+            )
+        if isinstance(value, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(value):
+            # An error envelope means the tool call FAILED: the policy's
+            # error_shaped_tool_output rule requires a no-evidence finding.
+            errors.append(
+                f"evidence[{index}].value: error-shaped tool output is not "
+                "evidence; return a no-evidence finding instead"
             )
         observed_at = item.get("observed_at")
         if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
@@ -3429,7 +3529,30 @@ def submit_fanout_results(
       pinning the fan-out at ``partial`` (Q00/ouroboros#1671); records
       persisted without a required/optional split treat every expected key as
       required.
+
+    The whole load → validate → synthesize → persist sequence runs inside a
+    per-fanout exclusive section: concurrent submissions serialize, so
+    exactly one can terminalize a record and the other replays the terminal
+    outcome instead of double-completing with a divergent result.
     """
+    with registry.exclusive(fanout_id):
+        return _submit_fanout_results_locked(
+            registry,
+            session_id=session_id,
+            correlation_key=correlation_key,
+            results=results,
+            fanout_id=fanout_id,
+        )
+
+
+def _submit_fanout_results_locked(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    correlation_key: str,
+    results: list[Mapping[str, Any]],
+    fanout_id: str,
+) -> dict[str, Any]:
     record = registry.load(fanout_id)
     if record is None:
         return {

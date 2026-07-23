@@ -2023,15 +2023,16 @@ class SubmitFanoutResultsHandler:
                     tool_name="ouroboros_submit_fanout_results",
                 )
             )
-        results = [item for item in raw_results if isinstance(item, dict)]
-        # Bound the submission BEFORE validation or persistence: results are
-        # written into durable fan-out state twice (received results + the
-        # terminal outcome), so unbounded input is a disk/memory exhaustion
-        # vector.
-        if len(results) > _MAX_FANOUT_RESULT_ITEMS:
+        # Bound the RAW submission BEFORE any filtering, validation, or
+        # persistence: results are written into durable fan-out state twice
+        # (received results + the terminal outcome), so unbounded input is a
+        # disk/memory exhaustion vector — and non-dict items count against
+        # the caps too (round-6 probe: 33 strings totaling 330 KB previously
+        # bypassed both advertised limits by being filtered out first).
+        if len(raw_results) > _MAX_FANOUT_RESULT_ITEMS:
             return Result.err(
                 MCPToolError(
-                    f"results carries {len(results)} items; at most "
+                    f"results carries {len(raw_results)} items; at most "
                     f"{_MAX_FANOUT_RESULT_ITEMS} results are accepted per "
                     "submission",
                     tool_name="ouroboros_submit_fanout_results",
@@ -2039,7 +2040,7 @@ class SubmitFanoutResultsHandler:
             )
         try:
             serialized_size = len(
-                json.dumps(results, ensure_ascii=False).encode("utf-8", "replace")
+                json.dumps(list(raw_results), ensure_ascii=False).encode("utf-8", "replace")
             )
         except (TypeError, ValueError):
             return Result.err(
@@ -2057,6 +2058,7 @@ class SubmitFanoutResultsHandler:
                     tool_name="ouroboros_submit_fanout_results",
                 )
             )
+        results = [item for item in raw_results if isinstance(item, dict)]
 
         outcome = submit_fanout_results(
             self._registry,
