@@ -165,6 +165,7 @@ from ouroboros.resilience.recovery import (
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.events.base import BaseEvent
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
     from ouroboros.orchestrator.model_routing import ModelRouter
@@ -1437,6 +1438,33 @@ class OrchestratorRunner:
                 },
             )
         )
+
+    async def _project_execution_outcome(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        terminal_status: str,
+        terminal_event: BaseEvent,
+    ) -> None:
+        """Run auxiliary outcome projections without invalidating durable PAUSED."""
+        try:
+            await self._event_store.append(terminal_event)
+            await self._evaluate_frugality_proof(execution_id)
+            if terminal_status in {"completed", "failed", "cancelled"}:
+                await self._report_frugality_retrospective(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    terminal_status=terminal_status,
+                )
+        except Exception:
+            if terminal_status != SessionStatus.PAUSED.value:
+                raise
+            log.exception(
+                "orchestrator.runner.paused_auxiliary_projection_failed",
+                execution_id=execution_id,
+                session_id=session_id,
+            )
 
     @staticmethod
     def _requested_terminal_status_from_error(error: BaseException) -> SessionStatus | None:
@@ -5864,17 +5892,12 @@ class OrchestratorRunner:
                     else None
                 ),
             )
-            await self._event_store.append(terminal_event)
-
-            # Deterministic frugality proof over this execution's per-AC triads.
-            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-            await self._evaluate_frugality_proof(exec_id)
-            if terminal_status in {"completed", "failed", "cancelled"}:
-                await self._report_frugality_retrospective(
-                    execution_id=exec_id,
-                    session_id=tracker.session_id,
-                    terminal_status=terminal_status,
-                )
+            await self._project_execution_outcome(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=terminal_status,
+                terminal_event=terminal_event,
+            )
 
             log.info(
                 "orchestrator.runner.execute_completed",
@@ -6308,53 +6331,47 @@ class OrchestratorRunner:
                 else SessionStatus.FAILED.value
             )
         )
-        await self._event_store.append(
-            create_execution_terminal_event(
-                execution_id=exec_id,
-                session_id=tracker.session_id,
-                status=terminal_status,
-                summary=(
-                    execution_summary if terminal_status == SessionStatus.COMPLETED.value else None
-                ),
-                error_message=(
-                    final_message
-                    if terminal_status
-                    not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
-                    else None
-                ),
-                messages_processed=parallel_result.total_messages,
-                pause_seconds=(
-                    recoverable_failure_pause.pause_seconds
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                resume_after=(
-                    recoverable_failure_pause.resume_after
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                pause_kind=(
-                    recoverable_failure_pause.pause_kind
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                resume_hint=(
-                    recoverable_failure_pause.resume_hint
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-            )
+        terminal_event = create_execution_terminal_event(
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            status=terminal_status,
+            summary=(
+                execution_summary if terminal_status == SessionStatus.COMPLETED.value else None
+            ),
+            error_message=(
+                final_message
+                if terminal_status
+                not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
+                else None
+            ),
+            messages_processed=parallel_result.total_messages,
+            pause_seconds=(
+                recoverable_failure_pause.pause_seconds
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            resume_after=(
+                recoverable_failure_pause.resume_after
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            pause_kind=(
+                recoverable_failure_pause.pause_kind
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            resume_hint=(
+                recoverable_failure_pause.resume_hint
+                if recoverable_failure_pause is not None
+                else None
+            ),
         )
-
-        # Deterministic frugality proof over this execution's per-AC triads.
-        # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-        await self._evaluate_frugality_proof(exec_id)
-        if terminal_status in {"completed", "failed", "cancelled"}:
-            await self._report_frugality_retrospective(
-                execution_id=exec_id,
-                session_id=tracker.session_id,
-                terminal_status=terminal_status,
-            )
+        await self._project_execution_outcome(
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            terminal_status=terminal_status,
+            terminal_event=terminal_event,
+        )
 
         log.info(
             "orchestrator.runner.parallel_completed",
@@ -7109,50 +7126,44 @@ Note: This is a resumed session. Please continue from where execution was interr
                     else SessionStatus.FAILED.value
                 )
             )
-            await self._event_store.append(
-                create_execution_terminal_event(
-                    execution_id=tracker.execution_id,
-                    session_id=session_id,
-                    status=terminal_status,
-                    error_message=(
-                        final_message
-                        if terminal_status
-                        not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
-                        else None
-                    ),
-                    messages_processed=messages_processed,
-                    pause_seconds=(
-                        recoverable_resume_failure.pause_seconds
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    resume_after=(
-                        recoverable_resume_failure.resume_after
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    pause_kind=(
-                        recoverable_resume_failure.pause_kind
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    resume_hint=(
-                        recoverable_resume_failure.resume_hint
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                )
+            terminal_event = create_execution_terminal_event(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                status=terminal_status,
+                error_message=(
+                    final_message
+                    if terminal_status
+                    not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
+                    else None
+                ),
+                messages_processed=messages_processed,
+                pause_seconds=(
+                    recoverable_resume_failure.pause_seconds
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                resume_after=(
+                    recoverable_resume_failure.resume_after
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                pause_kind=(
+                    recoverable_resume_failure.pause_kind
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                resume_hint=(
+                    recoverable_resume_failure.resume_hint
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
             )
-
-            # Deterministic frugality proof over this execution's per-AC triads.
-            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-            await self._evaluate_frugality_proof(tracker.execution_id)
-            if terminal_status in {"completed", "failed", "cancelled"}:
-                await self._report_frugality_retrospective(
-                    execution_id=tracker.execution_id,
-                    session_id=session_id,
-                    terminal_status=terminal_status,
-                )
+            await self._project_execution_outcome(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status,
+                terminal_event=terminal_event,
+            )
 
             log.info(
                 "orchestrator.runner.resume_completed",

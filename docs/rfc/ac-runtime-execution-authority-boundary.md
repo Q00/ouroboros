@@ -444,6 +444,12 @@ The Foundation A implementation must demonstrate all of the following:
 41. a cross-process cancellation marker arriving during resumed pause
     publication is likewise preserved; only a terminal lifecycle path may
     acknowledge and clear it.
+42. once `PAUSED` is durable, failure of the auxiliary execution-terminal
+    projection, frugality proof, or retrospective cannot route through generic
+    `FAILED` cleanup in sequential, parallel, or resumed execution.
+43. CLI cancellation preserves the typed distinction between a durable
+    `CANCELLED` winner and `CANCELLATION_REQUESTED`; single and `--all` output
+    and counts never report a live-owner request as completed cancellation.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

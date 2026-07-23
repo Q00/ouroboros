@@ -24,6 +24,7 @@ from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage
 from ouroboros.orchestrator.execution_authority import (
     _PROCESS_LOCAL_AUTHORITY_REGISTRY,
+    ProcessLocalCancellationDisposition,
     _ProcessLocalAuthorityLifecycleState,
     _register_process_local_authority_terminal_finalizer,
     _retire_process_local_authority_after_terminal_persistence,
@@ -231,6 +232,59 @@ async def test_pause_persistence_failure_keeps_durable_running_owner(tmp_path) -
         assert tracker.execution_id not in runner.active_sessions
         session_events = await event_store.replay("session", tracker.session_id)
         assert "orchestrator.session.paused" not in [event.type for event in session_events]
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_paused_projection_failure_keeps_durable_paused_owner(tmp_path) -> None:
+    """Auxiliary projection failure cannot convert durable PAUSED into FAILED."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'paused-projection.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_RecoverablePauseRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-paused-projection",
+        session_id="session-paused-projection",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    append = event_store.append
+
+    async def fail_execution_projection(event, **kwargs):
+        if event.type == "execution.terminal":
+            raise PersistenceError("execution projection unavailable")
+        return await append(event, **kwargs)
+
+    try:
+        with patch.object(event_store, "append", fail_execution_projection):
+            result = await runner.execute_precreated_session(
+                seed=_seed(),
+                tracker=tracker,
+                parallel=False,
+            )
+
+        assert result.is_ok
+        assert result.value.success is False
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.PAUSED
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        session_events = await event_store.replay("session", tracker.session_id)
+        event_types = [event.type for event in session_events]
+        assert event_types.count("orchestrator.session.paused") == 1
+        assert "orchestrator.session.failed" not in event_types
     finally:
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
@@ -2089,7 +2143,10 @@ async def test_cli_cancel_does_not_terminalize_a_claimed_process_local_owner(tmp
     assert already_claimed is False
 
     try:
-        assert await _cancel_session(event_store, tracker.session_id) is True
+        assert (
+            await _cancel_session(event_store, tracker.session_id)
+            == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+        )
 
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok
