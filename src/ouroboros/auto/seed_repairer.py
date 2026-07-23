@@ -206,8 +206,12 @@ class SeedRepairer:
                     "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
                     # Preserve AC order, multiplicity, semantic identity, and
-                    # structured verification evidence exactly as repaired.
-                    "acceptance_criteria": tuple(acceptance),
+                    # structured verification evidence exactly as repaired, but
+                    # drop criteria that became byte-for-byte identical — the
+                    # executor would dispatch each duplicate separately.  Only
+                    # fully-equal specs collapse; any difference in description,
+                    # contract, or identity keeps the criterion distinct.
+                    "acceptance_criteria": tuple(_dedupe_identical_criteria(acceptance)),
                     "metadata": seed.metadata.model_copy(
                         update={
                             "seed_id": f"seed_{uuid4().hex[:12]}",
@@ -313,6 +317,24 @@ class SeedRepairer:
             _check_cancelled()
             review = self.reviewer.review(current, **review_kwargs)
         return current, review, history
+
+
+def _dedupe_identical_criteria(
+    criteria: list[AcceptanceCriterionInput],
+) -> list[AcceptanceCriterionInput]:
+    """Drop only byte-for-byte identical criteria, preserving order/multiplicity.
+
+    Repairing two equal legacy criteria yields two identical repaired ACs that
+    the executor would dispatch separately and event consumers may conflate.
+    Equality here is total — an ``AcceptanceCriterionSpec`` compares every field
+    (description, verification contract, semantic identity), so any real
+    difference in wording, contract, or identity keeps the criterion distinct.
+    """
+    deduped: list[AcceptanceCriterionInput] = []
+    for criterion in criteria:
+        if all(criterion != kept for kept in deduped):
+            deduped.append(criterion)
+    return deduped
 
 
 def _observable_preserving_replacement(criterion: str, *, index: int) -> str:

@@ -1374,30 +1374,26 @@ async def test_pipeline_preserves_structured_contract_through_normalization(tmp_
     assert result.status == "complete", result.blocker
     assert len(executed) == 1
     normalized_criteria = executed[0].acceptance_criteria
-    # The three criteria are known-equivalent hello_auto observation lines, so
-    # normalization canonicalizes them into ONE contract.  Emitting one AC per
-    # source would either duplicate execution work or emit several ACs sharing
-    # a canonical description, which the evaluation map (keyed by description)
-    # dedupes so only the first verification contract stays reachable.
-    assert len(normalized_criteria) == 1
-    merged = normalized_criteria[0]
-    assert isinstance(merged, AcceptanceCriterionSpec)
-    # First non-empty scalar wins in source order; artifacts are a union.
-    assert merged.semantic_ac_key == criteria[0].semantic_ac_key
-    assert merged.verify_command == criteria[0].verify_command
-    assert merged.output_assertion == criteria[0].output_assertion
-    assert merged.investment == criteria[0].investment
-    assert merged.expected_artifacts == (
-        "hello_auto.py",
-        "tests/test_hello_auto.py",
-        ".pytest_cache",
-    )
-    # The merged contract stays reachable through the MCP evaluation boundary.
+    # The three criteria carry DISTINCT verification contracts.  A scalar
+    # AcceptanceCriterionSpec cannot represent several independent commands, so
+    # collapsing them into one canonical AC would strand every command but the
+    # first behind a single description.  Each distinct contract is instead
+    # preserved verbatim and stays uniquely reachable.
+    assert len(normalized_criteria) == len(criteria)
+    for normalized, original in zip(normalized_criteria, criteria, strict=True):
+        assert isinstance(normalized, AcceptanceCriterionSpec)
+        assert normalized.semantic_ac_key == original.semantic_ac_key
+        assert normalized.verify_command == original.verify_command
+        assert normalized.expected_artifacts == original.expected_artifacts
+        assert normalized.output_assertion == original.output_assertion
+        assert normalized.investment == original.investment
+    # Every distinct contract stays reachable through the MCP evaluation boundary.
     from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
 
     spec_map = _seed_ac_spec_map(executed[0])
-    assert list(spec_map) == [merged.description]
-    assert spec_map[merged.description].verify_command == criteria[0].verify_command
+    assert {c.description for c in criteria} <= set(spec_map)
+    for original in criteria:
+        assert spec_map[original.description].verify_command == original.verify_command
 
 
 def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:
@@ -1451,6 +1447,30 @@ def test_seed_repairer_preserves_structured_ac_identity_and_evidence() -> None:
     assert repaired.output_assertion == criterion.output_assertion
     assert repaired.investment == criterion.investment
     assert preserved == untouched
+
+
+def test_seed_repairer_dedupes_fully_identical_criteria_only() -> None:
+    """Byte-identical repaired criteria collapse; distinct ones are preserved."""
+    seed = _seed(
+        ac=(
+            "The CLI should be easy and user-friendly",
+            "The CLI should be easy and user-friendly",
+            "The dashboard should be intuitive",
+        )
+    )
+    ledger = SeedDraftLedger.from_goal(seed.goal)
+    _fill_ready(ledger)
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    repaired_texts = [ac_text(c) for c in result.seed.acceptance_criteria]
+    # The two identical criteria collapse to one; the distinct one survives.
+    assert len(repaired_texts) == 2
+    assert len(set(repaired_texts)) == 2
+    assert any("CLI" in text for text in repaired_texts)
+    assert any("dashboard" in text for text in repaired_texts)
 
 
 def test_seed_repairer_assigns_new_seed_identity_after_mutation() -> None:

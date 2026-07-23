@@ -351,27 +351,32 @@ def test_normalize_execution_acceptance_collapses_legacy_equivalents_without_dup
     assert not only.has_success_contract
 
 
-def test_normalize_execution_acceptance_merges_multi_source_contract_reachably() -> None:
-    """Multi-source regression: collapsed structured contracts stay reachable.
+def test_normalize_execution_acceptance_preserves_distinct_contracts_reachably() -> None:
+    """Multi-source regression: distinct contracts are never conflated.
 
-    Distinct structured criteria that canonicalize into one AC must merge into a
-    single contract with a unique description.  The MCP evaluation map keys
-    contracts by description via ``setdefault``; before the merge the several
-    same-description ACs made every contract but the first unreachable.
+    When several sources carry *different* verification contracts, collapsing
+    them into one scalar ``AcceptanceCriterionSpec`` would drop every command
+    but the first (the evaluation map keys contracts by description).  Each
+    distinct contract must instead survive verbatim and stay uniquely reachable;
+    the bare sibling the canonical text safely subsumes is dropped.
     """
     from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
 
+    returns_spec = AcceptanceCriterionSpec(
+        description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        verify_command="python -m pytest tests/test_return.py",
+        expected_artifacts=("hello_auto.py",),
+    )
+    imports_spec = AcceptanceCriterionSpec(
+        description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        verify_command="python -m pytest tests/test_import.py",
+        expected_artifacts=("tests/test_hello_auto.py",),
+        output_assertion="1 passed",
+    )
     seed = _seed(
-        AcceptanceCriterionSpec(
-            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
-            verify_command="uv run pytest tests/test_hello_auto.py",
-            expected_artifacts=("hello_auto.py",),
-        ),
-        AcceptanceCriterionSpec(
-            description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
-            expected_artifacts=("tests/test_hello_auto.py",),
-            output_assertion="1 passed",
-        ),
+        returns_spec,
+        imports_spec,
+        # Bare sibling: no contract, safely subsumed by the canonical text.
         AcceptanceCriterionSpec(
             description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
         ),
@@ -383,20 +388,65 @@ def test_normalize_execution_acceptance_merges_multi_source_contract_reachably()
 
     normalized = normalize_execution_acceptance(seed)
 
-    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
-    merged = normalized.acceptance_criteria[0]
-    assert isinstance(merged, AcceptanceCriterionSpec)
-    # First non-empty scalar wins; artifacts are an order-preserving union.
-    assert merged.verify_command == "uv run pytest tests/test_hello_auto.py"
-    assert merged.output_assertion == "1 passed"
-    assert merged.expected_artifacts == ("hello_auto.py", "tests/test_hello_auto.py")
+    # Both distinct contracts survive verbatim; the bare sibling is subsumed.
+    assert ac_texts(normalized.acceptance_criteria) == (
+        returns_spec.description,
+        imports_spec.description,
+    )
 
+    spec_map = _seed_ac_spec_map(normalized)
+    assert set(spec_map) == {returns_spec.description, imports_spec.description}
+    assert (
+        spec_map[returns_spec.description].verify_command == "python -m pytest tests/test_return.py"
+    )
+    assert (
+        spec_map[imports_spec.description].verify_command == "python -m pytest tests/test_import.py"
+    )
+    assert spec_map[imports_spec.description].output_assertion == "1 passed"
+
+
+def test_normalize_execution_acceptance_collapses_equivalent_contracts_to_one() -> None:
+    """A canonical text backed by byte-identical contracts stays a single AC.
+
+    Equivalent contracts are safe to collapse — there is no evidence to lose —
+    so the canonical criterion keeps one reachable contract rather than a
+    duplicated one.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    shared = {
+        "verify_command": "uv run pytest tests/test_hello_auto.py",
+        "expected_artifacts": ("hello_auto.py",),
+        "output_assertion": "1 passed",
+    }
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            **shared,
+        ),
+        AcceptanceCriterionSpec(
+            description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+            **shared,
+        ),
+        AcceptanceCriterionSpec(
+            description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+            **shared,
+        ),
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
     spec_map = _seed_ac_spec_map(normalized)
     assert list(spec_map) == [_SINGLE_HELLO_AUTO_OBSERVATION_AC]
     contract = spec_map[_SINGLE_HELLO_AUTO_OBSERVATION_AC]
     assert contract.verify_command == "uv run pytest tests/test_hello_auto.py"
+    assert contract.expected_artifacts == ("hello_auto.py",)
     assert contract.output_assertion == "1 passed"
-    assert contract.expected_artifacts == ("hello_auto.py", "tests/test_hello_auto.py")
 
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
@@ -609,6 +659,49 @@ def test_normalize_execution_acceptance_preserves_distinct_autoresearch_user_ac(
     normalized_texts = ac_texts(normalized.acceptance_criteria)
     assert "train.py must preserve the existing --device CLI flag behavior." in normalized_texts
     assert "Final report must include the baseline val_bpb and memory." in normalized_texts
+
+
+def test_normalize_execution_acceptance_preserves_structured_contract_across_autoresearch() -> None:
+    """Finding #2 regression: autoresearch canonicalization keeps contracts.
+
+    The autoresearch normalizer replaces source descriptions with its six fixed
+    canonical ACs, none of which the hello_auto matcher recognizes.  A source
+    that carried an explicit verification contract must not silently degrade to
+    a contractless canonical criterion — its evidence is re-appended verbatim.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    baseline_spec = AcceptanceCriterionSpec(
+        description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+        verify_command="/usr/bin/time -l uv run train.py",
+        expected_artifacts=("experiment_ledger.json",),
+        output_assertion="baseline recorded",
+    )
+    seed = _seed(baseline_spec).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # The six canonical autoresearch ACs are present, and the structured source
+    # contract survives verbatim and reachable rather than being dropped.
+    normalized_texts = ac_texts(normalized.acceptance_criteria)
+    assert baseline_spec.description in normalized_texts
+    spec_map = _seed_ac_spec_map(normalized)
+    assert baseline_spec.description in spec_map
+    preserved = spec_map[baseline_spec.description]
+    assert preserved.verify_command == "/usr/bin/time -l uv run train.py"
+    assert preserved.expected_artifacts == ("experiment_ledger.json",)
+    assert preserved.output_assertion == "baseline recorded"
 
 
 def test_normalize_execution_acceptance_preserves_existing_autoresearch_runtime_context() -> None:
