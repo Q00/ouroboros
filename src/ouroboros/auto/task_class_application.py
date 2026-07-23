@@ -2,9 +2,10 @@
 
 The Socratic interview standardizes the ledger; :mod:`domain_inference`
 (L1-b) classifies the ledger into a single :class:`TaskClass`; this
-module wires that class's default acceptance-criteria template into the
-:class:`ouroboros.core.seed.Seed` so the auto pipeline never ships a
-Seed that lacks the class-appropriate runtime AC.
+module wires that class's default acceptance-criteria template into a
+:class:`ouroboros.core.seed.Seed`. The guarded Auto pipeline caller invokes it
+only for an empty contract, so existing pipeline Seed criteria remain
+unmodified.
 
 The helper is intentionally split out from the inference module so:
 
@@ -41,8 +42,8 @@ class AppliedTaskClassDefaults:
         ``model_copy`` is performed) so callers can detect a no-op
         without an equality dance.
     injected_ac:
-        The acceptance-criteria entries prepended in this call —
-        possibly a subset of the catalog template if some entries were
+        The acceptance-criteria entries added in this call — possibly a
+        subset of the catalog template if some entries were
         already present verbatim in the original seed.
     task_class:
         The class whose defaults were applied (mirrors the caller's
