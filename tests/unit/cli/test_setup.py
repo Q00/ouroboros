@@ -83,10 +83,13 @@ class TestCodexSetup:
         assert 'command = "uvx"' in contents
         assert 'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]' in contents
 
-    def test_register_codex_mcp_server_honors_codex_home(self, tmp_path: Path) -> None:
+    def test_register_codex_mcp_server_honors_codex_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         default_home = tmp_path / "home"
         default_home.mkdir()
-        codex_home = default_home / "custom-codex"
+        monkeypatch.chdir(tmp_path)
+        codex_home = tmp_path / "~" / "custom-codex"
 
         with (
             patch("pathlib.Path.home", return_value=default_home),

@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.mcp_doctor import (
     CheckResult,
+    _codex_home_from_env,
     check_claude_agent_sdk_import,
     check_codex_oauth_auth,
     check_event_store,
@@ -306,6 +307,11 @@ class TestCheckLitellmImport:
 
 
 class TestCheckCodexOauthAuth:
+    def test_codex_home_preserves_literal_path_semantics(self, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", "~/custom-codex")
+
+        assert _codex_home_from_env() == Path("~/custom-codex")
+
     def test_passes_when_codex_auth_json_exists_without_openai_key(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()

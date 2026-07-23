@@ -720,7 +720,7 @@ def _active_codex_home() -> Path:
     """Resolve the one Codex home used by every setup artifact."""
     from .mcp_doctor import _codex_home_from_env
 
-    return _codex_home_from_env()
+    return _codex_home_from_env().absolute()
 
 
 def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:

@@ -242,10 +242,10 @@ _CODEX_BACKENDS = frozenset({"codex", "codex_cli"})
 
 
 def _codex_home_from_env() -> Path:
-    """Return the Codex home directory implied by the current environment."""
+    """Return CODEX_HOME using the same literal path semantics as Codex CLI."""
     codex_home = os.environ.get("CODEX_HOME", "").strip()
     if codex_home:
-        return Path(codex_home).expanduser()
+        return Path(codex_home)
     return Path.home() / ".codex"
 
 
