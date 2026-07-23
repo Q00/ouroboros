@@ -973,6 +973,74 @@ def test_normalize_execution_acceptance_exact_canonical_source_keeps_sequence() 
     assert list(texts) == list(_AUTORESEARCH_CANONICAL_AC)
 
 
+def test_normalize_execution_acceptance_wrapped_structured_runs_once() -> None:
+    """Blocker regression: a wrapped structured requirement produces one contracted AC.
+
+    The string normalizer emits the unwrapped requirement; the contract must be
+    transferred ONTO that emission (with case preserved and a fresh key), not
+    appended as a second contracted copy — otherwise the requirement dispatches
+    twice.
+    """
+    wrapped = _SEED_REPAIRER_WRAPPER + "RawStderr.LOG must be preserved for every attempt."
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=wrapped, verify_command="cmd_stderr")
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    texts = ac_texts(normalized.acceptance_criteria)
+    stderr_acs = [t for t in texts if "RawStderr.LOG" in t]
+    # Exactly one AC carries the requirement — case preserved — and it is contracted.
+    assert len(stderr_acs) == 1
+    stderr_spec = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and "RawStderr.LOG" in c.description
+    )
+    assert stderr_spec.verify_command == "cmd_stderr"
+    commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "cmd_stderr"
+    ]
+    assert commands == ["cmd_stderr"]
+
+
+def test_normalize_execution_acceptance_multi_stage_source_not_mis_transferred() -> None:
+    """Blocker regression: a multi-canonical restatement is not transferred to a narrower AC.
+
+    "up to two post-baseline experiments … sequentially … kept … reverted" spans
+    experiment count (canonical 1) AND sequential keep/revert semantics
+    (canonical 2).  A contracted source must be preserved verbatim, not have its
+    contract attached to the narrower count-only canonical AC.
+    """
+    multi_stage = (
+        "Seed requires up to two post-baseline experiments to selected sequentially "
+        "from the current best state, with improvements kept and all non-improvements "
+        "reverted before the next attempt."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=multi_stage, verify_command="cmd_multi")
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # The original structured criterion survives verbatim with its contract.
+    preserved = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and "post-baseline experiments" in c.description
+    )
+    assert preserved.verify_command == "cmd_multi"
+    # The narrower count-only canonical AC did NOT receive the contract.
+    count_ac = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "at most two train.py-only experiment entries" in c.description
+    )
+    assert count_ac.verify_command != "cmd_multi"
+
+
 def test_normalize_execution_acceptance_groups_identical_exact_canonical_sources() -> None:
     """Blocker regression: byte-identical exact canonical sources collapse once.
 

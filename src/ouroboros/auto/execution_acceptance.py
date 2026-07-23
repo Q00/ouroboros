@@ -399,20 +399,20 @@ def _restore_surviving_acceptance_specs(
         if autoresearch:
             subject = _unwrap_seed_repairer_original_requirement(source_text).strip()
             covered, canonical_index = _autoresearch_coverage(subject)
+            # A structured source subsumed by a canonical AC transfers its contract
+            # ONTO that canonical criterion; otherwise the string normalizer already
+            # emitted the source's unwrapped requirement (bare), so the contract is
+            # transferred onto THAT emission — never appended as a second copy.
+            # Either way the requirement runs exactly once, contracted.
             if covered and canonical_index is not None:
-                # A structured source truly subsumed by a canonical AC: transfer
-                # its contract ONTO that canonical criterion (keeping the
-                # canonical's tier-0 position) instead of emitting a verbatim
-                # duplicate.  Otherwise execution/evaluation would enumerate both
-                # the contractless canonical AC and the source.
-                canonical_text = _AUTORESEARCH_CANONICAL_AC[canonical_index]
-                if _transfer_contract_to_emitted_canonical(
-                    emissions,
-                    canonical_text,
-                    criterion,  # type: ignore[arg-type]
-                ):
-                    _pop(index)
-                    continue
+                target = _AUTORESEARCH_CANONICAL_AC[canonical_index]
+            else:
+                target = subject
+            transferred = _build_transferred_spec(criterion, target)  # type: ignore[arg-type]
+            _pop(index)
+            if not _place_transferred_onto_emission(emissions, target, transferred):
+                emissions.append(((1, float(index)), transferred))
+            continue
         _pop(index)
         emissions.append(((1, float(index)), criterion))
 
@@ -451,49 +451,58 @@ def _collapse_exact_match_criteria(
     return result
 
 
-def _transfer_contract_to_emitted_canonical(
-    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
-    canonical_text: str,
+def _build_transferred_spec(
     source: AcceptanceCriterionSpec,
-) -> bool:
-    """Attach a covered source's contract to its canonical AC, in place.
+    description: str,
+) -> AcceptanceCriterionSpec:
+    """Return the source's contract under ``description`` with a safe identity.
 
-    Returns whether the source is fully represented by the canonical AC (so the
-    caller may drop it).  The canonical criterion keeps its description and
-    tier-0 position and gains the source's complete identity — verification
-    evidence, investment authority, and an explicitly-supplied ``semantic_ac_key``
-    that runtime routing/recovery correlate on — so the executor/evaluator sees
-    exactly one contracted AC.
-
-    A canonical AC that already carries any explicit authority is only treated as
-    representing this source when their identities are equivalent; a *different*
-    identity (distinct command, artifacts, assertion, investment, or explicit
-    key) returns False so the caller preserves the source as its own criterion
-    rather than silently overwriting authority.  Comparison is on explicit
-    identity — an auto-derived key is not an intended identity, so two equivalent
-    contracts that differ only in a derived key still collapse once.
+    The spec keeps the source's verification evidence and investment authority;
+    an explicitly-supplied ``semantic_ac_key`` is preserved (routing/recovery
+    correlate on it), while an auto-derived key is dropped so ``Seed`` re-derives
+    a fresh one from ``description`` rather than persisting a stale source key.
     """
-    target = canonical_text.strip()
     explicit_key = (
         source.semantic_ac_key
         if source.semantic_ac_key is not None
         and source.semantic_ac_key != derive_semantic_ac_key(source)
         else None
     )
-    transferred = AcceptanceCriterionSpec(
-        description=canonical_text,
+    return AcceptanceCriterionSpec(
+        description=description,
         semantic_ac_key=explicit_key,
         verify_command=source.verify_command,
         expected_artifacts=source.expected_artifacts,
         output_assertion=source.output_assertion,
         investment=source.investment,
     )
+
+
+def _place_transferred_onto_emission(
+    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
+    target_text: str,
+    transferred: AcceptanceCriterionSpec,
+) -> bool:
+    """Attach a contract onto the already-emitted criterion for ``target_text``.
+
+    Returns whether the source is now represented by an existing emission (so the
+    caller may drop it).  The target — a canonical AC or the string normalizer's
+    unwrapped passthrough of this same requirement — keeps its description and
+    position and gains the contract, so the executor sees exactly one contracted
+    AC instead of a bare requirement plus a duplicate contracted copy.
+
+    An emission that already carries explicit authority is only treated as
+    representing this source when their identities are equivalent; a *different*
+    identity (distinct command, artifacts, assertion, investment, or explicit
+    key) returns False so the caller preserves the source separately.  Comparison
+    is on explicit identity — an auto-derived key is not intended identity, so two
+    equivalent contracts differing only in a derived key still collapse once.
+    """
+    target = target_text.strip()
     for position, (key, item) in enumerate(emissions):
         if ac_text(item).strip() != target:
             continue
         if isinstance(item, AcceptanceCriterionSpec) and _carries_explicit_contract(item):
-            # Occupied by explicit authority: only an equivalent identity is safe
-            # to collapse onto; anything distinct must survive on its own.
             return _autoresearch_identity_matches(item, transferred)
         emissions[position] = (key, transferred)
         return True
@@ -773,9 +782,14 @@ _AUTORESEARCH_KNOWN_COVERED: dict[str, int | None] = {
     "as first-class content for the autoresearch contract": None,
     "seed requires execution to record a baseline uv run train.py result "
     "before any experiment changes evaluated": 0,
+    # Spans experiment count (canonical index 1) AND sequential keep/revert
+    # semantics (canonical index 2); no single canonical AC is one-to-one
+    # equivalent, so a contracted source is preserved verbatim rather than
+    # transferred onto the narrower count-only AC.  A bare restatement is still
+    # covered — the canonical set collectively expresses it.
     "seed requires up to two post-baseline experiments to selected sequentially "
     "from the current best state, with improvements kept and all non-improvements "
-    "reverted before the next attempt": 1,
+    "reverted before the next attempt": None,
     "seed requires every baseline and experiment ledger entry to report command, "
     "changed files, diff summary, observed val_bpb, memory, status, and "
     "keep/discard conclusion": 3,
