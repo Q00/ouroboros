@@ -1864,6 +1864,319 @@ async def test_prepare_collision_preserves_existing_owner_workspace_lock(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_exact_identity_prepare_collision_preserves_original_generation(tmp_path) -> None:
+    """A failed duplicate generation cannot retire the existing exact owner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'exact-owner-collision.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    runner._task_workspace = TaskWorkspace(
+        durable_id="exact-owner-collision",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/exact-owner-collision",
+        lock_path="/tmp/exact-owner-collision.lock",
+    )
+    session_id = "session-exact-owner-collision"
+    execution_id = "exec-exact-owner-collision"
+    original = await runner.prepare_session(
+        _seed(),
+        execution_id=execution_id,
+        session_id=session_id,
+    )
+    assert original.is_ok
+    original_generation = runner._process_local_authorities[(session_id, execution_id)]
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            collision = await runner.prepare_session(
+                _seed(),
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+        assert collision.is_err
+        assert runner._process_local_authorities[(session_id, execution_id)] is original_generation
+        assert runner._task_workspace_users == {(session_id, execution_id)}
+        assert runner._task_workspace_lock_held is True
+        assert heartbeat.is_holder_alive(session_id)
+        release_lock_mock.assert_not_called()
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path) -> None:
+    """One terminal session cannot release a workspace used by another session."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-users.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    runner._task_workspace = TaskWorkspace(
+        durable_id="workspace-users",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/workspace-users",
+        lock_path="/tmp/workspace-users.lock",
+    )
+    first = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-workspace-first",
+        session_id="session-workspace-first",
+    )
+    second = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-workspace-second",
+        session_id="session-workspace-second",
+    )
+    assert first.is_ok
+    assert second.is_ok
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            runner._cleanup_pre_execution_state(
+                "exec-workspace-first",
+                "session-workspace-first",
+                session_registered=False,
+            )
+            release_lock_mock.assert_not_called()
+            assert runner._task_workspace_users == {
+                ("session-workspace-second", "exec-workspace-second")
+            }
+
+            runner._cleanup_pre_execution_state(
+                "exec-workspace-second",
+                "session-workspace-second",
+                session_registered=False,
+            )
+            release_lock_mock.assert_called_once_with("/tmp/workspace-users.lock")
+            assert not runner._task_workspace_users
+
+            runner._cleanup_pre_execution_state(
+                "exec-workspace-second",
+                "session-workspace-second",
+                session_registered=False,
+            )
+            release_lock_mock.assert_called_once_with("/tmp/workspace-users.lock")
+    finally:
+        runner._retire_process_local_authority(
+            session_id="session-workspace-first",
+            execution_id="exec-workspace-first",
+        )
+        runner._retire_process_local_authority(
+            session_id="session-workspace-second",
+            execution_id="exec-workspace-second",
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_inflight_preparation_reserves_workspace_before_registration(tmp_path) -> None:
+    """A session finishing during another contract build cannot release its lock."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-prepare-race.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    runner._task_workspace = TaskWorkspace(
+        durable_id="workspace-prepare-race",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/workspace-prepare-race",
+        lock_path="/tmp/workspace-prepare-race.lock",
+    )
+    first = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-workspace-prepare-first",
+        session_id="session-workspace-prepare-first",
+    )
+    assert first.is_ok
+    entered_build = Event()
+    release_build = Event()
+    original_build = runner._build_execution_contract
+
+    def _blocked_build(**kwargs: object) -> dict[str, object]:
+        entered_build.set()
+        assert release_build.wait(timeout=2)
+        return original_build(**kwargs)
+
+    try:
+        with (
+            patch.object(runner, "_build_execution_contract", _blocked_build),
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            second_task = asyncio.create_task(
+                runner.prepare_session(
+                    _seed(),
+                    execution_id="exec-workspace-prepare-second",
+                    session_id="session-workspace-prepare-second",
+                )
+            )
+            assert await asyncio.to_thread(entered_build.wait, 1)
+
+            runner._cleanup_pre_execution_state(
+                "exec-workspace-prepare-first",
+                "session-workspace-prepare-first",
+                session_registered=False,
+            )
+            release_lock_mock.assert_not_called()
+            assert runner._task_workspace_reservations
+
+            release_build.set()
+            second = await asyncio.wait_for(second_task, timeout=2)
+            assert second.is_ok
+            assert not runner._task_workspace_reservations
+
+            runner._cleanup_pre_execution_state(
+                "exec-workspace-prepare-second",
+                "session-workspace-prepare-second",
+                session_registered=False,
+            )
+            release_lock_mock.assert_called_once_with("/tmp/workspace-prepare-race.lock")
+    finally:
+        release_build.set()
+        runner._retire_process_local_authority(
+            session_id="session-workspace-prepare-first",
+            execution_id="exec-workspace-prepare-first",
+        )
+        runner._retire_process_local_authority(
+            session_id="session-workspace-prepare-second",
+            execution_id="exec-workspace-prepare-second",
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_handoff_reserves_workspace_before_reclaim(tmp_path) -> None:
+    """Another session cannot release the lock during retained-workspace restore."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-resume-race.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    workspace = TaskWorkspace(
+        durable_id="workspace-resume-race",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/workspace-resume-race",
+        lock_path="/tmp/workspace-resume-race.lock",
+    )
+    runner._task_workspace = workspace
+    first = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-workspace-resume-first",
+        session_id="session-workspace-resume-first",
+    )
+    second = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-workspace-resume-second",
+        session_id="session-workspace-resume-second",
+    )
+    assert first.is_ok
+    assert second.is_ok
+    runner._release_task_workspace_for_identity(
+        session_id=first.value.session_id,
+        execution_id=first.value.execution_id,
+    )
+    reservation = runner._reserve_task_workspace()
+    assert reservation is not None
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            runner._cleanup_pre_execution_state(
+                second.value.execution_id,
+                second.value.session_id,
+                session_registered=False,
+            )
+            release_lock_mock.assert_not_called()
+
+            runner._task_workspace = workspace
+            contract = first.value.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+            generation, already_claimed = runner._claim_process_local_authority_generation(
+                first.value.session_id,
+                first.value.execution_id,
+                contract,
+            )
+            assert generation is not None
+            assert already_claimed is False
+            runner._release_task_workspace_reservation(reservation)
+            release_lock_mock.assert_not_called()
+
+            runner._cleanup_pre_execution_state(
+                first.value.execution_id,
+                first.value.session_id,
+                session_registered=False,
+            )
+            release_lock_mock.assert_called_once_with("/tmp/workspace-resume-race.lock")
+    finally:
+        runner._release_task_workspace_reservation(reservation)
+        runner._retire_process_local_authority(
+            session_id=first.value.session_id,
+            execution_id=first.value.execution_id,
+        )
+        runner._retire_process_local_authority(
+            session_id=second.value.session_id,
+            execution_id=second.value.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_path) -> None:
+    """Terminal reconciliation through direct cancellation drains workspace use."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-cancel-workspace.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    runner._task_workspace = TaskWorkspace(
+        durable_id="terminal-cancel-workspace",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/terminal-cancel-workspace",
+        lock_path="/tmp/terminal-cancel-workspace.lock",
+    )
+    execution_id = "exec-terminal-cancel-workspace"
+    session_id = "session-terminal-cancel-workspace"
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=execution_id,
+        session_id=session_id,
+    )
+    assert prepared.is_ok
+    terminal = await runner._session_repo.mark_completed(session_id, {"done": True})
+    assert terminal.is_ok
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            cancelled = await runner.cancel_execution(execution_id)
+
+        assert cancelled.is_ok
+        assert cancelled.value["status"] == "already_terminal"
+        assert (session_id, execution_id) not in runner._process_local_authorities
+        assert not runner._task_workspace_users
+        assert runner._task_workspace_lock_held is False
+        release_lock_mock.assert_called_once_with("/tmp/terminal-cancel-workspace.lock")
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_prepare_rejects_terminal_only_session_id(tmp_path) -> None:
     """Terminal-only legacy history cannot acquire a new live execution owner."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-only-conflict.db'}")
@@ -2990,6 +3303,79 @@ async def test_public_running_cancellation_signals_claimed_process_local_owner(t
 
 
 @pytest.mark.asyncio
+async def test_claimed_owner_completion_racing_cancel_publication_clears_signal(
+    tmp_path,
+) -> None:
+    """A late local signal cannot survive the owner's terminal winner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'local-cancel-race.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-local-cancel-race",
+        session_id="session-local-cancel-race",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+    original_request_cancellation = request_cancellation
+
+    async def _publish_after_completion(
+        session_id: str,
+        *,
+        reason: str,
+        cancelled_by: str,
+    ) -> None:
+        completed = await runner._session_repo.mark_completed(session_id, {"done": True})
+        assert completed.is_ok
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=tracker.execution_id,
+        )
+        await original_request_cancellation(
+            session_id,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+
+    try:
+        with patch(
+            "ouroboros.orchestrator.runner.request_cancellation",
+            _publish_after_completion,
+        ):
+            outcome = await request_process_local_cancellation(
+                tracker,
+                runner._session_repo,
+                reason="racing local cancellation",
+                cancelled_by="test",
+            )
+
+        assert outcome is not None
+        assert outcome.disposition == ProcessLocalCancellationDisposition.ALREADY_TERMINAL
+        assert not await is_cancellation_requested(tracker.session_id)
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_job_manager_cancel_does_not_terminalize_a_claimed_process_local_owner(
     tmp_path,
 ) -> None:
@@ -3357,6 +3743,54 @@ async def test_public_cancel_signals_a_live_foreign_process_owner(tmp_path) -> N
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_foreign_owner_terminal_racing_cancel_publication_clears_signal(tmp_path) -> None:
+    """A stale foreign liveness observation cannot leave a late file marker."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'foreign-cancel-race.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-foreign-cancel-race",
+        session_id="session-foreign-cancel-race",
+    )
+    assert prepared.is_ok
+    stale_tracker = prepared.value
+    runner._retire_process_local_authority(
+        session_id=stale_tracker.session_id,
+        execution_id=stale_tracker.execution_id,
+    )
+    completed = await runner._session_repo.mark_completed(
+        stale_tracker.session_id,
+        {"done": True},
+    )
+    assert completed.is_ok
+
+    try:
+        with patch(
+            "ouroboros.orchestrator.heartbeat.is_holder_alive",
+            return_value=True,
+        ):
+            outcome = await request_process_local_cancellation(
+                stale_tracker,
+                runner._session_repo,
+                reason="racing foreign cancellation",
+                cancelled_by="test",
+            )
+
+        assert outcome is not None
+        assert outcome.disposition == ProcessLocalCancellationDisposition.ALREADY_TERMINAL
+        assert not heartbeat.has_cancellation_request(stale_tracker.session_id)
+        assert not await is_cancellation_requested(stale_tracker.session_id)
+    finally:
+        await clear_cancellation(stale_tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=stale_tracker.session_id,
+            execution_id=stale_tracker.execution_id,
         )
         await event_store.close()
 

@@ -1171,6 +1171,43 @@ class TestFindOrphanedSessions:
         mock_event_store.get_all_sessions.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_snapshot_reconstructed_terminal_tracker_is_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Snapshot classification rechecks authoritative reconstructed status."""
+        from ouroboros.persistence.event_store import SessionActivitySnapshot
+
+        old_time = datetime.now(UTC) - timedelta(hours=2)
+        mock_event_store.get_session_activity_snapshots = AsyncMock(
+            return_value=[
+                SessionActivitySnapshot(
+                    session_id="sess_1",
+                    execution_id="exec_sess_1",
+                    seed_id="seed_sess_1",
+                    start_time=old_time.isoformat(),
+                    last_activity=old_time,
+                    status_event_type=None,
+                    runtime_status="running",
+                )
+            ]
+        )
+        repository.reconstruct_session = AsyncMock(
+            return_value=Result.ok(
+                SessionTracker.create(
+                    "exec_sess_1",
+                    "seed_sess_1",
+                    session_id="sess_1",
+                ).with_status(SessionStatus.COMPLETED)
+            )
+        )
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
     async def test_failed_session_not_orphaned(
         self,
         repository: SessionRepository,

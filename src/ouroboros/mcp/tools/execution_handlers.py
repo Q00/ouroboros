@@ -828,6 +828,30 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         """Release the handler-local pre-resume gate after the runner settles."""
         self._process_local_resume_handoffs.discard(session_id)
 
+    @staticmethod
+    def _release_runner_task_workspace(
+        runner: object,
+        workspace: TaskWorkspace,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Release through the runner lifecycle boundary when it is available.
+
+        Lightweight test/runtime doubles may not implement the private runner
+        boundary.  The fallback preserves the legacy single-owner behavior for
+        those doubles; production runners always take the idempotent,
+        identity-aware path.
+        """
+        release_workspace = getattr(runner, "_release_task_workspace_for_identity", None)
+        if callable(release_workspace):
+            release_workspace(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            return
+        release_lock(workspace.lock_path)
+
     async def _release_terminal_process_local_owner(
         self,
         *,
@@ -856,6 +880,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         workspace: TaskWorkspace | None,
         owned_event_store: EventStore | None,
         retained_resume_handoff: bool,
+        workspace_reservation: object | None = None,
     ) -> None:
         """Close a task cancelled before its coroutine can enter ``finally``.
 
@@ -925,8 +950,14 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 except Exception:
                     log.exception("mcp.tool.execute_seed.event_store_close_error")
         finally:
+            runner._release_task_workspace_reservation(workspace_reservation)
             if workspace is not None:
-                release_lock(workspace.lock_path)
+                self._release_runner_task_workspace(
+                    runner,
+                    workspace,
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
             if retained_resume_handoff:
                 self._finish_process_local_resume_handoff(tracker.session_id)
 
@@ -968,7 +999,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         )
         owner._unregister_session(tracker.execution_id, tracker.session_id)
         if owner._task_workspace is not None:
-            release_lock(owner._task_workspace.lock_path)
+            self._release_runner_task_workspace(
+                owner,
+                owner._task_workspace,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
         await clear_cancellation(tracker.session_id)
         await self._release_terminal_process_local_owner(
             session_id=tracker.session_id,
@@ -1412,6 +1448,11 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             use_worktree = bool(arguments.get("use_worktree", True))
             retained_owner: OrchestratorRunner | None = None
             retained_resume_handoff = False
+            workspace_runner: OrchestratorRunner | None = None
+            workspace_session_id = session_id
+            workspace_execution_id = execution_id
+            workspace_reservation_runner: OrchestratorRunner | None = None
+            workspace_reservation: object | None = None
 
             try:
                 if is_resume and session_id:
@@ -1424,6 +1465,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
                     tracker = tracker_result.value
+                    workspace_session_id = tracker.session_id
+                    workspace_execution_id = tracker.execution_id
                     try:
                         execution_preferences = _persisted_execution_preferences(tracker.progress)
                     except ValueError as exc:
@@ -1470,6 +1513,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
                     if use_worktree:
+                        if retained_owner is not None:
+                            workspace_reservation_runner = retained_owner
+                            workspace_reservation = retained_owner._reserve_task_workspace()
                         persisted = TaskWorkspace.from_progress_dict(
                             tracker.progress.get("workspace")
                         )
@@ -1481,6 +1527,11 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 allow_dirty=inherited_runtime_handle is not None,
                             )
                         except WorktreeError as e:
+                            if workspace_reservation_runner is not None:
+                                workspace_reservation_runner._release_task_workspace_reservation(
+                                    workspace_reservation
+                                )
+                                workspace_reservation = None
                             return Result.err(
                                 MCPToolError(
                                     f"Task workspace error: {e.message}",
@@ -1583,6 +1634,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         frugality_assurance=raw_frugality_assurance,
                         session_signal_hub=self.session_signal_hub,
                     )
+                workspace_runner = runner
                 runtime_backend_attr = getattr(agent_adapter, "runtime_backend", None)
                 if not (isinstance(runtime_backend_attr, str) and runtime_backend_attr):
                     runtime_backend_attr = getattr(agent_adapter, "_runtime_backend", None)
@@ -1601,6 +1653,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     if prepared.is_err:
                         prepared_details = prepared.error.details
+                        detail_session_id = prepared_details.get("session_id")
+                        detail_execution_id = prepared_details.get("execution_id")
+                        if isinstance(detail_session_id, str):
+                            workspace_session_id = detail_session_id
+                        if isinstance(detail_execution_id, str):
+                            workspace_execution_id = detail_execution_id
                         terminal_persistence_pending = (
                             prepared_details.get("resume_blocked") == "terminal_persistence_pending"
                         )
@@ -1650,6 +1708,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
                     tracker = prepared.value
+                    workspace_session_id = tracker.session_id
+                    workspace_execution_id = tracker.execution_id
                     self._remember_process_local_owner(
                         tracker,
                         runner,
@@ -1672,6 +1732,10 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     _event_store: EventStore = event_store,
                     _owns_event_store: bool = owns_event_store,
                     _retained_resume_handoff: bool = retained_resume_handoff,
+                    _workspace_reservation_runner: OrchestratorRunner | None = (
+                        workspace_reservation_runner
+                    ),
+                    _workspace_reservation: object | None = workspace_reservation,
                 ) -> None:
                     nonlocal background_started, retained_after_run, retained_event_store_to_close
                     # This must be the first coroutine action. A done callback
@@ -1791,8 +1855,17 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             runner=_runner,
                             session_repo=_session_repo,
                         )
+                        if _workspace_reservation_runner is not None:
+                            _workspace_reservation_runner._release_task_workspace_reservation(
+                                _workspace_reservation
+                            )
                         if _workspace is not None:
-                            release_lock(_workspace.lock_path)
+                            self._release_runner_task_workspace(
+                                _runner,
+                                _workspace,
+                                session_id=_tracker.session_id,
+                                execution_id=_tracker.execution_id,
+                            )
                         if _owns_event_store and not retained_after_run:
                             try:
                                 close_result = _event_store.close()
@@ -1870,6 +1943,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 tracker=tracker,
                                 runner=runner,
                                 workspace=workspace,
+                                workspace_reservation=workspace_reservation,
                                 owned_event_store=event_store if owns_event_store else None,
                                 retained_resume_handoff=retained_resume_handoff,
                             )
@@ -1962,8 +2036,21 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # In synchronous mode, _run_in_background was told NOT to own
                 # cleanup (_owns_event_store=False), so the caller cleans up
                 # after reconstruct_session has finished using the store.
+                if not launched or synchronous:
+                    if workspace_reservation_runner is not None:
+                        workspace_reservation_runner._release_task_workspace_reservation(
+                            workspace_reservation
+                        )
                 if workspace is not None and (not launched or synchronous):
-                    release_lock(workspace.lock_path)
+                    if workspace_runner is not None:
+                        self._release_runner_task_workspace(
+                            workspace_runner,
+                            workspace,
+                            session_id=workspace_session_id,
+                            execution_id=workspace_execution_id,
+                        )
+                    else:
+                        release_lock(workspace.lock_path)
                 if owns_event_store and (not launched or synchronous) and not retained_after_run:
                     try:
                         close_result = event_store.close()

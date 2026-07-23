@@ -753,6 +753,8 @@ class OrchestratorRunner:
         )
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
         self._task_cwd = task_cwd
+        self._task_workspace_value: TaskWorkspace | None = None
+        self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
@@ -847,6 +849,8 @@ class OrchestratorRunner:
         self._process_local_authorities: dict[
             tuple[str, str], _ProcessLocalAuthorityGeneration
         ] = {}
+        self._task_workspace_users: set[tuple[str, str]] = set()
+        self._task_workspace_reservations: set[object] = set()
         self._pending_lifecycle_intents: dict[str, _PendingLifecycleIntent] = {}
         self._execution_guidance: ExecutionGuidanceBundle | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
@@ -1318,6 +1322,17 @@ class OrchestratorRunner:
         """
         return dict(self._active_sessions)
 
+    @property
+    def _task_workspace(self) -> TaskWorkspace | None:
+        """Return the workspace whose lock backs this runner's current effects."""
+        return self._task_workspace_value
+
+    @_task_workspace.setter
+    def _task_workspace(self, workspace: TaskWorkspace | None) -> None:
+        """Bind a freshly acquired workspace and reset release idempotence."""
+        self._task_workspace_value = workspace
+        self._task_workspace_lock_held = workspace is not None
+
     def _register_session(self, execution_id: str, session_id: str) -> None:
         """Register an active session for cancellation tracking.
 
@@ -1388,8 +1403,74 @@ class OrchestratorRunner:
             )
         if session_registered and execution_id is not None and session_id is not None:
             self._unregister_session(execution_id, session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+    def _release_task_workspace_for_identity(
+        self,
+        *,
+        session_id: str | None,
+        execution_id: str | None,
+    ) -> bool:
+        """Release the shared workspace lock only after its last local owner exits.
+
+        A runner may prepare more than one process-local session, while the
+        managed workspace lock is runner-wide.  The lifecycle path named by
+        ``session_id``/``execution_id`` is relinquishing its workspace use even
+        when its authority remains registered for retry.  Any other live
+        runner-local authority keeps the lock.  If the named identity was never
+        registered here, a global live registration for the same session means
+        this is a collision cleanup and must not release the real owner's lock.
+        """
+        identity = (
+            (session_id, execution_id)
+            if session_id is not None and execution_id is not None
+            else None
+        )
+        owns_named_workspace = identity in self._task_workspace_users
+        if identity is not None:
+            self._task_workspace_users.discard(identity)
+        if self._task_workspace is None or not self._task_workspace_lock_held:
+            return False
+        if self._task_workspace_users or self._task_workspace_reservations:
+            return False
+        if (
+            identity is not None
+            and not owns_named_workspace
+            and session_id is not None
+            and _has_live_process_local_authority_session(session_id)
+        ):
+            return False
+
+        release_lock(self._task_workspace.lock_path)
+        self._task_workspace_lock_held = False
+        return True
+
+    def _reserve_task_workspace(self, token: object | None = None) -> object | None:
+        """Keep a held runner workspace alive across a pre-identity handoff."""
+        if self._task_workspace is None:
+            return None
+        reservation = token if token is not None else object()
+        self._task_workspace_reservations.add(reservation)
+        return reservation
+
+    def _release_task_workspace_reservation(self, token: object | None) -> bool:
+        """Release one pre-identity reservation and the lock if it was last."""
+        if token is None:
+            return False
+        self._task_workspace_reservations.discard(token)
+        if (
+            self._task_workspace is None
+            or not self._task_workspace_lock_held
+            or self._task_workspace_users
+            or self._task_workspace_reservations
+        ):
+            return False
+        release_lock(self._task_workspace.lock_path)
+        self._task_workspace_lock_held = False
+        return True
 
     def _preserve_process_local_owner_for_retry(
         self,
@@ -1414,8 +1495,10 @@ class OrchestratorRunner:
             session_id,
             release_liveness_lease=False,
         )
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
 
     def _terminal_persistence_pending_result(
         self,
@@ -1642,8 +1725,10 @@ class OrchestratorRunner:
             )
             self._unregister_session(execution_id, session_id)
             await clear_cancellation(session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
             return durable_status
 
         return await _await_process_local_cleanup(_reconcile())
@@ -1727,8 +1812,10 @@ class OrchestratorRunner:
             )
             self._unregister_session(execution_id, session_id)
             await clear_cancellation(session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
         try:
             await self._event_store.append(
                 create_execution_terminal_event(
@@ -2171,12 +2258,16 @@ class OrchestratorRunner:
         """Claim a live capability before any effectful session work begins."""
         if not isinstance(raw_contract, Mapping):
             return None, False
-        return _claim_process_local_authority_generation(
+        generation, already_claimed = _claim_process_local_authority_generation(
             session_id,
             execution_id,
             raw_contract.get("foundation_a_authority"),
             self._adapter,
         )
+        if generation is not None and self._task_workspace is not None:
+            self._task_workspace_users.add((session_id, execution_id))
+            self._task_workspace_lock_held = True
+        return generation, already_claimed
 
     def _release_process_local_authority(
         self,
@@ -2205,8 +2296,10 @@ class OrchestratorRunner:
         """
         self._process_local_authorities.pop((session_id, execution_id), None)
         self._active_sessions.pop(execution_id, None)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
 
     def _register_process_local_authority(
         self,
@@ -2292,6 +2385,9 @@ class OrchestratorRunner:
                     "cause": str(exc),
                 },
             ) from exc
+        if self._task_workspace is not None:
+            self._task_workspace_users.add((session_id, execution_id))
+            self._task_workspace_lock_held = True
 
     def _retire_process_local_authority(
         self,
@@ -2312,6 +2408,7 @@ class OrchestratorRunner:
 
             release_session_lock(session_id)
         self._process_local_authorities.pop((session_id, execution_id), None)
+        self._task_workspace_users.discard((session_id, execution_id))
         return retired
 
     def _discard_process_local_authority(
@@ -2589,8 +2686,10 @@ class OrchestratorRunner:
                                 execution_id=execution_id,
                                 error=terminal_mark_error,
                             )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
             return (session_id, execution_id) in self._process_local_authorities
 
         return bool(await _await_process_local_cleanup(_reconcile()))
@@ -2941,8 +3040,10 @@ class OrchestratorRunner:
                 )
                 self._unregister_session(tracker.execution_id, tracker.session_id)
                 await clear_cancellation(tracker.session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
         self._pending_lifecycle_intents.pop(tracker.session_id, None)
         return Result.ok(
@@ -4688,6 +4789,10 @@ class OrchestratorRunner:
                 session_id=session_id,
                 execution_id=execution_id,
             )
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
             await clear_cancellation(session_id)
             return Result.ok(
                 {
@@ -5224,8 +5329,10 @@ class OrchestratorRunner:
                         execution_id=execution_id,
                     )
                     self._unregister_session(execution_id, session_id)
-                    if self._task_workspace is not None:
-                        release_lock(self._task_workspace.lock_path)
+                    self._release_task_workspace_for_identity(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
 
             await _await_process_local_cleanup(_reconcile_existing_terminal_owner())
             await self._report_frugality_retrospective(
@@ -5340,8 +5447,10 @@ class OrchestratorRunner:
                     execution_id=execution_id,
                 )
                 self._unregister_session(execution_id, session_id)
-                if self._task_workspace is not None:
-                    release_lock(self._task_workspace.lock_path)
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
 
         await _await_process_local_cleanup(_reconcile_cancelled_owner())
         await self._report_frugality_retrospective(
@@ -5438,7 +5547,13 @@ class OrchestratorRunner:
         # in a runner-wide mutable slot: concurrent preparations must not share
         # a capability or correlation id.
         authority_generation = self._begin_process_local_authority_generation()
-        workspace_had_existing_owner = bool(self._process_local_authorities)
+        if self._task_workspace is not None:
+            # Reserve the runner-wide lock before the first await.  Otherwise a
+            # different session can finish while contract construction is in a
+            # worker thread and release the lock before this preparation has a
+            # registered identity.
+            self._reserve_task_workspace(authority_generation)
+            self._task_workspace_lock_held = True
 
         def abort_process_local_preparation() -> None:
             """Dispose every authority state reachable from an aborted prepare.
@@ -5448,30 +5563,26 @@ class OrchestratorRunner:
             Both cleanup operations are idempotent and together leave no
             capability or lease behind.
             """
-            self._retire_process_local_authority(
-                session_id=resolved_session_id,
-                execution_id=exec_id,
+            identity = (resolved_session_id, exec_id)
+            owns_registered_generation = (
+                self._process_local_authorities.get(identity) is authority_generation
             )
+            if owns_registered_generation:
+                self._retire_process_local_authority(
+                    session_id=resolved_session_id,
+                    execution_id=exec_id,
+                )
             self._discard_process_local_authority(authority_generation)
-            # The workspace lock is runner-wide, while this authority
-            # generation belongs only to the current preparation. A rejected
-            # second preparation must not release exclusion still owned by an
-            # earlier live session. The dynamic check also covers concurrent
-            # preparations that both began before either registered.
-            workspace_has_other_owner = any(
-                identity != (resolved_session_id, exec_id)
-                for identity in self._process_local_authorities
-            )
-            workspace_has_live_session_owner = _has_live_process_local_authority_session(
-                resolved_session_id
-            )
-            if (
-                self._task_workspace is not None
-                and not workspace_had_existing_owner
-                and not workspace_has_other_owner
-                and not workspace_has_live_session_owner
-            ):
-                release_lock(self._task_workspace.lock_path)
+            self._task_workspace_reservations.discard(authority_generation)
+            # A duplicate exact identity can fail registration while an older
+            # generation still owns the same runner slot.  That failed
+            # preparation acquired no authority or workspace ownership of its
+            # own, so it must not retire or release the existing generation.
+            if owns_registered_generation or identity not in self._task_workspace_users:
+                self._release_task_workspace_for_identity(
+                    session_id=resolved_session_id,
+                    execution_id=exec_id,
+                )
 
         try:
             execution_contract = await asyncio.to_thread(
@@ -5516,6 +5627,7 @@ class OrchestratorRunner:
         except BaseException:
             abort_process_local_preparation()
             raise
+        self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
 
         try:
@@ -5664,8 +5776,10 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     execution_id=tracker.execution_id,
                 )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
             if terminal_mark_error is not None:
                 progress_exception_details["terminal_mark_error"] = terminal_mark_error
                 progress_exception_details["resume_blocked"] = "terminal_persistence_pending"
@@ -5693,8 +5807,10 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     execution_id=tracker.execution_id,
                 )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
             if terminal_mark_error is not None:
                 progress_result_details["terminal_mark_error"] = terminal_mark_error
@@ -6481,8 +6597,10 @@ class OrchestratorRunner:
             )
             if terminal_status != "paused":
                 await clear_cancellation(tracker.session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
             return Result.ok(
                 OrchestratorResult(
@@ -6973,8 +7091,10 @@ class OrchestratorRunner:
         )
         if terminal_status != "paused":
             await clear_cancellation(tracker.session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        self._release_task_workspace_for_identity(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
         return Result.ok(
             OrchestratorResult(
@@ -7132,8 +7252,10 @@ class OrchestratorRunner:
                     session_id,
                     release_liveness_lease=False,
                 )
-                if self._task_workspace is not None:
-                    release_lock(self._task_workspace.lock_path)
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
                 raise
             except Exception as exc:
                 self._release_process_local_authority(
@@ -7145,8 +7267,10 @@ class OrchestratorRunner:
                     session_id,
                     release_liveness_lease=False,
                 )
-                if self._task_workspace is not None:
-                    release_lock(self._task_workspace.lock_path)
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
                 return Result.err(
                     OrchestratorError(
                         message=f"Failed to inspect live process-local session: {exc}",
@@ -7725,8 +7849,10 @@ Note: This is a resumed session. Please continue from where execution was interr
                 session_id,
                 release_liveness_lease=terminal_status != "paused",
             )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
             return Result.ok(
                 OrchestratorResult(
