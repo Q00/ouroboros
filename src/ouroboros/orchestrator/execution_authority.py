@@ -784,6 +784,154 @@ def _retire_process_local_authority_generation(
     return _PROCESS_LOCAL_AUTHORITY_REGISTRY.retire(session_id, execution_id, adapter)
 
 
+async def collect_cancellation_acceptance_plan(
+    *,
+    session_id: str,
+    execution_id: str,
+    event_store: Any,
+) -> list[dict[str, Any]]:
+    """Build the one cancellation plan used by every terminal writer.
+
+    The collector is intentionally independent of runner-global state and of
+    Foundation A's process-local correlation ID.  It derives a deterministic
+    Foundation B generation from the durable session/execution identity, then
+    selects the latest provisional judgment for each observed root.  Read
+    failures, malformed judgments, and conflicting duplicates fail closed so
+    cancellation cannot commit a terminal winner without its exact decision
+    set.
+    """
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.persistence.event_store import acceptance_generation_id_for_session
+
+    acceptance_generation_id = acceptance_generation_id_for_session(session_id, execution_id)
+    query_events = getattr(event_store, "query_events", None)
+    if not callable(query_events):
+        raise PersistenceError(
+            "Cannot finalize cancellation without readable attempt telemetry.",
+            operation="collect_cancellation_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        )
+
+    attempts: list[Any] = []
+    for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
+        try:
+            attempts.extend(
+                await query_events(
+                    aggregate_id=execution_id,
+                    event_type=event_type,
+                    limit=None,
+                )
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "process_local_authority.cancellation_acceptance_scan_failed",
+                extra={"session_id": session_id, "execution_id": execution_id},
+            )
+            raise PersistenceError(
+                "Cannot finalize cancellation while attempt telemetry is unreadable.",
+                operation="collect_cancellation_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            ) from exc
+
+    event_priority = {
+        "execution.ac.attempt_judged": 1,
+        "execution.ac.outcome_finalized": 0,
+    }
+    latest_by_root: dict[int, tuple[int, int]] = {}
+    for item in attempts:
+        data = getattr(item, "data", {})
+        root = data.get("root_ac_index")
+        retry = data.get("retry_attempt")
+        event_type = getattr(item, "type", None)
+        if (
+            isinstance(root, bool)
+            or not isinstance(root, int)
+            or root < 0
+            or isinstance(retry, bool)
+            or not isinstance(retry, int)
+            or retry < 0
+            or event_type not in event_priority
+        ):
+            raise PersistenceError(
+                "Cancellation attempt telemetry has an invalid root or retry identity.",
+                operation="collect_cancellation_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        candidate = (retry, event_priority[event_type])
+        latest_by_root[root] = max(latest_by_root.get(root, (-1, -1)), candidate)
+
+    selected_by_root: dict[int, list[Any]] = {}
+    for item in attempts:
+        data = getattr(item, "data", {})
+        root = data.get("root_ac_index")
+        if root not in latest_by_root:
+            continue
+        event_type = getattr(item, "type", None)
+        candidate = (data.get("retry_attempt"), event_priority.get(event_type, -1))
+        if candidate == latest_by_root[root]:
+            selected_by_root.setdefault(root, []).append(item)
+
+    plan: list[dict[str, Any]] = []
+    canonical_outcomes = {
+        "succeeded",
+        "satisfied_externally",
+        "failed",
+        "blocked",
+        "invalid",
+        "cancelled",
+    }
+    for root in sorted(latest_by_root):
+        retry, _priority = latest_by_root[root]
+        normalized_outcomes: set[str] = set()
+        for item in selected_by_root.get(root, []):
+            data = getattr(item, "data", {})
+            raw_outcome = data.get("outcome")
+            if isinstance(raw_outcome, str) and raw_outcome in canonical_outcomes:
+                outcome = raw_outcome
+            elif (raw_outcome is None or raw_outcome == "") and isinstance(
+                data.get("success"), bool
+            ):
+                outcome = "succeeded" if data["success"] else "cancelled"
+            else:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry has a non-canonical outcome.",
+                    operation="collect_cancellation_acceptance_plan",
+                    details={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "root_ac_index": root,
+                        "retry_attempt": retry,
+                    },
+                )
+            normalized_outcomes.add(outcome)
+        if len(normalized_outcomes) != 1:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has conflicting latest judgments.",
+                operation="collect_cancellation_acceptance_plan",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "root_ac_index": root,
+                    "retry_attempt": retry,
+                },
+            )
+        outcome = next(iter(normalized_outcomes))
+        plan.append(
+            {
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "acceptance_generation_id": acceptance_generation_id,
+                "root_ac_index": root,
+                "final_retry_attempt": retry,
+                "accepted": False,
+                "disposition": "cancelled",
+                "outcome": outcome,
+                "terminal_status": "cancelled",
+            }
+        )
+    return plan
+
+
 async def request_process_local_cancellation(
     tracker: object,
     session_repo: Any,
@@ -976,10 +1124,16 @@ async def request_process_local_cancellation(
             cancelled_by=cancelled_by,
         )
         cancellation_request_published = True
+        acceptance_finalizations = await collect_cancellation_acceptance_plan(
+            session_id=session_id,
+            execution_id=execution_id,
+            event_store=getattr(session_repo, "_event_store", None),
+        )
         cancel_result = await session_repo.mark_cancelled_if_active(
             session_id=session_id,
             reason=reason,
             cancelled_by=cancelled_by,
+            acceptance_finalizations=acceptance_finalizations,
         )
     except BaseException as operation_error:
         cleanup_cancellation: asyncio.CancelledError | None = None

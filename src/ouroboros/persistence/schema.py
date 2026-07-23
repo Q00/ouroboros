@@ -106,7 +106,7 @@ session_start_guards_table = Table(
 ac_acceptance_guards_table = Table(
     "ac_acceptance_guards",
     metadata,
-    Column("authority_correlation_id", String(128), primary_key=True),
+    Column("acceptance_generation_id", String(128), primary_key=True),
     Column("root_ac_index", Integer, primary_key=True),
     Column("final_event_id", String(36), nullable=False),
     Column("payload_digest", String(64), nullable=False),

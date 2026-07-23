@@ -17,6 +17,7 @@ from ouroboros.orchestrator.frugality_proof import (
     assemble_triads,
     evaluate_proof,
 )
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 def _evt(etype: str, **data) -> dict:
@@ -104,7 +105,9 @@ def _triad_events(
                 EVENT_AC_ACCEPTANCE_FINALIZED,
                 execution_id=run,
                 session_id=f"session-{run}",
-                authority_correlation_id=f"authority-{run}",
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    f"session-{run}", run
+                ),
                 root_ac_index=root_ac_index,
                 final_retry_attempt=retry_attempt,
                 accepted=final_success,

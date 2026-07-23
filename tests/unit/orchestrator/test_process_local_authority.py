@@ -2289,6 +2289,7 @@ async def test_failure_cleanup_commit_then_cancel_reconciles_owner(tmp_path) -> 
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 error=RuntimeError("runtime failed"),
+                seed=_seed(),
             )
 
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
@@ -2417,6 +2418,7 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
         *,
         reason: str,
         cancelled_by: str,
+        acceptance_finalizations: list[dict[str, object]] | None = None,
     ) -> Result[None, object]:
         assert runner._has_live_process_local_authority(
             tracker.session_id,
@@ -2426,6 +2428,7 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
         assert heartbeat.is_holder_alive(tracker.session_id)
         assert reason == "CLI requested a careful stop"
         assert cancelled_by == "user"
+        assert acceptance_finalizations == []
         return Result.ok(None)
 
     runner._session_repo.mark_cancelled = mark_cancelled
@@ -3978,6 +3981,8 @@ async def test_public_cancel_interruption_reconciles_committed_terminal_state() 
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
     cancelled_tracker = tracker.with_status(SessionStatus.CANCELLED)
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(side_effect=asyncio.CancelledError)
     session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(cancelled_tracker))
 
@@ -4100,6 +4105,8 @@ async def test_public_cancel_retry_reclaims_nonterminal_reservation() -> None:
     )
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(side_effect=asyncio.CancelledError)
     session_repo.reconstruct_session = AsyncMock(
         return_value=Result.err(PersistenceError("winner temporarily unreadable"))
@@ -4422,6 +4429,8 @@ async def test_public_terminal_finalizer_cancellation_acknowledges_marker() -> N
     )
     authority = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]["foundation_a_authority"]
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(return_value=Result.ok(True))
 
     async def _self_cancelling_finalizer() -> None:

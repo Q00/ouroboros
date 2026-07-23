@@ -64,6 +64,7 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionTracker
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -734,7 +735,9 @@ class TestDeliverVerdict:
                 "data": {
                     "execution_id": "exec_frugal",
                     "session_id": "sess_frugal",
-                    "authority_correlation_id": "authority-frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
                     "root_ac_index": 0,
                     "final_retry_attempt": 0,
                     "accepted": True,
@@ -1127,7 +1130,9 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
             "data": {
                 "execution_id": run_id,
                 "session_id": f"session-{run_id}",
-                "authority_correlation_id": f"authority-{run_id}",
+                "acceptance_generation_id": acceptance_generation_id_for_session(
+                    f"session-{run_id}", run_id
+                ),
                 "root_ac_index": root_ac_index,
                 "final_retry_attempt": 0,
                 "accepted": True,
@@ -1442,7 +1447,7 @@ class TestProducedEventsMatchProofContract:
             baseline_tier="standard",
             decomposition_trustworthy=True,
         )
-        await executor._emit_ac_outcome_finalized(
+        await executor._emit_ac_attempt_judged(
             result=replace(result, is_decomposed=True),
             root_ac_index=0,
             session_id="sess_frugal",
@@ -1456,7 +1461,9 @@ class TestProducedEventsMatchProofContract:
                 data={
                     "execution_id": "exec_frugal",
                     "session_id": "sess_frugal",
-                    "authority_correlation_id": "authority-frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
                     "root_ac_index": 0,
                     "final_retry_attempt": 0,
                     "accepted": True,

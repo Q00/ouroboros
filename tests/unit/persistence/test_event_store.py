@@ -10,7 +10,7 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
 from ouroboros.orchestrator.session import SessionRepository
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 
 
 @pytest.fixture
@@ -239,7 +239,9 @@ class TestEventStoreAppend:
         data: dict[str, object] = {
             "execution_id": "exec-acceptance-guard",
             "session_id": "sess-acceptance-guard",
-            "authority_correlation_id": "authority-acceptance-guard",
+            "acceptance_generation_id": acceptance_generation_id_for_session(
+                "sess-acceptance-guard", "exec-acceptance-guard"
+            ),
             "root_ac_index": 0,
             "final_retry_attempt": 1,
             "accepted": True,
@@ -251,44 +253,63 @@ class TestEventStoreAppend:
         return BaseEvent(
             type="execution.ac.acceptance_finalized",
             aggregate_type="execution",
-            aggregate_id="exec-acceptance-guard",
+            aggregate_id=str(data["execution_id"]),
             data=data,
         )
 
     async def test_final_acceptance_is_idempotent_and_guarded(
         self, event_store: EventStore
     ) -> None:
-        event = self._acceptance_event()
-
-        assert EventStore.is_ac_acceptance_finalized_event(event) is True
-        assert await event_store.append(event) is True
-        assert (
-            await event_store.append(event.model_copy(update={"id": "duplicate-event-id"})) is False
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-idempotent",
+            session_id="sess-acceptance-idempotent",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-idempotent", "exec-acceptance-idempotent"
+            ),
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-idempotent",
+            data={"acceptance_finalizations": [payload, dict(payload)]},
         )
 
-        replayed = await event_store.replay("execution", event.aggregate_id)
+        assert await event_store.append(terminal) is True
+
+        replayed = await event_store.replay("execution", payload["execution_id"])
         assert [item.type for item in replayed] == ["execution.ac.acceptance_finalized"]
 
     async def test_conflicting_final_acceptance_fails_closed(self, event_store: EventStore) -> None:
-        await event_store.append(self._acceptance_event())
-        conflicting = self._acceptance_event(
-            id="conflicting-event-id",
-            accepted=False,
-            disposition="rejected",
-            outcome="failed",
-            terminal_status="failed",
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-conflict",
+            session_id="sess-acceptance-conflict",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-conflict", "exec-acceptance-conflict"
+            ),
+        )
+        conflicting = {**payload.data, "marker": "changed"}
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-conflict",
+            data={"acceptance_finalizations": [payload.data, conflicting]},
         )
 
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
-            await event_store.append(conflicting)
+            await event_store.append(terminal)
 
-        replayed = await event_store.replay("execution", conflicting.aggregate_id)
-        assert len(replayed) == 1
-        assert replayed[0].data["accepted"] is True
+        assert await event_store.replay("session", terminal.aggregate_id) == []
+        assert await event_store.replay("execution", payload.aggregate_id) == []
 
     async def test_terminal_acceptance_plan_is_atomic(self, event_store: EventStore) -> None:
         """Terminal CAS and all planned root decisions commit together."""
-        payload = self._acceptance_event().data
+        payload = self._acceptance_event(
+            execution_id="exec-acceptance-plan",
+            session_id="sess-acceptance-plan",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-plan", "exec-acceptance-plan"
+            ),
+        ).data
         terminal = BaseEvent(
             type="orchestrator.session.completed",
             aggregate_type="session",
@@ -308,20 +329,22 @@ class TestEventStoreAppend:
         self, event_store: EventStore
     ) -> None:
         """A contradictory plan cannot leave a terminal session without its winner."""
-        existing = self._acceptance_event()
-        await event_store.append(existing)
+        existing = self._acceptance_event(
+            execution_id="exec-acceptance-plan-conflict",
+            session_id="sess-acceptance-plan-conflict",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-plan-conflict", "exec-acceptance-plan-conflict"
+            ),
+        )
         conflicting = dict(
             existing.data,
-            accepted=False,
-            disposition="rejected",
-            outcome="failed",
-            terminal_status="failed",
+            marker="changed",
         )
         terminal = BaseEvent(
-            type="orchestrator.session.failed",
+            type="orchestrator.session.completed",
             aggregate_type="session",
             aggregate_id="sess-acceptance-plan-conflict",
-            data={"acceptance_finalizations": [conflicting]},
+            data={"acceptance_finalizations": [existing.data, conflicting]},
         )
 
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
@@ -332,19 +355,28 @@ class TestEventStoreAppend:
         self, event_store: EventStore
     ) -> None:
         """Extra final-event fields are part of fail-closed idempotence."""
-        event = self._acceptance_event()
-        await event_store.append(event)
-        conflicting = event.model_copy(
-            update={"id": "extra-payload-event-id", "data": {**event.data, "marker": "changed"}}
+        event = self._acceptance_event(
+            execution_id="exec-acceptance-digest",
+            session_id="sess-acceptance-digest",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-acceptance-digest", "exec-acceptance-digest"
+            ),
+        )
+        conflicting = {**event.data, "marker": "changed"}
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-digest",
+            data={"acceptance_finalizations": [event.data, conflicting]},
         )
 
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
-            await event_store.append(conflicting)
+            await event_store.append(terminal)
 
     @pytest.mark.parametrize(
         "overrides",
         [
-            {"authority_correlation_id": ""},
+            {"acceptance_generation_id": ""},
             {"root_ac_index": -1},
             {"accepted": "true"},
             {"final_retry_attempt": -1},
@@ -357,9 +389,17 @@ class TestEventStoreAppend:
         self, event_store: EventStore, overrides: dict[str, object]
     ) -> None:
         with pytest.raises(
-            PersistenceError, match="Final acceptance|Accepted final|Rejected final"
+            PersistenceError,
+            match="Final acceptance|Accepted final|Rejected final|Terminal acceptance plan",
         ):
-            await event_store.append(self._acceptance_event(**overrides))
+            payload = self._acceptance_event(**overrides).data
+            terminal = BaseEvent(
+                type="orchestrator.session.completed",
+                aggregate_type="session",
+                aggregate_id="sess-acceptance-guard",
+                data={"acceptance_finalizations": [payload]},
+            )
+            await event_store.append(terminal)
 
     async def test_final_acceptance_raw_append_paths_are_rejected(
         self, event_store: EventStore

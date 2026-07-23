@@ -59,6 +59,7 @@ from ouroboros.orchestrator.evidence.common import (
 from ouroboros.orchestrator.evidence.common import (
     strict_bool as _strict_bool,
 )
+from ouroboros.persistence.event_store import validate_acceptance_finalization_payload
 
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
@@ -303,15 +304,25 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         elif etype == EVENT_AC_ACCEPTANCE_FINALIZED:
             run_key = execution_run_anchor(data)
             root_index = parse_root_ac_index(data)
-            authority = data.get("authority_correlation_id")
             final_attempt = data.get("final_retry_attempt")
             accepted = _strict_bool(data.get("accepted"))
             disposition = data.get("disposition")
             terminal_status = data.get("terminal_status")
+            aggregate_id = (
+                event.get("aggregate_id")
+                if isinstance(event, Mapping)
+                else getattr(event, "aggregate_id", None)
+            )
+            try:
+                acceptance_generation, _ = validate_acceptance_finalization_payload(
+                    data,
+                    aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                )
+            except Exception:
+                acceptance_generation = None
             if (
                 root_index is None
-                or not isinstance(authority, str)
-                or not authority.strip()
+                or acceptance_generation is None
                 or isinstance(final_attempt, bool)
                 or not isinstance(final_attempt, int)
                 or final_attempt < 0
@@ -326,7 +337,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 continue
             acceptance.setdefault((run_key, root_index), []).append(
                 (
-                    authority.strip(),
+                    acceptance_generation,
                     final_attempt,
                     accepted,
                     disposition.strip(),

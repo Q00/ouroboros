@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from contextlib import aclosing
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -31,6 +32,7 @@ import math
 import os
 from pathlib import Path
 import re
+from threading import RLock
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
 
@@ -101,6 +103,7 @@ from ouroboros.orchestrator.execution_authority import (
     _register_process_local_authority_terminal_finalizer,
     _release_process_local_authority_generation,
     _retire_process_local_authority_generation,
+    collect_cancellation_acceptance_plan,
     constructor_model_contract,
     request_process_local_cancellation,
     runtime_execution_proves_effective_model,
@@ -154,6 +157,7 @@ from ouroboros.orchestrator.session import (
 )
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.resilience.lateral import ThinkingPersona
 from ouroboros.resilience.recovery import (
@@ -243,6 +247,7 @@ class _PendingLifecycleIntent:
     messages_processed: int = 0
     cancelled_by: str = "runner"
     pause: RecoverableFailurePause | None = None
+    acceptance_finalizations: list[dict[str, Any]] | None = None
 
 
 # =============================================================================
@@ -846,6 +851,7 @@ class OrchestratorRunner:
             )
         self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
+        self._execution_contract_restore_lock = RLock()
         self._process_local_authorities: dict[
             tuple[str, str], _ProcessLocalAuthorityGeneration
         ] = {}
@@ -1806,6 +1812,13 @@ class OrchestratorRunner:
         execution_contract: Mapping[str, Any] | None = None,
     ) -> tuple[SessionStatus | None, Result[OrchestratorResult, OrchestratorError] | None]:
         """Persist one durable failure winner before withdrawing ownership."""
+        if seed is None:
+            return None, self._terminal_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                requested_status=SessionStatus.FAILED,
+                cause=PersistenceError("Cannot persist FAILED without the seed acceptance plan."),
+            )
         reconciled_during_exception = False
         acceptance_finalizations = (
             self._build_terminal_acceptance_finalizations(
@@ -1846,6 +1859,7 @@ class OrchestratorRunner:
                     error_message=str(error),
                     error_type=type(error).__name__,
                     messages_processed=messages_processed,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
                 if isinstance(persistence_error, asyncio.CancelledError):
                     self._preserve_process_local_owner_for_retry(
@@ -1872,25 +1886,6 @@ class OrchestratorRunner:
             await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
                 execution_id=execution_id,
-            )
-        if seed is not None:
-            await self._emit_terminal_acceptance_finalized(
-                seed=seed,
-                parallel_result=None,
-                execution_id=execution_id,
-                session_id=session_id,
-                terminal_status=durable_status.value,
-                accepted_root_indices=(
-                    set(range(len(seed.acceptance_criteria)))
-                    if durable_status is SessionStatus.COMPLETED
-                    else set()
-                ),
-                default_outcome=(
-                    "succeeded"
-                    if durable_status is SessionStatus.COMPLETED
-                    else durable_status.value
-                ),
-                execution_contract=execution_contract,
             )
         try:
             await self._event_store.append(
@@ -2792,6 +2787,11 @@ class OrchestratorRunner:
         winner, otherwise completion and public cancellation can produce
         contradictory terminal streams.
         """
+        terminal_plan = (
+            [dict(item) for item in acceptance_finalizations]
+            if acceptance_finalizations is not None
+            else None
+        )
         intent = _PendingLifecycleIntent(
             execution_id=execution_id,
             status=requested_status,
@@ -2801,15 +2801,14 @@ class OrchestratorRunner:
             error_type=error_type,
             messages_processed=messages_processed,
             cancelled_by=cancelled_by,
+            acceptance_finalizations=terminal_plan,
         )
         result: Any = None
         last_error: object | None = None
         for attempt in range(3):
             try:
                 acceptance_kwargs = (
-                    {"acceptance_finalizations": acceptance_finalizations}
-                    if acceptance_finalizations is not None
-                    else {}
+                    {"acceptance_finalizations": terminal_plan} if terminal_plan is not None else {}
                 )
                 if requested_status is SessionStatus.COMPLETED:
                     result = await self._session_repo.mark_completed(
@@ -2992,6 +2991,51 @@ class OrchestratorRunner:
                 cause=exc,
             )
 
+        replayed_acceptance_finalizations = intent.acceptance_finalizations
+        if intent.status is SessionStatus.CANCELLED and replayed_acceptance_finalizations is None:
+            # ``None`` means the previous owner failed before it could obtain
+            # the exact telemetry snapshot.  Never replay that intent as an
+            # unplanned terminal cancellation: re-collect the plan first and
+            # retain it for the next retry if persistence still fails.
+            try:
+                replayed_acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    event_store=self._event_store,
+                )
+            except asyncio.CancelledError:
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                raise
+            except Exception as exc:
+                return self._cancellation_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    cause=exc,
+                    acceptance_finalizations=None,
+                    cancellation_reason=intent.error_message,
+                    cancelled_by=intent.cancelled_by,
+                )
+            self._pending_lifecycle_intents[tracker.session_id] = replace(
+                intent,
+                acceptance_finalizations=[dict(item) for item in replayed_acceptance_finalizations],
+            )
+        elif (
+            intent.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}
+            and replayed_acceptance_finalizations is None
+        ):
+            # A terminal intent without a captured plan is not replayable.
+            # Keeping it pending is safer than committing a lifecycle winner
+            # that can never be joined to its complete root decision set.
+            return self._terminal_persistence_pending_result(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                requested_status=intent.status,
+                cause=PersistenceError("Pending terminal intent is missing its acceptance plan."),
+            )
+
         resolved_status: SessionStatus
         try:
             if intent.status is SessionStatus.PAUSED:
@@ -3034,6 +3078,7 @@ class OrchestratorRunner:
                     error_type=intent.error_type,
                     messages_processed=intent.messages_processed,
                     cancelled_by=intent.cancelled_by,
+                    acceptance_finalizations=replayed_acceptance_finalizations,
                 )
         except asyncio.CancelledError:
             if (
@@ -4003,6 +4048,33 @@ class OrchestratorRunner:
             )
             return True
         return False
+
+    def _restore_execution_contract_snapshot(
+        self,
+        progress: Mapping[str, Any],
+        *,
+        seed: Seed | None = None,
+        authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Restore and return one immutable invocation-local contract snapshot.
+
+        The legacy restore routine updates runner configuration as a side
+        effect.  Serialize that mutation and copy the resulting contract
+        inside the same worker-thread critical section so a concurrent resume
+        can never copy another session's authority after the await boundary.
+        """
+        with self._execution_contract_restore_lock:
+            changed = self._restore_execution_contract(
+                progress,
+                seed=seed,
+                authority_generation=authority_generation,
+            )
+            if not isinstance(self._execution_contract, Mapping):
+                raise OrchestratorError(
+                    message="Cannot resume without a restored execution contract",
+                    details={"invalid": "execution_contract"},
+                )
+            return changed, deepcopy(dict(self._execution_contract))
 
     @staticmethod
     def _proof_cohort_identity(
@@ -5224,6 +5296,9 @@ class OrchestratorRunner:
         session_id: str,
         execution_id: str,
         cause: object,
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
+        cancellation_reason: str | None = None,
+        cancelled_by: str = "runner",
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Leave a failed cancellation write retryable without stranding a claim.
 
@@ -5237,6 +5312,14 @@ class OrchestratorRunner:
             session_id=session_id,
             execution_id=execution_id,
         )
+        if acceptance_finalizations is not None or cancellation_reason is not None:
+            self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                execution_id=execution_id,
+                status=SessionStatus.CANCELLED,
+                error_message=cancellation_reason or "Execution cancelled",
+                cancelled_by=cancelled_by,
+                acceptance_finalizations=acceptance_finalizations,
+            )
         return Result.err(
             OrchestratorError(
                 message="Failed to persist cancellation; process-local authority remains live",
@@ -5361,11 +5444,6 @@ class OrchestratorRunner:
         # cancellation that the durable session never recorded.
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
-        session_contract = None
-        if session_result.is_ok:
-            persisted_contract = session_result.value.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-            if isinstance(persisted_contract, Mapping):
-                session_contract = dict(persisted_contract)
         # An unreadable snapshot cannot prove that a terminal state already
         # exists.  Continue through ``mark_cancelled`` while retaining the live
         # owner; that append is the authoritative terminal write and preserves
@@ -5389,12 +5467,6 @@ class OrchestratorRunner:
 
             async def _reconcile_existing_terminal_owner() -> None:
                 try:
-                    await self._emit_cancellation_acceptance_finalized(
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        terminal_status=terminal_status,
-                        execution_contract=session_contract,
-                    )
                     if not execution_terminal_events:
                         await self._event_store.append(
                             create_execution_terminal_event(
@@ -5436,11 +5508,30 @@ class OrchestratorRunner:
                 )
             )
 
+        # Compute the complete observed-root decision set before the terminal
+        # CAS.  The terminal session event carries this exact plan so a
+        # cancellation cannot commit a durable winner and then lose its final
+        # acceptance records to interruption.
+        try:
+            cancellation_acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+            )
+        except Exception as exc:
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+                cancellation_reason=cancellation_reason,
+                cancelled_by=cancelled_by,
+            )
         try:
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id,
                 reason=cancellation_reason,
                 cancelled_by=cancelled_by,
+                acceptance_finalizations=cancellation_acceptance_finalizations,
             )
         except asyncio.CancelledError:
             if (
@@ -5450,6 +5541,13 @@ class OrchestratorRunner:
                 )
                 is None
             ):
+                self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                    execution_id=execution_id,
+                    status=SessionStatus.CANCELLED,
+                    error_message=cancellation_reason,
+                    cancelled_by=cancelled_by,
+                    acceptance_finalizations=cancellation_acceptance_finalizations,
+                )
                 self._preserve_process_local_owner_for_retry(
                     session_id=session_id,
                     execution_id=execution_id,
@@ -5476,6 +5574,9 @@ class OrchestratorRunner:
                 session_id=session_id,
                 execution_id=execution_id,
                 cause=exc,
+                acceptance_finalizations=cancellation_acceptance_finalizations,
+                cancellation_reason=cancellation_reason,
+                cancelled_by=cancelled_by,
             )
         if cancel_result is not None and cancel_result.is_err:
             log.warning(
@@ -5487,6 +5588,9 @@ class OrchestratorRunner:
                 session_id=session_id,
                 execution_id=execution_id,
                 cause=cancel_result.error,
+                acceptance_finalizations=cancellation_acceptance_finalizations,
+                cancellation_reason=cancellation_reason,
+                cancelled_by=cancelled_by,
             )
         if cancel_result is not None and cancel_result.value is False:
             # The session became terminal after the initial reconstruction but
@@ -5515,12 +5619,6 @@ class OrchestratorRunner:
         # durable CAS has committed.
         async def _reconcile_cancelled_owner() -> None:
             try:
-                await self._emit_cancellation_acceptance_finalized(
-                    execution_id=execution_id,
-                    session_id=session_id,
-                    terminal_status=SessionStatus.CANCELLED,
-                    execution_contract=session_contract,
-                )
                 await self._event_store.append(
                     create_execution_terminal_event(
                         execution_id=execution_id,
@@ -5563,109 +5661,6 @@ class OrchestratorRunner:
                 duration_seconds=duration,
             )
         )
-
-    async def _emit_cancellation_acceptance_finalized(
-        self,
-        *,
-        execution_id: str,
-        session_id: str,
-        terminal_status: SessionStatus = SessionStatus.CANCELLED,
-        execution_contract: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Close observed root-AC episodes using the durable terminal winner."""
-        contract = execution_contract or self._execution_contract
-        authority_contract = contract.get("foundation_a_authority") if contract else None
-        authority = (
-            authority_contract.get("correlation_id")
-            if isinstance(authority_contract, Mapping)
-            else None
-        )
-        if not isinstance(authority, str) or not authority.strip():
-            return
-        attempts: list[Any] = []
-        for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
-            try:
-                attempts.extend(
-                    await self._event_store.query_events(
-                        aggregate_id=execution_id,
-                        event_type=event_type,
-                        limit=None,
-                    )
-                )
-            except Exception:
-                # Cancellation remains a valid durable terminal result even
-                # when optional attempt telemetry cannot be read. A later
-                # reconciler can replay the finalization plan from the
-                # terminal session event when one was persisted.
-                log.warning(
-                    "orchestrator.runner.cancellation_acceptance_scan_failed",
-                    execution_id=execution_id,
-                    session_id=session_id,
-                    event_type=event_type,
-                )
-                return
-        latest_by_root: dict[int, int] = {}
-        for event in attempts:
-            root = event.data.get("root_ac_index")
-            retry = event.data.get("retry_attempt", 0)
-            if (
-                isinstance(root, int)
-                and not isinstance(root, bool)
-                and root >= 0
-                and isinstance(retry, int)
-                and not isinstance(retry, bool)
-                and retry >= 0
-            ):
-                latest_by_root[root] = max(latest_by_root.get(root, 0), retry)
-        from ouroboros.events.base import BaseEvent
-
-        latest_event_by_root: dict[int, Any] = {}
-        for event in attempts:
-            root = event.data.get("root_ac_index")
-            if root not in latest_by_root:
-                continue
-            retry = event.data.get("retry_attempt", 0)
-            if retry == latest_by_root[root]:
-                latest_event_by_root[root] = event
-
-        for root, retry in latest_by_root.items():
-            latest = latest_event_by_root.get(root)
-            latest_data = latest.data if latest is not None else {}
-            outcome = str(latest_data.get("outcome") or "").strip()
-            if not outcome:
-                outcome = (
-                    "succeeded" if latest_data.get("success") is True else terminal_status.value
-                )
-            accepted = bool(
-                terminal_status is SessionStatus.COMPLETED
-                and (
-                    latest_data.get("success") is True
-                    or outcome in {"succeeded", "satisfied_externally"}
-                )
-            )
-            disposition = (
-                "accepted"
-                if accepted
-                else ("cancelled" if terminal_status is SessionStatus.CANCELLED else outcome)
-            )
-            await self._event_store.append(
-                BaseEvent(
-                    type="execution.ac.acceptance_finalized",
-                    aggregate_type="execution",
-                    aggregate_id=execution_id or session_id,
-                    data={
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                        "authority_correlation_id": authority.strip(),
-                        "root_ac_index": root,
-                        "final_retry_attempt": retry,
-                        "accepted": accepted,
-                        "disposition": disposition,
-                        "outcome": outcome,
-                        "terminal_status": terminal_status.value,
-                    },
-                )
-            )
 
     async def execute_seed(
         self,
@@ -6738,24 +6733,6 @@ class OrchestratorRunner:
                     else SessionStatus.FAILED.value
                 )
             )
-            await self._emit_terminal_acceptance_finalized(
-                seed=seed,
-                parallel_result=None,
-                execution_id=exec_id,
-                session_id=tracker.session_id,
-                terminal_status=terminal_status,
-                accepted_root_indices=(
-                    set(range(len(seed.acceptance_criteria)))
-                    if terminal_status == SessionStatus.COMPLETED.value
-                    else set()
-                ),
-                default_outcome=(
-                    "succeeded"
-                    if terminal_status == SessionStatus.COMPLETED.value
-                    else terminal_status
-                ),
-                execution_contract=execution_contract,
-            )
             terminal_event = create_execution_terminal_event(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
@@ -7264,14 +7241,6 @@ class OrchestratorRunner:
                 else SessionStatus.FAILED.value
             )
         )
-        await self._emit_terminal_acceptance_finalized(
-            seed=seed,
-            parallel_result=parallel_result,
-            execution_id=exec_id,
-            session_id=tracker.session_id,
-            terminal_status=terminal_status,
-            execution_contract=execution_contract,
-        )
         terminal_event = create_execution_terminal_event(
             execution_id=exec_id,
             session_id=tracker.session_id,
@@ -7375,22 +7344,11 @@ class OrchestratorRunner:
         """Build the complete root decision set before terminal CAS."""
         if terminal_status == SessionStatus.PAUSED.value:
             return []
-        contract = execution_contract
-        if contract is None:
-            contract = self._execution_contract
-        authority_contract = contract.get("foundation_a_authority") if contract else None
-        authority_correlation_id = (
-            authority_contract.get("correlation_id")
-            if isinstance(authority_contract, Mapping)
-            else None
+        del execution_contract
+        acceptance_generation_id = acceptance_generation_id_for_session(
+            session_id,
+            execution_id,
         )
-        if not isinstance(authority_correlation_id, str) or not authority_correlation_id.strip():
-            log.error(
-                "orchestrator.runner.acceptance_finalization_missing_authority",
-                execution_id=execution_id,
-                session_id=session_id,
-            )
-            return []
 
         results_by_index: dict[int, Any] = {}
         for result in getattr(parallel_result, "results", ()):
@@ -7435,13 +7393,19 @@ class OrchestratorRunner:
             disposition = (
                 "accepted"
                 if accepted
-                else ("cancelled" if terminal_status == SessionStatus.CANCELLED.value else outcome)
+                else (
+                    "cancelled"
+                    if terminal_status == SessionStatus.CANCELLED.value
+                    else (
+                        "rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome
+                    )
+                )
             )
             finalizations.append(
                 {
                     "execution_id": execution_id,
                     "session_id": session_id,
-                    "authority_correlation_id": authority_correlation_id.strip(),
+                    "acceptance_generation_id": acceptance_generation_id,
                     "root_ac_index": root_ac_index,
                     "final_retry_attempt": retry_attempt,
                     "accepted": accepted,
@@ -7451,48 +7415,6 @@ class OrchestratorRunner:
                 }
             )
         return finalizations
-
-    async def _emit_terminal_acceptance_finalized(
-        self,
-        *,
-        seed: Seed,
-        parallel_result: Any,
-        execution_id: str,
-        session_id: str,
-        terminal_status: str,
-        accepted_root_indices: set[int] | None = None,
-        default_outcome: str | None = None,
-        execution_contract: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Have the terminal Final Gate publish one decision per root AC.
-
-        Attempt judgments are deliberately insufficient for admission. This
-        method runs only after the session CAS has produced a terminal status;
-        a paused episode therefore has no final acceptance event. The
-        EventStore's authority/root CAS makes retries and duplicate observers
-        idempotent while rejecting contradictory payloads.
-        """
-        finalizations = self._build_terminal_acceptance_finalizations(
-            seed=seed,
-            parallel_result=parallel_result,
-            execution_id=execution_id,
-            session_id=session_id,
-            terminal_status=terminal_status,
-            accepted_root_indices=accepted_root_indices,
-            default_outcome=default_outcome,
-            execution_contract=execution_contract,
-        )
-        from ouroboros.events.base import BaseEvent
-
-        for finalization in finalizations:
-            await self._event_store.append(
-                BaseEvent(
-                    type="execution.ac.acceptance_finalized",
-                    aggregate_type="execution",
-                    aggregate_id=execution_id or session_id,
-                    data=finalization,
-                )
-            )
 
     async def resume_session(
         self,
@@ -7754,18 +7676,13 @@ class OrchestratorRunner:
             )
 
         try:
-            execution_contract_changed = await asyncio.to_thread(
-                self._restore_execution_contract,
+            execution_contract_changed, execution_contract = await asyncio.to_thread(
+                self._restore_execution_contract_snapshot,
                 tracker.progress,
                 seed=seed,
                 authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
-            execution_contract = (
-                dict(self._execution_contract)
-                if isinstance(self._execution_contract, Mapping)
-                else dict(raw_contract)
-            )
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -7826,9 +7743,9 @@ class OrchestratorRunner:
                     start_time=datetime.now(UTC),
                 )
 
-            if execution_contract_changed and self._execution_contract is not None:
+            if execution_contract_changed:
                 contract_progress = {
-                    EXECUTION_CONTRACT_PROGRESS_KEY: self._execution_contract,
+                    EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
                     "messages_processed": tracker.messages_processed,
                 }
                 persisted_contract = await self._session_repo.track_progress(
@@ -8223,24 +8140,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                     if durable_terminal_status is not None
                     else SessionStatus.FAILED.value
                 )
-            )
-            await self._emit_terminal_acceptance_finalized(
-                seed=seed,
-                parallel_result=None,
-                execution_id=tracker.execution_id,
-                session_id=session_id,
-                terminal_status=terminal_status,
-                accepted_root_indices=(
-                    set(range(len(seed.acceptance_criteria)))
-                    if terminal_status == SessionStatus.COMPLETED.value
-                    else set()
-                ),
-                default_outcome=(
-                    "succeeded"
-                    if terminal_status == SessionStatus.COMPLETED.value
-                    else terminal_status
-                ),
-                execution_contract=execution_contract,
             )
             terminal_event = create_execution_terminal_event(
                 execution_id=tracker.execution_id,

@@ -54,6 +54,7 @@ from ouroboros.orchestrator.shadow_replay import (
     run_shadow_replay,
     shadow_replay_enabled_from_env,
 )
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -374,7 +375,9 @@ class _EmitterHarness:
                         data={
                             "execution_id": run_id,
                             "session_id": session_id,
-                            "authority_correlation_id": f"authority-{run_id}",
+                            "acceptance_generation_id": acceptance_generation_id_for_session(
+                                session_id, run_id
+                            ),
                             "root_ac_index": 0,
                             "final_retry_attempt": 0,
                             "accepted": True,

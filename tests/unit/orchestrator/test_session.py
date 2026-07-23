@@ -983,6 +983,7 @@ class TestFindOrphanedSessions:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_events = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
         return store
 

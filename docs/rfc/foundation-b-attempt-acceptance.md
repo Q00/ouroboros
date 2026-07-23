@@ -49,7 +49,7 @@ Required fields:
 {
   "execution_id": "exec_...",
   "session_id": "sess_...",
-  "authority_correlation_id": "...",
+  "acceptance_generation_id": "foundation-b/v1:<sha256(session_id, execution_id)>...",
   "root_ac_index": 0,
   "final_retry_attempt": 1,
   "accepted": true,
@@ -60,7 +60,13 @@ Required fields:
 ```
 
 The durable uniqueness key is
-`(authority_correlation_id, root_ac_index)`. The terminal session transition
+`(acceptance_generation_id, root_ac_index)`. The generation is derived from the
+immutable `(session_id, execution_id)` pair and belongs exclusively to
+Foundation B. It is deliberately not Foundation A's process-local authority
+correlation or fingerprint; A's live identity is diagnostic only and can never
+authorize final acceptance or replay.
+
+The terminal session transition
 carries the complete root decision set as a replayable finalization plan. The
 EventStore writes the winning terminal session event, every acceptance guard,
 and every acceptance event in one transaction. A duplicate append is an

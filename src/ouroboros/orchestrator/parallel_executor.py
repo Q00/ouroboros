@@ -6273,7 +6273,7 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome=outcome,
         )
 
-    async def _emit_ac_outcome_finalized(
+    async def _emit_ac_attempt_judged(
         self,
         *,
         result: ACExecutionResult,
@@ -6513,7 +6513,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                 )
                 results[position] = gated
-                await self._emit_ac_outcome_finalized(
+                await self._emit_ac_attempt_judged(
                     result=gated,
                     root_ac_index=ac_idx,
                     session_id=session_id,
@@ -6604,7 +6604,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                 results[position_by_idx[ac_idx]] = gated
                 if isinstance(gated, ACExecutionResult):
-                    await self._emit_ac_outcome_finalized(
+                    await self._emit_ac_attempt_judged(
                         result=gated,
                         root_ac_index=ac_idx,
                         session_id=session_id,
@@ -6728,7 +6728,7 @@ Respond with either ATOMIC or the structured JSON object only.
                                 execution_id=execution_id,
                             )
                             results[position_by_idx[ac_idx]] = finalized_alt
-                            await self._emit_ac_outcome_finalized(
+                            await self._emit_ac_attempt_judged(
                                 result=finalized_alt,
                                 root_ac_index=ac_idx,
                                 session_id=session_id,
