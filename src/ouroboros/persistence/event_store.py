@@ -470,25 +470,27 @@ class EventStore:
                     else:
                         transaction = await conn.begin()
                     try:
-                        existing_start = await conn.scalar(
-                            select(events_table.c.id)
+                        existing_lifecycle = await conn.execute(
+                            select(events_table.c.id, events_table.c.event_type)
                             .where(
                                 events_table.c.aggregate_type == "session",
                                 events_table.c.aggregate_id == event.aggregate_id,
-                                events_table.c.event_type == "orchestrator.session.started",
                             )
                             .limit(1)
                         )
-                        if existing_start is not None:
+                        existing_row = existing_lifecycle.first()
+                        if existing_row is not None:
                             if conn.in_transaction():
                                 await conn.rollback()
                             raise PersistenceError(
-                                "Session ID already has an immutable start identity.",
+                                "Session ID already has durable lifecycle history.",
                                 operation="append_session_start_if_absent",
                                 table="events",
                                 details={
                                     "session_id": event.aggregate_id,
                                     "execution_id": execution_id,
+                                    "existing_event_id": existing_row.id,
+                                    "existing_event_type": existing_row.event_type,
                                     "session_start_conflict": True,
                                 },
                             )

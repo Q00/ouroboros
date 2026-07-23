@@ -1807,6 +1807,43 @@ async def test_prepare_rejects_reused_terminal_session_id(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_rejects_terminal_only_session_id(tmp_path) -> None:
+    """Terminal-only legacy history cannot acquire a new live execution owner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-only-conflict.db'}")
+    await event_store.initialize()
+    session_id = "session-terminal-only-conflict"
+    runtime = _CountingRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock())
+    await event_store.append(
+        create_session_completed_event(
+            session_id,
+            summary={"legacy": "terminal-only"},
+            messages_processed=0,
+        )
+    )
+
+    try:
+        collision = await runner.prepare_session(
+            _seed(),
+            execution_id="exec-terminal-only-collision",
+            session_id=session_id,
+        )
+
+        assert collision.is_err
+        assert collision.error.details["resume_blocked"] == "session_id_conflict"
+        assert runtime.execute_calls == 0
+        events = await event_store.replay("session", session_id)
+        assert [event.type for event in events] == ["orchestrator.session.completed"]
+        assert not heartbeat.is_holder_alive(session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id="exec-terminal-only-collision",
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_failure_cleanup_commit_then_cancel_reconciles_owner(tmp_path) -> None:
     """Generic failure persistence drains ownership after an interrupted CAS response."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'failure-cleanup-cas.db'}")
@@ -2395,6 +2432,86 @@ async def test_prepare_terminal_pending_keeps_handler_owned_store_open(
             durable = await SessionRepository(event_store).reconstruct_session(session_id)
             assert durable.is_ok
             assert durable.value.status == SessionStatus.RUNNING
+            assert heartbeat.is_holder_alive(session_id)
+    finally:
+        if retained_runner is not None and session_id is not None:
+            retained_runner._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=next(
+                    execution_id
+                    for stored_session_id, execution_id in retained_runner._process_local_authorities
+                    if stored_session_id == session_id
+                ),
+            )
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
+        handler._process_local_resume_handoffs.clear()
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_pending_retains_owner_when_reconstruction_is_unreadable(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous preparation keeps a callable owner/store without a durable read."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepare-unreadable.db'}")
+    await event_store.initialize()
+    handler = ExecuteSeedHandler(agent_runtime_backend="process-local-test")
+    original_prepare = OrchestratorRunner.prepare_session
+    close_mock = AsyncMock()
+
+    async def _prepare_with_terminal_failure(
+        runner: OrchestratorRunner,
+        *args: object,
+        **kwargs: object,
+    ):
+        runner._session_repo.track_progress = AsyncMock(
+            return_value=Result.err(PersistenceError("initial progress unavailable"))
+        )
+        runner._session_repo.mark_failed = AsyncMock(
+            return_value=Result.err(PersistenceError("terminal store unavailable"))
+        )
+        return await original_prepare(runner, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+        lambda **_kwargs: _CountingRuntime(),
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.EventStore",
+        lambda: event_store,
+    )
+
+    retained_runner: OrchestratorRunner | None = None
+    session_id: str | None = None
+    try:
+        with (
+            patch.object(OrchestratorRunner, "prepare_session", _prepare_with_terminal_failure),
+            patch.object(event_store, "close", close_mock),
+            patch.object(
+                SessionRepository,
+                "reconstruct_session",
+                AsyncMock(side_effect=PersistenceError("session reconstruction unavailable")),
+            ) as reconstruct_mock,
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": yaml.safe_dump(_seed().to_dict()),
+                    "skip_qa": True,
+                    "use_worktree": False,
+                }
+            )
+
+            assert result.is_err
+            assert result.error.details["resume_blocked"] == "terminal_persistence_pending"
+            session_id = result.error.details["session_id"]
+            retained_runner = handler._process_local_resume_owners[session_id]
+            assert handler._process_local_owned_event_stores[session_id] is event_store
+            close_mock.assert_not_awaited()
+            reconstruct_mock.assert_not_awaited()
+            events = await event_store.replay("session", session_id)
+            assert [event.type for event in events] == ["orchestrator.session.started"]
             assert heartbeat.is_holder_alive(session_id)
     finally:
         if retained_runner is not None and session_id is not None:

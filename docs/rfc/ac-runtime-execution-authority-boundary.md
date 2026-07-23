@@ -238,7 +238,8 @@ stateDiagram-v2
     registered --> claimed: atomically claim effects
     claimed --> registered: pause or retryable cancellation failure\nrelease claim only
     registered --> terminalizing: public terminalization reservation
-    terminalizing --> registered: durable write fails or caller is cancelled
+    terminalizing --> registered: durable write fails or reconciliation proves nonterminal
+    terminalizing --> terminalizing: interrupted outcome unreadable\nretryable reservation
     terminalizing --> retired: durable terminal record + registry finalizer
     claimed --> retired: owner persists terminal record + owner teardown
     registered --> retired: setup abort or proven lost authority
@@ -516,6 +517,15 @@ The Foundation A implementation must demonstrate all of the following:
 61. resume replays pending lifecycle intent and arbitrates persisted
     process-local authority before evaluating current fat-harness or investment
     policy; lost or foreign authority cannot be masked by a newer policy gate.
+62. start publication rejects any pre-existing durable session lifecycle row,
+    including terminal-only legacy aggregates, in the same transaction that
+    claims the immutable start guard; no new runner may execute under a reused
+    session ID whose replay belongs to another lifecycle.
+63. an MCP preparation result that retains `terminal_persistence_pending`
+    records the exact runner and handler-owned EventStore from its live
+    process-local contract before attempting durable reconstruction, so an
+    unreadable aggregate cannot leave inaccessible authority beside a closed
+    store.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

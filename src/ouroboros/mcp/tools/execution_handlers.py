@@ -984,26 +984,46 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     ) -> None:
         """Keep a callable owner alive while its process-local lease is live."""
         raw_contract = tracker.progress.get("execution_contract")
+        self._remember_process_local_owner_identity(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+            raw_contract=raw_contract,
+            runner=runner,
+            owned_event_store=owned_event_store,
+        )
+
+    def _remember_process_local_owner_identity(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+        runner: OrchestratorRunner,
+        owned_event_store: EventStore | None = None,
+    ) -> bool:
+        """Retain an exact owner even when durable reconstruction is unavailable."""
         if runner._has_live_process_local_authority(
-            tracker.session_id,
-            tracker.execution_id,
+            session_id,
+            execution_id,
             raw_contract,
         ):
-            self._process_local_resume_owners[tracker.session_id] = runner
+            self._process_local_resume_owners[session_id] = runner
             if owned_event_store is not None:
-                self._process_local_owned_event_stores[tracker.session_id] = owned_event_store
+                self._process_local_owned_event_stores[session_id] = owned_event_store
             if isinstance(raw_contract, Mapping):
                 _register_process_local_authority_terminal_finalizer(
-                    tracker.session_id,
-                    tracker.execution_id,
+                    session_id,
+                    execution_id,
                     raw_contract.get("foundation_a_authority"),
                     runner._adapter,
                     ("execute-seed-handler", id(self), id(runner)),
                     lambda: self._release_terminal_process_local_owner(
-                        session_id=tracker.session_id,
+                        session_id=session_id,
                         runner=runner,
                     ),
                 )
+            return True
+        return False
 
     async def _reconcile_process_local_owner(
         self,
@@ -1585,10 +1605,31 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             prepared_details.get("resume_blocked") == "terminal_persistence_pending"
                         )
                         if terminal_persistence_pending:
-                            retained_tracker = await session_repo.reconstruct_session(
-                                prepared_details.get("session_id", session_id or "")
+                            retained_session_id = prepared_details.get(
+                                "session_id", session_id or ""
                             )
-                            if retained_tracker.is_ok:
+                            retained_execution_id = prepared_details.get(
+                                "execution_id", execution_id or ""
+                            )
+                            if isinstance(retained_session_id, str) and isinstance(
+                                retained_execution_id, str
+                            ):
+                                retained_after_run = self._remember_process_local_owner_identity(
+                                    session_id=retained_session_id,
+                                    execution_id=retained_execution_id,
+                                    raw_contract=runner._execution_contract,
+                                    runner=runner,
+                                    owned_event_store=(event_store if owns_event_store else None),
+                                )
+                            if not retained_after_run:
+                                retained_tracker = await session_repo.reconstruct_session(
+                                    retained_session_id
+                                    if isinstance(retained_session_id, str)
+                                    else ""
+                                )
+                            else:
+                                retained_tracker = None
+                            if retained_tracker is not None and retained_tracker.is_ok:
                                 self._remember_process_local_owner(
                                     retained_tracker.value,
                                     runner,
