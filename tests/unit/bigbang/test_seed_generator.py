@@ -503,17 +503,23 @@ class TestSeedGeneratorExtraction:
             assert result.value.constraints == ("--lang ko|en", "keep exact flag")
 
     @pytest.mark.asyncio
-    async def test_generate_keeps_legacy_bracket_prefixed_constraints(self) -> None:
-        """Legacy bracket-prefixed prose is not mistaken for JSON and still splits."""
+    async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:
+        """At extraction time bracket prose triggers retry; the reformatted array wins."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
-        extraction_response = create_valid_extraction_response(
+        prose_response = create_valid_extraction_response(
             constraints="[P0] Must work offline | [P1] Fast startup"
         )
+        reformatted_response = create_valid_extraction_response(
+            constraints='["[P0] Must work offline", "[P1] Fast startup"]'
+        )
         mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response(extraction_response))
+            side_effect=[
+                Result.ok(create_mock_completion_response(prose_response)),
+                Result.ok(create_mock_completion_response(reformatted_response)),
+            ]
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -529,51 +535,48 @@ class TestSeedGeneratorExtraction:
                 "[P0] Must work offline",
                 "[P1] Fast startup",
             )
+            assert mock_adapter.complete.await_count == 2
 
-    def test_parse_constraint_values_rejects_malformed_json_intent(self) -> None:
-        """JSON-looking but invalid CONSTRAINTS raise instead of silently splitting."""
-        with pytest.raises(ValueError, match="JSON array"):
-            _parse_constraint_values('["--lang ko|en",]')
+    def test_strict_rejects_any_bracket_led_value_that_is_not_a_json_string_array(self) -> None:
+        """Strict (extraction-time) mode: [-led values must be JSON string arrays."""
+        malformed_cases = (
+            '["--lang ko|en",]',  # trailing comma
+            '["--lang ko|en"',  # truncated, quote-led
+            "[--lang ko|en",  # truncated, unquoted
+            '["--lang ko|en"] stray text',  # valid array + trailing garbage
+            '[null, "x"] stray text',  # JSON-parseable group + trailing garbage
+            "[--lang ko|en, keep exact flag] trailing note",  # unquoted array shape
+            "[ko] preserve ko|en flag",  # word-tag shape from malformed array output
+            "[P0] Must work offline | [P1] Fast startup",  # prose retries at extraction
+        )
+        for malformed in malformed_cases:
+            with pytest.raises(ValueError, match="JSON array"):
+                _parse_constraint_values(malformed, strict=True)
 
-    def test_parse_constraint_values_rejects_non_string_json_entries(self) -> None:
-        """JSON arrays must contain only strings; non-string members retry."""
+    def test_strict_rejects_non_string_json_entries(self) -> None:
+        """Strict mode: JSON arrays must contain only strings."""
         for malformed in ("[null]", '[1, "x"]'):
             with pytest.raises(ValueError, match="only strings"):
-                _parse_constraint_values(malformed)
+                _parse_constraint_values(malformed, strict=True)
 
-    def test_parse_constraint_values_rejects_quote_led_array_with_trailing_text(self) -> None:
-        """A closed quoted array followed by prose is malformed JSON, not legacy prose."""
-        with pytest.raises(ValueError, match="JSON array"):
-            _parse_constraint_values('["--lang ko|en"] stray text')
-
-    def test_parse_constraint_values_rejects_json_parseable_group_with_trailing_text(self) -> None:
-        """A leading bracket group that is itself valid JSON is intent, not a tag."""
-        for malformed in ('[null, "x"] stray text', "[null] stray text", "[123] stray | text"):
-            with pytest.raises(ValueError, match="JSON array"):
-                _parse_constraint_values(malformed)
-
-    def test_parse_constraint_values_rejects_non_tag_bracket_group_with_trailing_text(self) -> None:
-        """Only word-like [tag] tokens are prose; other bracket groups retry."""
-        for malformed in (
-            "[--lang ko|en, keep exact flag] trailing note",
-            "[--lang ko|en] trailing note",
-            "[a, b] trailing note",
-        ):
-            with pytest.raises(ValueError, match="JSON array"):
-                _parse_constraint_values(malformed)
-
-    def test_parse_constraint_values_keeps_word_tag_prose(self) -> None:
-        """Word-like tags including dots and dashes stay on the legacy split."""
+    def test_lenient_keeps_legacy_bracket_prose_split(self) -> None:
+        """Lenient (stored-data) mode: bracket prose keeps the historical split."""
+        assert _parse_constraint_values("[P0] Must work offline | [P1] Fast startup") == (
+            "[P0] Must work offline",
+            "[P1] Fast startup",
+        )
         assert _parse_constraint_values("[v2.1-rc] Must ship | [2026-01] Later") == (
             "[v2.1-rc] Must ship",
             "[2026-01] Later",
         )
 
-    def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
-        """Any malformed array missing its closing bracket raises for retry."""
-        for malformed in ('["--lang ko|en"', "[--lang ko|en"):
-            with pytest.raises(ValueError, match="JSON array"):
-                _parse_constraint_values(malformed)
+    def test_lenient_never_raises_on_malformed_json(self) -> None:
+        """Lenient mode: stored data has no retry path, so it pipe-splits instead."""
+        assert _parse_constraint_values('["--lang ko|en",]') == (
+            '["--lang ko',
+            'en",]',
+        )
+        assert _parse_constraint_values("[null]") == ("None",)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -585,6 +588,7 @@ class TestSeedGeneratorExtraction:
             "[null]",
             '[null, "x"] stray text',
             "[--lang ko|en, keep exact flag] trailing note",
+            "[ko] preserve ko|en flag",
         ),
     )
     async def test_generate_retries_on_malformed_json_constraints(

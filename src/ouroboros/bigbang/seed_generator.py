@@ -55,48 +55,26 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
-_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[[A-Za-z0-9][\w .:-]{0,31}\]\s+\S")
-
-
-def _is_legacy_bracket_prose(text: str) -> bool:
-    """True for ``[tag] prose`` where the leading group is a plain tag token.
-
-    Legacy prose tags are short word-like tokens such as ``[P0]``, ``[HIGH]``
-    or ``[v2.1]``. Anything else — commas, pipes, quotes, or other JSON
-    punctuation inside the bracket group — signals JSON-array intent and must
-    not fall back to pipe splitting. A tag-shaped group that nevertheless
-    parses as a JSON array on its own (e.g. ``[null]``, ``[123]``) is also
-    treated as JSON intent with trailing garbage.
-    """
-    if not _LEGACY_BRACKET_PREFIX_RE.match(text):
-        return False
-    bracket_group = text[: text.index("]") + 1]
-    try:
-        json.loads(bracket_group)
-    except json.JSONDecodeError:
-        return True
-    return False
-
-
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
-def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
+def _parse_constraint_values(raw_value: object, *, strict: bool = False) -> tuple[str, ...]:
     """Parse constraints from a JSON array, a sequence, or a legacy pipe list.
 
     The extraction format requests a single-line JSON array so literal pipe
-    characters inside one constraint survive as data (#1696). Legacy
-    pipe-delimited responses keep the historical split, including
-    bracket-prefixed prose such as ``[P0] Must work offline`` that merely
-    starts with ``[`` without signalling JSON intent.
+    characters inside one constraint survive as data (#1696).
+
+    In strict mode (extraction time) any value starting with ``[`` must be a
+    valid JSON array of strings; anything else raises so the extraction retry
+    path can ask the LLM to reformat — the extraction prompt already demands
+    a JSON array. In lenient mode (stored legacy requirements consumed at
+    seed-build time) invalid JSON falls back to the historical pipe split,
+    including bracket-prefixed prose such as ``[P0] Must work offline``, and
+    never raises: stored data has no retry path.
 
     Raises:
-        ValueError: If the value starts with ``[`` but is neither a valid JSON
-            array of strings nor legacy bracket-prefixed prose such as
-            ``[P0] ...``. Quote-led values are always treated as JSON intent
-            (so ``["a"] stray text`` retries rather than pipe-splitting), and
-            valid arrays containing non-string members (e.g. ``[null]``)
-            violate the array-of-strings contract and retry as well.
+        ValueError: Only in strict mode, when a ``[``-led value is not a
+            valid JSON array of strings.
     """
     if isinstance(raw_value, list | tuple):
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
@@ -109,22 +87,23 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError as e:
-            if not _is_legacy_bracket_prose(text):
+            if strict:
                 raise ValueError(
-                    f"CONSTRAINTS looks like a JSON array but is not valid JSON: {e}. "
+                    f"CONSTRAINTS must be a single-line JSON array of strings: {e}. "
                     f"Value: {text[:200]}"
                 ) from e
         else:
             if isinstance(decoded, list):
-                non_strings = tuple(
-                    type(entry).__name__ for entry in decoded if not isinstance(entry, str)
-                )
-                if non_strings:
-                    raise ValueError(
-                        "CONSTRAINTS JSON array must contain only strings; got "
-                        f"{', '.join(non_strings)}. Value: {text[:200]}"
+                if strict:
+                    non_strings = tuple(
+                        type(entry).__name__ for entry in decoded if not isinstance(entry, str)
                     )
-                return tuple(item for item in (entry.strip() for entry in decoded) if item)
+                    if non_strings:
+                        raise ValueError(
+                            "CONSTRAINTS JSON array must contain only strings; got "
+                            f"{', '.join(non_strings)}. Value: {text[:200]}"
+                        )
+                return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
@@ -867,7 +846,9 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         # (e.g. a trailing-comma array) triggers the extraction retry path
         # instead of being silently pipe-split downstream (#1696).
         if "constraints" in requirements:
-            requirements["constraints"] = _parse_constraint_values(requirements["constraints"])
+            requirements["constraints"] = _parse_constraint_values(
+                requirements["constraints"], strict=True
+            )
 
         return requirements
 
