@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,12 +52,94 @@ class TestMcpConfiguration:
         ):
             assert is_mcp_configured() is False
 
+    def test_codex_home_is_authoritative(self, tmp_path):
+        default_home = tmp_path / "home"
+        default_home.mkdir()
+        codex_home = tmp_path / "custom-codex"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
+
+        with (
+            patch.object(_mod.Path, "home", return_value=default_home),
+            patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=True),
+        ):
+            assert is_mcp_configured("codex") is True
+
+    def test_disabled_or_transportless_codex_registration_is_not_configured(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config_path = codex_dir / "config.toml"
+
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            config_path.write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\nenabled = false\n')
+            assert is_mcp_configured("codex") is False
+
+            config_path.write_text('[mcp_servers.ouroboros]\nargs = ["ouroboros-ai"]\n')
+            assert is_mcp_configured("codex") is False
+
+    def test_python_310_fallback_ignores_multiline_string_decoy(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            'notice = """\n[mcp_servers.ouroboros]\ncommand = "uvx"\n"""\n'
+        )
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod, "_toml_loads", None),
+        ):
+            assert is_mcp_configured("codex") is False
+
+    def test_codex_hook_does_not_use_claude_only_registration(self, tmp_path, capsys):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "mcp.json").write_text('{"mcpServers": {"ouroboros": {"command": "uvx"}}}')
+        payload = {
+            "session_id": "codex-session",
+            "turn_id": "codex-turn",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:status" not in context
+
+    def test_claude_hook_does_not_use_codex_only_registration(self, tmp_path, capsys):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
+        payload = {
+            "session_id": "claude-session",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:status" not in context
+
     def test_codex_only_registration_routes_status_without_setup(self, tmp_path, capsys):
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()
         (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
         payload = {
             "session_id": "test-session",
+            "turn_id": "test-turn",
             "prompt": "ooo status",
             "hook_event_name": "UserPromptSubmit",
         }
@@ -129,7 +212,7 @@ class TestFirstTimePrefs:
         # MCP registered in ~/.claude/mcp.json means setup has already run.
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
-        (claude_dir / "mcp.json").write_text('{"mcpServers": {"ouroboros": {}}}')
+        (claude_dir / "mcp.json").write_text('{"mcpServers": {"ouroboros": {"command": "uvx"}}}')
 
         with patch.object(_mod.Path, "home", return_value=tmp_path):
             assert is_first_time() is False

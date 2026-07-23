@@ -13,6 +13,7 @@ Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -160,36 +161,94 @@ KEYWORD_MAP = [
 ]
 
 
+def _usable_mcp_transport(server: object) -> bool:
+    if not isinstance(server, dict) or server.get("enabled") is False:
+        return False
+    return any(
+        isinstance(server.get(key), str) and bool(server[key].strip()) for key in ("command", "url")
+    )
+
+
+def _fallback_codex_mcp_configured(config_text: str) -> bool:
+    in_ouroboros_section = False
+    section_count = 0
+    transport_found = False
+    enabled = True
+    multiline_delimiter: str | None = None
+
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        if multiline_delimiter is not None:
+            if line.count(multiline_delimiter) % 2 == 1:
+                multiline_delimiter = None
+            continue
+        for delimiter in ('"""', "'''"):
+            if line.count(delimiter) % 2 == 1:
+                multiline_delimiter = delimiter
+                line = line.split(delimiter, 1)[0].strip()
+                break
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            if line in ("[mcp_servers.ouroboros]", '[mcp_servers."ouroboros"]'):
+                section_count += 1
+                in_ouroboros_section = True
+            else:
+                in_ouroboros_section = False
+            continue
+        if not in_ouroboros_section:
+            continue
+        match = re.fullmatch(r"(command|url|enabled)\s*=\s*(.+)", line)
+        if match is None:
+            continue
+        key, raw_value = match.groups()
+        raw_value = raw_value.strip()
+        if key == "enabled":
+            enabled = raw_value.split("#", 1)[0].strip() == "true"
+        elif (
+            len(raw_value) >= 2
+            and raw_value[0] == raw_value[-1]
+            and raw_value[0] in ('"', "'")
+            and bool(raw_value[1:-1].strip())
+        ):
+            transport_found = True
+
+    return section_count == 1 and enabled and transport_found
+
+
 def _codex_mcp_configured(config_text: str) -> bool:
     if _toml_loads is not None:
         codex_config = _toml_loads(config_text)
         mcp_servers = codex_config.get("mcp_servers")
-        return isinstance(mcp_servers, dict) and isinstance(mcp_servers.get("ouroboros"), dict)
-
-    in_ouroboros_section = False
-    for raw_line in config_text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if line.startswith("["):
-            in_ouroboros_section = line == "[mcp_servers.ouroboros]"
-            continue
-        if in_ouroboros_section and re.match(r"^(command|url)\s*=\s*.+$", line):
-            return True
-    return False
-
-
-def is_mcp_configured() -> bool:
-    """Check if the Ouroboros MCP server is registered for Claude or Codex."""
-    try:
-        claude_path = Path.home() / ".claude" / "mcp.json"
-        if claude_path.exists() and "ouroboros" in claude_path.read_text():
-            return True
-
-        codex_path = Path.home() / ".codex" / "config.toml"
-        if not codex_path.exists():
+        if not isinstance(mcp_servers, dict):
             return False
-        return _codex_mcp_configured(codex_path.read_text())
+        return _usable_mcp_transport(mcp_servers.get("ouroboros"))
+    return _fallback_codex_mcp_configured(config_text)
+
+
+def _claude_mcp_configured(config_text: str) -> bool:
+    claude_config = json.loads(config_text)
+    if not isinstance(claude_config, dict):
+        return False
+    mcp_servers = claude_config.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        return False
+    return _usable_mcp_transport(mcp_servers.get("ouroboros"))
+
+
+def is_mcp_configured(host: str | None = None) -> bool:
+    """Check the active host's Ouroboros MCP registration."""
+    try:
+        if host in (None, "claude"):
+            claude_path = Path.home() / ".claude" / "mcp.json"
+            if claude_path.exists() and _claude_mcp_configured(claude_path.read_text()):
+                return True
+            if host == "claude":
+                return False
+
+        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        codex_path = codex_home / "config.toml"
+        return codex_path.exists() and _codex_mcp_configured(codex_path.read_text())
     except Exception:
         return False
 
@@ -303,12 +362,12 @@ def detect_keywords(text: str) -> dict:
     return {"detected": False, "keyword": None, "suggested_skill": None}
 
 
-def _extract_prompt(hook_input: str) -> str:
-    """Extract prompt text from a hook payload, falling back to raw stdin."""
+def _extract_prompt_and_host(hook_input: str) -> tuple[str, str | None]:
+    """Extract prompt and identify the hook host from its envelope."""
     try:
         payload = json.loads(hook_input)
     except (ValueError, RecursionError):
-        return hook_input
+        return hook_input, None
 
     if (
         isinstance(payload, dict)
@@ -316,8 +375,14 @@ def _extract_prompt(hook_input: str) -> str:
         and isinstance(payload.get("session_id"), str)
         and isinstance(payload.get("prompt"), str)
     ):
-        return payload["prompt"]
-    return hook_input
+        host = "codex" if isinstance(payload.get("turn_id"), str) else "claude"
+        return payload["prompt"], host
+    return hook_input, None
+
+
+def _extract_prompt(hook_input: str) -> str:
+    """Extract prompt text from a hook payload, falling back to raw stdin."""
+    return _extract_prompt_and_host(hook_input)[0]
 
 
 def _emit_context(context: str) -> None:
@@ -342,7 +407,7 @@ def main() -> None:
     except Exception:
         hook_input = ""
 
-    user_input = _extract_prompt(hook_input)
+    user_input, host = _extract_prompt_and_host(hook_input)
 
     result = detect_keywords(user_input)
 
@@ -361,7 +426,7 @@ IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confir
         keyword = result["keyword"]
 
         # Gate check: if MCP not configured and skill requires it, redirect to setup
-        if skill not in SETUP_BYPASS_SKILLS and not is_mcp_configured():
+        if skill not in SETUP_BYPASS_SKILLS and not is_mcp_configured(host):
             _emit_context("""<skill-suggestion>
 🎯 REQUIRED SKILL:
 - /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
