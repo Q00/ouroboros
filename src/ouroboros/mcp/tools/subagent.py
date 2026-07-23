@@ -3341,6 +3341,24 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     re.IGNORECASE,
 )
 
+# Embedded serialized-row shapes for PROSE fields (finding, caveats,
+# provenance text): a JSON array-of-objects opening, an object chain, or a
+# quoted-key object inside prose is smuggled rows. This is the
+# field-appropriate subset of the evidence.value row check — prose fields
+# legitimately contain newlines, and query text legitimately contains comma
+# lists, so neither of those rules applies here.
+_EMBEDDED_JSON_ROWS = re.compile(r"\[\s*\{|\}\s*,\s*\{|\{\s*\"[^\"]+\"\s*:")
+
+
+def _prose_contains_rows(text: str) -> bool:
+    """Row-shaped content embedded in a prose field (not evidence.value)."""
+    if _EMBEDDED_JSON_ROWS.search(text):
+        return True
+    if len(re.findall(r"[A-Za-z],[A-Za-z]", text)) >= 2:
+        return True
+    segments = [segment for segment in text.split(";") if segment.strip()]
+    return len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments)
+
 
 def _parseable_timestamp(value: str) -> bool:
     """True when ``value`` is a real ISO-8601 calendar date(-time).
@@ -3380,6 +3398,24 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         for label, pattern in _data_evidence_boundary_patterns()
         if pattern.search(serialized)
     ]
+    # The no-rows policy binds EVERY persisted prose field, not just
+    # evidence.value (bot-review round-10 probe: JSON rows smuggled through
+    # ``finding``). Each field gets the prose-appropriate subset of the row
+    # check; proposal query text is covered by the embedded-JSON rule only,
+    # since comma lists are legitimate query syntax.
+    finding = output.get("finding")
+    if isinstance(finding, str) and _prose_contains_rows(finding):
+        errors.append(
+            "finding: row-shaped (serialized-record) content is raw evidence "
+            "and may not ride any persisted field; state aggregates only"
+        )
+    caveats = output.get("caveats")
+    for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
+        if isinstance(caveat, str) and _prose_contains_rows(caveat):
+            errors.append(
+                f"caveats[{index}]: row-shaped (serialized-record) content is "
+                "raw evidence and may not ride any persisted field"
+            )
     forbidden = _data_forbidden_operation_pattern()
     evidence = output.get("evidence")
     for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
@@ -3414,6 +3450,12 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                     f"evidence[{index}].{field_name}: claims forbidden operation "
                     f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
                 )
+            if isinstance(field_value, str) and _prose_contains_rows(field_value):
+                errors.append(
+                    f"evidence[{index}].{field_name}: row-shaped "
+                    "(serialized-record) content is raw evidence and may not "
+                    "ride any persisted field"
+                )
         # An identifier-shaped source is the tool that WAS executed, so it
         # gets the same mutating-verb check as proposal tool names
         # (bot-review round-9 probe: source="delete_database"). Prose sources
@@ -3447,6 +3489,18 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"proposed_queries[{index}].tool_name: names a mutating tool "
                 f"({verb!r}); the data lane is read-only"
+            )
+        if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
+            errors.append(
+                f"proposed_queries[{index}].query: embedded serialized rows "
+                "are raw evidence and may not ride any persisted field"
+            )
+        expected_decision = item.get("expected_decision")
+        if isinstance(expected_decision, str) and _prose_contains_rows(expected_decision):
+            errors.append(
+                f"proposed_queries[{index}].expected_decision: row-shaped "
+                "(serialized-record) content is raw evidence and may not ride "
+                "any persisted field"
             )
     return errors
 

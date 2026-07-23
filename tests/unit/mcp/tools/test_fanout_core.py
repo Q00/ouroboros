@@ -2131,6 +2131,76 @@ def test_plugin_recipe_renders_every_lane_contract() -> None:
     assert "session_id: sess-plugin" in section
 
 
+def test_rows_smuggled_through_prose_fields_are_rejected() -> None:
+    """The no-rows policy binds every persisted field (round-10 probe).
+
+    JSON rows placed in ``finding`` previously completed and persisted
+    before human confirmation. Prose fields get the field-appropriate row
+    check: newlines stay legal in prose, and comma lists stay legal in
+    query text.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    rows_in_finding = _minimal_data_output("78% of MAU are on the free tier")
+    rows_in_finding["finding"] = 'Sample: [{"name": "Alice Kim", "tier": "premium"}]'
+    errors = _data_evidence_boundary_violations(rows_in_finding)
+    assert any("finding" in error and "row-shaped" in error for error in errors)
+
+    rows_in_caveat = _minimal_data_output("78% of MAU are on the free tier")
+    rows_in_caveat["caveats"] = ['Raw sample: {"user": "Bob Lee"}, {"user": "Choi"}']
+    errors = _data_evidence_boundary_violations(rows_in_caveat)
+    assert any("caveats[0]" in error for error in errors)
+
+    # Prose with newlines and single commas per clause stays valid.
+    prose_finding = _minimal_data_output("78% of MAU are on the free tier")
+    prose_finding["finding"] = "Most usage is free-tier.\nPremium adoption is growing, slowly."
+    assert _data_evidence_boundary_violations(prose_finding) == []
+
+    # Comma lists are legitimate query syntax.
+    query_proposal = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "clickhouse_query",
+                "query": "SELECT plan, count(*), avg(seats) FROM accounts GROUP BY plan",
+                "expected_decision": "Which plan dominates.",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    assert _data_evidence_boundary_violations(query_proposal) == []
+
+
+def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: Any) -> None:
+    """A configured mutating tool hint never reaches the child (round-10).
+
+    The plugin bridge grants the child broad permissions and post-execution
+    validation cannot undo a mutation, so ``delete_database`` must be
+    filtered out of ``OUROBOROS_KNOWN_DATA_TOOLS`` before dispatch.
+    """
+    monkeypatch.setenv(
+        "OUROBOROS_KNOWN_DATA_TOOLS",
+        "clickhouse_query,delete_database,DropTables,metabase_card",
+    )
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-mutating-hint",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

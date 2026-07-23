@@ -62,6 +62,7 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     SubagentDispatchMode,
+    _mutating_tool_verb,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
     build_interview_subagent,
@@ -745,11 +746,16 @@ def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[d
     lanes = [dict(lane) for lane in advisory.get("lanes") or ()]
     # Env values are untrusted prompt input: each entry must be a plain tool
     # identifier (no whitespace/newlines that could smuggle prompt text), and
-    # the list is bounded.
+    # the list is bounded. A hint whose identifier carries a mutating verb is
+    # rejected BEFORE dispatch (bot-review round-10): the plugin bridge
+    # grants the child broad permissions, and post-execution validation
+    # cannot undo a mutation the hint steered it into.
     known_tools = [
         item.strip()
         for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
-        if item.strip() and _KNOWN_DATA_TOOL_NAME.match(item.strip())
+        if item.strip()
+        and _KNOWN_DATA_TOOL_NAME.match(item.strip())
+        and _mutating_tool_verb(item.strip()) is None
     ][:_MAX_KNOWN_DATA_TOOLS]
     if known_tools:
         for lane in lanes:
