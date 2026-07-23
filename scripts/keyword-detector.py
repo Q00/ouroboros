@@ -16,7 +16,11 @@ import json
 from pathlib import Path
 import re
 import sys
-import tomllib
+
+try:
+    from tomllib import loads as _toml_loads
+except ModuleNotFoundError:  # Python 3.10 hook hosts
+    _toml_loads = None
 
 
 def _configure_utf8_stdio() -> None:
@@ -156,6 +160,25 @@ KEYWORD_MAP = [
 ]
 
 
+def _codex_mcp_configured(config_text: str) -> bool:
+    if _toml_loads is not None:
+        codex_config = _toml_loads(config_text)
+        mcp_servers = codex_config.get("mcp_servers")
+        return isinstance(mcp_servers, dict) and isinstance(mcp_servers.get("ouroboros"), dict)
+
+    in_ouroboros_section = False
+    for raw_line in config_text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            in_ouroboros_section = line == "[mcp_servers.ouroboros]"
+            continue
+        if in_ouroboros_section and re.match(r"^(command|url)\s*=\s*.+$", line):
+            return True
+    return False
+
+
 def is_mcp_configured() -> bool:
     """Check if the Ouroboros MCP server is registered for Claude or Codex."""
     try:
@@ -166,9 +189,7 @@ def is_mcp_configured() -> bool:
         codex_path = Path.home() / ".codex" / "config.toml"
         if not codex_path.exists():
             return False
-        codex_config = tomllib.loads(codex_path.read_text())
-        mcp_servers = codex_config.get("mcp_servers")
-        return isinstance(mcp_servers, dict) and isinstance(mcp_servers.get("ouroboros"), dict)
+        return _codex_mcp_configured(codex_path.read_text())
     except Exception:
         return False
 

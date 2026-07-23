@@ -27,6 +27,30 @@ class TestMcpConfiguration:
         with patch.object(_mod.Path, "home", return_value=tmp_path):
             assert is_mcp_configured() is True
 
+    def test_codex_only_registration_uses_python_310_fallback(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = ["ouroboros-ai"]\n'
+        )
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod, "_toml_loads", None),
+        ):
+            assert is_mcp_configured() is True
+
+    def test_python_310_fallback_rejects_header_without_transport(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\nargs = ["broken"]\n')
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod, "_toml_loads", None),
+        ):
+            assert is_mcp_configured() is False
+
     def test_codex_only_registration_routes_status_without_setup(self, tmp_path, capsys):
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()
