@@ -535,9 +535,16 @@ class TestSeedGeneratorExtraction:
         with pytest.raises(ValueError, match="JSON array"):
             _parse_constraint_values('["--lang ko|en",]')
 
-    def test_parse_constraint_values_coerces_non_string_json_entries(self) -> None:
-        """Valid JSON arrays with non-string entries are coerced to strings."""
-        assert _parse_constraint_values('[1, "x"]') == ("1", "x")
+    def test_parse_constraint_values_rejects_non_string_json_entries(self) -> None:
+        """JSON arrays must contain only strings; non-string members retry."""
+        for malformed in ("[null]", '[1, "x"]'):
+            with pytest.raises(ValueError, match="only strings"):
+                _parse_constraint_values(malformed)
+
+    def test_parse_constraint_values_rejects_quote_led_array_with_trailing_text(self) -> None:
+        """A closed quoted array followed by prose is malformed JSON, not legacy prose."""
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_constraint_values('["--lang ko|en"] stray text')
 
     def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
         """Any malformed array missing its closing bracket raises for retry."""
@@ -548,7 +555,12 @@ class TestSeedGeneratorExtraction:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "malformed_constraints",
-        ('["--lang ko|en", "keep exact flag",]', "[--lang ko|en | keep exact flag"),
+        (
+            '["--lang ko|en", "keep exact flag",]',
+            "[--lang ko|en | keep exact flag",
+            '["--lang ko|en"] stray text',
+            "[null]",
+        ),
     )
     async def test_generate_retries_on_malformed_json_constraints(
         self, malformed_constraints: str

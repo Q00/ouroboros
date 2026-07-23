@@ -55,7 +55,7 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
-_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[[^\[\]\r\n]+\]\s+\S")
+_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[\s*[^\s\"'\[\]][^\[\]\r\n]*\]\s+\S")
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -70,9 +70,11 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
 
     Raises:
         ValueError: If the value starts with ``[`` but is neither a valid JSON
-            array nor legacy bracket-prefixed prose such as ``[P0] ...``.
-            Raising here routes malformed structured output through the
-            existing extraction retry path.
+            array of strings nor legacy bracket-prefixed prose such as
+            ``[P0] ...``. Quote-led values are always treated as JSON intent
+            (so ``["a"] stray text`` retries rather than pipe-splitting), and
+            valid arrays containing non-string members (e.g. ``[null]``)
+            violate the array-of-strings contract and retry as well.
     """
     if isinstance(raw_value, list | tuple):
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
@@ -92,7 +94,15 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
                 ) from e
         else:
             if isinstance(decoded, list):
-                return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
+                non_strings = tuple(
+                    type(entry).__name__ for entry in decoded if not isinstance(entry, str)
+                )
+                if non_strings:
+                    raise ValueError(
+                        "CONSTRAINTS JSON array must contain only strings; got "
+                        f"{', '.join(non_strings)}. Value: {text[:200]}"
+                    )
+                return tuple(item for item in (entry.strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
