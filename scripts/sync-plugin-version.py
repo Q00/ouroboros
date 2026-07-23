@@ -19,6 +19,7 @@ PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([\d\w.]+) -->")
 
 
 def get_version() -> str:
@@ -96,14 +97,18 @@ def normalize_version(v: str) -> str:
 def update_version_marker(path: Path, version: str) -> bool:
     """Update <!-- ooo:VERSION:X.Y.Z --> marker in a text file."""
     text = path.read_text()
-    new_text = re.sub(
-        r"<!-- ooo:VERSION:[\d\w.]+ -->",
-        f"<!-- ooo:VERSION:{version} -->",
-        text,
-    )
+    matches = list(VERSION_MARKER_RE.finditer(text))
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one version marker in {path}")
+
+    new_text = VERSION_MARKER_RE.sub(f"<!-- ooo:VERSION:{version} -->", text)
     if text == new_text:
         return False
     path.write_text(new_text)
+
+    updated_matches = list(VERSION_MARKER_RE.finditer(path.read_text()))
+    if len(updated_matches) != 1 or updated_matches[0].group(1) != version:
+        raise RuntimeError(f"failed to verify version marker update in {path}")
     return True
 
 
@@ -181,16 +186,19 @@ def main() -> None:
 
     for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
         if not path.exists():
-            print(f"  SKIP  {path.relative_to(ROOT)} (not found)")
-            continue
+            sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
 
         text = path.read_text()
-        marker_match = re.search(r"<!-- ooo:VERSION:([\d\w.]+) -->", text)
-        old_marker = marker_match.group(1) if marker_match else "?"
+        marker_matches = list(VERSION_MARKER_RE.finditer(text))
+        if len(marker_matches) != 1:
+            sys.exit(f"Error: expected exactly one version marker in {path.relative_to(ROOT)}")
+        old_marker = marker_matches[0].group(1)
         if old_marker == version:
             print(f"  OK    {path.relative_to(ROOT)} ({old_marker})")
         elif write:
-            update_version_marker(path, version)
+            updated = update_version_marker(path, version)
+            if not updated:
+                sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
             print(f"  WRITE {path.relative_to(ROOT)} ({old_marker} -> {version})")
             changed = True
         else:
