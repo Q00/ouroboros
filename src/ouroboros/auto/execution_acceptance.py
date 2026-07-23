@@ -361,21 +361,22 @@ def _restore_surviving_acceptance_specs(
             )
             continue
 
-        exact_index = next(
-            (index for index in remaining_indices if original[index][1] == text),
-            None,
-        )
-        if exact_index is not None:
-            criterion, _text = _pop(exact_index)
-            # A source whose text IS an autoresearch canonical AC belongs in the
-            # fixed canonical sequence (tier 0 at its canonical index), not the
-            # source coordinate space — otherwise a lone exact baseline AC would
-            # sort after injected experiments/reporting and invert stage order.
+        exact_indices = [index for index in remaining_indices if original[index][1] == text]
+        if exact_indices:
+            # Group EVERY source with this exact text, not just the first, so
+            # byte-identical repeats collapse into one execution AC (one command,
+            # one key) while genuinely distinct identities each survive.  A source
+            # whose text IS an autoresearch canonical AC anchors to the fixed
+            # canonical sequence (tier 0); otherwise it stays in source order.
+            specs = [_pop(index)[0] for index in exact_indices]
             canonical_position = _autoresearch_canonical_position(text)
-            if canonical_position is not None:
-                _emit((0, float(canonical_position)), criterion)
-            else:
-                _emit((1, float(exact_index)), criterion)
+            key: tuple[int, float] = (
+                (0, float(canonical_position))
+                if canonical_position is not None
+                else (1, float(min(exact_indices)))
+            )
+            for item in _collapse_exact_match_criteria(specs):
+                _emit(key, item)
             continue
 
         # A filtered text with no remaining source.  Either the normalizer
@@ -422,6 +423,32 @@ def _restore_surviving_acceptance_specs(
     # a pre-existing boundary limitation for such inputs, not something to fix by
     # discarding a valid Seed contract here.
     return tuple(emission for _key, emission in emissions)
+
+
+def _collapse_exact_match_criteria(
+    specs: list[AcceptanceCriterionInput],
+) -> list[AcceptanceCriterionInput]:
+    """Collapse same-description sources into one AC per distinct identity.
+
+    All inputs share one description.  Byte-identical full identities (same
+    contract and explicit key) collapse to a single execution AC — otherwise the
+    same command would dispatch twice under one shared key.  A bare source (no
+    contract, no explicit identity) is subsumed once any contract-bearing source
+    is present, since the contracted criterion is the richer form of the same
+    requirement.  Genuinely distinct identities are each preserved.
+    """
+    contract_specs = [spec for spec in specs if _carries_explicit_contract(spec)]
+    if not contract_specs:
+        # All bare: one representative AC for the shared requirement.
+        return [specs[0]]
+    result: list[AcceptanceCriterionInput] = []
+    seen_signatures: list[tuple[object, ...]] = []
+    for spec in contract_specs:
+        signature = _identity_signature(spec)  # type: ignore[arg-type]
+        if signature not in seen_signatures:
+            seen_signatures.append(signature)
+            result.append(spec)
+    return result
 
 
 def _transfer_contract_to_emitted_canonical(

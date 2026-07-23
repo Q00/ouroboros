@@ -973,6 +973,57 @@ def test_normalize_execution_acceptance_exact_canonical_source_keeps_sequence() 
     assert list(texts) == list(_AUTORESEARCH_CANONICAL_AC)
 
 
+def test_normalize_execution_acceptance_groups_identical_exact_canonical_sources() -> None:
+    """Blocker regression: byte-identical exact canonical sources collapse once.
+
+    Two byte-identical already-canonical specs must produce one execution AC
+    (one command, one key), regardless of source order, while a bare duplicate is
+    subsumed by its contracted twin and genuinely distinct contracts both survive.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+
+    # Byte-identical → one AC, one dispatched command.
+    identical = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+    )
+    normalized = normalize_execution_acceptance(identical)
+    assert len(normalized.acceptance_criteria) == 6
+    commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "uv run train.py"
+    ]
+    assert commands == ["uv run train.py"]
+
+    # Bare-first / contract-second is order-independent: the contract survives.
+    bare_first = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+    )
+    bare_first_normalized = normalize_execution_acceptance(bare_first)
+    assert len(bare_first_normalized.acceptance_criteria) == 6
+    baseline = next(
+        c
+        for c in bare_first_normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "baseline entry written before any edit" in c.description
+    )
+    assert baseline.verify_command == "uv run train.py"
+
+    # Genuinely distinct contracts on the same canonical text both survive.
+    distinct = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+    )
+    distinct_commands = {
+        c.verify_command
+        for c in normalize_execution_acceptance(distinct).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command
+    }
+    assert {"cmd_a", "cmd_b"} <= distinct_commands
+
+
 def test_unwrap_seed_repairer_preserves_case_and_recurses() -> None:
     """Blocker regression: unwrapping keeps case and strips every nested wrapper."""
     # Case-sensitive identifiers survive verbatim (not lowercased).
