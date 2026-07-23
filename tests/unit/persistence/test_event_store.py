@@ -297,9 +297,9 @@ class TestEventStoreAppend:
         )
 
         assert await event_store.append(terminal) is True
-        assert [event.type for event in await event_store.replay("session", terminal.aggregate_id)] == [
-            "orchestrator.session.completed"
-        ]
+        assert [
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ] == ["orchestrator.session.completed"]
         assert [
             event.type for event in await event_store.replay("execution", payload["execution_id"])
         ] == ["execution.ac.acceptance_finalized"]

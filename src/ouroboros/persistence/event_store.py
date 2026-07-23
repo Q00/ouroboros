@@ -827,8 +827,7 @@ class EventStore:
         payload_digest = _acceptance_payload_digest(event)
         existing = await conn.execute(
             select(ac_acceptance_guards_table.c.payload_digest).where(
-                ac_acceptance_guards_table.c.authority_correlation_id
-                == authority_correlation_id,
+                ac_acceptance_guards_table.c.authority_correlation_id == authority_correlation_id,
                 ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
             )
         )

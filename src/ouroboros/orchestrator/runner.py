@@ -5634,9 +5634,7 @@ class OrchestratorRunner:
             outcome = str(latest_data.get("outcome") or "").strip()
             if not outcome:
                 outcome = (
-                    "succeeded"
-                    if latest_data.get("success") is True
-                    else terminal_status.value
+                    "succeeded" if latest_data.get("success") is True else terminal_status.value
                 )
             accepted = bool(
                 terminal_status is SessionStatus.COMPLETED
@@ -5645,8 +5643,10 @@ class OrchestratorRunner:
                     or outcome in {"succeeded", "satisfied_externally"}
                 )
             )
-            disposition = "accepted" if accepted else (
-                "cancelled" if terminal_status is SessionStatus.CANCELLED else outcome
+            disposition = (
+                "accepted"
+                if accepted
+                else ("cancelled" if terminal_status is SessionStatus.CANCELLED else outcome)
             )
             await self._event_store.append(
                 BaseEvent(
