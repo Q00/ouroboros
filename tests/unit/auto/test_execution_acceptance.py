@@ -842,6 +842,38 @@ def test_normalize_execution_acceptance_transfers_contract_onto_autoresearch_can
     assert transferred.output_assertion == "baseline recorded"
 
 
+def test_normalize_execution_acceptance_preserves_extra_autoresearch_requirement() -> None:
+    """Blocker regression: a covered prefix with a distinct extra clause survives.
+
+    A source that restates a standard autoresearch requirement but adds a
+    caller-specific clause (a token outside the canonical vocabulary, e.g.
+    "raw stderr log") is NOT fully subsumed by a canonical AC, so the normalizer
+    must preserve it instead of silently dropping it behind the prefix matcher.
+    """
+    extra_requirement = (
+        "Seed requires execution to record a baseline uv run train.py result and "
+        "preserves the raw stderr log for every attempt."
+    )
+    seed = _seed(extra_requirement).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    normalized_texts = ac_texts(normalized.acceptance_criteria)
+    # The distinct "raw stderr log" requirement is not lost to canonicalization.
+    assert any("stderr log" in text for text in normalized_texts)
+
+
 def test_normalize_execution_acceptance_preserves_existing_autoresearch_runtime_context() -> None:
     seed = Seed.from_dict(
         {

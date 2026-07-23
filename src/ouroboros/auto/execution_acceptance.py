@@ -669,19 +669,130 @@ _AUTORESEARCH_COVERED_PHRASES: tuple[tuple[str, int | None], ...] = (
 )
 
 
+# Word tokens without trailing punctuation; keeps dotted/slashed identifiers
+# like ``train.py`` and ``keep/discard`` intact.
+_AUTORESEARCH_TOKEN_RE = re.compile(r"[a-z0-9_-]+(?:[./][a-z0-9_-]+)*")
+
+
+def _autoresearch_tokens(text: str) -> list[str]:
+    return _AUTORESEARCH_TOKEN_RE.findall(text.casefold())
+
+
+# The autoresearch canonical contract covers a fixed requirement vocabulary
+# (baseline, experiments, ledger, discard, diff, report). A covered-prefix
+# source whose remaining words stay inside that vocabulary is a restatement the
+# canonical ACs already express; a foreign token (e.g. ``stderr``, ``signed``)
+# is a distinct caller requirement the contract does not carry and must survive.
+_AUTORESEARCH_VOCAB_EXTRA: frozenset[str] = frozenset(
+    {
+        # Structural/meta requirement words used by standard autoresearch ACs.
+        "acceptance",
+        "content",
+        "contract",
+        "criteria",
+        "first-class",
+        "non-goals",
+        "non-improvements",
+        "recorded",
+        "reverted",
+        "selected",
+        "sequentially",
+        "widening",
+        "autoresearch",
+        "explicit",
+        "context",
+        "runtime",
+        "goals",
+        "first",
+        "class",
+        "improvements",
+        "post-baseline",
+    }
+)
+
+_AUTORESEARCH_VOCAB_FILLER: frozenset[str] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "for",
+        "with",
+        "in",
+        "on",
+        "is",
+        "are",
+        "be",
+        "that",
+        "this",
+        "its",
+        "by",
+        "as",
+        "at",
+        "into",
+        "from",
+        "per",
+        "then",
+        "which",
+        "each",
+        "all",
+        "any",
+        "must",
+        "should",
+        "seed",
+        "requires",
+        "require",
+        "execution",
+        "record",
+        "records",
+        "before",
+        "after",
+        "up",
+        "not",
+        "no",
+        "result",
+        "results",
+    }
+)
+
+_AUTORESEARCH_CANONICAL_VOCAB: frozenset[str] = (
+    frozenset(
+        token
+        for source in (*_AUTORESEARCH_CANONICAL_AC, *_AUTORESEARCH_NON_GOALS)
+        for token in _autoresearch_tokens(source)
+    )
+    | frozenset(token for phrase, _idx in _AUTORESEARCH_COVERED_PHRASES for token in phrase.split())
+    | _AUTORESEARCH_VOCAB_EXTRA
+    | _AUTORESEARCH_VOCAB_FILLER
+)
+
+
 def _autoresearch_coverage(subject: str) -> tuple[bool, int | None]:
     """Classify an autoresearch source against the canonical contract.
 
-    Returns ``(is_covered, canonical_index)``.  A covered phrase is matched by
-    prefix — the same rule the normalizer drops on — and ``canonical_index`` is
-    the AC that subsumes it, so a covered structured source can transfer its
-    verification contract onto that canonical criterion rather than being
-    dropped (losing evidence) or duplicated.
+    Returns ``(is_covered, canonical_index)``.  A source is covered only when a
+    covered phrase matches by prefix AND its remaining words stay inside the
+    canonical requirement vocabulary — i.e. it restates a requirement the six
+    canonical ACs already express, adding nothing distinct.  A remainder token
+    outside that vocabulary (a caller's extra requirement) makes it uncovered,
+    so the normalizer preserves it instead of dropping it.  ``canonical_index``
+    is the AC that subsumes a truly-covered source, letting a structured source
+    transfer its verification contract onto that canonical criterion rather than
+    being dropped (losing evidence) or duplicated.
     """
     key = _criterion_key(subject)
     for phrase, canonical_index in _AUTORESEARCH_COVERED_PHRASES:
-        if key.startswith(phrase):
-            return (True, canonical_index)
+        if not key.startswith(phrase):
+            continue
+        remainder = key[len(phrase) :]
+        if any(
+            token not in _AUTORESEARCH_CANONICAL_VOCAB for token in _autoresearch_tokens(remainder)
+        ):
+            return (False, None)
+        return (True, canonical_index)
     return (False, None)
 
 
