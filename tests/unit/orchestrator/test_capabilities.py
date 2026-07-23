@@ -4938,6 +4938,8 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "include_recommended_draft": True,
         "preserve_user_agency": True,
         "forward_to_mcp_only_after_user_or_auto_confirm": True,
+        # No-auto-confirm for data output is machine-readable (round-7).
+        "confirmation_overrides": {"data_context": "user_confirm_only_no_auto_confirm"},
     }
     assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
     assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
@@ -5209,8 +5211,16 @@ def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> Non
     assert fanout["contract_id"] == "interview_question_advisory_fanout.v1"
     assert fanout["lane_compatibility_rules"] == {
         "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+        # Skipping is legal only for OPTIONAL unknown lanes: a required
+        # unknown lane gates completion and must never be dropped.
+        "unknown_required_lane": "dispatch_generic_or_return_noop_finding_never_skip",
         "unsupported_capability": "dispatch_and_return_noop_finding",
         "noop_finding_is_completion_signal": True,
+    }
+    # The data lane's no-auto-confirm rule is machine-readable at synthesis
+    # time, not prose-only (bot-review round-7).
+    assert fanout["synthesis_contract"]["confirmation_overrides"] == {
+        "data_context": "user_confirm_only_no_auto_confirm",
     }
 
 

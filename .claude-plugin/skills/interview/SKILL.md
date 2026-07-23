@@ -244,7 +244,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    fan-out was registered with them, omitting them is a
    `correlation_mismatch`, not a skipped check. Submissions are bounded
    (at most 32 results / 256 KB serialized per call): submit findings, not
-   raw child transcripts.
+   raw child transcripts. Submitting lanes one at a time? Pass
+   `finalize: false` on every intermediate call (`status="accumulated"`,
+   the fan-out stays open even when all required lanes are in) and close
+   with a final `finalize`-omitted or `finalize: true` call — otherwise
+   completion fires as soon as the required set is present and later
+   optional results are rejected as `already_complete`.
    A complete set returns the correlated synthesis to continue with; a partial
    set returns `status="partial"` with `missing_keys` so you can resubmit the
    remaining lanes (partial submissions accumulate server-side; if the

@@ -25,10 +25,18 @@ DATA_EVIDENCE_SECRET_PATTERN = (
 # password assignment (sensitive regardless of digits), or an AWS-style
 # access key id.
 DATA_EVIDENCE_AUTH_HEADER_PATTERN = (
+    # Space-separated form needs a digit-bearing value ("authorization
+    # required for X" stays valid); the explicit colon HEADER form is a
+    # credential shape regardless of alphabet (round-7 probe: alphabetic
+    # Bearer values).
     r"\b(authorization|bearer)\b[:= ]+(?=[^\s]*\d)[A-Za-z0-9_.=/+-]{8,}"
+    r"|\b(authorization|bearer)\s*:\s*\S{6,}"
 )
 DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
 DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
+# US Social Security Number shape (round-7 probe): the phone pattern's group
+# widths deliberately do not cover the 3-2-4 split.
+DATA_EVIDENCE_SSN_PATTERN = r"\b\d{3}-\d{2}-\d{4}\b"
 # Phone shapes: international (+ then 7+ digits), separator-grouped local
 # numbers, or the US parenthesized area-code form. Comma-grouped magnitudes
 # ("1,234,567") and ISO dates/times do not match (comma and colon are not in
@@ -950,6 +958,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "include_recommended_draft": {"type": "boolean"},
                     "preserve_user_agency": {"const": True},
                     "forward_to_mcp_only_after_user_or_auto_confirm": {"const": True},
+                    # Per-lane confirmation exceptions: lanes listed here have
+                    # NO auto-confirm path (the data lane is confirmation-only
+                    # by contract).
+                    "confirmation_overrides": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
             },
             "mcp_tool_capability": {
@@ -1052,8 +1067,12 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "lanes": lanes,
         "lane_compatibility_rules": {
             # v1-in-place lane additions (Q00/ouroboros#1671): hosts must not
-            # break on lanes or capabilities they do not recognise.
+            # break on lanes or capabilities they do not recognise. Skipping
+            # is legal only for OPTIONAL unknown lanes — a required unknown
+            # lane gates completion, so it must be dispatched generically (or
+            # answered with a no-op finding), never dropped.
             "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+            "unknown_required_lane": "dispatch_generic_or_return_noop_finding_never_skip",
             "unsupported_capability": "dispatch_and_return_noop_finding",
             "noop_finding_is_completion_signal": True,
         },
@@ -1063,6 +1082,14 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "include_recommended_draft": True,
             "preserve_user_agency": True,
             "forward_to_mcp_only_after_user_or_auto_confirm": True,
+            # Machine-readable per-lane exception (round-7): the generic
+            # auto-confirm path NEVER applies to data output —
+            # data_evidence_answer.v1 pins requires_user_confirmation const
+            # true, so synthesis must route data-derived answers through
+            # explicit user confirmation only.
+            "confirmation_overrides": {
+                "data_context": "user_confirm_only_no_auto_confirm",
+            },
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
@@ -1080,7 +1107,10 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm. Execute a data lane's proposed_queries only "
+            "chooses auto-confirm — EXCEPT data_context output, which has no "
+            "auto-confirm path (synthesis_contract.confirmation_overrides): a "
+            "data-derived answer is forwarded only after explicit user "
+            "confirmation. Execute a data lane's proposed_queries only "
             "after the user confirms, and forward user-confirmed data-derived "
             "answers prefixed [from-data] with their point-in-time caveat."
         ),

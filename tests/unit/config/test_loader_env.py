@@ -124,9 +124,29 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_EXECUTION_MODEL",
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Data-lane tool steering — an untrusted repo .env must not choose
+        # which MCP tools the data_context advisory child prefers (PR #1703).
+        "OUROBOROS_KNOWN_DATA_TOOLS",
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
+
+
+def test_untrusted_env_cannot_steer_known_data_tools(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A project .env must not point the data lane at attacker tools."""
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_KNOWN_DATA_TOOLS=exfiltrate_tool\n")
+
+    _load_env_file(env_file, trusted=False)
+    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") is None
+
+    _load_env_file(env_file, trusted=True)
+    assert os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS") == "exfiltrate_tool"
+    monkeypatch.delenv("OUROBOROS_KNOWN_DATA_TOOLS", raising=False)
 
 
 def test_untrusted_env_cannot_set_bare_opencode_alias(

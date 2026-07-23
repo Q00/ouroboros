@@ -2891,10 +2891,49 @@ class FanoutRegistry:
             return
         for path in entries:
             try:
-                if path.stat().st_mtime < cutoff:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                if path.name.endswith(".lock"):
+                    self._unlink_lock_if_unheld(path)
+                else:
                     path.unlink(missing_ok=True)
             except OSError:
                 continue
+
+    @staticmethod
+    def _unlink_lock_if_unheld(path: Path) -> None:
+        """Unlink an aged lock file only while holding its flock.
+
+        Unlinking a HELD lock reopens the divergent-terminalization race
+        (bot-review round-7 probe): a new locker would create a fresh inode
+        and enter the exclusive section alongside the current holder. A
+        non-blocking flock proves no holder exists, and unlinking while
+        holding it forces any concurrent waiter through the acquisition-side
+        inode re-verification.
+        """
+        try:
+            import fcntl
+        except ImportError:
+            return
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
 
     @classmethod
     def _valid_id(cls, fanout_id: str) -> bool:
@@ -3007,6 +3046,12 @@ class FanoutRegistry:
         per ``fanout_id`` — the second submission then reloads the terminal
         record and replays it. Where ``fcntl`` or the lock file are
         unavailable the section degrades to best-effort (never an error).
+
+        Acquisition verifies inode identity after locking (bot-review
+        round-7 probe): the retention GC may unlink an aged lock path, and a
+        lock held on a deleted inode excludes nobody — on mismatch the open
+        is retried against the recreated path. The GC side only unlinks a
+        lock it can flock itself, so a HELD lock is never deleted.
         """
         if not self._valid_id(fanout_id):
             yield
@@ -3014,29 +3059,49 @@ class FanoutRegistry:
         lock_path = self._dir / f".{fanout_id}.lock"
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         except OSError:
             yield
             return
-        locked = False
         try:
+            import fcntl
+        except ImportError:
+            yield
+            return
+        locked_fd: int | None = None
+        for _attempt in range(16):
             try:
-                import fcntl
-
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError:
+                break
+            try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                locked = True
-            except (ImportError, OSError):
+            except OSError:
+                os.close(fd)
+                break
+            try:
+                fd_stat = os.fstat(fd)
+                path_stat = os.stat(lock_path)
+                if fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev:
+                    locked_fd = fd
+                    break
+            except OSError:
                 pass
+            # The path was unlinked/recreated while we waited: this lock
+            # excludes nobody. Release and retry against the live path.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+        try:
             yield
         finally:
-            if locked:
+            if locked_fd is not None:
                 try:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                except (ImportError, OSError):
+                    fcntl.flock(locked_fd, fcntl.LOCK_UN)
+                except OSError:
                     pass
-            os.close(fd)
+                os.close(locked_fd)
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt."""
@@ -3071,6 +3136,7 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
         DATA_EVIDENCE_PASSWORD_PATTERN,
         DATA_EVIDENCE_PHONE_PATTERN,
         DATA_EVIDENCE_SECRET_PATTERN,
+        DATA_EVIDENCE_SSN_PATTERN,
     )
 
     return (
@@ -3088,6 +3154,7 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
         # matching would false-positive on ordinary prose.
         ("aws-access-key-shaped (secret)", re.compile(DATA_EVIDENCE_AWS_KEY_PATTERN)),
         ("phone-shaped (PII)", re.compile(DATA_EVIDENCE_PHONE_PATTERN)),
+        ("ssn-shaped (PII)", re.compile(DATA_EVIDENCE_SSN_PATTERN)),
     )
 
 
@@ -3140,11 +3207,15 @@ def _is_row_shaped_value(value: str) -> bool:
     # digit,digit so neither trips this.
     if len(re.findall(r"[A-Za-z],[A-Za-z]", stripped)) >= 2:
         return True
-    # Semicolon-delimited record lists without a single numeric quantity:
-    # every ;-segment carrying a comma and no digit anywhere is a name/label
-    # roster, not a metric ("revenue up 12%, churn down 3%; ..." keeps its
-    # digits and stays valid).
+    # Semicolon-delimited record lists: 2+ segments with 2+ commas EACH is a
+    # multi-field record list even with digits (round-7 probe: "Alice Kim,
+    # premium, 1; Bob Lee, free, 2"), and every ;-segment carrying a comma
+    # with no digit anywhere is a name/label roster. Metric prose keeps one
+    # comma per clause ("revenue up 12%, churn down 3%; retention flat,
+    # NPS +4") and stays valid.
     segments = [segment for segment in stripped.split(";") if segment.strip()]
+    if len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments):
+        return True
     return (
         len(segments) >= 2
         and all("," in segment for segment in segments)
@@ -3157,7 +3228,8 @@ def _is_row_shaped_value(value: str) -> bool:
 # no-evidence finding, never evidence ("error rate 0.2%" prose stays valid;
 # only the envelope shapes match).
 _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
-    r"[\"']error[\"']\s*:|\bHTTP[ /]?[45]\d{2}\b|\btraceback \(most recent call last\)",
+    r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
+    r"|\btraceback \(most recent call last\)",
     re.IGNORECASE,
 )
 
@@ -3505,6 +3577,7 @@ def submit_fanout_results(
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
+    finalize: bool | None = None,
 ) -> dict[str, Any]:
     """Validate + route a batch of correlated fan-out results back to synthesis.
 
@@ -3544,6 +3617,15 @@ def submit_fanout_results(
       persisted without a required/optional split treat every expected key as
       required.
 
+    ``finalize`` is the sequential-host escape from eager completion
+    (bot-review round-7): completion normally fires as soon as every
+    required lane is present, which would permanently discard optional
+    results a host submits one at a time AFTER the required set. Passing
+    ``finalize=False`` accumulates the batch without terminalizing
+    (``status="accumulated"``); the host closes the fan-out with a final
+    ``finalize``-omitted (or ``finalize=True``) submission. Single-batch
+    hosts never need the parameter.
+
     The whole load → validate → synthesize → persist sequence runs inside a
     per-fanout exclusive section: concurrent submissions serialize, so
     exactly one can terminalize a record and the other replays the terminal
@@ -3556,6 +3638,7 @@ def submit_fanout_results(
             correlation_key=correlation_key,
             results=results,
             fanout_id=fanout_id,
+            finalize=finalize,
         )
 
 
@@ -3566,6 +3649,7 @@ def _submit_fanout_results_locked(
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
+    finalize: bool | None = None,
 ) -> dict[str, Any]:
     record = registry.load(fanout_id)
     if record is None:
@@ -3660,6 +3744,29 @@ def _submit_fanout_results_locked(
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
+    if finalize is False:
+        # Sequential accumulation (bot-review round-7): the host is still
+        # submitting lanes one at a time, so even a required-complete set
+        # must NOT terminalize yet — optional results still in flight would
+        # be permanently discarded behind already_complete.
+        persisted = registry.save(replace(record, received_results=provided))
+        return {
+            "status": "accumulated",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": missing_keys,
+            "missing_required_keys": missing_required,
+            "received_keys": sorted(provided),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "accumulation_persisted": persisted,
+            "note": (
+                "Results accumulated; the fan-out stays open. Submit the "
+                "remaining lanes, then close with a finalizing submission "
+                "(finalize omitted or true)."
+            ),
+        }
     if missing_required:
         persisted = registry.save(replace(record, received_results=provided))
         return {

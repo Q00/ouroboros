@@ -1852,6 +1852,114 @@ def test_known_data_tools_env_is_bounded_and_identifier_validated(monkeypatch: A
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase"]
 
 
+def test_finalize_false_preserves_late_optional_results(tmp_path: Any) -> None:
+    """Sequential hosts do not lose optional lanes to eager completion.
+
+    Bot-review round-7 probe (PR #1703): submitting the documented lane order
+    one result at a time completed on the last required lane and bounced the
+    late optional lane off ``already_complete``. ``finalize=false``
+    accumulates without terminalizing; the closing submission completes with
+    every accumulated lane aggregated.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-finalize",
+        payloads=_mixed_advisory_payloads(),
+    )
+
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-finalize",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert first["status"] == "accumulated"
+
+    # Required set becomes complete here — WITHOUT finalize this would
+    # terminalize and discard the optional lane still in flight.
+    second = submit_fanout_results(
+        registry,
+        session_id="sess-finalize",
+        correlation_key="context.lane_id",
+        results=[{"key": "answer_simplifier", "content": "simplifier-advice"}],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert second["status"] == "accumulated"
+    assert second["missing_required_keys"] == []
+
+    conforming_data = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    closing = submit_fanout_results(
+        registry,
+        session_id="sess-finalize",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": conforming_data}],
+        fanout_id=fanout_id,
+        finalize=True,
+    )
+    assert closing["status"] == "complete"
+    aggregated = [item["lane_id"] for item in closing["result"]["aggregated_outputs"]]
+    assert aggregated == ["data_context", "ambiguity_contrarian", "answer_simplifier"]
+    assert closing["missing_optional_keys"] == []
+
+
+def test_round7_evidence_boundary_variants_are_rejected() -> None:
+    """Bot-review round-7 probes: remaining prohibited-content variants."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for probe in (
+        "Alice Kim, premium, 1; Bob Lee, free, 2",
+        "Customer SSN 123-45-6789",
+        "Authorization: Bearer supersecretvalue",
+        'HTTP 200 body: {"ok": false, "detail": "queue stalled"}',
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(probe)), probe
+
+    # Metric prose with one comma per clause stays valid.
+    metric = "revenue up 12%, churn down 3%; retention flat, NPS +4"
+    assert _data_evidence_boundary_violations(_minimal_data_output(metric)) == []
+
+
+def test_gc_never_unlinks_a_held_lock(tmp_path: Any) -> None:
+    """Retention GC must not defeat exclusive terminalization (round-7).
+
+    An aged lock file that is currently flock'd is skipped by the sweep; the
+    same aged lock is removed once no holder exists.
+    """
+    import fcntl
+    import os as os_module
+    import time
+
+    registry = FanoutRegistry(tmp_path)
+    lock_path = tmp_path / ".fanout_held.lock"
+    lock_path.write_text("")
+    ancient = time.time() - FanoutRegistry._RECORD_RETENTION_SECONDS - 3600
+    os_module.utime(lock_path, (ancient, ancient))
+
+    fd = os_module.open(lock_path, os_module.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        registry._gc_stale_records()
+        assert lock_path.exists(), "held lock must never be unlinked"
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os_module.close(fd)
+
+    registry._gc_stale_records()
+    assert not lock_path.exists(), "unheld aged lock is swept"
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

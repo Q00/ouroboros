@@ -1958,7 +1958,9 @@ class SubmitFanoutResultsHandler:
                 "lists `missing_keys`/`missing_required_keys` (and "
                 "`synthesis_rejected_keys` for content the synthesizer refused) "
                 "so you can resubmit the remainder — `accumulation_persisted: "
-                "false` means resubmit those lanes too; "
+                "false` means resubmit those lanes too; `accumulated` "
+                "(finalize=false) holds the batch without completing so later "
+                "optional lanes are not discarded; "
                 "`completion_not_persisted` means the synthesis succeeded but "
                 "the terminal write failed, so resubmit; `already_complete` "
                 "replays the immutable terminal outcome; `correlation_mismatch` "
@@ -1997,6 +1999,19 @@ class SubmitFanoutResultsHandler:
                         "result, object or text)."
                     ),
                     required=True,
+                ),
+                MCPToolParameter(
+                    name="finalize",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Sequential-submission control: pass false to accumulate "
+                        "this batch WITHOUT completing the fan-out (status="
+                        "'accumulated'), so optional lanes submitted after the "
+                        "required set are not discarded. Omit (or pass true) on "
+                        "the last submission to complete. Single-batch "
+                        "submissions omit it."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -2060,12 +2075,14 @@ class SubmitFanoutResultsHandler:
             )
         results = [item for item in raw_results if isinstance(item, dict)]
 
+        raw_finalize = arguments.get("finalize")
         outcome = submit_fanout_results(
             self._registry,
             session_id=str(arguments.get("session_id") or ""),
             correlation_key=str(arguments.get("correlation_key") or ""),
             results=results,
             fanout_id=fanout_id,
+            finalize=raw_finalize if isinstance(raw_finalize, bool) else None,
         )
 
         if outcome.get("status") == "unknown_fanout_id":
