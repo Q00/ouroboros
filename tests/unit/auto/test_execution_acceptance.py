@@ -886,6 +886,95 @@ def test_normalize_execution_acceptance_keeps_distinct_covered_contracts() -> No
     assert "python -m pytest tests/test_baseline_b.py" in commands
 
 
+def test_normalize_execution_acceptance_keeps_distinct_covered_identities() -> None:
+    """Blocker regression: full identity governs collapse, not just the command.
+
+    Two covered baselines with the SAME command but different explicit keys, and
+    two with different investments, must each survive — the transfer compares the
+    complete identity (command, artifacts, assertion, investment, explicit key)
+    and never overwrites authority.
+    """
+    baseline = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    # Same command, distinct explicit keys.
+    seed_keys = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description=baseline, semantic_ac_key="ac_1111111111111111", verify_command="cmd"
+        ),
+        AcceptanceCriterionSpec(
+            description=baseline, semantic_ac_key="ac_2222222222222222", verify_command="cmd"
+        ),
+    )
+    keys = {
+        c.semantic_ac_key
+        for c in normalize_execution_acceptance(seed_keys).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+    }
+    assert {"ac_1111111111111111", "ac_2222222222222222"} <= keys
+
+    # Authority-only specs: differing investments must not overwrite each other.
+    low = InvestmentSpec(difficulty="low", stakes="low", provenance="declared", confidence="high")
+    high = InvestmentSpec(
+        difficulty="high", stakes="high", provenance="declared", confidence="high"
+    )
+    seed_inv = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline, investment=low),
+        AcceptanceCriterionSpec(description=baseline, investment=high),
+    )
+    investments = [
+        c.investment
+        for c in normalize_execution_acceptance(seed_inv).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.investment is not None
+    ]
+    assert low in investments
+    assert high in investments
+
+
+def test_normalize_execution_acceptance_generic_removal_is_exact_only() -> None:
+    """Blocker regression: a distinct requirement sharing the proof phrase survives.
+
+    Generic-placeholder removal must be exact, not a substring match, so a
+    criterion that merely opens with the proof phrase but adds a distinct clause
+    is preserved.
+    """
+    seed = _autoresearch_seed(
+        "A command/API check returns stable observable output while preserving "
+        "the raw stderr log for every attempt."
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert any("stderr log" in text for text in ac_texts(normalized.acceptance_criteria))
+
+
+def test_normalize_execution_acceptance_transfer_preserves_source_order() -> None:
+    """Follow-up regression: a transferred contract keeps its source position.
+
+    Sequential execution reads tuple order, so a covered baseline contract must
+    stay after an earlier distinct source rather than jumping ahead with the
+    injected canonical block.
+    """
+    baseline = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        "train.py must preserve the existing --device CLI flag behavior.",
+        AcceptanceCriterionSpec(
+            description=baseline, verify_command="/usr/bin/time -l uv run train.py"
+        ),
+    )
+
+    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
+    device_index = next(i for i, t in enumerate(texts) if "--device" in t)
+    baseline_index = next(
+        i for i, t in enumerate(texts) if "baseline entry written before any edit" in t
+    )
+    assert device_index < baseline_index
+
+
 def test_normalize_execution_acceptance_transfer_preserves_explicit_key() -> None:
     """Blocker regression: contract transfer keeps an explicitly-supplied key.
 

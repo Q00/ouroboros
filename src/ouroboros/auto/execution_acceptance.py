@@ -382,6 +382,7 @@ def _restore_surviving_acceptance_specs(
                     emissions,
                     canonical_text,
                     criterion,  # type: ignore[arg-type]
+                    float(index),
                 ):
                     _pop(index)
                     continue
@@ -401,20 +402,22 @@ def _transfer_contract_to_emitted_canonical(
     emissions: list[tuple[float, AcceptanceCriterionInput]],
     canonical_text: str,
     source: AcceptanceCriterionSpec,
+    source_anchor: float,
 ) -> bool:
     """Attach a covered source's contract to its canonical AC, in place.
 
     Returns whether the source is fully represented by the canonical AC (so the
     caller may drop it).  The canonical criterion keeps its description and gains
-    the source's verification evidence — including an explicitly-supplied
-    ``semantic_ac_key`` that runtime routing/recovery correlate on — so the
-    executor/evaluator sees exactly one contracted AC rather than a contractless
-    canonical plus a duplicate source.
+    the source's complete identity — verification evidence, investment authority,
+    and an explicitly-supplied ``semantic_ac_key`` that runtime routing/recovery
+    correlate on — and is re-anchored to the source's position so sequential
+    execution order follows the source, not the injected canonical block.
 
-    A canonical AC already carrying a contract is only treated as representing
-    this source when the two contracts are identical; a *different* contract
-    returns False so the caller preserves the source as its own criterion rather
-    than silently dropping a distinct command.
+    A canonical AC that already carries any explicit authority is only treated as
+    representing this source when their full identities are identical; a
+    *different* identity (distinct command, key, or investment) returns False so
+    the caller preserves the source as its own criterion rather than silently
+    overwriting authority.
     """
     target = canonical_text.strip()
     explicit_key = (
@@ -431,28 +434,29 @@ def _transfer_contract_to_emitted_canonical(
         output_assertion=source.output_assertion,
         investment=source.investment,
     )
-    for position, (anchor, item) in enumerate(emissions):
+    for position, (_anchor, item) in enumerate(emissions):
         if ac_text(item).strip() != target:
             continue
-        if isinstance(item, AcceptanceCriterionSpec) and item.has_success_contract:
-            # Only a byte-identical contract is safe to collapse onto; a distinct
-            # command must survive as its own criterion.
-            return _autoresearch_contract_matches(item, transferred)
-        emissions[position] = (anchor, transferred)
+        if isinstance(item, AcceptanceCriterionSpec) and _carries_explicit_contract(item):
+            # Occupied by explicit authority: only an identical full identity is
+            # safe to collapse onto; anything distinct must survive on its own.
+            return _autoresearch_identity_matches(item, transferred)
+        emissions[position] = (source_anchor, transferred)
         return True
     return False
 
 
-def _autoresearch_contract_matches(
+def _autoresearch_identity_matches(
     existing: AcceptanceCriterionSpec,
     candidate: AcceptanceCriterionSpec,
 ) -> bool:
-    """Return whether two canonical-AC contracts are identical evidence."""
+    """Return whether two canonical-AC criteria carry the same full identity."""
     return (
         existing.verify_command == candidate.verify_command
         and existing.expected_artifacts == candidate.expected_artifacts
         and existing.output_assertion == candidate.output_assertion
         and existing.investment == candidate.investment
+        and existing.semantic_ac_key == candidate.semantic_ac_key
     )
 
 
@@ -722,11 +726,23 @@ def _autoresearch_coverage(subject: str) -> tuple[bool, int | None]:
     return (False, None)
 
 
+# Exact normalized text of the seed-repairer's generic placeholder fallbacks.
+# Matching by substring instead would delete distinct requirements that merely
+# open with the same proof phrase (e.g. "... while preserving the raw stderr
+# log"), so only these exact placeholders are treated as generic.
+_AUTORESEARCH_GENERIC_FALLBACKS: frozenset[str] = frozenset(
+    {
+        "a command/api check returns stable observable output or artifacts proving the task goal",
+        "a command/api check returns stable observable output or artifacts",
+    }
+)
+
+
 def _is_autoresearch_generic_or_covered(criterion: str) -> bool:
     key = _criterion_key(criterion)
     if key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
         return True
-    if "command/api check returns stable observable output" in key:
+    if key in _AUTORESEARCH_GENERIC_FALLBACKS:
         return True
     covered, _canonical_index = _autoresearch_coverage(criterion)
     return covered
