@@ -738,7 +738,52 @@ async def request_process_local_cancellation(
         )
     except BaseException:
         if terminalization_started:
-            _abort_process_local_authority_terminalization(session_id, execution_id, authority)
+            terminal_winner = False
+            try:
+                reconstructed = await session_repo.reconstruct_session(session_id)
+                reconstructed_status = (
+                    getattr(reconstructed.value.status, "value", reconstructed.value.status)
+                    if reconstructed.is_ok
+                    else None
+                )
+                terminal_winner = reconstructed_status in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                }
+                if terminal_winner:
+                    (
+                        retired,
+                        claim_became_active,
+                    ) = await _retire_process_local_authority_after_terminal_persistence(
+                        session_id,
+                        execution_id,
+                        authority,
+                    )
+                    if claim_became_active:
+                        await request_cancellation(session_id)
+                    else:
+                        await clear_cancellation(session_id)
+                    _LOG.info(
+                        "process_local_authority.interrupted_terminal_reconciled",
+                        extra={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "durable_status": reconstructed_status,
+                            "retired": retired,
+                        },
+                    )
+            except BaseException:
+                _LOG.warning(
+                    "process_local_authority.interrupted_terminal_reconcile_failed",
+                    extra={"session_id": session_id, "execution_id": execution_id},
+                )
+            if not terminal_winner:
+                _abort_process_local_authority_terminalization(
+                    session_id,
+                    execution_id,
+                    authority,
+                )
         elif cancellation_request_published:
             await clear_cancellation(session_id)
         raise

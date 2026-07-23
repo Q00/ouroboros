@@ -1411,6 +1411,78 @@ class OrchestratorRunner:
             )
         )
 
+    @staticmethod
+    def _requested_terminal_status_from_error(error: BaseException) -> SessionStatus | None:
+        """Recover the original terminal intent from a typed persistence error."""
+        if not isinstance(error, OrchestratorError):
+            return None
+        details = error.details
+        if details.get("terminal_persistence_pending") is not True:
+            return None
+        requested_status = details.get("requested_status")
+        try:
+            status = SessionStatus(requested_status)
+        except (TypeError, ValueError):
+            return None
+        if status not in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            return None
+        return status
+
+    def _terminal_persistence_pending_from_error(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        error: BaseException,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Preserve ownership instead of changing a failed terminal intent."""
+        requested_status = self._requested_terminal_status_from_error(error)
+        if requested_status is None:
+            return None
+        return self._terminal_persistence_pending_result(
+            session_id=session_id,
+            execution_id=execution_id,
+            requested_status=requested_status,
+            cause=error,
+        )
+
+    async def _cleanup_if_durable_terminal(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Retire a claimed owner only after reconstructing a terminal winner.
+
+        Cancellation can arrive after the session CAS commits but before the
+        execution-stream projection or ordinary cleanup finishes.  In that
+        window preserving the live generation would contradict the durable
+        terminal source of truth, so interruption paths reconcile first.
+        """
+        try:
+            reconstructed = await self._session_repo.reconstruct_session(session_id)
+        except Exception:
+            return False
+        if reconstructed.is_err or reconstructed.value.status not in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            return False
+        self._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        self._unregister_session(execution_id, session_id)
+        await clear_cancellation(session_id)
+        if self._task_workspace is not None:
+            release_lock(self._task_workspace.lock_path)
+        return True
+
     async def _persist_failure_and_cleanup(
         self,
         *,
@@ -2200,42 +2272,77 @@ class OrchestratorRunner:
         winner, otherwise completion and public cancellation can produce
         contradictory terminal streams.
         """
-        if requested_status is SessionStatus.COMPLETED:
-            result = await self._session_repo.mark_completed(
-                session_id,
-                summary,
-                messages_processed=messages_processed,
+        result: Any = None
+        last_error: object | None = None
+        for attempt in range(3):
+            try:
+                if requested_status is SessionStatus.COMPLETED:
+                    result = await self._session_repo.mark_completed(
+                        session_id,
+                        summary,
+                        messages_processed=messages_processed,
+                    )
+                elif requested_status is SessionStatus.FAILED:
+                    result = await self._session_repo.mark_failed(
+                        session_id,
+                        error_message or "Execution failed",
+                        error_details,
+                        error_type=error_type,
+                        messages_processed=messages_processed,
+                    )
+                elif requested_status is SessionStatus.CANCELLED:
+                    result = await self._session_repo.mark_cancelled(
+                        session_id,
+                        reason=error_message or "Execution cancelled",
+                        cancelled_by=cancelled_by,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported terminal session status: {requested_status.value}"
+                    )
+            except Exception as exc:
+                last_error = exc
+            else:
+                if result.is_ok:
+                    break
+                last_error = result.error
+            log.warning(
+                "orchestrator.runner.terminal_persistence_retry",
+                session_id=session_id,
+                requested_status=requested_status.value,
+                attempt=attempt + 1,
+                error=str(last_error),
             )
-        elif requested_status is SessionStatus.FAILED:
-            result = await self._session_repo.mark_failed(
-                session_id,
-                error_message or "Execution failed",
-                error_details,
-                error_type=error_type,
-                messages_processed=messages_processed,
-            )
-        elif requested_status is SessionStatus.CANCELLED:
-            result = await self._session_repo.mark_cancelled(
-                session_id,
-                reason=error_message or "Execution cancelled",
-                cancelled_by=cancelled_by,
-            )
+            if attempt < 2:
+                await asyncio.sleep(0.05 * (2**attempt))
         else:
-            raise ValueError(f"Unsupported terminal session status: {requested_status.value}")
-
-        if result.is_err:
             raise OrchestratorError(
                 message=f"Failed to persist terminal session status: {requested_status.value}",
                 details={
                     "session_id": session_id,
                     "requested_status": requested_status.value,
-                    "cause": str(result.error),
+                    "cause": str(last_error),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
                 },
             )
+
         if result.value is not False:
             return requested_status
 
-        winner = await self._session_repo.reconstruct_session(session_id)
+        try:
+            winner = await self._session_repo.reconstruct_session(session_id)
+        except Exception as exc:
+            raise OrchestratorError(
+                message="Terminal session transition lost its CAS without a readable winner",
+                details={
+                    "session_id": session_id,
+                    "requested_status": requested_status.value,
+                    "cause": str(exc),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
+                },
+            ) from exc
         terminal_statuses = {
             SessionStatus.COMPLETED,
             SessionStatus.FAILED,
@@ -2255,6 +2362,8 @@ class OrchestratorRunner:
                 "session_id": session_id,
                 "requested_status": requested_status.value,
                 **({"cause": str(winner.error)} if winner.is_err else {}),
+                "resume_blocked": "terminal_persistence_pending",
+                "terminal_persistence_pending": True,
             },
         )
 
@@ -5146,6 +5255,11 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if await self._cleanup_if_durable_terminal(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            ):
+                raise
             self._preserve_process_local_owner_for_retry(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
@@ -5162,6 +5276,13 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             log.exception(
                 "orchestrator.runner.execute_setup_failed",
                 execution_id=exec_id,
@@ -5639,6 +5760,11 @@ class OrchestratorRunner:
                     messages_processed=messages_processed,
                     start_time=start_time,
                 )
+            if await self._cleanup_if_durable_terminal(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            ):
+                raise
             self._preserve_process_local_owner_for_retry(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
@@ -5651,6 +5777,13 @@ class OrchestratorRunner:
                 error=str(e),
             )
 
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             durable_terminal_status, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
@@ -6394,6 +6527,11 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if await self._cleanup_if_durable_terminal(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            ):
+                raise
             self._preserve_process_local_owner_for_retry(
                 execution_id=tracker.execution_id,
                 session_id=session_id,
@@ -6538,6 +6676,13 @@ Note: This is a resumed session. Please continue from where execution was interr
             )
             if cancellation_result is not None:
                 return cancellation_result
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             log.exception(
                 "orchestrator.runner.resume_setup_failed",
                 session_id=session_id,
@@ -6876,6 +7021,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     messages_processed=messages_processed,
                     start_time=start_time,
                 )
+            if await self._cleanup_if_durable_terminal(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            ):
+                raise
             self._preserve_process_local_owner_for_retry(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -6888,6 +7038,13 @@ Note: This is a resumed session. Please continue from where execution was interr
                 error=str(e),
             )
 
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             durable_terminal_status, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=session_id,
                 execution_id=tracker.execution_id,

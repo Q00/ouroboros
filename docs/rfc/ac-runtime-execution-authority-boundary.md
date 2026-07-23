@@ -406,6 +406,15 @@ The Foundation A implementation must demonstrate all of the following:
 28. cancellation issued from a separate CLI/MCP process reaches a live owner
     through a containment-safe file-backed request marker, which is distinct
     from both the heartbeat lease and terminal session evidence.
+29. a transient or persistent `COMPLETED` write failure retries or preserves
+    the original completion intent; no generic exception funnel may rewrite a
+    successful runtime result as `FAILED`.
+30. cancellation after a durable terminal CAS but before projection/cleanup
+    reconstructs the terminal winner and retires local authority instead of
+    restoring a live owner beside `COMPLETED`, `FAILED`, or `CANCELLED`.
+31. an MCP background task cancelled before its first coroutine turn retains
+    its exact owner and owned EventStore when lost-authority terminalization
+    cannot persist, and reconciles cleanup only after reading a terminal record.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
