@@ -772,9 +772,7 @@ def create_frugality_retrospective_event(
         if isinstance(data.get("acceptance_generation_id"), str)
         else None
     )
-    identity_scope = "\x00".join(
-        (execution_id, resolved_session_id or "", generation or "")
-    )
+    identity_scope = "\x00".join((execution_id, resolved_session_id or "", generation or ""))
     event_id = uuid5(
         NAMESPACE_URL,
         f"ouroboros:{FRUGALITY_RETROSPECTIVE_EVENT_TYPE}:v1:{identity_scope}",
