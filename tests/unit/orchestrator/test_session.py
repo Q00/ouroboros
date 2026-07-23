@@ -1715,6 +1715,43 @@ class TestStaleRuntimeMetadataCleansing:
         assert tracker.status == SessionStatus.CANCELLED
         assert tracker.progress.get("runtime_status") == "cancelled"
 
+    async def test_cancelled_session_ignores_later_running_progress(self) -> None:
+        """A delayed progress checkpoint cannot revive a durable cancellation."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-cancelled-late-progress",
+                    data={"execution_id": "exec", "seed_id": "seed"},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.cancelled",
+                    aggregate_type="session",
+                    aggregate_id="sess-cancelled-late-progress",
+                    data={"reason": "user request", "cancelled_by": "user"},
+                ),
+                BaseEvent(
+                    type="orchestrator.progress.updated",
+                    aggregate_type="session",
+                    aggregate_id="sess-cancelled-late-progress",
+                    data={"progress": {"runtime_status": "running", "phase": "late"}},
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        result = await SessionRepository(mock_event_store).reconstruct_session(
+            "sess-cancelled-late-progress"
+        )
+
+        assert result.is_ok
+        assert result.value.status == SessionStatus.CANCELLED
+        assert result.value.progress.get("runtime_status") == "cancelled"
+
     async def test_completed_session_overwrites_stale_runtime_status(self) -> None:
         """runtime_status should reflect 'completed' for completed sessions."""
         from ouroboros.events.base import BaseEvent

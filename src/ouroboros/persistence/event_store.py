@@ -66,6 +66,15 @@ _SESSION_TERMINAL_EVENT_TYPES = frozenset(
 )
 
 
+def _is_session_terminal_event(event: object) -> bool:
+    """Return whether one event must use the durable terminal transition CAS."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "session"
+        and event.type in _SESSION_TERMINAL_EVENT_TYPES
+    )
+
+
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
     """Return normalized string keys for mapping inspection."""
     return {str(key).strip().lower().replace("-", "_") for key in value}
@@ -388,11 +397,16 @@ class EventStore:
         event: BaseEvent,
         *,
         _skip_workflow_ir_guard: bool = False,
-    ) -> None:
+    ) -> bool | None:
         """Append an event to the store.
 
         The operation is wrapped in a transaction for atomicity.
         If the insert fails, the transaction is rolled back.
+
+        Returns:
+            ``True`` when a terminal session event wins its conditional
+            transition, ``False`` when an existing terminal event already won,
+            and ``None`` for ordinary append-only events.
 
         Args:
             event: The event to append.
@@ -400,7 +414,14 @@ class EventStore:
         Raises:
             PersistenceError: If the append operation fails.
         """
+        # Terminal session lifecycle is a one-winner transition, not a generic
+        # append-only observation.  Keep this guard at the public EventStore
+        # boundary so event factories and older SessionRepository callers
+        # cannot accidentally bypass the conditional terminal CAS.
+        if _is_session_terminal_event(event):
+            return await self.append_session_terminal_if_active(event)
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
+        return None
 
     async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
         """Append one terminal session event only while no terminal event exists.
@@ -532,6 +553,13 @@ class EventStore:
             )
         if not isinstance(event, BaseEvent):
             self._raise_invalid_append_input(event, operation="append_with_rowid")
+        if _is_session_terminal_event(event):
+            raise PersistenceError(
+                "Terminal session lifecycle events must be persisted via append() "
+                "or append_session_terminal_if_active() to preserve the one-winner guard.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
 
         # Guard the workflow IR lifecycle family from direct raw appends:
         # ``WorkflowLifecycleEvent`` enforces the replay-unsafe key blocklist
@@ -646,6 +674,15 @@ class EventStore:
                 "append_workflow_lifecycle_event() and cannot be batched.",
                 operation="append_batch",
                 details={"count": len(workflow_ir_events)},
+            )
+
+        terminal_session_events = [event for event in events if _is_session_terminal_event(event)]
+        if terminal_session_events:
+            raise PersistenceError(
+                "Terminal session lifecycle events cannot be appended in a batch; "
+                "use append() so each session transition takes the one-winner guard.",
+                operation="append_batch",
+                details={"count": len(terminal_session_events)},
             )
 
         for attempt in range(3):

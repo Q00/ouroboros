@@ -803,3 +803,20 @@ class TestCancelHelperFunctions:
             result = await _cancel_session(mock_es, "orch_test123")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_session_returns_false_when_terminal_cas_loses(self) -> None:
+        """A race winner must not be reported as a successful CLI cancellation."""
+        from ouroboros.cli.commands.cancel import _cancel_session
+
+        mock_es = AsyncMock()
+        tracker = _make_tracker(status=SessionStatus.RUNNING)
+
+        with patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            mock_repo.mark_cancelled = AsyncMock(return_value=Result.ok(False))
+
+            result = await _cancel_session(mock_es, "orch_test123")
+
+        assert result is False

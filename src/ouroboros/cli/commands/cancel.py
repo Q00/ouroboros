@@ -129,6 +129,10 @@ async def _cancel_session(
     Returns:
         True if session was cancelled, False if it was not in a cancellable state.
     """
+    from ouroboros.orchestrator.execution_authority import (
+        ProcessLocalCancellationDisposition,
+        request_process_local_cancellation,
+    )
     from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
     repo = SessionRepository(event_store)
@@ -151,7 +155,32 @@ async def _cancel_session(
         )
         return False
 
-    # Cancel the session
+    process_local = await request_process_local_cancellation(
+        tracker,
+        repo,
+        reason=reason,
+        cancelled_by="user",
+    )
+    if process_local is not None:
+        if process_local.disposition in {
+            ProcessLocalCancellationDisposition.CANCELLED,
+            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED,
+        }:
+            return True
+        if process_local.disposition == ProcessLocalCancellationDisposition.HELD_ELSEWHERE:
+            print_warning(
+                f"Session {session_id} is held by another live process-local owner; "
+                "cancel it through that owner."
+            )
+        elif process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING:
+            print_warning(
+                f"Cancellation for session {session_id} is pending durable persistence; retry it."
+            )
+        else:
+            print_warning(f"Session {session_id} became terminal before cancellation completed.")
+        return False
+
+    # Historical sessions have no live Foundation A capability to coordinate.
     cancel_result = await repo.mark_cancelled(
         session_id=session_id,
         reason=reason,
@@ -160,6 +189,9 @@ async def _cancel_session(
 
     if cancel_result.is_err:
         print_error(f"Failed to cancel session {session_id}: {cancel_result.error}")
+        return False
+    if cancel_result.value is False:
+        print_warning(f"Session {session_id} became terminal before cancellation completed.")
         return False
 
     return True
@@ -208,6 +240,10 @@ async def _cancel_all_running(
     Returns:
         Tuple of (cancelled_count, skipped_count).
     """
+    from ouroboros.orchestrator.execution_authority import (
+        ProcessLocalCancellationDisposition,
+        request_process_local_cancellation,
+    )
     from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
     repo = SessionRepository(event_store)
@@ -235,14 +271,37 @@ async def _cancel_all_running(
             skipped += 1
             continue
 
-        # Cancel this session
+        process_local = await request_process_local_cancellation(
+            tracker,
+            repo,
+            reason=reason,
+            cancelled_by="user",
+        )
+        if process_local is not None:
+            if process_local.disposition in {
+                ProcessLocalCancellationDisposition.CANCELLED,
+                ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED,
+            }:
+                cancelled += 1
+                status = (
+                    "requested"
+                    if process_local.disposition
+                    == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+                    else "cancelled"
+                )
+                console.print(f"  [dim]Cancellation {status}:[/] {session_id}")
+            else:
+                skipped += 1
+            continue
+
+        # Historical sessions have no live Foundation A capability to coordinate.
         cancel_result = await repo.mark_cancelled(
             session_id=session_id,
             reason=reason,
             cancelled_by="user",
         )
 
-        if cancel_result.is_ok:
+        if cancel_result.is_ok and cancel_result.value is not False:
             cancelled += 1
             console.print(f"  [dim]Cancelled:[/] {session_id}")
         else:

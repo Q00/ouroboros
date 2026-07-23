@@ -506,11 +506,23 @@ class TestCancelExecution:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_orphan",
+            "seed_orphan",
+            session_id="sess_orphan",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.ok(None),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.ok(None),
+            ),
         ):
             result = await runner.cancel_execution(
                 "exec_orphan",
@@ -556,11 +568,23 @@ class TestCancelExecution:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_1",
+            "seed_1",
+            session_id="sess_1",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.err(PersistenceError("DB error")),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.err(PersistenceError("DB error")),
+            ),
         ):
             result = await runner.cancel_execution("exec_1")
 

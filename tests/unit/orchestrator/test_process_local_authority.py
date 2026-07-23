@@ -12,15 +12,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.cli.commands.cancel import _cancel_session
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
+from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.mcp.tools.job_handlers import CancelExecutionHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage
 from ouroboros.orchestrator.execution_authority import (
     _PROCESS_LOCAL_AUTHORITY_REGISTRY,
+    _ProcessLocalAuthorityLifecycleState,
     _register_process_local_authority_terminal_finalizer,
     _retire_process_local_authority_after_terminal_persistence,
 )
@@ -158,6 +162,77 @@ async def test_prepare_session_registers_an_opaque_live_generation() -> None:
         tracker.execution_id,
         contract,
     )
+
+
+@pytest.mark.asyncio
+async def test_registry_encodes_claim_and_terminalization_as_one_state() -> None:
+    """One lifecycle entry cannot be claimed and terminalizing simultaneously."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-one-lifecycle-state",
+        execution_id="exec-one-lifecycle-state",
+    )
+    authority = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]["foundation_a_authority"]
+    lifecycle = _PROCESS_LOCAL_AUTHORITY_REGISTRY._lifecycles[tracker.session_id]
+
+    try:
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.REGISTERED
+
+        generation, already_owned = _PROCESS_LOCAL_AUTHORITY_REGISTRY.claim(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+            runner._adapter,
+        )
+        assert generation is not None
+        assert already_owned is False
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.CLAIMED
+
+        reserved, active_owner = _PROCESS_LOCAL_AUTHORITY_REGISTRY.begin_terminalization(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+        )
+        assert reserved is False
+        assert active_owner is True
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.CLAIMED
+
+        _PROCESS_LOCAL_AUTHORITY_REGISTRY.release(
+            tracker.session_id,
+            tracker.execution_id,
+            runner._adapter,
+        )
+        reserved, active_owner = _PROCESS_LOCAL_AUTHORITY_REGISTRY.begin_terminalization(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+        )
+        assert reserved is True
+        assert active_owner is False
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+
+        generation, already_owned = _PROCESS_LOCAL_AUTHORITY_REGISTRY.claim(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+            runner._adapter,
+        )
+        assert generation is None
+        assert already_owned is True
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+
+        _PROCESS_LOCAL_AUTHORITY_REGISTRY.abort_terminalization(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+        )
+        assert lifecycle.state is _ProcessLocalAuthorityLifecycleState.REGISTERED
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -525,7 +600,7 @@ async def test_precreated_setup_cancellation_releases_its_authority_claim() -> N
 
 @pytest.mark.asyncio
 async def test_resume_setup_cancellation_releases_its_authority_claim() -> None:
-    """A raw cancellation during resume restoration cannot leave ``_claims`` set."""
+    """A raw cancellation during resume restoration cannot leave a claimed lifecycle."""
     runner = _runner()
     tracker = await _prepare(
         runner,
@@ -704,6 +779,126 @@ async def test_external_terminalization_retires_retained_owner_and_store() -> No
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_unstarted_background_cleanup_terminalizes_and_drains_process_local_owner(
+    tmp_path,
+) -> None:
+    """The done-callback cleanup leaves no live owner when a task never starts."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'unstarted-background.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-unstarted-background",
+        session_id="session-unstarted-background",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    handler = ExecuteSeedHandler(event_store=event_store)
+    handler._remember_process_local_owner(tracker, runner)
+
+    try:
+        await handler._cleanup_unstarted_process_local_background_task(
+            tracker=tracker,
+            runner=runner,
+            workspace=None,
+            owned_event_store=None,
+            retained_resume_handoff=False,
+        )
+
+        terminal = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert terminal.is_ok
+        assert terminal.value.status == SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.session_id not in handler._process_local_resume_owners
+        assert tracker.session_id not in handler._process_local_owned_event_stores
+    finally:
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
+        handler._process_local_resume_handoffs.clear()
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_before_first_background_turn_runs_process_local_cleanup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direct execute-seed done callback covers a never-entered coroutine."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'cancel-before-start.db'}")
+    await event_store.initialize()
+    handler = ExecuteSeedHandler(
+        event_store=event_store,
+        agent_runtime_backend="process-local-test",
+    )
+    original_create_task = asyncio.create_task
+    scheduled_tasks: list[asyncio.Task[object]] = []
+
+    class _ExecuteHandlerAsyncio:
+        def __getattr__(self, name: str) -> object:
+            return getattr(asyncio, name)
+
+        def create_task(
+            self,
+            coroutine: object,
+            *args: object,
+            **kwargs: object,
+        ) -> asyncio.Task[object]:
+            task = original_create_task(coroutine, *args, **kwargs)  # type: ignore[arg-type]
+            scheduled_tasks.append(task)
+            if len(scheduled_tasks) == 1:
+                task.cancel()
+            return task
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+        lambda **_kwargs: _CountingRuntime(),
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.asyncio",
+        _ExecuteHandlerAsyncio(),
+    )
+
+    try:
+        launched = await handler.handle(
+            {
+                "seed_content": yaml.safe_dump(_seed().to_dict()),
+                "skip_qa": True,
+                "use_worktree": False,
+            }
+        )
+        assert launched.is_ok
+        session_id = launched.value.meta["session_id"]
+
+        for _ in range(20):
+            if not handler._background_tasks:
+                break
+            await asyncio.sleep(0)
+
+        terminal = await SessionRepository(event_store).reconstruct_session(session_id)
+        assert terminal.is_ok
+        assert terminal.value.status == SessionStatus.FAILED
+        assert not heartbeat.is_holder_alive(session_id)
+        assert session_id not in handler._process_local_resume_owners
+        assert session_id not in handler._process_local_owned_event_stores
+    finally:
+        for task in tuple(handler._background_tasks):
+            task.cancel()
+        if handler._background_tasks:
+            await asyncio.gather(*handler._background_tasks, return_exceptions=True)
+        await event_store.close()
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1226,192 @@ async def test_public_running_cancellation_signals_claimed_process_local_owner(t
 
 
 @pytest.mark.asyncio
+async def test_job_manager_cancel_does_not_terminalize_a_claimed_process_local_owner(
+    tmp_path,
+) -> None:
+    """The job surface uses the same signal-only path below live effects."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'job-manager-running-cancel.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-job-manager-running-cancel",
+        session_id="session-job-manager-running-cancel",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+    manager = JobManager(event_store)
+    started = asyncio.Event()
+    runner_cancelled = asyncio.Event()
+
+    async def _job_runner() -> MCPToolResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            runner_cancelled.set()
+            raise
+        return MCPToolResult(content=(MCPContentItem(type=ContentType.TEXT, text="late"),))
+
+    try:
+        job = await manager.start_job(
+            job_type="process-local-cancel",
+            initial_message="running",
+            runner=_job_runner(),
+            links=JobLinks(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            ),
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await manager.cancel_job(job.job_id)
+        await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.RUNNING
+        assert await is_cancellation_requested(tracker.session_id)
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        assert not await event_store.query_events(
+            aggregate_id=tracker.execution_id,
+            event_type="execution.terminal",
+        )
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._release_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        tasks = [
+            *manager._tasks.values(),
+            *manager._runner_tasks.values(),
+            *manager._monitors.values(),
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_runner_cancel_does_not_terminalize_a_claimed_process_local_owner(
+    tmp_path,
+) -> None:
+    """The direct runner fallback cannot write beneath its own effect claim."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'direct-running-cancel.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-direct-running-cancel",
+        session_id="session-direct-running-cancel",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+
+    try:
+        result = await runner.cancel_execution(tracker.execution_id)
+
+        assert result.is_ok
+        assert result.value["status"] == "cancellation_requested"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.RUNNING
+        assert await is_cancellation_requested(tracker.session_id)
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._release_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_cancel_does_not_terminalize_a_claimed_process_local_owner(tmp_path) -> None:
+    """The CLI cancellation surface delegates live ownership to the runner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'cli-running-cancel.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-cli-running-cancel",
+        session_id="session-cli-running-cancel",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+
+    try:
+        assert await _cancel_session(event_store, tracker.session_id) is True
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.RUNNING
+        assert await is_cancellation_requested(tracker.session_id)
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._release_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_public_cancellation_reservation_blocks_an_interleaved_resume_claim(tmp_path) -> None:
     """A paused owner cannot claim effects while public cancellation persists terminal state."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'cancel-race.db'}")
@@ -1183,7 +1564,7 @@ async def test_public_cancel_refuses_a_live_foreign_process_owner(tmp_path) -> N
     try:
         with (
             patch(
-                "ouroboros.mcp.tools.job_handlers.is_holder_alive",
+                "ouroboros.orchestrator.heartbeat.is_holder_alive",
                 return_value=True,
             ),
             patch.object(cancel_handler._session_repo, "mark_cancelled_if_active", mark_cancelled),

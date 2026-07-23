@@ -409,12 +409,12 @@ def test_credential_alias_in_runtime_identity_becomes_process_local_without_egre
 def test_secret_key_alias_in_runtime_identity_becomes_process_local(
     key_name: str,
 ) -> None:
-    secret = "opaque-provider-credential"
+    credential_value = "opaque-provider-credential"
 
     class CredentialRuntime(_Runtime):
         def execution_identity_contract(self) -> dict[str, object]:
             return {
-                key_name: secret,
+                key_name: credential_value,
                 "effective_model_observed": True,
             }
 
@@ -423,7 +423,7 @@ def test_secret_key_alias_in_runtime_identity_becomes_process_local(
     assert authority.portable_across_processes is False
     assert authority.data["runtime"]["stability"] == "process_local"
     assert authority.data["runtime"]["execution_identity"] == {"observed": False}
-    assert secret not in authority.canonical_json
+    assert credential_value not in authority.canonical_json
 
 
 def test_custom_verifier_credential_alias_never_enters_authority_json() -> None:

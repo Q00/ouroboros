@@ -30,7 +30,7 @@ from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
 from ouroboros.orchestrator.heartbeat import lock_path
 from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
-from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore, PersistenceError
 
@@ -2978,6 +2978,75 @@ class TestJobManager:
             assert await is_cancellation_requested(session_id) is False
             assert not session_cancelled
             assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
+        finally:
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_does_not_mirror_cancel_when_terminal_cas_loses(
+        self, tmp_path
+    ) -> None:
+        """A linked-session race winner must not gain a cancelled execution mirror."""
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_terminal_cas_loser_123"
+        execution_id = "exec_terminal_cas_loser_123"
+        runner_cancelled = asyncio.Event()
+
+        try:
+            await store.initialize()
+            repository = SessionRepository(store)
+            created = await repository.create_session(
+                execution_id=execution_id,
+                seed_id="seed_terminal_cas_loser_123",
+                session_id=session_id,
+            )
+            assert created.is_ok
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="terminal-cas-loser",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            async def _lose_terminal_race(
+                _repository: SessionRepository,
+                _session_id: str,
+                reason: str,
+                cancelled_by: str = "user",
+            ) -> Result[bool, PersistenceError]:
+                await store.append(
+                    BaseEvent(
+                        type="orchestrator.session.completed",
+                        aggregate_type="session",
+                        aggregate_id=_session_id,
+                        data={"summary": {"won": "completion"}},
+                    )
+                )
+                return Result.ok(False)
+
+            with patch.object(SessionRepository, "mark_cancelled", new=_lose_terminal_race):
+                snapshot = await manager.cancel_job(started.job_id)
+
+            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
+            session = await repository.reconstruct_session(session_id)
+            execution_events = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
+
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+            assert session.is_ok and session.value.status is SessionStatus.COMPLETED
+            assert not any(event.data.get("status") == "cancelled" for event in execution_events)
         finally:
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)

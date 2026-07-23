@@ -3,13 +3,32 @@
 ## Status
 
 Proposed Foundation A replacement for the closed implementation PRs #1682,
-#1704, and #1705. This document deliberately selects the conservative first
+#1704, #1705, and #1706. This document deliberately selects the conservative first
 boundary: every currently supported CLI runtime is executable **only within
 its creating process**. No existing CLI runtime can claim portable execution
 identity until it is rebuilt around the sealed kernel described below.
 
-Foundation A is identity-only. It does not authorize result reuse, checkpoint
-reuse, trust reuse, dispatch, routing, acceptance, or cross-run learning.
+Foundation A's persisted authority contract is identity-only. This replacement
+also defines the process-local lifecycle required to keep that identity
+truthful while effects are active. It does not authorize result reuse,
+checkpoint reuse, trust reuse, dispatch, routing, acceptance, or cross-run
+learning.
+
+## Review-derived approval constraints
+
+The four closed implementation PRs are evidence for hard exclusions in this
+replacement, not a backlog of helper names to bind later:
+
+| Review evidence | Rejected assumption | Binding rule in this replacement |
+| --- | --- | --- |
+| #1682 | A growing snapshot of workspace, runtime, verifier, dispatcher, rate gate, and executor objects can prove portable behavior | Never infer portable authority by recursively inspecting live Python objects |
+| #1704 | More callable/global/credential inspection can make that open object graph complete and safe to serialize | Canonical authority contains only finite declarative data; dynamic behavior and credential-shaped values force process-local scope |
+| #1705 | A narrow legacy CLI allowlist can be portable if enough launch and helper fields are enumerated | Every existing CLI runtime is process-local; portability requires a separate sealed execution kernel with a closed effect path |
+| #1706 | Runner, heartbeat, retained MCP owner, and public cancellation may each perform their own terminal cleanup | One registry owns one lifecycle entry per session; other surfaces request transitions and durable terminal state has one CAS winner |
+
+These constraints may not be relaxed by a follow-up patch in Foundation A. A
+future proposal that needs portability, routing, or reuse must introduce its own
+reviewed authority rather than widening this boundary.
 
 ## Problem
 
@@ -205,7 +224,9 @@ capsule contract is independently valid.
 ## Process-local lifecycle ownership
 
 The process-local registry is the sole in-process owner of the authority
-generation's lifecycle.  It has a deliberately small state machine; runner,
+generation's lifecycle. It stores one lifecycle entry per session with one
+explicit, mutually exclusive state; claim and terminalization are not parallel
+maps that can both appear owned. It has a deliberately small state machine; runner,
 MCP execution, and public cancellation surfaces may request a transition, but
 they must not each infer a separate terminal lifecycle.
 
@@ -266,6 +287,12 @@ property on other supported stores. The outcome is either one durable winner or
 a successful no-op because another terminal event already won. A stale
 `PAUSED`/`RUNNING` snapshot therefore cannot append `FAILED` over a concurrent
 `CANCELLED` record after the registry has retired its local generation.
+
+The session terminal CAS is the durable source of truth. A runner persists that
+transition before emitting the `execution.terminal` projection used by
+single-stream consumers. If its requested transition loses, it reconstructs
+the durable winner and projects that status instead; it never publishes a
+`completed` or `failed` execution mirror before the session winner is known.
 
 ### Cancellation and resume race matrix
 
@@ -359,6 +386,12 @@ The Foundation A implementation must demonstrate all of the following:
 23. a raw task cancellation in every claimed-but-pre-effect setup window drains
     a published cooperative cancellation before generic cleanup, or preserves
     the explicit retryable cancellation state for the next exact-owner resume.
+24. every live session is represented by one registry lifecycle entry whose
+    state is exactly one of `registered`, `claimed`, or `terminalizing`; a claim
+    and a terminalization reservation cannot coexist.
+25. a runner emits `execution.terminal` only after the session terminal CAS has
+    selected a durable winner, and a CAS loser projects the winner rather than
+    its stale requested status.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

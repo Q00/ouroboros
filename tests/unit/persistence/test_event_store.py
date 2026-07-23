@@ -9,6 +9,7 @@ import pytest
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
+from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -162,6 +163,76 @@ class TestEventStoreAppend:
 
         replayed = await event_store.replay("ontology", "ont-123")
         assert len(replayed) == 5
+
+    async def test_append_preserves_the_first_terminal_session_event(
+        self, event_store: EventStore
+    ) -> None:
+        """Generic append callers cannot overwrite an earlier terminal winner."""
+        cancelled = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id="sess-terminal-winner",
+            data={"reason": "user cancelled"},
+        )
+        completed = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-terminal-winner",
+            data={"summary": {"would_have_overwritten": True}},
+        )
+
+        await event_store.append(cancelled)
+        await event_store.append(completed)
+
+        terminal_events = await event_store.replay("session", "sess-terminal-winner")
+        assert [event.type for event in terminal_events] == ["orchestrator.session.cancelled"]
+
+    async def test_session_terminal_marker_reports_when_another_transition_won(
+        self, event_store: EventStore
+    ) -> None:
+        """Legacy markers must not report a losing terminal transition as success."""
+        repository = SessionRepository(event_store)
+        await repository.create_session(
+            execution_id="exec-terminal-marker-race",
+            seed_id="seed-terminal-marker-race",
+            session_id="sess-terminal-marker-race",
+        )
+
+        completed = await repository.mark_completed("sess-terminal-marker-race")
+        cancelled = await repository.mark_cancelled(
+            "sess-terminal-marker-race",
+            reason="late cancellation",
+        )
+
+        assert completed.is_ok and completed.value is True
+        assert cancelled.is_ok and cancelled.value is False
+        terminal_events = await event_store.replay("session", "sess-terminal-marker-race")
+        assert [event.type for event in terminal_events] == [
+            "orchestrator.session.started",
+            "orchestrator.session.completed",
+        ]
+
+    async def test_raw_terminal_append_paths_are_rejected(self, event_store: EventStore) -> None:
+        """Terminal sessions must use the one-winner public append boundary."""
+        terminal = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id="sess-raw-terminal-path",
+            data={"error": "would bypass terminal CAS"},
+        )
+        benign = BaseEvent(
+            type="orchestrator.progress.updated",
+            aggregate_type="session",
+            aggregate_id="sess-raw-terminal-path",
+            data={"progress": {"messages_processed": 1}},
+        )
+
+        with pytest.raises(PersistenceError, match="one-winner guard"):
+            await event_store.append_with_rowid(terminal)
+        with pytest.raises(PersistenceError, match="cannot be appended in a batch"):
+            await event_store.append_batch([benign, terminal])
+
+        assert await event_store.replay("session", "sess-raw-terminal-path") == []
 
     async def test_append_preserves_event_data(
         self, event_store: EventStore, sample_event: BaseEvent

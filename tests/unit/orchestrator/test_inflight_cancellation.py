@@ -547,11 +547,23 @@ class TestCancellationErrorScenarios:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_dfail",
+            "seed_dfail",
+            session_id="sess_dfail",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.err(PersistenceError("Write failed")),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.err(PersistenceError("Write failed")),
+            ),
         ):
             result = await runner.cancel_execution("exec_dfail")
 

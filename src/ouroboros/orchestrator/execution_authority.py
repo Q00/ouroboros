@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 import inspect
 import json
@@ -121,22 +122,53 @@ class _ProcessLocalAuthorityRegistration:
     creator_pid: int
 
 
+class _ProcessLocalAuthorityLifecycleState(StrEnum):
+    """The only live states of one process-local authority generation."""
+
+    REGISTERED = "registered"
+    CLAIMED = "claimed"
+    TERMINALIZING = "terminalizing"
+
+
+@dataclass(slots=True)
+class _ProcessLocalAuthorityLifecycle:
+    """One registry-owned lifecycle entry for a process-local session.
+
+    Keeping the state and finalizers on the same entry makes it impossible for
+    a session to be represented as both claimed and terminalizing.  Callers may
+    request transitions, but only the registry mutates this object.
+    """
+
+    registration: _ProcessLocalAuthorityRegistration
+    state: _ProcessLocalAuthorityLifecycleState
+    terminal_finalizers: dict[object, Callable[[], object]]
+
+
+class ProcessLocalCancellationDisposition(StrEnum):
+    """Outcome of one public cancellation request for a live authority."""
+
+    CANCELLED = "cancelled"
+    ALREADY_TERMINAL = "already_terminal"
+    CANCELLATION_REQUESTED = "cancellation_requested"
+    HELD_ELSEWHERE = "process_local_authority_held_elsewhere"
+    PERSISTENCE_PENDING = "cancellation_persistence_pending"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessLocalCancellationOutcome:
+    """Typed result shared by every public process-local cancellation surface."""
+
+    disposition: ProcessLocalCancellationDisposition
+    retired: bool = False
+    error: object | None = None
+
+
 class _ProcessLocalAuthorityRegistry:
     """Keep opaque Foundation A capabilities in one process and PID epoch."""
 
     def __init__(self) -> None:
         self._issued: dict[int, _ProcessLocalAuthorityIssuance] = {}
-        self._registrations: dict[str, _ProcessLocalAuthorityRegistration] = {}
-        self._claims: dict[str, _ProcessLocalAuthorityRegistration] = {}
-        # A public terminalization reserves an otherwise-unclaimed owner while
-        # its durable terminal record is being written.  This prevents a
-        # paused runner from acquiring effects between cancellation preflight
-        # and persistence.
-        self._terminalizations: dict[str, _ProcessLocalAuthorityRegistration] = {}
-        # A public terminalization surface may not hold the creating runner.
-        # Keep only local cleanup callbacks alongside the opaque registration,
-        # so a durable terminal record can retire the whole local lifecycle.
-        self._terminal_finalizers: dict[str, dict[object, Callable[[], object]]] = {}
+        self._lifecycles: dict[str, _ProcessLocalAuthorityLifecycle] = {}
         self._lock = RLock()
 
     @staticmethod
@@ -197,7 +229,7 @@ class _ProcessLocalAuthorityRegistry:
         with self._lock:
             if not self._is_issued_here(generation):
                 raise ValueError("process-local authority requires a registry-issued generation")
-            current = self._registrations.get(session_id)
+            current = self._lifecycles.get(session_id)
             registration = _ProcessLocalAuthorityRegistration(
                 execution_id=execution_id,
                 generation=generation,
@@ -205,14 +237,18 @@ class _ProcessLocalAuthorityRegistry:
                 creator_pid=os.getpid(),
             )
             if current is not None and not (
-                current.execution_id == registration.execution_id
-                and current.generation is registration.generation
-                and current.adapter is registration.adapter
-                and current.creator_pid == registration.creator_pid
+                current.registration.execution_id == registration.execution_id
+                and current.registration.generation is registration.generation
+                and current.registration.adapter is registration.adapter
+                and current.registration.creator_pid == registration.creator_pid
             ):
                 raise ValueError("process-local authority session is already registered")
-            self._registrations[session_id] = registration
-            self._terminal_finalizers.setdefault(session_id, {})
+            if current is None:
+                self._lifecycles[session_id] = _ProcessLocalAuthorityLifecycle(
+                    registration=registration,
+                    state=_ProcessLocalAuthorityLifecycleState.REGISTERED,
+                    terminal_finalizers={},
+                )
 
     def begin_terminalization(
         self,
@@ -230,7 +266,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return False, False
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -239,12 +276,9 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.generation.correlation_id != value.get("correlation_id")
             ):
                 return False, False
-            if (
-                self._claims.get(session_id) is not None
-                or self._terminalizations.get(session_id) is not None
-            ):
+            if lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED:
                 return False, True
-            self._terminalizations[session_id] = entry
+            lifecycle.state = _ProcessLocalAuthorityLifecycleState.TERMINALIZING
             return True, False
 
     def abort_terminalization(
@@ -257,17 +291,17 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return
         with self._lock:
-            entry = self._registrations.get(session_id)
-            reservation = self._terminalizations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is not None
-                and reservation is entry
                 and entry.creator_pid == os.getpid()
                 and entry.execution_id == execution_id
                 and self._is_issued_here(entry.generation)
                 and entry.generation.correlation_id == value.get("correlation_id")
+                and lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
             ):
-                self._terminalizations.pop(session_id, None)
+                lifecycle.state = _ProcessLocalAuthorityLifecycleState.REGISTERED
 
     def add_terminal_finalizer(
         self,
@@ -282,7 +316,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return False
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -292,7 +327,7 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.generation.correlation_id != value.get("correlation_id")
             ):
                 return False
-            self._terminal_finalizers.setdefault(session_id, {})[finalizer_key] = finalizer
+            lifecycle.terminal_finalizers[finalizer_key] = finalizer
             return True
 
     def live_generation(
@@ -306,7 +341,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return None
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -333,7 +369,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return False
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             return (
                 entry is not None
                 and entry.creator_pid == os.getpid()
@@ -358,7 +395,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return None, False
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -368,34 +406,35 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.generation.correlation_id != value.get("correlation_id")
             ):
                 return None, False
-            claim = self._claims.get(session_id)
-            if claim is not None or self._terminalizations.get(session_id) is not None:
+            if lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED:
                 return None, True
-            self._claims[session_id] = entry
+            lifecycle.state = _ProcessLocalAuthorityLifecycleState.CLAIMED
             return entry.generation, False
 
     def release(self, session_id: str, execution_id: str, adapter: object) -> None:
         """Release a paused session's exclusive execution claim."""
         with self._lock:
-            claim = self._claims.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            claim = lifecycle.registration if lifecycle is not None else None
             if (
                 claim is not None
                 and claim.creator_pid == os.getpid()
                 and claim.execution_id == execution_id
                 and claim.adapter is adapter
+                and lifecycle.state is _ProcessLocalAuthorityLifecycleState.CLAIMED
             ):
-                self._claims.pop(session_id, None)
+                lifecycle.state = _ProcessLocalAuthorityLifecycleState.REGISTERED
 
     def is_claimed(self, session_id: str, execution_id: str, value: object) -> bool:
         """Report whether the exact durable correlation currently owns effects."""
         if not valid_process_local_authority_contract(value):
             return False
         with self._lock:
-            entry = self._registrations.get(session_id)
-            claim = self._claims.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             return (
                 entry is not None
-                and claim is entry
+                and lifecycle.state is _ProcessLocalAuthorityLifecycleState.CLAIMED
                 and entry.creator_pid == os.getpid()
                 and entry.execution_id == execution_id
                 and self._is_issued_here(entry.generation)
@@ -405,7 +444,8 @@ class _ProcessLocalAuthorityRegistry:
     def retire(self, session_id: str, execution_id: str, adapter: object) -> bool:
         """Retire an exact session binding and report whether this owner did it."""
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -413,10 +453,7 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.adapter is not adapter
             ):
                 return False
-            self._registrations.pop(session_id, None)
-            self._claims.pop(session_id, None)
-            self._terminalizations.pop(session_id, None)
-            self._terminal_finalizers.pop(session_id, None)
+            self._lifecycles.pop(session_id, None)
             issuance = self._issued.get(id(entry.generation))
             if issuance is not None and issuance.generation is entry.generation:
                 self._issued.pop(id(entry.generation), None)
@@ -437,7 +474,8 @@ class _ProcessLocalAuthorityRegistry:
         if not valid_process_local_authority_contract(value):
             return False, False, ()
         with self._lock:
-            entry = self._registrations.get(session_id)
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
             if (
                 entry is None
                 or entry.creator_pid != os.getpid()
@@ -446,11 +484,10 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.generation.correlation_id != value.get("correlation_id")
             ):
                 return False, False, ()
-            if self._claims.get(session_id) is not None:
+            if lifecycle.state is _ProcessLocalAuthorityLifecycleState.CLAIMED:
                 return False, True, ()
-            self._registrations.pop(session_id, None)
-            self._terminalizations.pop(session_id, None)
-            finalizers = tuple(self._terminal_finalizers.pop(session_id, {}).values())
+            self._lifecycles.pop(session_id, None)
+            finalizers = tuple(lifecycle.terminal_finalizers.values())
             issuance = self._issued.get(id(entry.generation))
             if issuance is not None and issuance.generation is entry.generation:
                 self._issued.pop(id(entry.generation), None)
@@ -461,7 +498,9 @@ class _ProcessLocalAuthorityRegistry:
         with self._lock:
             issuance = self._issued.get(id(generation))
             if issuance is not None and issuance.generation is generation:
-                if not any(item.generation is generation for item in self._registrations.values()):
+                if not any(
+                    item.registration.generation is generation for item in self._lifecycles.values()
+                ):
                     self._issued.pop(id(generation), None)
 
     def clear_after_fork(self) -> None:
@@ -470,10 +509,7 @@ class _ProcessLocalAuthorityRegistry:
         # the inherited lock at fork time, so acquiring it here can deadlock
         # forever because that owner no longer exists in the child.
         self._issued = {}
-        self._registrations = {}
-        self._claims = {}
-        self._terminalizations = {}
-        self._terminal_finalizers = {}
+        self._lifecycles = {}
         self._lock = RLock()
 
 
@@ -625,6 +661,107 @@ def _retire_process_local_authority_generation(
     adapter: object,
 ) -> bool:
     return _PROCESS_LOCAL_AUTHORITY_REGISTRY.retire(session_id, execution_id, adapter)
+
+
+async def request_process_local_cancellation(
+    tracker: object,
+    session_repo: Any,
+    *,
+    reason: str,
+    cancelled_by: str,
+) -> ProcessLocalCancellationOutcome | None:
+    """Apply the one public cancellation protocol to a process-local session.
+
+    Returns ``None`` when ``tracker`` is not a Foundation A process-local
+    session, leaving legacy callers to use their existing cancellation path.
+    A live claim is signalled rather than terminalized underneath its effects;
+    an unclaimed retained owner is reserved until the conditional terminal
+    write finishes.  This lives beside the registry so CLI, MCP, and job
+    surfaces cannot each invent a different terminalization sequence.
+    """
+    session_id = getattr(tracker, "session_id", None)
+    execution_id = getattr(tracker, "execution_id", None)
+    progress = getattr(tracker, "progress", None)
+    authority = (
+        progress.get("execution_contract", {}).get("foundation_a_authority")
+        if isinstance(progress, Mapping) and isinstance(progress.get("execution_contract"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(session_id, str)
+        or not isinstance(execution_id, str)
+        or not valid_process_local_authority_contract(authority)
+    ):
+        return None
+
+    from ouroboros.orchestrator.heartbeat import is_holder_alive
+    from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
+
+    terminalization_started, authority_claimed = _begin_process_local_authority_terminalization(
+        session_id,
+        execution_id,
+        authority,
+    )
+    if authority_claimed:
+        # A local claimed runner owns the effect boundary.  It observes this
+        # signal and persists cancellation before its own teardown.
+        await request_cancellation(session_id)
+        return ProcessLocalCancellationOutcome(
+            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+        )
+
+    if not terminalization_started and is_holder_alive(session_id):
+        # Registry signals cannot cross processes, so a live foreign holder
+        # must not receive a durable terminal state beneath active effects.
+        return ProcessLocalCancellationOutcome(ProcessLocalCancellationDisposition.HELD_ELSEWHERE)
+
+    cancellation_request_published = False
+    try:
+        await request_cancellation(session_id)
+        cancellation_request_published = True
+        cancel_result = await session_repo.mark_cancelled_if_active(
+            session_id=session_id,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+    except BaseException:
+        if terminalization_started:
+            _abort_process_local_authority_terminalization(session_id, execution_id, authority)
+        elif cancellation_request_published:
+            await clear_cancellation(session_id)
+        raise
+
+    if cancel_result.is_err:
+        if terminalization_started:
+            # Keep the cooperative request after a failed durable write.  The
+            # retained same-process owner must retry it before future effects.
+            _abort_process_local_authority_terminalization(session_id, execution_id, authority)
+        else:
+            await clear_cancellation(session_id)
+        return ProcessLocalCancellationOutcome(
+            ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
+            error=cancel_result.error,
+        )
+
+    retired, claim_became_active = await _retire_process_local_authority_after_terminal_persistence(
+        session_id,
+        execution_id,
+        authority,
+    )
+    if claim_became_active:
+        await request_cancellation(session_id)
+    else:
+        await clear_cancellation(session_id)
+
+    if cancel_result.value:
+        return ProcessLocalCancellationOutcome(
+            ProcessLocalCancellationDisposition.CANCELLED,
+            retired=retired,
+        )
+    return ProcessLocalCancellationOutcome(
+        ProcessLocalCancellationDisposition.ALREADY_TERMINAL,
+        retired=retired,
+    )
 
 
 async def _retire_process_local_authority_after_terminal_persistence(

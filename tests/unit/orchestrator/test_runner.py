@@ -1482,6 +1482,75 @@ class TestOrchestratorRunner:
         retrospective.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_execute_precreated_mirrors_the_durable_terminal_cas_winner(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A concurrent terminal winner must replace the requested completion mirror."""
+        tracker = SessionTracker.create(
+            "exec_terminal_cas_winner",
+            sample_seed.metadata.seed_id,
+            session_id="sess_terminal_cas_winner",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        cancelled_tracker = tracker.with_status(SessionStatus.CANCELLED)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Completed after cancellation won",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mark_completed = AsyncMock(return_value=Result.ok(False))
+
+        with (
+            patch.object(runner, "_register_session"),
+            patch.object(runner, "_unregister_session"),
+            patch.object(runner._session_repo, "mark_completed", mark_completed),
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(cancelled_tracker)),
+            ),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner.execute_precreated_session(
+                seed=sample_seed,
+                tracker=tracker,
+                parallel=False,
+            )
+
+        assert result.is_ok
+        assert result.value.success is False
+        mark_completed.assert_awaited_once()
+        terminal_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.terminal"
+        ]
+        assert terminal_events[-1].data["status"] == SessionStatus.CANCELLED.value
+        assert not [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "orchestrator.session.completed"
+        ]
+
+    @pytest.mark.asyncio
     async def test_execute_seed_exception_marks_session_failed(
         self,
         runner: OrchestratorRunner,

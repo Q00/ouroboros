@@ -95,27 +95,32 @@ from ouroboros.providers.base import LLMAdapter
 log = structlog.get_logger(__name__)
 
 
-_NONTERMINAL_PROCESS_LOCAL_RESUME_BLOCKS = frozenset(
+_PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
     {
         "process_local_execution_in_progress",
         "process_local_authority_held_elsewhere",
         "session_not_paused",
         "cancellation_persistence_pending",
+        # This error path already conditionally persisted its own terminal
+        # result (or observed a concurrent terminal winner). A background
+        # wrapper must never append a second FAILED event over that outcome.
+        "process_local_resume_unavailable",
     }
 )
 
 
-def _is_nonterminal_process_local_resume_error(error: object) -> bool:
-    """Return whether a runner error intentionally leaves its session live.
+def _is_process_local_background_owned_error(error: object) -> bool:
+    """Return whether a runner error already owns its session lifecycle result.
 
-    A process-local owner may be running in another adapter or process.  The
-    runner reports that as a typed non-terminal rejection; the background MCP
-    wrapper must preserve it rather than immediately writing ``mark_failed``
-    and undoing the runner's liveness protection.
+    Most of these typed results intentionally leave a process-local owner live;
+    ``process_local_resume_unavailable`` instead conditionally persists (or
+    observes) a terminal outcome itself.  In both cases the background MCP
+    wrapper must preserve the runner-owned lifecycle rather than append an
+    unconditional ``mark_failed``.
     """
     details = getattr(error, "details", None)
     return isinstance(details, Mapping) and (
-        details.get("resume_blocked") in _NONTERMINAL_PROCESS_LOCAL_RESUME_BLOCKS
+        details.get("resume_blocked") in _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS
     )
 
 
@@ -839,6 +844,53 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             except Exception:
                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
+    async def _cleanup_unstarted_process_local_background_task(
+        self,
+        *,
+        tracker: SessionTracker,
+        runner: OrchestratorRunner,
+        workspace: TaskWorkspace | None,
+        owned_event_store: EventStore | None,
+        retained_resume_handoff: bool,
+    ) -> None:
+        """Close a task cancelled before its coroutine can enter ``finally``.
+
+        ``asyncio`` never executes a coroutine's body when its task is
+        cancelled before the first scheduling turn.  A freshly prepared
+        process-local session has already registered its capability, lease,
+        handler owner, and possibly EventStore by that point, so the done
+        callback must create an explicit terminal cleanup task instead of only
+        discarding the cancelled task reference.
+        """
+        try:
+            await runner._mark_process_local_resume_unavailable(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        except Exception:
+            log.exception(
+                "mcp.tool.execute_seed.unstarted_background_terminalization_failed",
+                session_id=tracker.session_id,
+            )
+        try:
+            await self._reconcile_terminal_process_local_owner(tracker)
+        except Exception:
+            log.exception(
+                "mcp.tool.execute_seed.unstarted_background_owner_cleanup_failed",
+                session_id=tracker.session_id,
+            )
+        if workspace is not None:
+            release_lock(workspace.lock_path)
+        if owned_event_store is not None:
+            try:
+                close_result = owned_event_store.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception:
+                log.exception("mcp.tool.execute_seed.event_store_close_error")
+        if retained_resume_handoff:
+            self._finish_process_local_resume_handoff(tracker.session_id)
+
     async def _reconcile_terminal_process_local_owner(self, tracker: SessionTracker) -> None:
         """Reconcile a terminal record through the registry-owned transition.
 
@@ -1502,6 +1554,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         owned_event_store=event_store if owns_event_store else None,
                     )
 
+                background_started = False
+
                 # Background execution coroutine — either awaited directly
                 # (synchronous=True) or wrapped in create_task (fire-and-forget).
                 async def _run_in_background(
@@ -1517,7 +1571,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     _owns_event_store: bool = owns_event_store,
                     _retained_resume_handoff: bool = retained_resume_handoff,
                 ) -> None:
-                    nonlocal retained_after_run, retained_event_store_to_close
+                    nonlocal background_started, retained_after_run, retained_event_store_to_close
+                    # This must be the first coroutine action. A done callback
+                    # distinguishes cancellation before this first scheduling
+                    # turn (no ``finally`` execution) from ordinary in-body
+                    # cancellation, which reaches the cleanup below.
+                    background_started = True
                     try:
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
@@ -1533,17 +1592,28 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 session_id=_tracker.session_id,
                                 error=str(result.error),
                             )
-                            if _is_nonterminal_process_local_resume_error(result.error):
+                            if _is_process_local_background_owned_error(result.error):
                                 log.info(
-                                    "mcp.tool.execute_seed.background_nonterminal_resume_block",
+                                    "mcp.tool.execute_seed.background_process_local_lifecycle_owned",
                                     session_id=_tracker.session_id,
                                     resume_blocked=result.error.details.get("resume_blocked"),
                                 )
                                 return
-                            await _session_repo.mark_failed(
+                            mark_result = await _session_repo.mark_failed(
                                 _tracker.session_id,
                                 error_message=str(result.error),
                             )
+                            if mark_result.is_err:
+                                log.error(
+                                    "mcp.tool.execute_seed.background_mark_failed_error",
+                                    session_id=_tracker.session_id,
+                                    error=str(mark_result.error),
+                                )
+                            elif mark_result.value is False:
+                                log.info(
+                                    "mcp.tool.execute_seed.background_terminal_preserved",
+                                    session_id=_tracker.session_id,
+                                )
                             return
                         if not result.value.success:
                             log.warning(
@@ -1593,10 +1663,21 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             session_id=_tracker.session_id,
                         )
                         try:
-                            await _session_repo.mark_failed(
+                            mark_result = await _session_repo.mark_failed(
                                 _tracker.session_id,
                                 error_message="Unexpected error in background execution",
                             )
+                            if mark_result.is_err:
+                                log.error(
+                                    "mcp.tool.execute_seed.mark_failed_error",
+                                    session_id=_tracker.session_id,
+                                    error=str(mark_result.error),
+                                )
+                            elif mark_result.value is False:
+                                log.info(
+                                    "mcp.tool.execute_seed.background_terminal_preserved",
+                                    session_id=_tracker.session_id,
+                                )
                         except Exception:
                             log.exception("mcp.tool.execute_seed.mark_failed_error")
                     finally:
@@ -1677,16 +1758,24 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     launched = True
                     self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
-                    if retained_resume_handoff:
-                        # A task cancelled before its coroutine starts will not
-                        # execute the coroutine's ``finally`` block. The discard
-                        # is idempotent and covers that scheduling edge too.
-                        task.add_done_callback(
-                            lambda _task, _session_id=tracker.session_id: (
-                                self._finish_process_local_resume_handoff(_session_id)
+
+                    def _background_done(completed: asyncio.Task[None]) -> None:
+                        self._background_tasks.discard(completed)
+                        if not completed.cancelled() or background_started:
+                            return
+                        cleanup = asyncio.create_task(
+                            self._cleanup_unstarted_process_local_background_task(
+                                tracker=tracker,
+                                runner=runner,
+                                workspace=workspace,
+                                owned_event_store=event_store if owns_event_store else None,
+                                retained_resume_handoff=retained_resume_handoff,
                             )
                         )
+                        self._background_tasks.add(cleanup)
+                        cleanup.add_done_callback(self._background_tasks.discard)
+
+                    task.add_done_callback(_background_done)
                     status_label = "running"
                     success = None  # unknown yet
                     is_error = False
