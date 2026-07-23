@@ -292,6 +292,7 @@ class TestCancellationCleanup:
             "sess_clean",
             reason="Cancellation detected during execution",
             cancelled_by="runner",
+            acceptance_finalizations=[],
         )
 
     @pytest.mark.asyncio

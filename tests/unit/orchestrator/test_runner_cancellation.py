@@ -386,6 +386,7 @@ class TestHandleCancellation:
             "sess_1",
             reason="Cancellation detected during execution",
             cancelled_by="runner",
+            acceptance_finalizations=[],
         )
 
     @pytest.mark.asyncio
