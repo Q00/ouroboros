@@ -29,6 +29,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_text,
+    derive_semantic_ac_key,
 )
 
 # The unsafe-context matcher / safe-default blocking machinery exercised here
@@ -1447,6 +1448,27 @@ def test_seed_repairer_preserves_structured_ac_identity_and_evidence() -> None:
     assert repaired.output_assertion == criterion.output_assertion
     assert repaired.investment == criterion.investment
     assert preserved == untouched
+
+
+def test_seed_repairer_refreshes_auto_derived_key_after_repair() -> None:
+    """A legacy (auto-derived key) criterion gets a fresh key matching its rewrite.
+
+    ``model_copy`` retains the old auto-derived key after a description rewrite,
+    which would masquerade as an explicit identity downstream.  Repair must
+    re-derive a non-explicit key so it stays consistent with the repaired text.
+    """
+    seed = _seed(ac=("The CLI should be easy and user-friendly",))
+    ledger = SeedDraftLedger.from_goal(seed.goal)
+    _fill_ready(ledger)
+    review = SeedReviewer().review(seed, ledger=ledger)
+
+    result = SeedRepairer().repair_once(seed, review, ledger=ledger)
+
+    assert result.changed
+    repaired = result.seed.acceptance_criteria[0]
+    assert isinstance(repaired, AcceptanceCriterionSpec)
+    # The persisted key matches the repaired description, not a stale source key.
+    assert repaired.semantic_ac_key == derive_semantic_ac_key(repaired)
 
 
 def test_seed_repairer_dedupes_fully_identical_criteria_only() -> None:

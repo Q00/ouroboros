@@ -404,30 +404,56 @@ def _transfer_contract_to_emitted_canonical(
 ) -> bool:
     """Attach a covered source's contract to its canonical AC, in place.
 
-    Returns whether the canonical AC was found and updated.  The canonical
-    criterion keeps its description and gains the source's verification
-    evidence, so the executor/evaluator sees exactly one contracted AC rather
-    than a contractless canonical plus a duplicate source.  An existing contract
-    on the canonical AC is never clobbered.
+    Returns whether the source is fully represented by the canonical AC (so the
+    caller may drop it).  The canonical criterion keeps its description and gains
+    the source's verification evidence — including an explicitly-supplied
+    ``semantic_ac_key`` that runtime routing/recovery correlate on — so the
+    executor/evaluator sees exactly one contracted AC rather than a contractless
+    canonical plus a duplicate source.
+
+    A canonical AC already carrying a contract is only treated as representing
+    this source when the two contracts are identical; a *different* contract
+    returns False so the caller preserves the source as its own criterion rather
+    than silently dropping a distinct command.
     """
     target = canonical_text.strip()
+    explicit_key = (
+        source.semantic_ac_key
+        if source.semantic_ac_key is not None
+        and source.semantic_ac_key != derive_semantic_ac_key(source)
+        else None
+    )
+    transferred = AcceptanceCriterionSpec(
+        description=canonical_text,
+        semantic_ac_key=explicit_key,
+        verify_command=source.verify_command,
+        expected_artifacts=source.expected_artifacts,
+        output_assertion=source.output_assertion,
+        investment=source.investment,
+    )
     for position, (anchor, item) in enumerate(emissions):
         if ac_text(item).strip() != target:
             continue
         if isinstance(item, AcceptanceCriterionSpec) and item.has_success_contract:
-            return True
-        emissions[position] = (
-            anchor,
-            AcceptanceCriterionSpec(
-                description=canonical_text,
-                verify_command=source.verify_command,
-                expected_artifacts=source.expected_artifacts,
-                output_assertion=source.output_assertion,
-                investment=source.investment,
-            ),
-        )
+            # Only a byte-identical contract is safe to collapse onto; a distinct
+            # command must survive as its own criterion.
+            return _autoresearch_contract_matches(item, transferred)
+        emissions[position] = (anchor, transferred)
         return True
     return False
+
+
+def _autoresearch_contract_matches(
+    existing: AcceptanceCriterionSpec,
+    candidate: AcceptanceCriterionSpec,
+) -> bool:
+    """Return whether two canonical-AC contracts are identical evidence."""
+    return (
+        existing.verify_command == candidate.verify_command
+        and existing.expected_artifacts == candidate.expected_artifacts
+        and existing.output_assertion == candidate.output_assertion
+        and existing.investment == candidate.investment
+    )
 
 
 def _collapse_canonical_acceptance_specs(
@@ -648,151 +674,51 @@ def _extract_autoresearch_repository_path(context_text: str) -> str:
     return ""
 
 
-# Each covered phrase names the canonical AC (by index into
-# ``_AUTORESEARCH_CANONICAL_AC``) that subsumes it, or ``None`` when it is folded
-# into the Seed's runtime-context extras rather than an executable AC.  The
-# index lets a structured source transfer its verification contract onto the
-# canonical criterion instead of being dropped or duplicated.
-_AUTORESEARCH_COVERED_PHRASES: tuple[tuple[str, int | None], ...] = (
-    ("seed has explicit runtime context", None),
-    ("seed preserves explicit runtime context", None),
-    ("seed requires execution to record a baseline", 0),
-    ("execution records baseline val_bpb before train.py experiments", 0),
-    ("seed requires up to two post-baseline experiments", 1),
-    ("seed requires every baseline and experiment ledger entry", 3),
-    ("seed requires final kept changes to limited to train.py", 4),
-    (
-        "seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, "
-        "missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes",
-        2,
-    ),
-)
-
-
-# Word tokens without trailing punctuation; keeps dotted/slashed identifiers
-# like ``train.py`` and ``keep/discard`` intact.
-_AUTORESEARCH_TOKEN_RE = re.compile(r"[a-z0-9_-]+(?:[./][a-z0-9_-]+)*")
-
-
-def _autoresearch_tokens(text: str) -> list[str]:
-    return _AUTORESEARCH_TOKEN_RE.findall(text.casefold())
-
-
-# The autoresearch canonical contract covers a fixed requirement vocabulary
-# (baseline, experiments, ledger, discard, diff, report). A covered-prefix
-# source whose remaining words stay inside that vocabulary is a restatement the
-# canonical ACs already express; a foreign token (e.g. ``stderr``, ``signed``)
-# is a distinct caller requirement the contract does not carry and must survive.
-_AUTORESEARCH_VOCAB_EXTRA: frozenset[str] = frozenset(
-    {
-        # Structural/meta requirement words used by standard autoresearch ACs.
-        "acceptance",
-        "content",
-        "contract",
-        "criteria",
-        "first-class",
-        "non-goals",
-        "non-improvements",
-        "recorded",
-        "reverted",
-        "selected",
-        "sequentially",
-        "widening",
-        "autoresearch",
-        "explicit",
-        "context",
-        "runtime",
-        "goals",
-        "first",
-        "class",
-        "improvements",
-        "post-baseline",
-    }
-)
-
-_AUTORESEARCH_VOCAB_FILLER: frozenset[str] = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "of",
-        "to",
-        "for",
-        "with",
-        "in",
-        "on",
-        "is",
-        "are",
-        "be",
-        "that",
-        "this",
-        "its",
-        "by",
-        "as",
-        "at",
-        "into",
-        "from",
-        "per",
-        "then",
-        "which",
-        "each",
-        "all",
-        "any",
-        "must",
-        "should",
-        "seed",
-        "requires",
-        "require",
-        "execution",
-        "record",
-        "records",
-        "before",
-        "after",
-        "up",
-        "not",
-        "no",
-        "result",
-        "results",
-    }
-)
-
-_AUTORESEARCH_CANONICAL_VOCAB: frozenset[str] = (
-    frozenset(
-        token
-        for source in (*_AUTORESEARCH_CANONICAL_AC, *_AUTORESEARCH_NON_GOALS)
-        for token in _autoresearch_tokens(source)
-    )
-    | frozenset(token for phrase, _idx in _AUTORESEARCH_COVERED_PHRASES for token in phrase.split())
-    | _AUTORESEARCH_VOCAB_EXTRA
-    | _AUTORESEARCH_VOCAB_FILLER
-)
+# Demonstrable equivalence, not fuzzy matching: each entry is the *exact*
+# normalized text (via ``_criterion_key``) of a standard autoresearch
+# requirement restatement, mapped to the canonical AC (index into
+# ``_AUTORESEARCH_CANONICAL_AC``) that provably expresses the same requirement,
+# or ``None`` when it is folded into the Seed's runtime-context extras.  Token
+# membership cannot establish equivalence — "record a baseline after every
+# experiment" contradicts the canonical before-edit baseline while using only
+# in-domain words — so only these exact phrasings collapse.  Any variation,
+# added clause, or contradiction is not equivalent and is preserved verbatim.
+_AUTORESEARCH_KNOWN_COVERED: dict[str, int | None] = {
+    "seed has explicit runtime context, non-goals, and acceptance criteria "
+    "as first-class content for the autoresearch contract": None,
+    "seed preserves explicit runtime context, non-goals, and acceptance criteria "
+    "as first-class content for the autoresearch contract": None,
+    "seed requires execution to record a baseline uv run train.py result "
+    "before any experiment changes evaluated": 0,
+    "seed requires up to two post-baseline experiments to selected sequentially "
+    "from the current best state, with improvements kept and all non-improvements "
+    "reverted before the next attempt": 1,
+    "seed requires every baseline and experiment ledger entry to report command, "
+    "changed files, diff summary, observed val_bpb, memory, status, and "
+    "keep/discard conclusion": 3,
+    "seed requires final kept changes to limited to train.py unless explicit scope "
+    "widening recorded in the ledger": 4,
+    "seed defines discard behavior for ties, regressions, invalid runs, missing "
+    "val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and "
+    "unauthorized file changes": 2,
+}
 
 
 def _autoresearch_coverage(subject: str) -> tuple[bool, int | None]:
     """Classify an autoresearch source against the canonical contract.
 
-    Returns ``(is_covered, canonical_index)``.  A source is covered only when a
-    covered phrase matches by prefix AND its remaining words stay inside the
-    canonical requirement vocabulary — i.e. it restates a requirement the six
-    canonical ACs already express, adding nothing distinct.  A remainder token
-    outside that vocabulary (a caller's extra requirement) makes it uncovered,
-    so the normalizer preserves it instead of dropping it.  ``canonical_index``
-    is the AC that subsumes a truly-covered source, letting a structured source
-    transfer its verification contract onto that canonical criterion rather than
-    being dropped (losing evidence) or duplicated.
+    Returns ``(is_covered, canonical_index)``.  A source is covered only when its
+    normalized text *exactly* matches a known standard requirement restatement,
+    so a canonical AC demonstrably expresses the same requirement.  Anything
+    else — an added clause, reworded or contradicting requirement, or a novel
+    requirement — is not equivalent and is preserved.  ``canonical_index`` is the
+    AC that subsumes a covered source, letting a structured source transfer its
+    verification contract onto that canonical criterion rather than being dropped
+    (losing evidence) or duplicated.
     """
     key = _criterion_key(subject)
-    for phrase, canonical_index in _AUTORESEARCH_COVERED_PHRASES:
-        if not key.startswith(phrase):
-            continue
-        remainder = key[len(phrase) :]
-        if any(
-            token not in _AUTORESEARCH_CANONICAL_VOCAB for token in _autoresearch_tokens(remainder)
-        ):
-            return (False, None)
-        return (True, canonical_index)
+    if key in _AUTORESEARCH_KNOWN_COVERED:
+        return (True, _AUTORESEARCH_KNOWN_COVERED[key])
     return (False, None)
 
 

@@ -842,6 +842,91 @@ def test_normalize_execution_acceptance_transfers_contract_onto_autoresearch_can
     assert transferred.output_assertion == "baseline recorded"
 
 
+def _autoresearch_seed(*criteria: str | AcceptanceCriterionSpec) -> Seed:
+    return _seed(*criteria).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+
+def test_normalize_execution_acceptance_keeps_distinct_covered_contracts() -> None:
+    """Blocker regression: two covered baselines with different commands both survive.
+
+    Transferring onto an already-contracted canonical AC is only a valid collapse
+    when the contracts are identical.  A second baseline carrying a different
+    verify command must not be silently dropped as a successful transfer.
+    """
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            verify_command="python -m pytest tests/test_baseline_a.py",
+        ),
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            verify_command="python -m pytest tests/test_baseline_b.py",
+        ),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    commands = {
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command
+    }
+    assert "python -m pytest tests/test_baseline_a.py" in commands
+    assert "python -m pytest tests/test_baseline_b.py" in commands
+
+
+def test_normalize_execution_acceptance_transfer_preserves_explicit_key() -> None:
+    """Blocker regression: contract transfer keeps an explicitly-supplied key.
+
+    Runtime routing/recovery correlate on the explicit ``semantic_ac_key``; the
+    canonical AC must inherit it, not a freshly derived key.
+    """
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            semantic_ac_key="ac_1111111111111111",
+            verify_command="/usr/bin/time -l uv run train.py",
+        )
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    keys = {
+        c.semantic_ac_key
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+    }
+    assert "ac_1111111111111111" in keys
+
+
+def test_normalize_execution_acceptance_preserves_contradicting_in_vocabulary_criterion() -> None:
+    """Blocker regression: token membership does not imply semantic equivalence.
+
+    "record a baseline after every experiment" uses only in-domain words yet
+    contradicts the canonical before-edit baseline requirement.  It is not a
+    known equivalent restatement, so it must be preserved, not silently deleted.
+    """
+    contradicting = "Seed requires execution to record a baseline after every experiment."
+    seed = _autoresearch_seed(contradicting)
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert any(
+        "after every experiment" in text for text in ac_texts(normalized.acceptance_criteria)
+    )
+
+
 def test_normalize_execution_acceptance_preserves_extra_autoresearch_requirement() -> None:
     """Blocker regression: a covered prefix with a distinct extra clause survives.
 

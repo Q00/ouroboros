@@ -19,6 +19,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     Seed,
     ac_text,
+    derive_semantic_ac_key,
 )
 
 
@@ -160,11 +161,7 @@ class SeedRepairer:
                         replacement = _observable_preserving_replacement(
                             ac_text(criterion), index=index
                         )
-                        acceptance[index] = (
-                            criterion.model_copy(update={"description": replacement})
-                            if isinstance(criterion, AcceptanceCriterionSpec)
-                            else replacement
-                        )
+                        acceptance[index] = _repair_criterion_description(criterion, replacement)
                         repaired_acceptance_indices.add(index)
                 else:
                     acceptance.append(
@@ -317,6 +314,30 @@ class SeedRepairer:
             _check_cancelled()
             review = self.reviewer.review(current, **review_kwargs)
         return current, review, history
+
+
+def _repair_criterion_description(
+    criterion: AcceptanceCriterionInput,
+    replacement: str,
+) -> AcceptanceCriterionInput:
+    """Rewrite a criterion's description, refreshing only auto-derived identity.
+
+    A structured criterion keeps its verification evidence, but its semantic key
+    must stay consistent with the repaired contract.  An auto-derived key (equal
+    to what derivation produces) is re-derived from the new description so it is
+    not mistaken for an explicit identity downstream; an explicitly-supplied key
+    (one that differs from the derived value) is preserved verbatim.
+    """
+    if not isinstance(criterion, AcceptanceCriterionSpec):
+        return replacement
+    rewritten = criterion.model_copy(update={"description": replacement})
+    explicit_key = (
+        criterion.semantic_ac_key is not None
+        and criterion.semantic_ac_key != derive_semantic_ac_key(criterion)
+    )
+    if explicit_key:
+        return rewritten
+    return rewritten.model_copy(update={"semantic_ac_key": derive_semantic_ac_key(rewritten)})
 
 
 def _dedupe_identical_criteria(
