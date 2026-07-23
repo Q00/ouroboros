@@ -39,6 +39,7 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    _atomic_write_text,
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
@@ -1180,7 +1181,7 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        filepath.write_text(json_content, encoding="utf-8")
+        _atomic_write_text(filepath, json_content)
 
         log.info(
             "pm.seed_saved",
