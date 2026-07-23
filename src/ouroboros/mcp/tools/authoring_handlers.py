@@ -67,6 +67,7 @@ from ouroboros.mcp.tools.subagent import (
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
     register_question_advisory_fanout,
+    register_question_advisory_fanout_from_lanes,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
@@ -815,11 +816,15 @@ def _attach_question_assist_requests(
         # round-trips through ``ouroboros_submit_fanout_results`` successfully
         # (#1578 registered a ``code_facts`` code-investigation record here,
         # which rejected contract-following submissions as a mismatch).
-        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
+        # ``None`` means the record could not be persisted: an id that cannot
+        # be redeemed at re-entry must not be advertised.
+        advisory_fanout_id = register_question_advisory_fanout(
             fanout_registry,
             session_id=session_id,
             payloads=advisory_payloads,
         )
+        if advisory_fanout_id is not None:
+            meta["question_advisory_fanout_id"] = advisory_fanout_id
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -2463,6 +2468,31 @@ class InterviewHandler:
             turn_context=turn_context,
             adapter_question=adapter_question,
         )
+        # Transport parity (PR #1703 bot review round 4): the plugin child
+        # generates the question itself, so per-question lane payloads cannot
+        # be pre-built here — but the plugin transport must still receive the
+        # SAME machine-readable advisory contract as host-driven mode: the
+        # versioned lane metadata (data_policy + answer contracts included)
+        # and a registered fan-out id so re-entry validation applies. The
+        # child builds lane prompts from the contract once it has the
+        # question.
+        plugin_advisory_meta: dict[str, Any] = {}
+        plugin_registry = self._resolved_fanout_registry()
+        if plugin_registry is not None:
+            advisory_contract = ouroboros_tool_capability_metadata("ouroboros_interview")[
+                "orchestration"
+            ]["question_advisory_fanout"]
+            plugin_fanout_id = register_question_advisory_fanout_from_lanes(
+                plugin_registry,
+                session_id=real_session_id or "new",
+                lanes=list(advisory_contract.get("lanes") or ()),
+            )
+            plugin_advisory_meta["question_advisory_fanout"] = advisory_contract
+            plugin_advisory_meta["question_advisory_result_correlation_key"] = "context.lane_id"
+            # None means the record could not be persisted: never advertise a
+            # fan-out id that cannot be redeemed at re-entry.
+            if plugin_fanout_id is not None:
+                plugin_advisory_meta["question_advisory_fanout_id"] = plugin_fanout_id
         return await dispatch_plugin_terminal(
             self.event_store,
             session_id=real_session_id,
@@ -2474,6 +2504,7 @@ class InterviewHandler:
                 "dispatch_mode": "plugin",
                 "question_advisory_strategy": "plugin_child_question_first_advisory",
                 "question_advisory_recommended": True,
+                **plugin_advisory_meta,
                 **_interview_reasoning_meta(
                     state=plugin_state,
                     session_id=real_session_id,

@@ -261,6 +261,44 @@ class TestInterviewHandlerSubagentDispatch:
         assert result.is_ok
         assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_interview"
 
+    async def test_plugin_dispatch_carries_advisory_fanout_contract(self, tmp_path) -> None:
+        """Plugin transport parity (PR #1703 bot review round 4, B1).
+
+        The OpenCode plugin path previously emitted only a prose mention of
+        the advisory lanes — no ``data_policy``, no ``data_evidence_answer.v1``
+        contract, no fan-out id — so that supported transport bypassed the
+        machine-readable policy and re-entry validation entirely.
+        """
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry
+
+        registry = FanoutRegistry(tmp_path)
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=registry,
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        meta = result.value.meta
+
+        contract = meta["question_advisory_fanout"]
+        lanes = {lane["lane_id"]: lane for lane in contract["lanes"]}
+        assert lanes["data_context"]["data_policy"]["read_only"] is True
+        assert lanes["data_context"]["answer_contract"]["contract_id"] == "data_evidence_answer.v1"
+        assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
+
+        # The stamped id is redeemable: the registered record carries the data
+        # lane's answer contract, so re-entry door validation applies on this
+        # transport too.
+        record = registry.load(meta["question_advisory_fanout_id"])
+        assert record is not None
+        contracts = record.synthesizer_input["lane_answer_contracts"]
+        assert contracts["data_context"]["contract_id"] == "data_evidence_answer.v1"
+
+        # The child prompt points at the structured contract, not just prose.
+        assert "question_advisory_fanout" in result.value.meta["_subagent"]["prompt"]
+
 
 # ---------------------------------------------------------------------------
 # EvaluateHandler

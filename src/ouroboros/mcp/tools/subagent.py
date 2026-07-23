@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -72,7 +73,9 @@ _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 # The data_context answer contract must reach the subagent WHOLE — a torn form
 # defeats its informed-consent purpose (the code contract is truncated at the
 # generic budget above; see Q00/ouroboros#1671 follow-ups). Pinned by tests.
-_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 6_000
+# Sized above the rendered contract with headroom for boundary-pattern
+# additions (the evidence policy patterns live inside the schema).
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 8_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1178,7 +1181,14 @@ def build_interview_subagent(
 1. Show the interview question first.
 2. Then add a compact helper from: code_context, web_context, data_context,
    ambiguity_contrarian, answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+3. Offer options, a draft, or unresolved ambiguities; preserve user agency.
+4. The dispatching response meta carries the versioned lane contract
+   (`question_advisory_fanout`: per-lane purpose, `data_policy`, and
+   `answer_contract`) plus a `question_advisory_fanout_id`. Follow each
+   lane's contract — `data_context` is a read-only proposer whose answers
+   always require user confirmation — and submit lane outputs back via
+   `ouroboros_submit_fanout_results` keyed by `context.lane_id` with that
+   fanout id."""
 
     transcript_section = ""
     if transcript:
@@ -2789,6 +2799,16 @@ class FanoutRegistry:
         if self._dir == _DEFAULT_FANOUT_DIR:
             self._dir = directory
 
+    # Fan-out ids are opaque basenames, never paths: this is enforced INSIDE
+    # the registry (independently of any outer input validation) so a caller
+    # supplied absolute or traversal-shaped id can never make ``Path`` joining
+    # escape the configured fan-out root.
+    _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+    @classmethod
+    def _valid_id(cls, fanout_id: str) -> bool:
+        return bool(cls._ID_PATTERN.match(fanout_id))
+
     def _path(self, fanout_id: str) -> Path:
         return self._dir / f"{fanout_id}.json"
 
@@ -2802,12 +2822,16 @@ class FanoutRegistry:
         synthesizer_input: dict[str, Any],
         fanout_id: str | None = None,
         required_keys: list[str] | None = None,
-    ) -> str:
+    ) -> str | None:
         """Persist a fan-out record and return its ``fanout_id``.
 
         A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
         supplied by the caller) and stamped into the returned value so the
-        producer can echo it into the emitted meta. Persistence is best-effort.
+        producer can echo it into the emitted meta. Returns ``None`` when the
+        record could NOT be persisted (or a caller-supplied id is not an
+        opaque basename): a fan-out id that cannot be redeemed at re-entry
+        must never be advertised — producers skip stamping instead of handing
+        the host an id whose first submission is ``unknown_fanout_id``.
         ``required_keys`` names the subset of ``expected_keys`` that gates
         completion; when omitted every expected key is required (the original
         all-keys gate).
@@ -2822,7 +2846,8 @@ class FanoutRegistry:
             synthesizer_input=synthesizer_input,
             required_keys=tuple(required_keys if required_keys is not None else expected_keys),
         )
-        self.save(record)
+        if not self.save(record):
+            return None
         return resolved_id
 
     def save(self, record: FanoutRecord) -> bool:
@@ -2839,13 +2864,28 @@ class FanoutRegistry:
         accumulated when they were lost (disk-full/read-only degradation):
         the re-entry response surfaces it as ``accumulation_persisted=false``,
         telling the host to resubmit those lanes together with the remainder.
+
+        The write is atomic (temp file + ``os.replace`` in the same
+        directory): a failure mid-write leaves the PRIOR record intact and
+        replayable instead of tearing the live JSON file, so the documented
+        resubmission path still finds the fan-out.
         """
+        if not self._valid_id(record.fanout_id):
+            log.warning(
+                "fanout.registry.invalid_fanout_id",
+                fanout_id=record.fanout_id,
+                kind=record.kind,
+            )
+            return False
+        target = self._path(record.fanout_id)
+        tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            self._path(record.fanout_id).write_text(
+            tmp_path.write_text(
                 json.dumps(record.to_dict(), ensure_ascii=False),
                 encoding="utf-8",
             )
+            os.replace(tmp_path, target)
         except OSError as exc:
             log.warning(
                 "fanout.registry.persist_failed",
@@ -2853,11 +2893,17 @@ class FanoutRegistry:
                 kind=record.kind,
                 error=str(exc),
             )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             return False
         return True
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
+        """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt."""
+        if not self._valid_id(fanout_id):
+            return None
         try:
             content = self._path(fanout_id).read_text(encoding="utf-8")
         except OSError:
@@ -2880,36 +2926,112 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
     # modules, so the canonical pattern strings are pulled lazily.
     from ouroboros.orchestrator.capabilities.interview_schemas import (
         DATA_EVIDENCE_EMAIL_PATTERN,
+        DATA_EVIDENCE_PHONE_PATTERN,
         DATA_EVIDENCE_SECRET_PATTERN,
     )
 
     return (
         ("email-shaped (PII)", re.compile(DATA_EVIDENCE_EMAIL_PATTERN, re.IGNORECASE)),
         ("credential-shaped (secret)", re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)),
+        ("phone-shaped (PII)", re.compile(DATA_EVIDENCE_PHONE_PATTERN)),
     )
 
 
-def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
-    """Scan a data-lane output for raw-evidence shapes the policy forbids.
+@lru_cache(maxsize=1)
+def _data_forbidden_operation_pattern() -> re.Pattern[str]:
+    """One word-boundary regex over the canonical forbidden-operation list."""
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _data_context_lane_policy,
+    )
 
-    The evidence policy (aggregates only, no raw rows, PII-scrubbed) is
-    enforced at re-entry — the point the engine owns — not just declared in
-    the schema: the WHOLE serialized output is scanned so PII/credential
-    content cannot hide in any field, including outputs validated against a
-    contract persisted before the schema carried the boundary patterns. The
-    matched content is deliberately NOT echoed into the error message: the
-    violation report flows back to the host and must not re-leak the data.
+    words = _data_context_lane_policy()["forbidden_operation_patterns"]
+    return re.compile(
+        r"\b(" + "|".join(re.escape(str(word)) for word in words) + r")\b",
+        re.IGNORECASE,
+    )
+
+
+def _is_row_shaped_value(value: str) -> bool:
+    """True when an evidence value looks like serialized rows, not an aggregate.
+
+    Aggregates are short scalar statements; a JSON-encoded list/object or a
+    multi-record blob is raw data regardless of what it contains.
+    """
+    stripped = value.strip()
+    if stripped.startswith(("[", "{")):
+        return True
+    if "},{" in stripped.replace(" ", "") or '",["' in stripped:
+        return True
+    return stripped.count("\n") >= 2
+
+
+def _parseable_timestamp(value: str) -> bool:
+    """True when ``value`` is a real ISO-8601 calendar date(-time).
+
+    The schema's range regex cannot reject impossible dates like 2026-02-31;
+    parsing can.
+    """
+    from datetime import datetime
+
+    normalized = value[:-1] + "+00:00" if value and value[-1] in "zZ" else value
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return True
+
+
+def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
+    """Scan a data-lane output for shapes the data policy forbids.
+
+    The policy (read-only proposals; aggregates only, no raw rows,
+    PII-scrubbed, real point-in-time timestamps) is enforced at re-entry —
+    the point the engine owns — not just declared in the schema: the WHOLE
+    serialized output is scanned so PII/credential content cannot hide in any
+    field, including outputs validated against a contract persisted before
+    the schema carried the boundary patterns. Matched content is deliberately
+    NOT echoed into the error messages: the violation report flows back to
+    the host and must not re-leak the data.
     """
     try:
         serialized = json.dumps(output, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return ["data evidence output is not JSON-serializable"]
-    return [
+    errors = [
         f"data evidence boundary: {label} content is raw evidence; the "
         "evidence policy requires aggregates only, PII-scrubbed"
         for label, pattern in _data_evidence_boundary_patterns()
         if pattern.search(serialized)
     ]
+    evidence = output.get("evidence")
+    for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        if isinstance(value, str) and _is_row_shaped_value(value):
+            errors.append(
+                f"evidence[{index}].value: row-shaped (list/object/multi-record) "
+                "content is raw evidence, not an aggregate"
+            )
+        observed_at = item.get("observed_at")
+        if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
+            errors.append(
+                f"evidence[{index}].observed_at: not a real ISO-8601 calendar date(-time)"
+            )
+    proposals = output.get("proposed_queries")
+    forbidden = _data_forbidden_operation_pattern()
+    for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        query = item.get("query")
+        if isinstance(query, str) and (match := forbidden.search(query)):
+            # User confirmation gates *execution* of read-only proposals; it
+            # must never make an explicitly mutating operation permissible.
+            errors.append(
+                f"proposed_queries[{index}].query: proposes forbidden operation "
+                f"{match.group(1).lower()!r}; the data lane is read-only"
+            )
+    return errors
 
 
 _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
@@ -2987,7 +3109,7 @@ def register_lateral_persona_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.persona",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a lateral persona-panel fan-out for later result re-entry.
 
     Expected keys are the payload personas (``context.persona``); the persisted
@@ -3018,7 +3140,7 @@ def register_code_investigation_fanout(
     request: Mapping[str, Any],
     correlation_key: str = "code_facts",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a code-investigation fan-out for later result re-entry.
 
     Expected keys default to the request's ``required_result_ids`` (or the
@@ -3048,7 +3170,7 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
@@ -3070,25 +3192,66 @@ def register_question_advisory_fanout(
     forever. Optional lanes that were submitted still aggregate; missing ones
     are reported as ``missing_optional_keys`` on the complete outcome.
     """
-    expected_keys: list[str] = []
-    required_keys: list[str] = []
-    lane_answer_contracts: dict[str, Any] = {}
+    lanes: list[dict[str, Any]] = []
     for payload in payloads:
         payload_dict = payload.to_dict()
         lane_id = _payload_lane_id(payload_dict)
-        if lane_id and lane_id not in expected_keys:
-            expected_keys.append(lane_id)
-            context = payload_dict.get("context")
-            if isinstance(context, Mapping):
-                if bool(context.get("required")):
-                    required_keys.append(lane_id)
-                # Persist the lane's answer contract so re-entry can validate
-                # the submitted output against it BEFORE synthesis — a data
-                # lane result is otherwise arbitrary content flowing toward
-                # user confirmation and persisted interview state.
-                answer_contract = context.get("answer_contract")
-                if isinstance(answer_contract, Mapping):
-                    lane_answer_contracts[lane_id] = dict(answer_contract)
+        if not lane_id:
+            continue
+        context = payload_dict.get("context")
+        lane = dict(context) if isinstance(context, Mapping) else {}
+        lane["lane_id"] = lane_id
+        lanes.append(lane)
+    return register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id=session_id,
+        lanes=lanes,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+    )
+
+
+def register_question_advisory_fanout_from_lanes(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    lanes: list[Mapping[str, Any]],
+    correlation_key: str = "context.lane_id",
+    fanout_id: str | None = None,
+) -> str | None:
+    """Register a question-advisory fan-out directly from lane metadata.
+
+    The plugin (OpenCode passive) transport cannot pre-build per-question
+    lane payloads server-side — the plugin child generates the question — but
+    it must still receive the SAME machine-readable re-entry contract as the
+    host-driven transport: registered lane ids, required/optional gating, and
+    each lane's answer contract for door validation. Lane dicts are the
+    versioned ``question_advisory_fanout`` metadata lanes (or payload
+    contexts, which carry the same fields). Returns ``None`` when nothing was
+    registered or persistence failed — the caller must then skip stamping a
+    fan-out id.
+    """
+    expected_keys: list[str] = []
+    required_keys: list[str] = []
+    lane_answer_contracts: dict[str, Any] = {}
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        if not lane_id or lane_id in expected_keys:
+            continue
+        expected_keys.append(lane_id)
+        if bool(lane.get("required")):
+            required_keys.append(lane_id)
+        # Persist the lane's answer contract so re-entry can validate the
+        # submitted output against it BEFORE synthesis — a data lane result
+        # is otherwise arbitrary content flowing toward user confirmation and
+        # persisted interview state.
+        answer_contract = lane.get("answer_contract")
+        if isinstance(answer_contract, Mapping):
+            lane_answer_contracts[lane_id] = dict(answer_contract)
+    if not expected_keys:
+        return None
     synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
     if lane_answer_contracts:
         synthesizer_input["lane_answer_contracts"] = lane_answer_contracts
@@ -3156,6 +3319,24 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
         }
+    # Correlation is validated BEFORE terminal replay: the stored synthesis is
+    # only handed back across the same session/correlation boundary it was
+    # registered under — a caller outside that boundary gets the same
+    # correlation_mismatch a live submission would.
+    if record.session_id and session_id and record.session_id != session_id:
+        return {
+            "status": "correlation_mismatch",
+            "fanout_id": fanout_id,
+            "error": "session_id does not match the registered fan-out.",
+            "expected_session_id": record.session_id,
+        }
+    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
+        return {
+            "status": "correlation_mismatch",
+            "fanout_id": fanout_id,
+            "error": "correlation_key does not match the registered fan-out.",
+            "expected_correlation_key": record.correlation_key,
+        }
     if record.completed:
         replay: dict[str, Any] = (
             dict(record.terminal_response) if record.terminal_response is not None else {}
@@ -3177,20 +3358,6 @@ def submit_fanout_results(
             }
         )
         return replay
-    if record.session_id and session_id and record.session_id != session_id:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "session_id does not match the registered fan-out.",
-            "expected_session_id": record.session_id,
-        }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "correlation_key does not match the registered fan-out.",
-            "expected_correlation_key": record.correlation_key,
-        }
 
     # Unknown keys are rejected at the door, BEFORE any merge or write: a key
     # the record never registered is arbitrary content with no lane contract,

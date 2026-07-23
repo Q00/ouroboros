@@ -1090,6 +1090,350 @@ def test_data_evidence_pii_shaped_value_is_rejected_at_reentry(tmp_path: Any) ->
     assert "sk-live-123" not in persisted
 
 
+def test_forbidden_operation_proposal_is_rejected_at_reentry(tmp_path: Any) -> None:
+    """User confirmation must not make mutating operations permissible.
+
+    Bot-review round-4 probe (PR #1703): a ``DROP TABLE users`` proposal
+    validated with no boundary violation, and the skill then instructs the
+    host to execute confirmed proposals. The lane's
+    ``forbidden_operation_patterns`` are now consulted at re-entry.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-readonly",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-readonly", payloads=payloads
+    )
+
+    mutating_proposal = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "A cleanup query would clarify the numbers.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "clickhouse_query",
+                "query": "DROP TABLE users",
+                "expected_decision": "Whether stale rows skew the metric.",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-readonly",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": mutating_proposal},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    violations = out["contract_violations"]
+    assert [item["lane_id"] for item in violations] == ["data_context"]
+    joined = " ".join(violations[0]["errors"])
+    assert "read-only" in joined
+    aggregated = [item["lane_id"] for item in out["result"]["aggregated_outputs"]]
+    assert "data_context" not in aggregated
+
+
+def test_row_shaped_evidence_value_is_rejected_at_reentry(tmp_path: Any) -> None:
+    """Aggregate-only means aggregate-shaped, not just email/token-free.
+
+    Bot-review round-4 probe (PR #1703): a JSON-encoded list of customer
+    names and phone numbers passed validation and entered the terminal
+    record. Row-shaped values and phone-shaped digit groups are now raw
+    evidence.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-rows",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-rows", payloads=payloads
+    )
+
+    row_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Customer sample follows.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "sample customers",
+                "value": '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
+                "observed_at": "2026-07-23T09:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time sample."],
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-rows",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": row_output},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "Alice Kim" not in persisted
+    assert "010-1234-5678" not in persisted
+
+
+def test_impossible_calendar_date_is_rejected_at_reentry(tmp_path: Any) -> None:
+    """A range regex cannot see February 31st; parsing can (round-4 warning)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    impossible = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Aggregate finding.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "count users",
+                "value": "78% of MAU are on the free tier",
+                "observed_at": "2026-02-31T10:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    errors = _data_evidence_boundary_violations(impossible)
+    assert any("observed_at" in error for error in errors)
+    valid = {
+        **impossible,
+        "evidence": [{**impossible["evidence"][0], "observed_at": "2026-02-28T10:00:00Z"}],
+    }
+    assert _data_evidence_boundary_violations(valid) == []
+
+
+def test_boundary_scan_allows_hyphenated_vocabulary() -> None:
+    """Ordinary data metrics are not credential leaks (round-4 warning).
+
+    ``token-counts`` / ``secret-santa`` previously matched the credential
+    pattern; a credential suffix must carry digits.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    clean = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Aggregate token-counts by plan; secret-santa participation is up.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "sum token-counts grouped by plan",
+                "value": "premium plans average 12,400 tokens/day",
+                "observed_at": "2026-07-23",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    assert _data_evidence_boundary_violations(clean) == []
+
+
+def test_registration_failure_is_not_advertised(tmp_path: Any) -> None:
+    """A fan-out id that cannot be redeemed must never be stamped.
+
+    Bot-review round-4 probe (PR #1703): with ``save`` failing, registration
+    still returned a public id whose first re-entry was necessarily
+    ``unknown_fanout_id``. Registration now surfaces the failure and the
+    producer skips stamping.
+    """
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    with patch.object(FanoutRegistry, "save", return_value=False):
+        assert (
+            register_question_advisory_fanout(
+                registry,
+                session_id="sess-reg-fail",
+                payloads=_mixed_advisory_payloads(),
+            )
+            is None
+        )
+        meta: dict[str, Any] = {}
+        _attach_question_assist_requests(
+            meta,
+            session_id="sess-reg-fail",
+            question="Which rollout strategy should we pick?",
+            phase="answer",
+            score=None,
+            dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+            runtime_backend="codex",
+            fanout_registry=registry,
+        )
+    assert "question_advisory_fanout_id" not in meta
+
+
+def test_failed_record_update_preserves_prior_state(tmp_path: Any) -> None:
+    """A torn write must not destroy the state needed for recovery.
+
+    Bot-review round-4 probe (PR #1703): a mid-write ``OSError`` left the
+    live record file as ``{``, so the documented resubmission returned
+    ``unknown_fanout_id``. Saves are now atomic (temp file + rename): a
+    failed update preserves the prior replayable record.
+    """
+    import json
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-atomic",
+        payloads=_mixed_advisory_payloads(),
+    )
+    assert fanout_id is not None
+
+    with patch(
+        "ouroboros.mcp.tools.subagent.os.replace",
+        side_effect=OSError("disk full"),
+    ):
+        out = submit_fanout_results(
+            registry,
+            session_id="sess-atomic",
+            correlation_key="context.lane_id",
+            results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+            fanout_id=fanout_id,
+        )
+    assert out["status"] == "partial"
+    assert out["accumulation_persisted"] is False
+    # The prior record is intact JSON and still loadable for the retry.
+    json.loads((tmp_path / f"{fanout_id}.json").read_text())
+    record = registry.load(fanout_id)
+    assert record is not None
+
+    retry = submit_fanout_results(
+        registry,
+        session_id="sess-atomic",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert retry["status"] == "complete"
+
+
+def test_terminal_replay_requires_matching_correlation(tmp_path: Any) -> None:
+    """Completion recovery must not cross the registered boundary.
+
+    Bot-review round-4 probe (PR #1703): a different session and correlation
+    key received ``already_complete`` with the stored synthesis. Correlation
+    is now validated before terminal replay.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-replay-boundary",
+        payloads=_mixed_advisory_payloads(),
+    )
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-replay-boundary",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert first["status"] == "complete"
+
+    cross = submit_fanout_results(
+        registry,
+        session_id="some-other-session",
+        correlation_key="context.persona",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert cross["status"] == "correlation_mismatch"
+    assert "result" not in cross
+
+
+def test_fanout_id_is_confined_to_registry_root(tmp_path: Any) -> None:
+    """A caller-supplied id can never escape the fan-out directory.
+
+    Bot-review round-4 probe (PR #1703): an absolute ``fanout_id`` made
+    ``Path`` joining ignore the registry root, loading (and completing) a
+    shaped record outside it. Ids are opaque basenames, enforced inside the
+    registry independently of outer input validation.
+    """
+    import json
+
+    root = tmp_path / "root"
+    registry = FanoutRegistry(root)
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "fanout_id": "outside",
+                "kind": FANOUT_KIND_QUESTION_ADVISORY,
+                "session_id": "s1",
+                "correlation_key": "context.lane_id",
+                "expected_keys": ["lane"],
+                "synthesizer_input": {"lane_ids": ["lane"]},
+            }
+        )
+    )
+
+    absolute_id = str(tmp_path / "outside")
+    traversal_id = "../outside"
+    assert registry.load(absolute_id) is None
+    assert registry.load(traversal_id) is None
+    for evil_id in (absolute_id, traversal_id):
+        out = submit_fanout_results(
+            registry,
+            session_id="s1",
+            correlation_key="context.lane_id",
+            results=[{"key": "lane", "content": "x"}],
+            fanout_id=evil_id,
+        )
+        assert out["status"] == "unknown_fanout_id"
+    # Registration refuses a non-basename id instead of writing outside root.
+    assert (
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id="s1",
+            correlation_key="context.lane_id",
+            expected_keys=["lane"],
+            synthesizer_input={"lane_ids": ["lane"]},
+            fanout_id=absolute_id,
+        )
+        is None
+    )
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

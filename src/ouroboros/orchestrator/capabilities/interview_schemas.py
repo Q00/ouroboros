@@ -6,15 +6,28 @@ from collections.abc import Mapping
 from typing import Any
 
 # Raw-evidence shapes the data_context evidence policy forbids (aggregates
-# only, PII-scrubbed): an email-shaped substring is PII, and a credential
-# prefix glued to an opaque suffix is a leaked secret, never an aggregate.
-# Written without inline regex flags so the same strings are valid in both
-# Python `re` and the ECMA dialect JSON Schema validators use; the re-entry
-# enforcement point recompiles them case-insensitively.
+# only, PII-scrubbed): an email-shaped substring is PII, a credential prefix
+# glued to an opaque digit-bearing suffix is a leaked secret, and a
+# phone-shaped digit group is PII — never an aggregate. Written without
+# inline regex flags so the same strings are valid in both Python `re` and
+# the ECMA dialect JSON Schema validators use; the re-entry enforcement
+# point recompiles the case-sensitive ones case-insensitively.
 DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+# The digit lookahead keeps ordinary hyphenated vocabulary ("token-counts",
+# "secret-santa") out: a credential suffix carries digits, a compound noun
+# does not.
 DATA_EVIDENCE_SECRET_PATTERN = (
-    r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)[-_=:][A-Za-z0-9_-]{4,}"
+    r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
+    r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
 )
+# Phone shapes: international (+ then 7+ digits) or separator-grouped local
+# numbers. Comma-grouped magnitudes ("1,234,567") and ISO dates/times do not
+# match (comma and colon are not in the separator class, and date groups are
+# 2-digit).
+DATA_EVIDENCE_PHONE_PATTERN = r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b"
+# A value that opens as a JSON list/object is serialized rows, not an
+# aggregate.
+DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"
 
 
 def _builtin_semantics_for(tool_name: str):  # noqa: ANN202
@@ -537,13 +550,17 @@ def _data_context_answer_contract() -> dict[str, Any]:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 400,
-                            # The evidence policy (aggregates only, PII-scrubbed)
-                            # is part of the contract, not just the prompt:
-                            # email-shaped and credential-shaped substrings are
-                            # raw evidence and never validate.
+                            # The evidence policy (aggregates only, no raw
+                            # rows, PII-scrubbed) is part of the contract, not
+                            # just the prompt: email-, credential-, and
+                            # phone-shaped substrings and JSON-encoded
+                            # row/object payloads are raw evidence and never
+                            # validate.
                             "allOf": [
                                 {"not": {"pattern": DATA_EVIDENCE_EMAIL_PATTERN}},
                                 {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_PHONE_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_ROW_SHAPE_PATTERN}},
                             ],
                         },
                         "observed_at": {

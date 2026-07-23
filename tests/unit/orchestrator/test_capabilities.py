@@ -5126,6 +5126,29 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [{**executed["evidence"][0], "value": "alice@example.com token=sk-live-123"}],
     }
     assert list(validator.iter_errors(pii_value))
+    # Aggregate-only means aggregate-shaped (bot-review round-4 probe): a
+    # JSON-encoded row list and phone-shaped digit groups are raw evidence.
+    row_value = {
+        **executed,
+        "evidence": [
+            {
+                **executed["evidence"][0],
+                "value": '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
+            }
+        ],
+    }
+    assert list(validator.iter_errors(row_value))
+    phone_value = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "top customer phone 010-1234-5678"}],
+    }
+    assert list(validator.iter_errors(phone_value))
+    # Hyphenated vocabulary is NOT a credential (round-4 false-positive fix).
+    vocabulary_value = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "aggregate token-counts by plan tier"}],
+    }
+    validator.validate(vocabulary_value)
     # An unexecuted proposal with empty tool/query/decision fields is not a
     # proposal the parent session can run and judge.
     empty_proposal = {

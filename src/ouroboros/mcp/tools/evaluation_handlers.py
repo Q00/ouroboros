@@ -1728,11 +1728,16 @@ class LateralThinkHandler(BridgeAwareMixin):
             if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             if self.fanout_registry is not None:
-                dispatch_record["fanout_id"] = register_lateral_persona_fanout(
+                lateral_fanout_id = register_lateral_persona_fanout(
                     self.fanout_registry,
                     session_id=str(arguments.get("session_id") or ""),
                     payloads=payloads,
                 )
+                # A fan-out id whose record could not be persisted is not
+                # redeemable at re-entry: skip stamping instead of advertising
+                # an id whose first submission is unknown_fanout_id.
+                if lateral_fanout_id is not None:
+                    dispatch_record["fanout_id"] = lateral_fanout_id
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (
