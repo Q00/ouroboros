@@ -17,6 +17,7 @@ from ouroboros.orchestrator.runner import (
     ExecutionCancelledError,
     OrchestratorRunner,
     clear_cancellation,
+    get_cancellation_request,
     get_pending_cancellations,
     is_cancellation_requested,
     request_cancellation,
@@ -478,7 +479,11 @@ class TestCancelExecution:
         """Test cancelling an in-flight execution signals registry."""
         runner._register_session("exec_1", "sess_1")
 
-        result = await runner.cancel_execution("exec_1", reason="Test cancel")
+        result = await runner.cancel_execution(
+            "exec_1",
+            reason="Test cancel",
+            cancelled_by="mcp_tool",
+        )
 
         assert result.is_ok
         assert result.value["status"] == "cancellation_requested"
@@ -487,6 +492,10 @@ class TestCancelExecution:
         assert result.value["session_id"] == "sess_1"
         # Registry should be populated
         assert await is_cancellation_requested("sess_1")
+        request = await get_cancellation_request("sess_1")
+        assert request is not None
+        assert request.reason == "Test cancel"
+        assert request.cancelled_by == "mcp_tool"
 
     @pytest.mark.asyncio
     async def test_cancel_not_in_flight_looks_up_session(

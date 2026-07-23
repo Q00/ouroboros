@@ -4592,7 +4592,11 @@ class OrchestratorRunner:
 
         if session_id is not None:
             # In-flight cancellation: signal via the cancellation registry
-            await request_cancellation(session_id)
+            await request_cancellation(
+                session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
             log.info(
                 "orchestrator.runner.cancellation_requested",
                 execution_id=execution_id,

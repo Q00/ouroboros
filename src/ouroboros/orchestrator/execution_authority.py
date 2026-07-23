@@ -320,6 +320,27 @@ class _ProcessLocalAuthorityRegistry:
             ):
                 lifecycle.state = _ProcessLocalAuthorityLifecycleState.REGISTERED
 
+    def is_terminalizing(
+        self,
+        session_id: str,
+        execution_id: str,
+        value: object,
+    ) -> bool:
+        """Report an exact owner's non-effectful terminalization reservation."""
+        if not valid_process_local_authority_contract(value):
+            return False
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            return (
+                entry is not None
+                and entry.creator_pid == os.getpid()
+                and entry.execution_id == execution_id
+                and self._is_issued_here(entry.generation)
+                and entry.generation.correlation_id == value.get("correlation_id")
+                and lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+            )
+
     def add_terminal_finalizer(
         self,
         session_id: str,
@@ -647,6 +668,19 @@ def _abort_process_local_authority_terminalization(
     )
 
 
+def _process_local_authority_is_terminalizing(
+    session_id: str,
+    execution_id: str,
+    value: object,
+) -> bool:
+    """Report whether a public terminal writer currently owns the lifecycle."""
+    return _PROCESS_LOCAL_AUTHORITY_REGISTRY.is_terminalizing(
+        session_id,
+        execution_id,
+        value,
+    )
+
+
 def _register_process_local_authority_terminal_finalizer(
     session_id: str,
     execution_id: str,
@@ -730,12 +764,79 @@ async def request_process_local_cancellation(
     from ouroboros.orchestrator.heartbeat import is_holder_alive
     from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 
+    async def _reconcile_terminalizing_owner() -> tuple[str | None, bool]:
+        """Reconstruct and retire a terminal winner without restoring effects."""
+        try:
+            reconstructed = await session_repo.reconstruct_session(session_id)
+        except Exception:
+            return None, False
+        if reconstructed.is_err:
+            return None, False
+        reconstructed_status = getattr(
+            reconstructed.value.status,
+            "value",
+            reconstructed.value.status,
+        )
+        if reconstructed_status not in {"completed", "failed", "cancelled"}:
+            return reconstructed_status, False
+        (
+            retired,
+            claim_became_active,
+        ) = await _retire_process_local_authority_after_terminal_persistence(
+            session_id,
+            execution_id,
+            authority,
+        )
+        if claim_became_active:
+            await request_cancellation(
+                session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
+        else:
+            await clear_cancellation(session_id)
+        _LOG.info(
+            "process_local_authority.interrupted_terminal_reconciled",
+            extra={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "durable_status": reconstructed_status,
+                "retired": retired,
+            },
+        )
+        return reconstructed_status, True
+
     terminalization_started, authority_claimed = _begin_process_local_authority_terminalization(
         session_id,
         execution_id,
         authority,
     )
     if authority_claimed:
+        if _process_local_authority_is_terminalizing(
+            session_id,
+            execution_id,
+            authority,
+        ):
+            reconstructed_status, terminal_winner = await _await_process_local_cleanup(
+                _reconcile_terminalizing_owner()
+            )
+            if terminal_winner:
+                return ProcessLocalCancellationOutcome(
+                    (
+                        ProcessLocalCancellationDisposition.CANCELLED
+                        if reconstructed_status == "cancelled"
+                        else ProcessLocalCancellationDisposition.ALREADY_TERMINAL
+                    ),
+                    retired=True,
+                )
+            await request_cancellation(
+                session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
+            return ProcessLocalCancellationOutcome(
+                ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+            )
         # A local claimed runner owns the effect boundary.  It observes this
         # signal and persists cancellation before its own teardown.
         await request_cancellation(
@@ -784,62 +885,38 @@ async def request_process_local_cancellation(
     except BaseException:
         if terminalization_started:
 
-            async def _reconcile_interrupted_terminalization() -> bool:
-                reconstructed = await session_repo.reconstruct_session(session_id)
-                reconstructed_status = (
-                    getattr(reconstructed.value.status, "value", reconstructed.value.status)
-                    if reconstructed.is_ok
-                    else None
-                )
-                terminal_winner = reconstructed_status in {
-                    "completed",
-                    "failed",
-                    "cancelled",
-                }
-                if not terminal_winner:
-                    return False
-                (
-                    retired,
-                    claim_became_active,
-                ) = await _retire_process_local_authority_after_terminal_persistence(
-                    session_id,
-                    execution_id,
-                    authority,
-                )
-                if claim_became_active:
-                    await request_cancellation(
-                        session_id,
-                        reason=reason,
-                        cancelled_by=cancelled_by,
-                    )
-                else:
-                    await clear_cancellation(session_id)
-                _LOG.info(
-                    "process_local_authority.interrupted_terminal_reconciled",
-                    extra={
-                        "session_id": session_id,
-                        "execution_id": execution_id,
-                        "durable_status": reconstructed_status,
-                        "retired": retired,
-                    },
-                )
-                return True
+            async def _retry_interrupted_terminalization() -> tuple[str | None, bool]:
+                reconstructed_status: str | None = None
+                terminal_winner = False
+                for attempt in range(3):
+                    reconstructed_status, terminal_winner = await _reconcile_terminalizing_owner()
+                    if terminal_winner or reconstructed_status is not None:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0.05 * (2**attempt))
+                return reconstructed_status, terminal_winner
 
+            interrupted_status: str | None = None
             terminal_winner = False
             try:
-                terminal_winner = await _await_process_local_cleanup(
-                    _reconcile_interrupted_terminalization()
+                interrupted_status, terminal_winner = await _await_process_local_cleanup(
+                    _retry_interrupted_terminalization()
                 )
             except BaseException:
                 _LOG.warning(
                     "process_local_authority.interrupted_terminal_reconcile_failed",
                     extra={"session_id": session_id, "execution_id": execution_id},
                 )
-            if not terminal_winner:
+            if not terminal_winner and interrupted_status is not None:
                 _abort_process_local_authority_terminalization(
                     session_id,
                     execution_id,
                     authority,
+                )
+            elif not terminal_winner:
+                _LOG.warning(
+                    "process_local_authority.interrupted_terminal_reconcile_pending",
+                    extra={"session_id": session_id, "execution_id": execution_id},
                 )
         elif cancellation_request_published:
             await clear_cancellation(session_id)
