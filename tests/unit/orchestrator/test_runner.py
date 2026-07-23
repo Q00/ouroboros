@@ -4105,6 +4105,66 @@ class TestOrchestratorRunner:
             allowed_tools=[],
         )
 
+    def test_build_dependency_analyzer_drops_runtime_cli_path_for_different_llm_backend(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        mock_adapter.runtime_backend = "codex"
+        mock_adapter.llm_backend = "claude_code"
+        mock_adapter.cli_path = "/tmp/real-codex"
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
+            runner._build_dependency_analyzer()
+
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "claude_code"
+        assert mock_create_llm_adapter.call_args.kwargs["cli_path"] is None
+
+    def test_build_dependency_analyzer_drops_runtime_cli_path_for_runtime_only_backend(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        mock_adapter.runtime_backend = "grok"
+        mock_adapter.llm_backend = "claude_code"
+        mock_adapter.cli_path = "/tmp/real-grok"
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
+            runner._build_dependency_analyzer()
+
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "claude_code"
+        assert mock_create_llm_adapter.call_args.kwargs["cli_path"] is None
+
+    @pytest.mark.parametrize(
+        ("runtime_backend", "llm_backend", "cli_path"),
+        [
+            ("codex_mcp", "codex", "/tmp/real-codex"),
+            ("claude_mcp", "claude_code", "/tmp/real-claude"),
+        ],
+    )
+    def test_build_dependency_analyzer_reuses_cli_path_for_same_cli_worker_transport(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        runtime_backend: str,
+        llm_backend: str,
+        cli_path: str,
+    ) -> None:
+        mock_adapter.runtime_backend = runtime_backend
+        mock_adapter.llm_backend = llm_backend
+        mock_adapter.cli_path = cli_path
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
+            runner._build_dependency_analyzer()
+
+        assert mock_create_llm_adapter.call_args.kwargs["cli_path"] == cli_path
+
     def test_build_dependency_analyzer_uses_public_llm_backend_property(
         self,
         mock_adapter: MagicMock,
@@ -4249,6 +4309,23 @@ class TestOrchestratorRunner:
             side_effect=RuntimeError("CLI not found"),
         ):
             analyzer = runner._build_dependency_analyzer()
+
+        assert isinstance(analyzer, DependencyAnalyzer)
+
+    def test_build_dependency_analyzer_falls_back_for_invalid_llm_backend(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        mock_adapter.runtime_backend = "codex"
+        mock_adapter.llm_backend = "not-a-backend"
+        mock_adapter.cli_path = "/tmp/real-codex"
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        analyzer = runner._build_dependency_analyzer()
 
         assert isinstance(analyzer, DependencyAnalyzer)
 
