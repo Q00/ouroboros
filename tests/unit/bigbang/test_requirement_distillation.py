@@ -8,6 +8,7 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.requirement_distillation import (
     apply_requirement_distillation,
+    build_promoted_reference_seed,
     build_requirement_distillation,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
@@ -307,6 +308,15 @@ async def test_seed_generator_keeps_explicitly_confirmed_reference_ac(tmp_path) 
     assert tuple(str(item) for item in result.value.acceptance_criteria) == (
         "For the Linear-like reference, keyboard-first navigation is required.",
     )
+
+
+def test_reference_seed_preserves_literal_pipe_in_constraint() -> None:
+    state = _reference_state(confirmation="Only --lang ko\\|en is required.")
+    distillation = build_requirement_distillation(state)
+
+    seed = build_promoted_reference_seed(state, distillation, ambiguity_score=0.1)
+
+    assert seed.constraints == ("Only --lang ko|en is required.",)
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,16 @@ _CONSTRAINT_RE = re.compile(
 )
 
 
+def split_escaped_pipe_values(raw_value: object) -> tuple[str, ...]:
+    if isinstance(raw_value, list | tuple):
+        values = (str(item) for item in raw_value)
+    elif isinstance(raw_value, str):
+        values = re.split(r"(?<!\\)\|", raw_value)
+    else:
+        return ()
+    return tuple(value.replace(r"\|", "|").strip() for value in values if value.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class AppliedRequirementDistillation:
     """Requirements after the deterministic reference-aware promotion gate."""
@@ -299,16 +309,8 @@ def build_promoted_reference_seed(
     if applied.promotion.blockers:
         raise ValueError(seed_readiness_details(applied.promotion))
     requirements = applied.requirements
-    constraints = tuple(
-        item.strip()
-        for item in str(requirements.get("constraints") or "").split("|")
-        if item.strip()
-    )
-    criteria = tuple(
-        item.strip()
-        for item in str(requirements.get("acceptance_criteria") or "").split("|")
-        if item.strip()
-    )
+    constraints = split_escaped_pipe_values(requirements.get("constraints"))
+    criteria = split_escaped_pipe_values(requirements.get("acceptance_criteria"))
     context_references = tuple(
         ContextReference(
             path=entry.get("path", ""),

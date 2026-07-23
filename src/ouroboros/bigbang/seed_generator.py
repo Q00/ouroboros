@@ -32,6 +32,7 @@ from ouroboros.bigbang.requirement_distillation import (
     build_requirement_distillation,
     is_reference_aware_distillation,
     seed_readiness_details,
+    split_escaped_pipe_values,
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -804,11 +805,7 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         constraints: tuple[str, ...] = ()
         if "constraints" in requirements and requirements["constraints"]:
             # Keep legacy pipe-delimited extraction while preserving escaped literal pipes.
-            constraints = tuple(
-                c.replace(r"\|", "|").strip()
-                for c in re.split(r"(?<!\\)\|", requirements["constraints"])
-                if c.strip()
-            )
+            constraints = split_escaped_pipe_values(requirements["constraints"])
 
         # Parse acceptance criteria
         acceptance_criteria: tuple[AcceptanceCriterionSpec | str, ...] = ()
