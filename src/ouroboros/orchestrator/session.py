@@ -1346,6 +1346,12 @@ class SessionRepository:
                 for event in events:
                     status_update = self._status_from_event(event.type, event.data)
                     if status_update is not None:
+                        if status in {
+                            SessionStatus.COMPLETED,
+                            SessionStatus.FAILED,
+                            SessionStatus.CANCELLED,
+                        }:
+                            continue
                         status = status_update
 
                 # Only consider active sessions (RUNNING or PAUSED)
@@ -1381,6 +1387,11 @@ class SessionRepository:
                     # Reconstruct full tracker for the orphaned session
                     result = await self.reconstruct_session(session_id)
                     if result.is_ok:
+                        if result.value.status not in (
+                            SessionStatus.RUNNING,
+                            SessionStatus.PAUSED,
+                        ):
+                            continue
                         if self._usage_limit_pause_cleanup_deferred(
                             result.value,
                             now=now,

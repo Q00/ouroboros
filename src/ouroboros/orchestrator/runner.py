@@ -92,6 +92,7 @@ from ouroboros.orchestrator.execution_authority import (
     _claim_process_local_authority_generation,
     _discard_process_local_authority_generation,
     _has_live_process_local_authority_registration,
+    _has_live_process_local_authority_session,
     _live_process_local_authority_generation,
     _mint_process_local_authority_generation,
     _process_local_authority_contract,
@@ -5437,6 +5438,7 @@ class OrchestratorRunner:
         # in a runner-wide mutable slot: concurrent preparations must not share
         # a capability or correlation id.
         authority_generation = self._begin_process_local_authority_generation()
+        workspace_had_existing_owner = bool(self._process_local_authorities)
 
         def abort_process_local_preparation() -> None:
             """Dispose every authority state reachable from an aborted prepare.
@@ -5451,7 +5453,24 @@ class OrchestratorRunner:
                 execution_id=exec_id,
             )
             self._discard_process_local_authority(authority_generation)
-            if self._task_workspace is not None:
+            # The workspace lock is runner-wide, while this authority
+            # generation belongs only to the current preparation. A rejected
+            # second preparation must not release exclusion still owned by an
+            # earlier live session. The dynamic check also covers concurrent
+            # preparations that both began before either registered.
+            workspace_has_other_owner = any(
+                identity != (resolved_session_id, exec_id)
+                for identity in self._process_local_authorities
+            )
+            workspace_has_live_session_owner = _has_live_process_local_authority_session(
+                resolved_session_id
+            )
+            if (
+                self._task_workspace is not None
+                and not workspace_had_existing_owner
+                and not workspace_has_other_owner
+                and not workspace_has_live_session_owner
+            ):
                 release_lock(self._task_workspace.lock_path)
 
         try:

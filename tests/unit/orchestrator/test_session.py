@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.types import Result
 from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
@@ -1204,6 +1205,64 @@ class TestFindOrphanedSessions:
 
         mock_event_store.get_all_sessions.return_value = [start_event]
         mock_event_store.replay.return_value = [start_event, cancelled_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_late_running_progress_cannot_revive_cancelled_orphan(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Replay-only orphan detection keeps terminal lifecycle absorbing."""
+        old_time = datetime.now(UTC) - timedelta(hours=5)
+        start_event = self._make_start_event("sess_1", timestamp=old_time)
+        cancelled_event = self._make_terminal_event(
+            "sess_1",
+            "orchestrator.session.cancelled",
+            timestamp=old_time + timedelta(minutes=5),
+        )
+        late_running = self._make_progress_event(
+            "sess_1",
+            timestamp=old_time + timedelta(minutes=10),
+        )
+        late_running.data = {
+            "runtime_status": "running",
+            "progress": {"runtime_status": "running"},
+        }
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, cancelled_event, late_running]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_reconstructed_terminal_tracker_is_not_appended_as_orphan(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Fallback classification rechecks authoritative reconstructed status."""
+        old_time = datetime.now(UTC) - timedelta(hours=5)
+        start_event = self._make_start_event("sess_1", timestamp=old_time)
+        running_event = self._make_progress_event(
+            "sess_1",
+            timestamp=old_time + timedelta(minutes=10),
+        )
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, running_event]
+        repository.reconstruct_session = AsyncMock(
+            return_value=Result.ok(
+                SessionTracker.create(
+                    "exec_sess_1",
+                    "seed_sess_1",
+                    session_id="sess_1",
+                ).with_status(SessionStatus.CANCELLED)
+            )
+        )
 
         result = await repository.find_orphaned_sessions()
 

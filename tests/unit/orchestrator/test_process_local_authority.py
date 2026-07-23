@@ -22,6 +22,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.mcp.tools.job_handlers import CancelExecutionHandler
@@ -1794,6 +1795,62 @@ async def test_prepare_rejects_reused_terminal_session_id(tmp_path) -> None:
             colliding_runner._process_local_authorities
         )
         assert not heartbeat.is_holder_alive(session_id)
+    finally:
+        original_runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=original_execution_id,
+        )
+        colliding_runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=collision_execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_collision_preserves_existing_owner_workspace_lock(tmp_path) -> None:
+    """A rejected preparation cannot release another live owner's workspace."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'live-owner-collision.db'}")
+    await event_store.initialize()
+    original_runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    colliding_runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    workspace = TaskWorkspace(
+        durable_id="live-owner-collision",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/repo",
+        worktree_path="/tmp/repo",
+        branch="test/live-owner-collision",
+        lock_path="/tmp/live-owner-collision.lock",
+    )
+    original_runner._task_workspace = workspace
+    colliding_runner._task_workspace = workspace
+    session_id = "session-live-owner-collision"
+    original_execution_id = "exec-live-owner-original"
+    collision_execution_id = "exec-live-owner-collision"
+    original = await original_runner.prepare_session(
+        _seed(),
+        execution_id=original_execution_id,
+        session_id=session_id,
+    )
+    assert original.is_ok
+
+    try:
+        with patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock:
+            collision = await colliding_runner.prepare_session(
+                _seed(),
+                execution_id=collision_execution_id,
+                session_id=session_id,
+            )
+
+        assert collision.is_err
+        assert (session_id, original_execution_id) in original_runner._process_local_authorities
+        assert (session_id, collision_execution_id) not in (
+            colliding_runner._process_local_authorities
+        )
+        assert heartbeat.is_holder_alive(session_id)
+        release_lock_mock.assert_not_called()
     finally:
         original_runner._retire_process_local_authority(
             session_id=session_id,

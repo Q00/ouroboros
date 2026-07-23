@@ -526,6 +526,14 @@ The Foundation A implementation must demonstrate all of the following:
     process-local contract before attempting durable reconstruction, so an
     unreadable aggregate cannot leave inaccessible authority beside a closed
     store.
+64. an aborted preparation releases the runner-wide workspace lock only when
+    no earlier or concurrently registered process-local owner still depends on
+    it; a rejected session-ID collision cannot remove another live execution's
+    workspace exclusion.
+65. replay-only orphan detection is terminal-absorbing and rechecks the fully
+    reconstructed tracker before classification; late `RUNNING` progress cannot
+    revive or report a durable `COMPLETED`, `FAILED`, or `CANCELLED` session as
+    orphaned.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
