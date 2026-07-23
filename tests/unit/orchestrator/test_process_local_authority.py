@@ -1515,9 +1515,14 @@ async def test_cancelled_before_first_background_turn_runs_process_local_cleanup
         assert launched.is_ok
         session_id = launched.value.meta["session_id"]
 
-        for _ in range(100):
-            if not handler._background_tasks:
+        for _ in range(5):
+            pending = tuple(handler._background_tasks)
+            if not pending:
                 break
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=2,
+            )
             await asyncio.sleep(0)
 
         terminal = await SessionRepository(event_store).reconstruct_session(session_id)
