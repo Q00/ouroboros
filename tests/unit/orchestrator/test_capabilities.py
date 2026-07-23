@@ -921,7 +921,10 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_start_evolve_step": _BACKGROUND_INTERRUPT,
     "ouroboros_start_execute_seed": _BACKGROUND_INTERRUPT,
     "ouroboros_start_ralph": _BACKGROUND_INTERRUPT,
-    "ouroboros_submit_fanout_results": _READ_ONLY_INTERRUPT,
+    # Re-entry writes session state, so it carries the soft interrupt of the
+    # other state-writing synchronous handlers instead of claiming the
+    # read-only contract (round-8).
+    "ouroboros_submit_fanout_results": {"supported": True, "mode": "soft"},
 }
 
 _UNSUPPORTED_CANCEL = {

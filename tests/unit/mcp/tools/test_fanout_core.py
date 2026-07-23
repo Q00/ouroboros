@@ -1960,6 +1960,118 @@ def test_gc_never_unlinks_a_held_lock(tmp_path: Any) -> None:
     assert not lock_path.exists(), "unheld aged lock is swept"
 
 
+def test_mutating_tool_identifier_in_proposal_is_rejected() -> None:
+    """A confirmed proposal is executable payload: its tool NAME matters.
+
+    Bot-review round-8 probe (PR #1703): ``tool_name="delete_database"``
+    with an innocuous query completed with no violations. Mutating verbs in
+    the tool identifier are now rejected; legitimate read-tool names pass.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(tool_name: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": tool_name,
+                    "query": "customers",
+                    "expected_decision": "n/a",
+                    "source_class": "side_effect_ambiguous",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    for mutating in ("delete_database", "drop-table-tool", "upload.results", "SaveReport"):
+        errors = _data_evidence_boundary_violations(proposal(mutating))
+        assert any("mutating tool" in error for error in errors), mutating
+
+    for read_only in ("clickhouse_query", "metabase_card", "warehouse_reader"):
+        assert _data_evidence_boundary_violations(proposal(read_only)) == [], read_only
+
+
+def test_gc_never_unlinks_a_record_under_active_lock(tmp_path: Any) -> None:
+    """Record deletion honors the same per-fanout lock as submission.
+
+    Bot-review round-8 probe (PR #1703): GC deleted an aged JSON record
+    while its ``exclusive`` section was held, vaporizing the only durable
+    retry state mid-submission.
+    """
+    import fcntl
+    import os as os_module
+    import time
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-gc-lock",
+        payloads=_mixed_advisory_payloads(),
+    )
+    assert fanout_id is not None
+    record_path = tmp_path / f"{fanout_id}.json"
+    ancient = time.time() - FanoutRegistry._RECORD_RETENTION_SECONDS - 3600
+    os_module.utime(record_path, (ancient, ancient))
+
+    lock_path = tmp_path / f".{fanout_id}.lock"
+    lock_path.touch()
+    fd = os_module.open(lock_path, os_module.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        registry._gc_stale_records()
+        assert record_path.exists(), "record under an active lock must survive GC"
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os_module.close(fd)
+
+    registry._gc_stale_records()
+    assert not record_path.exists(), "unlocked aged record is swept"
+
+
+def test_unknown_lane_answer_contract_reaches_the_child_prompt() -> None:
+    """v1 forward compatibility is executable (bot-review round-8).
+
+    An unknown lane carrying an ``answer_contract`` must have that contract
+    rendered into its generic child prompt — re-entry validates against it,
+    so the generic Output shape alone would guarantee contract_violations.
+    """
+    request = {
+        "session_id": "sess-unknown-contract",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": [
+            {
+                "lane_id": "future_lane",
+                "purpose": "A lane added after this engine shipped.",
+                "capability": "future_capability",
+                "required": True,
+                "answer_contract": {
+                    "contract_id": "future_answer.v1",
+                    "response_model_schema": {
+                        "type": "object",
+                        "required": ["lane_id", "verdict"],
+                        "properties": {
+                            "lane_id": {"const": "future_lane"},
+                            "verdict": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        ],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    assert len(payloads) == 1
+    prompt = payloads[0].prompt
+    assert "future_answer.v1" in prompt
+    assert "response_model_schema" in prompt
+    assert "generic Output section below is superseded" in prompt
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

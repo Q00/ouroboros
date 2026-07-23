@@ -305,6 +305,47 @@ class TestInterviewHandlerSubagentDispatch:
         assert '"read_only": true' in prompt
         assert "requires_user_confirmation" in prompt
 
+    async def test_plugin_rendered_recipe_is_redeemable_verbatim(self, tmp_path) -> None:
+        """Following the rendered re-entry recipe EXACTLY must succeed.
+
+        Bot-review round-8 probe (PR #1703): the recipe supplied fanout_id
+        and correlation_key but omitted session_id, and strict correlation
+        then rejected a contract-following child with correlation_mismatch.
+        The prompt now renders all three identity values; submitting with
+        them verbatim completes.
+        """
+        import re as re_module
+
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry, submit_fanout_results
+
+        registry = FanoutRegistry(tmp_path)
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=registry,
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        prompt = result.value.meta["_subagent"]["prompt"]
+
+        fanout_match = re_module.search(r"^fanout_id: (\S+)$", prompt, re_module.MULTILINE)
+        session_match = re_module.search(r"^session_id: (\S+)$", prompt, re_module.MULTILINE)
+        assert fanout_match, "recipe must render the actual fanout_id"
+        assert session_match, "recipe must render the actual session_id"
+
+        out = submit_fanout_results(
+            registry,
+            session_id=session_match.group(1),
+            correlation_key="context.lane_id",
+            results=[
+                {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+                {"key": "answer_simplifier", "content": "simplifier-advice"},
+            ],
+            fanout_id=fanout_match.group(1),
+        )
+        assert out["status"] == "complete"
+
     async def test_plugin_child_prompt_renders_known_data_tools(
         self, tmp_path, monkeypatch
     ) -> None:

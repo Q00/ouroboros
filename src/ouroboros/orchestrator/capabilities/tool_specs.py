@@ -794,7 +794,12 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         companions=("ouroboros_interview", "ouroboros_lateral_think"),
         side_effects=("session_state_write",),
         retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
-        interrupt=_OUROBOROS_READ_ONLY_INTERRUPT_METADATA,
+        # Soft interrupt like the other state-writing synchronous handlers
+        # (interview, lateral_think): re-entry writes session state, so it
+        # must not claim the read-only interrupt contract (PR #1703 round-8);
+        # every write is idempotent and an interrupted submission is safely
+        # resubmitted against the same fanout_id.
+        interrupt=_OUROBOROS_DEFAULT_INTERRUPT_METADATA,
     ),
     "ouroboros_evolve_step": _OuroborosToolCapabilitySpec(
         execution_mode="blocking",

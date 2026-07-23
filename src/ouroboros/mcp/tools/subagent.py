@@ -1157,6 +1157,7 @@ Return ONLY the JSON verdict object. No other text."""
 def _plugin_advisory_contract_section(
     advisory_fanout_id: str | None,
     advisory_fanout_contract: Mapping[str, Any] | None,
+    session_id: str = "",
 ) -> str:
     """Render the ACTUAL advisory re-entry contract into the child prompt.
 
@@ -1196,9 +1197,15 @@ def _plugin_advisory_contract_section(
         if isinstance(known_data_tools, list) and known_data_tools
         else ""
     )
+    # session_id is part of the re-entry identity: the record is registered
+    # with it and correlation is strict, so a recipe omitting it would send
+    # a contract-following child straight into correlation_mismatch
+    # (bot-review round-8 probe).
+    session_line = f"session_id: {session_id}" if session_id else "session_id: (none registered)"
     return f"""
 ### Advisory Re-entry Contract (actual values)
 {fanout_line}
+{session_line}
 result_correlation_key: context.lane_id
 lanes:
 {chr(10).join(lane_lines)}{known_tools_line}
@@ -1211,8 +1218,10 @@ form exactly; it is validated server-side at re-entry):
 {contract_json}
 
 After the advisory lanes run, submit one {{"key": <lane_id>, "content":
-<lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`
-with the fanout_id above and correlation_key `context.lane_id`."""
+<lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`,
+passing ALL THREE identity arguments exactly as above: the fanout_id, the
+session_id, and correlation_key `context.lane_id` (omitting session_id or
+the correlation key is a correlation_mismatch, not a skipped check)."""
 
 
 def build_interview_subagent(
@@ -1256,7 +1265,7 @@ def build_interview_subagent(
 4. Follow each lane's contract below — `data_context` is a read-only
    proposer whose answers always require user confirmation — and submit
    lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
-        advisory_fanout_id, advisory_fanout_contract
+        advisory_fanout_id, advisory_fanout_contract, session_id
     )
 
     transcript_section = ""
@@ -1522,6 +1531,24 @@ def build_interview_question_advisory_subagents(
         else:
             lane_task = "Help the parent session answer this interview question."
             extra = ""
+            # v1 forward compatibility is executable, not just declared
+            # (bot-review round-8): an unknown lane carrying an answer
+            # contract gets that contract rendered — re-entry validates
+            # against it, so a child answering the generic Output shape
+            # would land in contract_violations through no fault of its own.
+            if isinstance(lane_answer_contract, Mapping):
+                unknown_contract_json = _bounded_json(
+                    lane_answer_contract,
+                    _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+                )
+                extra = (
+                    "## Answer Contract\n"
+                    f"```json\n{unknown_contract_json}\n```\n"
+                    "This lane carries an answer contract: the generic Output "
+                    "section below is superseded — return EXACTLY one JSON "
+                    "object matching the contract's response_model_schema; it "
+                    "is validated server-side at re-entry."
+                )
 
         prompt = f"""## Task
 You are an Ouroboros interview advisory subagent.
@@ -2893,12 +2920,56 @@ class FanoutRegistry:
             try:
                 if path.stat().st_mtime >= cutoff:
                     continue
-                if path.name.endswith(".lock"):
-                    self._unlink_lock_if_unheld(path)
-                else:
-                    path.unlink(missing_ok=True)
             except OSError:
                 continue
+            if path.name.endswith(".lock"):
+                self._unlink_lock_if_unheld(path)
+            else:
+                self._unlink_record_if_unlocked(path, cutoff)
+
+    def _unlink_record_if_unlocked(self, path: Path, cutoff: float) -> None:
+        """Delete an aged record only under its per-fanout lock (non-blocking).
+
+        Deleting outside the submission lock can vaporize the only durable
+        retry state while a submission is mid-flight (bot-review round-8
+        probe). A held lock skips this sweep, and age is re-checked under the
+        lock because an in-flight submission may have just refreshed the
+        record.
+        """
+        fanout_id = path.name[: -len(".json")]
+        if not self._valid_id(fanout_id):
+            # Not one of ours (no lock protocol applies): sweep directly.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        try:
+            import fcntl
+        except ImportError:
+            # Cannot honor the lock protocol: leave the record in place.
+            return
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _unlink_lock_if_unheld(path: Path) -> None:
@@ -3186,6 +3257,32 @@ def _data_forbidden_operation_pattern() -> re.Pattern[str]:
     return re.compile("|".join(f"(?:{shape})" for shape in shapes), re.IGNORECASE)
 
 
+@lru_cache(maxsize=1)
+def _mutating_tool_verbs() -> frozenset[str]:
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _data_context_lane_policy,
+    )
+
+    return frozenset(
+        str(word).lower() for word in _data_context_lane_policy()["forbidden_operation_patterns"]
+    )
+
+
+def _mutating_tool_verb(tool_name: str) -> str | None:
+    """Return the mutating verb a tool identifier carries, if any.
+
+    Confirmed proposals are handed to the host for execution, so a proposal
+    whose TOOL NAME is a mutator (``delete_database``) is executable payload
+    regardless of its query text (bot-review round-8 probe). Identifiers are
+    tokenized on non-alphanumerics AND camelCase boundaries because ``\\b``
+    splits neither snake_case nor ``SaveReport``.
+    """
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", tool_name)
+    tokens = re.split(r"[^a-z0-9]+", decamelled.lower())
+    verbs = _mutating_tool_verbs()
+    return next((token for token in tokens if token in verbs), None)
+
+
 def _is_row_shaped_value(value: str) -> bool:
     """True when an evidence value looks like serialized rows, not an aggregate.
 
@@ -3317,6 +3414,12 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"proposed_queries[{index}].query: proposes forbidden operation "
                 f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
+            )
+        tool_name = item.get("tool_name")
+        if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: names a mutating tool "
+                f"({verb!r}); the data lane is read-only"
             )
     return errors
 
@@ -3656,7 +3759,12 @@ def _submit_fanout_results_locked(
         return {
             "status": "unknown_fanout_id",
             "fanout_id": fanout_id,
-            "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
+            "error": (
+                f"No fan-out record exists for fanout_id={fanout_id!r}. "
+                "Records (including completed ones held for replay) are "
+                "retained for 7 days after their last update, so an expired "
+                "id and a never-registered id are indistinguishable here."
+            ),
         }
     # Correlation is validated BEFORE terminal replay, and STRICTLY: when the
     # record was registered with a session/correlation identity, the caller
