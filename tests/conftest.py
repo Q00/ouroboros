@@ -87,6 +87,32 @@ def block_runner_real_llm_adapter(monkeypatch):
         monkeypatch.setattr(runner_mod, "create_llm_adapter", _blocked_create_llm_adapter)
 
 
+@pytest.fixture(autouse=True)
+def block_interview_answer_refiner_cli_spawn(monkeypatch):
+    """Stop the auto interview's answer refiner from spawning real agent CLIs.
+
+    ``build_answer_refiner()`` builds an ``LLMAnswerRefiner`` from the configured
+    interview backend via ``ouroboros.providers.create_llm_adapter``. When a
+    matching CLI (claude, ...) is installed, the safe-default synthesis path then
+    spawns it for a REAL completion per open section — ~4 ``claude`` subprocesses
+    and ~13s in a single otherwise-mocked auto test locally, while CI (no CLI
+    auth) simply degrades the refiner to ``None``.
+
+    Force the refiner OFF by default. Its own documented fallback is
+    deterministic-only answering (``build_answer_refiner`` returns ``None`` when
+    the provider is unavailable), so this preserves behavior and makes local runs
+    match CI. Tests that exercise the refiner inject an ``LLMAnswerRefiner``
+    directly or re-patch after this fixture and win.
+
+    Patched in the consuming modules (where the name is bound at import) and
+    gated on sys.modules so tests that never import them don't pay.
+    """
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_answer_refiner"):
+            monkeypatch.setattr(mod, "build_answer_refiner", lambda: None)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def close_test_owned_stores(monkeypatch):
     """Close stores created during a test to prevent aiosqlite leak warnings."""
