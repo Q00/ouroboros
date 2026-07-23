@@ -255,7 +255,6 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     judged_invalid: set[tuple[str | None, str | None, int]] = set()
     acceptance: dict[tuple[str | None, str | None, int], list[tuple[str, int, bool, str, str]]] = {}
     acceptance_invalid: set[tuple[str | None, str | None, int]] = set()
-    acceptance_sessions: set[str] = set()
 
     def session_anchor(data: Mapping) -> str | None:
         value = data.get("session_id")
@@ -371,8 +370,6 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                     terminal_status.strip(),
                 )
             )
-            if session_id is not None:
-                acceptance_sessions.add(session_id)
         elif etype == EVENT_EFFORT_ROUTED:
             row = slot(data)
             if row is None:
@@ -550,8 +547,25 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         candidates = [
             key for key in acc if key[0] == run_key and key[1] is not None and key[2] == ac_id
         ]
-        if len(candidates) == 1 and len(acceptance_sessions) <= 1:
-            target_key = candidates[0]
+        if len(candidates) != 1:
+            continue
+        target_key = candidates[0]
+        target = acc[target_key]
+        target_root = target.get("root_ac_index")
+        scoped_acceptance_sessions = {
+            key[1]
+            for key in acceptance
+            if key[0] == run_key
+            and (target_root is None or key[2] == target_root)
+            and key[1] is not None
+        }
+        # Legacy axis telemetry may be attached only when the matching run/root
+        # has one unambiguous acceptance session.  Sessions from other runs or
+        # unrelated roots must not poison this row, while two sessions sharing
+        # the same run/root remain fail-closed.
+        if len(scoped_acceptance_sessions) <= 1 and (
+            not scoped_acceptance_sessions or target_key[1] in scoped_acceptance_sessions
+        ):
             merge_legacy_row(acc[target_key], acc[legacy_key])
             del acc[legacy_key]
 

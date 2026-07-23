@@ -304,6 +304,45 @@ class TestAssembleTriads:
         assert v.status is ProofStatus.PASS
         assert v.runs == 3 and v.counted_rows == 6
 
+    def test_legacy_axis_merge_is_scoped_to_run_and_root(self) -> None:
+        """Independent runs must not poison each other's legacy compatibility."""
+        events: list[dict] = []
+        for run in ("r1", "r2"):
+            mixed = _triad_events(f"ac-{run}", run)
+            # One explicit current-format axis makes the remaining legacy axes
+            # eligible for attachment to this run/session row.
+            next(event for event in mixed if event["type"] == EVENT_MODEL_ROUTED)["data"][
+                "session_id"
+            ] = f"session-{run}"
+            events.extend(mixed)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 2
+        assert {row.session_id for row in rows} == {"session-r1", "session-r2"}
+        assert all(row.counts_in_proof for row in rows)
+
+    def test_legacy_axis_merge_stays_fail_closed_for_two_sessions_same_root(self) -> None:
+        """Two sessions for one run/root keep unscoped axes ambiguous."""
+        events: list[dict] = []
+        for session_id in ("session-a", "session-b"):
+            mixed = _triad_events("ac-shared", "run-shared")
+            next(event for event in mixed if event["type"] == EVENT_MODEL_ROUTED)["data"][
+                "session_id"
+            ] = session_id
+            for event in mixed:
+                if event["type"] == EVENT_AC_ACCEPTANCE_FINALIZED:
+                    event["data"]["session_id"] = session_id
+                    event["data"]["acceptance_generation_id"] = (
+                        acceptance_generation_id_for_session(session_id, "run-shared")
+                    )
+            events.extend(mixed)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 3
+        assert not any(row.counts_in_proof for row in rows)
+
     def test_execution_id_used_as_run_anchor_when_no_seed_run_id(self) -> None:
         # The effort event carries execution_id even before seed_run_id is wired;
         # it serves as the run anchor so two executions of the same AC stay distinct.
