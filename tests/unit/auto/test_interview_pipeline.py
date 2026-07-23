@@ -1374,14 +1374,30 @@ async def test_pipeline_preserves_structured_contract_through_normalization(tmp_
     assert result.status == "complete", result.blocker
     assert len(executed) == 1
     normalized_criteria = executed[0].acceptance_criteria
-    assert len(normalized_criteria) == len(criteria)
-    for normalized, original in zip(normalized_criteria, criteria, strict=True):
-        assert isinstance(normalized, AcceptanceCriterionSpec)
-        assert normalized.semantic_ac_key == original.semantic_ac_key
-        assert normalized.verify_command == original.verify_command
-        assert normalized.expected_artifacts == original.expected_artifacts
-        assert normalized.output_assertion == original.output_assertion
-        assert normalized.investment == original.investment
+    # The three criteria are known-equivalent hello_auto observation lines, so
+    # normalization canonicalizes them into ONE contract.  Emitting one AC per
+    # source would either duplicate execution work or emit several ACs sharing
+    # a canonical description, which the evaluation map (keyed by description)
+    # dedupes so only the first verification contract stays reachable.
+    assert len(normalized_criteria) == 1
+    merged = normalized_criteria[0]
+    assert isinstance(merged, AcceptanceCriterionSpec)
+    # First non-empty scalar wins in source order; artifacts are a union.
+    assert merged.semantic_ac_key == criteria[0].semantic_ac_key
+    assert merged.verify_command == criteria[0].verify_command
+    assert merged.output_assertion == criteria[0].output_assertion
+    assert merged.investment == criteria[0].investment
+    assert merged.expected_artifacts == (
+        "hello_auto.py",
+        "tests/test_hello_auto.py",
+        ".pytest_cache",
+    )
+    # The merged contract stays reachable through the MCP evaluation boundary.
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    spec_map = _seed_ac_spec_map(executed[0])
+    assert list(spec_map) == [merged.description]
+    assert spec_map[merged.description].verify_command == criteria[0].verify_command
 
 
 def test_seed_repairer_rewrites_each_acceptance_criterion_once() -> None:

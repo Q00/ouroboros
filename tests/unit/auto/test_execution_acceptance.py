@@ -325,6 +325,80 @@ def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() 
     assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
 
 
+def test_normalize_execution_acceptance_collapses_legacy_equivalents_without_duplication() -> None:
+    """Legacy-collapse regression: equivalent strings canonicalize to one AC.
+
+    ``Seed`` materializes every legacy string as an ``AcceptanceCriterionSpec``.
+    Treating each as an independent structured source duplicated the canonical
+    AC and re-ran equivalent execution work; the collapse must yield exactly one
+    criterion carrying no phantom success contract.
+    """
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+    only = normalized.acceptance_criteria[0]
+    assert isinstance(only, AcceptanceCriterionSpec)
+    assert not only.has_success_contract
+
+
+def test_normalize_execution_acceptance_merges_multi_source_contract_reachably() -> None:
+    """Multi-source regression: collapsed structured contracts stay reachable.
+
+    Distinct structured criteria that canonicalize into one AC must merge into a
+    single contract with a unique description.  The MCP evaluation map keys
+    contracts by description via ``setdefault``; before the merge the several
+    same-description ACs made every contract but the first unreachable.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            verify_command="uv run pytest tests/test_hello_auto.py",
+            expected_artifacts=("hello_auto.py",),
+        ),
+        AcceptanceCriterionSpec(
+            description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+            expected_artifacts=("tests/test_hello_auto.py",),
+            output_assertion="1 passed",
+        ),
+        AcceptanceCriterionSpec(
+            description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        ),
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+    merged = normalized.acceptance_criteria[0]
+    assert isinstance(merged, AcceptanceCriterionSpec)
+    # First non-empty scalar wins; artifacts are an order-preserving union.
+    assert merged.verify_command == "uv run pytest tests/test_hello_auto.py"
+    assert merged.output_assertion == "1 passed"
+    assert merged.expected_artifacts == ("hello_auto.py", "tests/test_hello_auto.py")
+
+    spec_map = _seed_ac_spec_map(normalized)
+    assert list(spec_map) == [_SINGLE_HELLO_AUTO_OBSERVATION_AC]
+    contract = spec_map[_SINGLE_HELLO_AUTO_OBSERVATION_AC]
+    assert contract.verify_command == "uv run pytest tests/test_hello_auto.py"
+    assert contract.output_assertion == "1 passed"
+    assert contract.expected_artifacts == ("hello_auto.py", "tests/test_hello_auto.py")
+
+
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
     seed = _seed("Final report includes auto session id and seed id.")
 

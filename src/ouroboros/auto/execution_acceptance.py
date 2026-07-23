@@ -234,15 +234,21 @@ def _restore_surviving_acceptance_specs(
             and _structured_criterion_normalizes_to(original_text, text)
         ]
         if canonical_sources:
-            # A canonical hello_auto AC can represent several source criteria.
-            # Keep one structured entry per source, in source order: the model
-            # has scalar evidence fields, so collapsing them would necessarily
-            # discard contracts or invent an unsafe merge policy.
+            # A canonical AC can represent several known-equivalent source
+            # criteria.  Collapse them into ONE contract instead of one entry
+            # per source: keeping duplicates either re-runs equivalent execution
+            # work (legacy strings that ``Seed`` materializes as bare specs) or
+            # emits several ACs that share this canonical description, which the
+            # downstream evaluation map dedupes by description and silently drops
+            # all but the first verification contract.  Merging preserves every
+            # source's evidence under a single stable, unique identity.
             for index, _criterion in reversed(canonical_sources):
                 remaining.pop(index)
-            restored.extend(
-                criterion.model_copy(update={"description": text})
-                for _index, criterion in canonical_sources
+            restored.append(
+                _merge_canonical_acceptance_specs(
+                    [criterion for _index, criterion in canonical_sources],
+                    description=text,
+                )
             )
             continue
 
@@ -261,6 +267,53 @@ def _restore_surviving_acceptance_specs(
 
         restored.append(text)
     return tuple(restored)
+
+
+def _merge_canonical_acceptance_specs(
+    specs: list[AcceptanceCriterionSpec],
+    *,
+    description: str,
+) -> AcceptanceCriterionInput:
+    """Collapse known-equivalent structured criteria into one canonical contract.
+
+    The normalizer canonicalizes equivalent criteria into a single AC, so their
+    structured evidence must survive that collapse as exactly one contract:
+    persistence and MCP evaluation key contracts by description, so several ACs
+    sharing this canonical description would make every contract but the first
+    unreachable.  Merge deterministically in source order — the first non-empty
+    scalar wins and ``expected_artifacts`` are an order-preserving union — under
+    the first source's semantic identity so the canonical criterion keeps a
+    stable, unique key.  A collapse of bare legacy strings carries no contract,
+    so it degrades to a plain string and stays byte-for-byte legacy-compatible.
+    """
+    first = specs[0]
+    if len(specs) == 1:
+        merged = first.model_copy(update={"description": description})
+    else:
+
+        def _first_present(values: tuple[object | None, ...]) -> object | None:
+            return next((value for value in values if value is not None), None)
+
+        artifacts: list[str] = []
+        for spec in specs:
+            for artifact in spec.expected_artifacts:
+                if artifact not in artifacts:
+                    artifacts.append(artifact)
+        merged = first.model_copy(
+            update={
+                "description": description,
+                "verify_command": _first_present(tuple(spec.verify_command for spec in specs)),
+                "output_assertion": _first_present(tuple(spec.output_assertion for spec in specs)),
+                "expected_artifacts": tuple(artifacts),
+                "investment": _first_present(tuple(spec.investment for spec in specs)),
+                "semantic_ac_key": _first_present(tuple(spec.semantic_ac_key for spec in specs)),
+            }
+        )
+    # A bare legacy criterion carries only an auto-derived key; keep it a plain
+    # string so downstream persistence stays identical to the legacy contract.
+    if not merged.has_success_contract and merged.investment is None:
+        return merged.description
+    return merged
 
 
 def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:
