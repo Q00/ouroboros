@@ -280,7 +280,8 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         default_factory=tuple,
         description=(
             "Exact file or directory paths relative to the run workspace; "
-            "each path is resolved literally and must exist"
+            "each path is resolved literally and must exist; prefix top-level "
+            "paths containing spaces with ./"
         ),
     )
     output_assertion: str | None = Field(

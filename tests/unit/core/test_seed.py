@@ -417,6 +417,7 @@ class TestSeed:
         assert "Exact file or directory paths" in field.description
         assert "relative to the run workspace" in field.description
         assert "resolved literally" in field.description
+        assert "prefix top-level paths containing spaces with ./" in field.description
 
     def test_expected_artifact_path_grammar(self) -> None:
         for artifact in (

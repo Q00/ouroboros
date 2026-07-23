@@ -95,19 +95,26 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
     if not description:
         return None
     fields: dict[str, object] = {"description": description}
+    seen_fields: set[str] = set()
     for index, match in enumerate(matches):
         normalized_key = match.group(1).lower()
+        if normalized_key in seen_fields:
+            raise ValueError(f"Duplicate {normalized_key} field in acceptance criterion")
+        seen_fields.add(normalized_key)
         value_start = match.end()
         value_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         normalized_value = body[value_start:value_end].strip()
+        if normalized_key == "artifacts" and not normalized_value:
+            raise ValueError("Empty artifacts field; use artifacts: NONE")
         if not normalized_value or normalized_value.upper() == "NONE":
             continue
         if normalized_key == "verify":
             fields["verify_command"] = normalized_value
         elif normalized_key == "artifacts":
-            fields["expected_artifacts"] = tuple(
-                item.strip() for item in normalized_value.split(",") if item.strip()
-            )
+            artifact_entries = normalized_value.split(",")
+            if any(not item.strip() for item in artifact_entries):
+                raise ValueError("Malformed artifacts field contains an empty path")
+            fields["expected_artifacts"] = tuple(item.strip() for item in artifact_entries)
         elif normalized_key == "expect":
             fields["output_assertion"] = normalized_value
     return AcceptanceCriterionSpec.model_validate(fields)
