@@ -238,9 +238,15 @@ class TestPrdMetaFileLocation:
     alongside interview state files (AC 6)."""
 
     def test_default_data_dir_is_ouroboros_data(self) -> None:
-        """_DATA_DIR points to ~/.ouroboros/data/."""
-        expected = Path.home() / ".ouroboros" / "data"
-        assert expected == _DATA_DIR
+        """_DATA_DIR points to ~/.ouroboros/data/.
+
+        ``_DATA_DIR`` is a module-level constant captured at import time, so this
+        asserts the structural invariant (``.../.ouroboros/data``) rather than
+        comparing against the live ``Path.home()`` — the two diverge whenever a
+        test isolates the home directory.
+        """
+        assert _DATA_DIR.name == "data"
+        assert _DATA_DIR.parent.name == ".ouroboros"
 
     def test_meta_path_uses_session_id_in_filename(self) -> None:
         """_meta_path produces pm_meta_{session_id}.json naming."""

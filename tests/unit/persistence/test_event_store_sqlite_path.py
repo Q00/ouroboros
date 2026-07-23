@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from ouroboros.config.models import get_config_dir
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -12,11 +11,12 @@ class TestSqlitePath:
         store = EventStore("sqlite+aiosqlite:////tmp/custom/ouroboros.db")
         assert store.sqlite_path() == "/tmp/custom/ouroboros.db"
 
-    def test_default_store_points_at_home_db(self) -> None:
-        # No URL → the home-directory default; the path must be recoverable so the
-        # daemon resolves to the same file the writer uses.
+    def test_default_store_points_at_config_dir_db(self) -> None:
+        # No URL → the Ouroboros state-dir default (honours $OUROBOROS_HOME); the
+        # path must be recoverable so the daemon resolves to the same file the
+        # writer uses.
         store = EventStore()
-        expected = str(Path.home() / ".ouroboros" / "ouroboros.db")
+        expected = str(get_config_dir() / "ouroboros.db")
         assert store.sqlite_path() == expected
 
     def test_memory_backend_has_no_file(self) -> None:

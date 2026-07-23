@@ -2,6 +2,7 @@
 
 import inspect
 import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -20,6 +21,37 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 # effects, non-deterministic URL in responses). Force it OFF by default; tests that
 # exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
 os.environ["OUROBOROS_DASHBOARD"] = "0"
+
+
+@pytest.fixture(autouse=True)
+def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
+    """Point every test at a pristine, isolated home so no test reads or writes
+    the developer's real ``~/.ouroboros``.
+
+    Runtime-backend resolution and the default ``EventStore`` DB path resolve
+    through ``get_config_dir()`` → ``Path.home()``. Without isolation tests
+    silently inherit the developer's machine state, with two concrete failure
+    modes:
+
+    * Runtime-inference tests read the real ``config.yaml`` ``runtime_profile``
+      (e.g. ``interview: codex``) and fail locally with ``codex != opencode``
+      while passing on CI's empty home — the classic "passes on CI, fails on my
+      machine" split.
+    * A no-arg ``EventStore()`` writes into the single shared real
+      ``~/.ouroboros/ouroboros.db``; under ``pytest -n`` that is cross-worker
+      state and lock contention (and it silently bloats the real DB).
+
+    We patch ``Path.home`` rather than ``$HOME``/``$OUROBOROS_HOME`` on purpose:
+
+    * ``$HOME`` drives external tools (e.g. ``uv build``'s cache); leaving it
+      untouched keeps those hermetic against the real environment.
+    * Patching ``Path.home`` composes with the ~dozens of tests that already do
+      ``patch("pathlib.Path.home", return_value=tmp_path)`` in their body — that
+      in-body patch is applied after this fixture and wins, so their explicit
+      isolation still routes ``get_config_dir()`` where they expect.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
 
 
 @pytest.fixture(autouse=True)

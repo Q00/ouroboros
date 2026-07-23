@@ -21,6 +21,7 @@ Classes:
     OuroborosConfig: Top-level configuration combining all sections
 """
 
+import os
 from pathlib import Path
 import re
 from typing import Any, Literal
@@ -801,7 +802,13 @@ def get_default_credentials() -> CredentialsConfig:
 def get_config_dir() -> Path:
     """Get the Ouroboros configuration directory path.
 
+    Honours the ``OUROBOROS_HOME`` environment variable so the entire Ouroboros
+    state root can be relocated (tests isolate it per-run; power users can point
+    it at an alternate location). When unset, defaults to ``~/.ouroboros/``.
+
     Returns:
-        Path to ~/.ouroboros/
+        Path to ``<OUROBOROS_HOME or ~>/.ouroboros/``
     """
-    return Path.home() / ".ouroboros"
+    override = os.environ.get("OUROBOROS_HOME", "").strip()
+    base = Path(override).expanduser() if override else Path.home()
+    return base / ".ouroboros"
