@@ -569,13 +569,16 @@ def test_normalize_execution_acceptance_never_deletes_same_description_contracts
 
     normalized = normalize_execution_acceptance(seed)
 
-    # Both distinct contracts survive — cardinality and commands preserved.
-    surviving = [
-        c for c in normalized.acceptance_criteria if isinstance(c, AcceptanceCriterionSpec)
-    ]
+    # Exactly the two source contracts survive — no deletion, and no phantom
+    # contractless duplicate manufactured for the repeated description.
+    surviving = list(normalized.acceptance_criteria)
+    assert len(surviving) == 2
+    assert all(isinstance(c, AcceptanceCriterionSpec) for c in surviving)
     commands = {c.verify_command for c in surviving}
-    assert "python -m pytest tests/test_first.py" in commands
-    assert "python -m pytest tests/test_second.py" in commands
+    assert commands == {
+        "python -m pytest tests/test_first.py",
+        "python -m pytest tests/test_second.py",
+    }
 
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:

@@ -283,8 +283,10 @@ def _restore_surviving_acceptance_specs(
       position and re-sorted, so a refused collapse or an autoresearch
       replacement can never move a contract ahead of or behind its siblings
       (sequential execution reads tuple order as stage order).
-    - **Unique reachability** — no two emitted criteria share a description, so
-      the description-keyed persistence/evaluation map reaches every contract.
+    - **Loss-free** — a caller-authored criterion is never deleted to satisfy a
+      downstream constraint. Two criteria that arrive sharing a description keep
+      both contracts; a canonical text seen twice never manufactures a phantom
+      contractless duplicate.
     """
     remaining_indices = list(range(len(original)))
 
@@ -296,6 +298,12 @@ def _restore_surviving_acceptance_specs(
     # Normalizer-injected texts (no source, e.g. autoresearch canonical ACs)
     # anchor to their filtered position so they keep the normalizer's order.
     emissions: list[tuple[float, AcceptanceCriterionInput]] = []
+    emitted_source_texts: set[str] = set()
+
+    def _emit(anchor: float, item: AcceptanceCriterionInput) -> None:
+        emissions.append((anchor, item))
+        emitted_source_texts.add(ac_text(item).strip())
+
     for filtered_pos, text in enumerate(filtered):
         canonical_indices = [
             index
@@ -322,18 +330,16 @@ def _restore_surviving_acceptance_specs(
                 # sibling here silently deletes a caller-authorized requirement.
                 for index in list(canonical_indices):
                     criterion, _text = _pop(index)
-                    emissions.append((float(index), criterion))
+                    _emit(float(index), criterion)
                 continue
             anchor = float(min(canonical_indices))
             specs = [_pop(index)[0] for index in canonical_indices]
-            emissions.append(
-                (
-                    anchor,
-                    _collapse_canonical_acceptance_specs(
-                        specs,  # type: ignore[arg-type]
-                        description=text,
-                    ),
-                )
+            _emit(
+                anchor,
+                _collapse_canonical_acceptance_specs(
+                    specs,  # type: ignore[arg-type]
+                    description=text,
+                ),
             )
             continue
 
@@ -343,13 +349,17 @@ def _restore_surviving_acceptance_specs(
         )
         if exact_index is not None:
             criterion, _text = _pop(exact_index)
-            emissions.append((float(exact_index), criterion))
+            _emit(float(exact_index), criterion)
             continue
 
-        # Normalizer-injected text with no originating source.  Anchor between
-        # integer source positions using the filtered offset so injected ACs
-        # keep their relative normalizer order without displacing sources.
-        emissions.append((filtered_pos - 0.5, text))
+        # A filtered text with no remaining source.  Either the normalizer
+        # injected it (e.g. an autoresearch canonical AC) or it repeats a text an
+        # earlier iteration already consumed and emitted.  Emit it only when it
+        # is genuinely new — repeating an already-emitted description here would
+        # manufacture a phantom contractless duplicate for the same requirement.
+        if text.strip() in emitted_source_texts:
+            continue
+        _emit(filtered_pos - 0.5, text)
 
     # Never let a canonicalization path drop an explicit contract/identity: any
     # source a normalizer replaced or dropped (e.g. the autoresearch rewrite the
