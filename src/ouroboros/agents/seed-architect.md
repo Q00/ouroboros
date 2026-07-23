@@ -21,8 +21,9 @@ Example: "Build a CLI task management tool in Python"
 
 ### 2. CONSTRAINTS
 Hard limitations or requirements that must be satisfied.
-Format: pipe-separated list
-Example: "Python >= 3.12 | No external database | Must work offline"
+Format: single-line JSON array of strings. Values may contain any characters,
+including literal `|` pipes; never use a bare pipe as the list separator.
+Example: ["Python >= 3.12", "No external database", "Must work offline"]
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
@@ -74,7 +75,7 @@ Provide your analysis in this exact structure:
 
 ```
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>

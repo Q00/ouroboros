@@ -12,6 +12,7 @@ The SeedGenerator:
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -55,6 +56,32 @@ EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
+
+
+def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
+    """Parse constraints from a JSON array, a sequence, or a legacy pipe list.
+
+    The extraction format requests a single-line JSON array so literal pipe
+    characters inside one constraint survive as data (#1696). Legacy
+    pipe-delimited responses keep the historical split, including
+    bracket-prefixed prose such as ``[P0] Must work offline`` that merely
+    starts with ``[`` without being valid JSON.
+    """
+    if isinstance(raw_value, list | tuple):
+        return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        return ()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list):
+            return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
+    return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
 def _parse_acceptance_criteria_contracts(
@@ -574,8 +601,10 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
+CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -673,8 +702,10 @@ ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one indepe
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
+CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
+
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -800,12 +831,8 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         Returns:
             Constructed Seed instance.
         """
-        # Parse constraints
-        constraints: tuple[str, ...] = ()
-        if "constraints" in requirements and requirements["constraints"]:
-            constraints = tuple(
-                c.strip() for c in requirements["constraints"].split("|") if c.strip()
-            )
+        # Parse constraints (JSON array preferred; legacy pipe list supported)
+        constraints = _parse_constraint_values(requirements.get("constraints"))
 
         # Parse acceptance criteria
         acceptance_criteria: tuple[AcceptanceCriterionSpec | str, ...] = ()

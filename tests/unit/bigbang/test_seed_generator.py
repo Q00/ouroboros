@@ -477,6 +477,59 @@ class TestSeedGeneratorExtraction:
             assert "No external database" in result.value.constraints
 
     @pytest.mark.asyncio
+    async def test_generate_preserves_literal_pipe_in_json_array_constraints(self) -> None:
+        """JSON-array CONSTRAINTS keep literal pipes inside one constraint (#1696)."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            constraints='["--lang ko|en", "keep exact flag"]'
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == ("--lang ko|en", "keep exact flag")
+
+    @pytest.mark.asyncio
+    async def test_generate_keeps_legacy_bracket_prefixed_constraints(self) -> None:
+        """Legacy bracket-prefixed prose is not mistaken for JSON and still splits."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            constraints="[P0] Must work offline | [P1] Fast startup"
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == (
+                "[P0] Must work offline",
+                "[P1] Fast startup",
+            )
+
+    @pytest.mark.asyncio
     async def test_generate_extracts_acceptance_criteria(self) -> None:
         """SeedGenerator extracts acceptance_criteria as tuple."""
         mock_adapter = AsyncMock()

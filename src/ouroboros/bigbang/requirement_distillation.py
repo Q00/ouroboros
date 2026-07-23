@@ -266,8 +266,8 @@ def apply_requirement_distillation(
     ]
     filtered = {
         "goal": promoted_goals[0] if promoted_goals else "Confirmed interview requirements",
-        "constraints": " | ".join(dict.fromkeys(promoted_constraints)),
-        "acceptance_criteria": " | ".join(promoted_criteria),
+        "constraints": tuple(dict.fromkeys(promoted_constraints)),
+        "acceptance_criteria": tuple(promoted_criteria),
         "ontology_name": "ConfirmedRequirementContract",
         "ontology_description": "Only user-authorized interview requirements.",
         "ontology_fields": "",
@@ -288,6 +288,21 @@ def apply_requirement_distillation(
     )
 
 
+def _normalized_requirement_values(raw_value: object) -> tuple[str, ...]:
+    """Normalize promoted requirement values without splitting literal pipes.
+
+    Promoted candidates carry verbatim user statements, so a delimiter-based
+    round trip would corrupt values that legitimately contain ``|`` (#1696).
+    A plain string therefore stays one value instead of being pipe-split.
+    """
+    if isinstance(raw_value, str):
+        value = raw_value.strip()
+        return (value,) if value else ()
+    if isinstance(raw_value, list | tuple):
+        return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
+    return ()
+
+
 def build_promoted_reference_seed(
     state: InterviewState,
     distillation: RequirementDistillation,
@@ -299,16 +314,8 @@ def build_promoted_reference_seed(
     if applied.promotion.blockers:
         raise ValueError(seed_readiness_details(applied.promotion))
     requirements = applied.requirements
-    constraints = tuple(
-        item.strip()
-        for item in str(requirements.get("constraints") or "").split("|")
-        if item.strip()
-    )
-    criteria = tuple(
-        item.strip()
-        for item in str(requirements.get("acceptance_criteria") or "").split("|")
-        if item.strip()
-    )
+    constraints = _normalized_requirement_values(requirements.get("constraints"))
+    criteria = _normalized_requirement_values(requirements.get("acceptance_criteria"))
     context_references = tuple(
         ContextReference(
             path=entry.get("path", ""),

@@ -8,6 +8,7 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.requirement_distillation import (
     apply_requirement_distillation,
+    build_promoted_reference_seed,
     build_requirement_distillation,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
@@ -139,7 +140,7 @@ def test_reference_contrast_does_not_promote_inferred_acceptance_criteria() -> N
     applied = apply_requirement_distillation(_requirements(), distillation)
 
     assert applied.promotion.is_ready_for_seed
-    assert applied.requirements["acceptance_criteria"] == ""
+    assert applied.requirements["acceptance_criteria"] == ()
 
 
 def test_unresolved_reference_blocks_seed_generation() -> None:
@@ -180,7 +181,7 @@ def test_explicit_reference_confirmation_promotes_exact_user_statement() -> None
 
     assert applied.promotion.is_ready_for_seed
     assert applied.requirements["acceptance_criteria"] == (
-        "For the Linear-like reference, keyboard-first navigation is required."
+        "For the Linear-like reference, keyboard-first navigation is required.",
     )
     promoted = [
         candidate
@@ -206,7 +207,7 @@ def test_non_english_confirmation_after_reference_contrast_is_preserved(
     applied = apply_requirement_distillation(_requirements(), distillation)
 
     assert applied.promotion.is_ready_for_seed
-    assert applied.requirements["acceptance_criteria"] == confirmation
+    assert applied.requirements["acceptance_criteria"] == (confirmation,)
     promoted = [
         candidate
         for candidate in applied.promotion.promoted
@@ -224,7 +225,7 @@ def test_ordinary_follow_up_after_reference_contrast_is_not_promoted() -> None:
     applied = apply_requirement_distillation(_requirements(), distillation)
 
     assert applied.promotion.is_ready_for_seed
-    assert applied.requirements["acceptance_criteria"] == ""
+    assert applied.requirements["acceptance_criteria"] == ()
     assert all(
         candidate.candidate_id != "round-3:requirement" for candidate in distillation.candidates
     )
@@ -250,6 +251,30 @@ def test_non_reference_interview_preserves_legacy_extraction() -> None:
     )
 
     assert applied.requirements == requirements
+
+
+def test_promoted_reference_seed_preserves_literal_pipe_in_constraint() -> None:
+    state = _reference_state(
+        confirmation="The CLI must accept only --lang ko|en as the language flag."
+    )
+    distillation = build_requirement_distillation(state)
+
+    seed = build_promoted_reference_seed(state, distillation, ambiguity_score=0.1)
+
+    assert seed.constraints == ("The CLI must accept only --lang ko|en as the language flag.",)
+
+
+def test_promoted_reference_seed_preserves_literal_pipe_in_acceptance_criterion() -> None:
+    state = _reference_state(
+        confirmation="The confirmed requirement is that output must show ko|en verbatim."
+    )
+    distillation = build_requirement_distillation(state)
+
+    seed = build_promoted_reference_seed(state, distillation, ambiguity_score=0.1)
+
+    assert tuple(str(item) for item in seed.acceptance_criteria) == (
+        "The confirmed requirement is that output must show ko|en verbatim.",
+    )
 
 
 def test_reference_cue_merge_changes_fingerprint_and_revision() -> None:
