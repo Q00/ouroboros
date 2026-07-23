@@ -37,6 +37,7 @@ from ouroboros.orchestrator.execution_authority import (
     collect_cancellation_acceptance_plan,
     request_process_local_cancellation,
 )
+from ouroboros.orchestrator.session import ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY
 
 app = typer.Typer(
     name="cancel",
@@ -184,13 +185,9 @@ async def _cancel_session(
         return None
 
     # Historical sessions have no live Foundation A capability to coordinate.
-    raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+    raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
     expected_root_indices = (
-        range(raw_total_acs)
-        if isinstance(raw_total_acs, int)
-        and not isinstance(raw_total_acs, bool)
-        and raw_total_acs >= 0
-        else None
+        tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
     )
     try:
         acceptance_finalizations = await collect_cancellation_acceptance_plan(
@@ -323,13 +320,9 @@ async def _cancel_all_running(
             continue
 
         # Historical sessions have no live Foundation A capability to coordinate.
-        raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+        raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
         expected_root_indices = (
-            range(raw_total_acs)
-            if isinstance(raw_total_acs, int)
-            and not isinstance(raw_total_acs, bool)
-            and raw_total_acs >= 0
-            else None
+            tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
         )
         try:
             acceptance_finalizations = await collect_cancellation_acceptance_plan(

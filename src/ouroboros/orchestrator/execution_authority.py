@@ -69,6 +69,7 @@ _RATE_GATE_BUCKET_HELPER_NAMES = (
 _PROCESS_LOCAL_AUTHORITY_CONSTRUCTION_TOKEN = object()
 _SAFE_PROCESS_LOCAL_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _LOG = logging.getLogger(__name__)
+_ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
 
 
 async def _await_process_local_cleanup(awaitable: Awaitable[Any]) -> Any:
@@ -823,6 +824,54 @@ async def collect_terminal_acceptance_plan(
             details={"session_id": session_id, "execution_id": execution_id},
         )
 
+    durable_root_indices: set[int] | None = None
+    replay = getattr(event_store, "replay", None)
+    if callable(replay):
+        try:
+            session_events = await replay("session", session_id)
+        except Exception:
+            session_events = None
+        if isinstance(session_events, list):
+            start_event = next(
+                (
+                    item
+                    for item in session_events
+                    if getattr(item, "type", None) == "orchestrator.session.started"
+                ),
+                None,
+            )
+            if start_event is not None:
+                start_data = getattr(start_event, "data", {})
+                if not isinstance(start_data, Mapping):
+                    raise PersistenceError(
+                        "Durable session-start metadata is malformed.",
+                        operation="collect_terminal_acceptance_plan",
+                        details={"session_id": session_id},
+                    )
+                raw_roots = start_data.get(_ACCEPTANCE_ROOT_INDICES_KEY)
+                if raw_roots is not None:
+                    if isinstance(raw_roots, (str, bytes, bytearray)) or not isinstance(
+                        raw_roots, Iterable
+                    ):
+                        raise PersistenceError(
+                            "Durable acceptance root set is malformed.",
+                            operation="collect_terminal_acceptance_plan",
+                            details={"session_id": session_id},
+                        )
+                    durable_root_indices = set()
+                    for raw_root in raw_roots:
+                        if (
+                            isinstance(raw_root, bool)
+                            or not isinstance(raw_root, int)
+                            or raw_root < 0
+                        ):
+                            raise PersistenceError(
+                                "Durable acceptance root set contains an invalid root.",
+                                operation="collect_terminal_acceptance_plan",
+                                details={"session_id": session_id},
+                            )
+                        durable_root_indices.add(raw_root)
+
     attempts: list[Any] = []
     for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
         try:
@@ -864,6 +913,25 @@ async def collect_terminal_acceptance_plan(
     latest_by_root: dict[int, tuple[int, int]] = {}
     for item in attempts:
         data = getattr(item, "data", {})
+        aggregate_id = getattr(item, "aggregate_id", None)
+        if not isinstance(data, Mapping):
+            raise PersistenceError(
+                "Cancellation attempt telemetry must contain a mapping payload.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if aggregate_id is not None and aggregate_id != execution_id:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has a mismatched aggregate identity.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if data.get("execution_id") != execution_id or data.get("session_id") != session_id:
+            raise PersistenceError(
+                "Cancellation attempt telemetry belongs to a different execution or session.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
         root = data.get("root_ac_index")
         retry = data.get("retry_attempt")
         event_type = getattr(item, "type", None)
@@ -878,6 +946,27 @@ async def collect_terminal_acceptance_plan(
         ):
             raise PersistenceError(
                 "Cancellation attempt telemetry has an invalid root or retry identity.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        success = data.get("success")
+        raw_outcome = data.get("outcome")
+        if not isinstance(success, bool) or not isinstance(raw_outcome, str):
+            raise PersistenceError(
+                "Cancellation attempt telemetry has an incomplete outcome contract.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if raw_outcome not in {
+            "succeeded",
+            "satisfied_externally",
+            "failed",
+            "blocked",
+            "invalid",
+            "cancelled",
+        } or success != (raw_outcome in {"succeeded", "satisfied_externally"}):
+            raise PersistenceError(
+                "Cancellation attempt telemetry has contradictory success/outcome fields.",
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             )
@@ -926,6 +1015,14 @@ async def collect_terminal_acceptance_plan(
                     details={"root_ac_index": raw_root},
                 )
             expected_roots.add(raw_root)
+    if durable_root_indices is not None:
+        if expected_root_indices is not None and expected_roots != durable_root_indices:
+            raise PersistenceError(
+                "Terminal acceptance plan does not match the durable session root set.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        expected_roots = durable_root_indices
 
     plan: list[dict[str, Any]] = []
     for root in sorted(latest_by_root.keys() | expected_roots):
@@ -1041,13 +1138,9 @@ async def request_process_local_cancellation(
     progress = getattr(tracker, "progress", None)
     expected_root_indices: tuple[int, ...] | None = None
     if isinstance(progress, Mapping):
-        raw_total_acs = progress.get("total_acceptance_criteria")
-        if (
-            isinstance(raw_total_acs, int)
-            and not isinstance(raw_total_acs, bool)
-            and raw_total_acs >= 0
-        ):
-            expected_root_indices = tuple(range(raw_total_acs))
+        raw_root_indices = progress.get(_ACCEPTANCE_ROOT_INDICES_KEY)
+        if isinstance(raw_root_indices, (list, tuple)):
+            expected_root_indices = tuple(raw_root_indices)
     authority = (
         progress.get("execution_contract", {}).get("foundation_a_authority")
         if isinstance(progress, Mapping) and isinstance(progress.get("execution_contract"), Mapping)

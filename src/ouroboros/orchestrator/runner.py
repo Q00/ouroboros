@@ -149,6 +149,7 @@ from ouroboros.orchestrator.runtime_param_negotiation import (
     runtime_capabilities_for,
 )
 from ouroboros.orchestrator.session import (
+    ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
     SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
     SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionRepository,
@@ -5097,13 +5098,9 @@ class OrchestratorRunner:
             )
 
         # Historical sessions have no live Foundation A capability to coordinate.
-        raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+        raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
         expected_root_indices = (
-            range(raw_total_acs)
-            if isinstance(raw_total_acs, int)
-            and not isinstance(raw_total_acs, bool)
-            and raw_total_acs >= 0
-            else None
+            tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
         )
         try:
             acceptance_finalizations = await collect_cancellation_acceptance_plan(
@@ -5444,6 +5441,7 @@ class OrchestratorRunner:
         execution_id: str,
         messages_processed: int,
         start_time: datetime,
+        expected_root_indices: Iterable[int] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError] | None:
         """Persist a published cancellation before abandoning a claimed setup.
 
@@ -5468,6 +5466,7 @@ class OrchestratorRunner:
                 execution_id=execution_id,
                 messages_processed=messages_processed,
                 start_time=start_time,
+                expected_root_indices=expected_root_indices,
             )
         )
         repeated_cancellation: asyncio.CancelledError | None = None
@@ -5929,6 +5928,7 @@ class OrchestratorRunner:
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
                 llm_backend=getattr(self._adapter, "llm_backend", None),
                 execution_contract=execution_contract,
+                acceptance_root_indices=range(len(seed.acceptance_criteria)),
             )
         except asyncio.CancelledError:
             await self._reconcile_session_publication_interruption(
@@ -6035,6 +6035,7 @@ class OrchestratorRunner:
             "fat_harness_mode": self._fat_harness_mode,
             "messages_processed": 0,
             EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
+            ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY: list(range(len(seed.acceptance_criteria))),
         }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
@@ -6233,6 +6234,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -6249,6 +6251,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -6391,6 +6394,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -6412,6 +6416,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -7804,6 +7809,7 @@ class OrchestratorRunner:
                     execution_id=tracker.execution_id,
                     messages_processed=tracker.messages_processed,
                     start_time=tracker.start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -7825,6 +7831,7 @@ class OrchestratorRunner:
                     execution_id=tracker.execution_id,
                     messages_processed=tracker.messages_processed,
                     start_time=tracker.start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -7942,6 +7949,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     messages_processed=tracker.messages_processed,
                     start_time=tracker.start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:
@@ -7958,6 +7966,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     messages_processed=tracker.messages_processed,
                     start_time=tracker.start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             )
             if cancellation_result is not None:

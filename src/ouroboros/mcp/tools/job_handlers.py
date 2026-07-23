@@ -43,7 +43,11 @@ from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
     request_process_local_cancellation,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.session import (
+    ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+)
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -875,13 +879,9 @@ class CancelExecutionHandler:
                 collect_cancellation_acceptance_plan,
             )
 
-            raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+            raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
             expected_root_indices = (
-                range(raw_total_acs)
-                if isinstance(raw_total_acs, int)
-                and not isinstance(raw_total_acs, bool)
-                and raw_total_acs >= 0
-                else None
+                tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
             )
             acceptance_finalizations = await collect_cancellation_acceptance_plan(
                 session_id=tracker.session_id,

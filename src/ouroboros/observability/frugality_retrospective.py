@@ -34,6 +34,7 @@ from ouroboros.orchestrator.frugality_proof import (
     EVENT_SHADOW_REPLAY,
     EVENT_TOKEN_ATTRIBUTION,
 )
+from ouroboros.persistence.event_store import validate_acceptance_finalization_payload
 
 if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
@@ -197,27 +198,28 @@ def build_frugality_retrospective(
         if current_type != EVENT_AC_ACCEPTANCE_FINALIZED:
             continue
 
-        root_ac_index = parse_root_ac_index(data)
-        retry_attempt = data.get("final_retry_attempt")
-        accepted = strict_bool(data.get("accepted"))
-        outcome = _normalized_outcome(data, success=accepted) if accepted is not None else None
-        disposition = _non_empty_string(data.get("disposition"))
-        event_terminal_status = _non_empty_string(data.get("terminal_status"))
-        if (
-            root_ac_index is None
-            or isinstance(retry_attempt, bool)
-            or not isinstance(retry_attempt, int)
-            or retry_attempt < 0
-            or accepted is None
-            or outcome is None
-            or disposition is None
-            or event_terminal_status is None
-        ):
-            if root_ac_index is not None:
-                invalid_acceptance_roots.add(root_ac_index)
+        candidate_root = parse_root_ac_index(data)
+        try:
+            _generation, root_ac_index = validate_acceptance_finalization_payload(
+                data,
+                aggregate_id=getattr(event, "aggregate_id", None),
+            )
+        except Exception:
+            if candidate_root is not None:
+                invalid_acceptance_roots.add(candidate_root)
             else:
                 anonymous_invalid_attempts.add(invalid_identity)
             continue
+        if (
+            data.get("execution_id") != execution_id
+            or data.get("session_id") != session_id
+            or data.get("terminal_status") != terminal_status
+        ):
+            invalid_acceptance_roots.add(root_ac_index)
+            continue
+        retry_attempt = data["final_retry_attempt"]
+        accepted = data["accepted"]
+        outcome = data["outcome"]
         acceptance_by_root.setdefault(root_ac_index, []).append(
             (retry_attempt, accepted, outcome, current_id)
         )

@@ -22,7 +22,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -47,6 +47,22 @@ log = get_logger(__name__)
 # able to overwrite that identity.
 SESSION_START_IDENTITY_PROGRESS_KEY = "_session_start_identity"
 SESSION_RUNTIME_IDENTITY_PROGRESS_KEY = "_session_runtime_identity"
+ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY = "acceptance_root_indices"
+
+
+def _normalize_acceptance_root_indices(value: object) -> list[int] | None:
+    """Normalize the immutable root set persisted at session publication."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Iterable):
+        raise ValueError("acceptance_root_indices must be an iterable of non-negative integers")
+    roots: set[int] = set()
+    for raw_root in value:
+        if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+            raise ValueError("acceptance_root_indices must contain non-negative integers")
+        roots.add(raw_root)
+    return sorted(roots)
+
 
 _STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {
     "codex": "codex_cli",
@@ -648,6 +664,7 @@ class SessionRepository:
         runtime_backend: str | None = None,
         llm_backend: str | None = None,
         execution_contract: Mapping[str, Any] | None = None,
+        acceptance_root_indices: Iterable[int] | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -663,6 +680,9 @@ class SessionRepository:
             execution_contract: Resolved immutable run inputs needed for safe
                 resume and proof-cohort attribution. The same payload is also
                 written to the initial progress checkpoint by the runner.
+            acceptance_root_indices: Immutable root AC indices persisted before
+                the session is exposed, so pre-execution terminalization cannot
+                lose undecided roots.
 
         Returns:
             Result containing new SessionTracker.
@@ -674,6 +694,10 @@ class SessionRepository:
             "seed_id": seed_id,
             "start_time": tracker.start_time.isoformat(),
         }
+        if acceptance_root_indices is not None:
+            event_data[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY] = _normalize_acceptance_root_indices(
+                acceptance_root_indices
+            )
         if seed_goal:
             event_data["seed_goal"] = seed_goal
         if runtime_backend:
@@ -1144,6 +1168,12 @@ class SessionRepository:
             last_progress: dict[str, Any] = {
                 SESSION_START_IDENTITY_PROGRESS_KEY: start_identity,
             }
+            if ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY in start_event.data:
+                last_progress[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY] = (
+                    _normalize_acceptance_root_indices(
+                        start_event.data[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY]
+                    )
+                )
             if "execution_contract" in start_event.data:
                 start_execution_contract = start_event.data.get("execution_contract")
                 # The start event is the durable fallback for the immutable run
@@ -1508,16 +1538,11 @@ class SessionRepository:
                         execution_id=tracker.execution_id,
                         event_store=self._event_store,
                         expected_root_indices=(
-                            range(tracker.progress["total_acceptance_criteria"])
+                            tuple(tracker.progress[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY])
                             if isinstance(
-                                tracker.progress.get("total_acceptance_criteria"),
-                                int,
+                                tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY),
+                                (list, tuple),
                             )
-                            and not isinstance(
-                                tracker.progress.get("total_acceptance_criteria"),
-                                bool,
-                            )
-                            and tracker.progress["total_acceptance_criteria"] >= 0
                             else None
                         ),
                     )
