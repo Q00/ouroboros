@@ -1312,10 +1312,12 @@ async def test_final_workspace_revalidation_does_not_reuse_cached_command_result
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "2"
+    # Coordinator revalidation must not replay an arbitrary shell command;
+    # external effects are not observable through the workspace digest.
+    assert counter.read_text(encoding="utf-8") == "1"
     assert revalidated[0].success is False
     assert revalidated[0].outcome is ACExecutionOutcome.FAILED
-    assert "Final workspace verify gate failed" in (revalidated[0].error or "")
+    assert "replaying verify_command is not permitted" in (revalidated[0].error or "")
 
 
 @pytest.mark.asyncio
@@ -1357,7 +1359,50 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
         ACExecutionOutcome.FAILED,
         ACExecutionOutcome.FAILED,
     ]
-    assert all("mutated the workspace" in (result.error or "") for result in revalidated)
+    assert all(
+        "replaying verify_command is not permitted" in (result.error or "")
+        for result in revalidated
+    )
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_reruns_stale_command_once_and_rejects_failure(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        "raise SystemExit(0 if Path('condition.txt').read_text() == 'before' else 7)\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert "Final workspace verify gate failed" in (settled[0].error or "")
 
 
 def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:

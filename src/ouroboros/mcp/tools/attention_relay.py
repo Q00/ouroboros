@@ -66,12 +66,37 @@ def _strings(value: object, *, limit: int = _MAX_LIST) -> list[str]:
     return result
 
 
+def _is_session_scoped_event(event: BaseEvent) -> bool:
+    return event.type.startswith(("execution.", "control.session.signal."))
+
+
+def _event_session_id(event: BaseEvent) -> str | None:
+    """Return the authoritative orchestration session carried by an event.
+
+    Execution and Synapse control events can share an aggregate across
+    concurrent orchestration sessions.  New events carry the explicit
+    ``orchestrator_session_id`` field; older execution projections used
+    ``session_id``.  An explicit field always wins so a stale fallback cannot
+    make a foreign event look local.
+    """
+    if not _is_session_scoped_event(event):
+        return None
+    data = event.data
+    explicit = data.get("orchestrator_session_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    legacy = data.get("session_id")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
 def _scope(event: BaseEvent, *, job_id: str | None) -> dict[str, object]:
     data = event.data
     return {
         "job_id": job_id,
         "execution_id": _text(data.get("execution_id"), limit=96),
-        "session_id": _text(data.get("session_id"), limit=96),
+        "session_id": _text(_event_session_id(event), limit=96),
         "lineage_id": _text(data.get("lineage_id"), limit=96),
         "semantic_ac_key": _text(data.get("semantic_ac_key"), limit=96),
         "root_ac_index": (
@@ -209,26 +234,6 @@ def _event_order(events: Iterable[BaseEvent]) -> list[BaseEvent]:
     return sorted(events, key=lambda event: (event.timestamp, event.id))
 
 
-def _execution_event_session_id(event: BaseEvent) -> str | None:
-    """Return the authoritative orchestration session carried by an event.
-
-    Execution aggregates are shared by multiple orchestration sessions.  New
-    runtime events carry the explicit ``orchestrator_session_id`` field; older
-    parent projections used ``session_id``.  An explicit field always wins so
-    a stale fallback cannot make a foreign event look local.
-    """
-    if not event.type.startswith("execution."):
-        return None
-    data = event.data
-    explicit = data.get("orchestrator_session_id")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit
-    legacy = data.get("session_id")
-    if isinstance(legacy, str) and legacy.strip():
-        return legacy
-    return None
-
-
 def _history_for_session(
     history_events: Iterable[BaseEvent], *, session_id: str | None
 ) -> list[BaseEvent]:
@@ -244,8 +249,7 @@ def _history_for_session(
     return [
         event
         for event in history_events
-        if not event.type.startswith("execution.")
-        or _execution_event_session_id(event) == session_id
+        if not _is_session_scoped_event(event) or _event_session_id(event) == session_id
     ]
 
 

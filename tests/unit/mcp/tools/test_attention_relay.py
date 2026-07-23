@@ -305,6 +305,36 @@ def test_execution_event_without_session_identity_fails_closed_for_linked_job() 
     )
 
 
+def test_foreign_control_signal_attention_is_not_relayed() -> None:
+    foreign = _event(
+        1,
+        "control.session.signal.rejected",
+        {
+            "orchestrator_session_id": "orch_2",
+            "rejection_code": "expired",
+            "detail": "signal expired before delivery",
+        },
+    )
+    unscoped = _event(
+        2,
+        "control.session.signal.rejected",
+        {
+            "session_id": None,
+            "rejection_code": "invalid_target",
+            "detail": "target session missing",
+        },
+    )
+
+    assert (
+        classify_relay_events(
+            [foreign, unscoped],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
+
+
 def test_synapse_completed_relay_carries_only_bounded_reply_summary() -> None:
     completed = _event(
         1,

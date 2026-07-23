@@ -1280,6 +1280,7 @@ class _VerifyGateOutcome:
     output_tail: str
     missing_artifacts: tuple[str, ...] = ()
     workspace_mutated: bool = False
+    workspace_digest: str | None = None
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -1327,6 +1328,7 @@ def _revalidate_cached_verify_gate_outcome(
         output_tail=outcome.output_tail,
         missing_artifacts=missing_artifacts,
         workspace_mutated=outcome.workspace_mutated,
+        workspace_digest=outcome.workspace_digest,
     )
 
 
@@ -2769,6 +2771,7 @@ class ParallelACExecutor:
                     # failure, execute the AC normally instead.
                     spec = seed.acceptance_criteria[ac_idx]
                     verification_status = "assumed"
+                    gate: _VerifyGateOutcome | None = None
                     if (
                         self._run_verify_commands
                         and isinstance(spec, AcceptanceCriterionSpec)
@@ -2808,6 +2811,7 @@ class ParallelACExecutor:
                         final_message="\n".join(notes),
                         retry_attempt=ac_retry_attempts[ac_idx],
                         outcome=ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        verify_gate_outcome=gate,
                     )
                     all_results.append(satisfied_result)
                     stage_ac_results.append(satisfied_result)
@@ -3390,6 +3394,7 @@ class ParallelACExecutor:
             results=all_results,
             session_id=session_id,
             execution_id=execution_id,
+            coordinator_revalidated=post_coordinator_revalidated,
         )
         settled_by_index = {result.ac_index: result for result in all_results}
         stage_results = [
@@ -3539,7 +3544,6 @@ class ParallelACExecutor:
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         revalidated: list[ACExecutionResult] = []
-        verify_mutated_workspace = False
         for result in results:
             if not result.success or result.outcome not in {
                 ACExecutionOutcome.SUCCEEDED,
@@ -3587,76 +3591,70 @@ class ParallelACExecutor:
                 )
                 continue
 
-            workspace_before_verify = self._workspace_content_digest(cwd)
-            outcome = await _invoke_execution_authority_entry(
-                self,
-                _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
-                spec=spec,
-                cwd=cwd,
-            )
-            workspace_after_verify = self._workspace_content_digest(cwd)
-            if (
-                workspace_before_verify is None
-                or workspace_after_verify is None
-                or workspace_before_verify != workspace_after_verify
-            ):
-                outcome = replace(
-                    outcome,
-                    passed=False,
-                    reason=(
-                        "verify_command mutated the workspace or its digest could not be "
-                        "revalidated"
-                    ),
-                    workspace_mutated=True,
+            if spec.verify_command:
+                # A verify command is an arbitrary shell contract and may have
+                # external effects that the workspace digest cannot observe.
+                # Never replay it after a coordinator mutation; fail closed at
+                # this boundary instead of executing an effectful command twice.
+                reason = (
+                    "Final acceptance rejected because the coordinator changed the "
+                    "workspace and replaying verify_command is not permitted."
                 )
-            verify_mutated_workspace = verify_mutated_workspace or outcome.workspace_mutated
-            if not outcome.passed:
-                reason = f"Final workspace verify gate failed: {outcome.reason}"
-                detail = reason
-                if outcome.output_tail:
-                    detail = (
-                        f"{reason}\n--- verify_command output (tail) ---\n{outcome.output_tail}"
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "verify_command": spec.verify_command,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                            "verify_replay_blocked": True,
+                        },
                     )
+                )
                 revalidated.append(
                     replace(
                         result,
                         success=False,
-                        error=detail,
-                        final_message=detail,
+                        error=reason,
+                        final_message=reason,
                         outcome=ACExecutionOutcome.FAILED,
-                        verify_gate_outcome=outcome,
                     )
                 )
                 continue
 
-            revalidated.append(replace(result, verify_gate_outcome=outcome))
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if missing_artifacts:
+                reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
 
-        if verify_mutated_workspace:
-            # A verifier is an observation boundary, not another writer.  If
-            # any final verifier changed the shared workspace (or its digest
-            # became unreadable), every success observed before or after that
-            # command is stale.  Fail closed for the complete finalization set.
-            reason = (
-                "Final acceptance rejected because a verify_command mutated the "
-                "workspace or its digest could not be revalidated."
-            )
-            revalidated = [
+            revalidated.append(
                 replace(
                     result,
-                    success=False,
-                    error=reason,
-                    final_message=reason,
-                    outcome=ACExecutionOutcome.FAILED,
+                    verify_gate_outcome=_VerifyGateOutcome(
+                        passed=True,
+                        reason=None,
+                        output_tail="",
+                        workspace_digest=self._workspace_content_digest(cwd),
+                    ),
                 )
-                if result.success
-                and result.outcome
-                in {
-                    ACExecutionOutcome.SUCCEEDED,
-                    ACExecutionOutcome.SATISFIED_EXTERNALLY,
-                }
-                else result
-                for result in revalidated
-            ]
+            )
+
         return revalidated
 
     async def _settle_verify_gate_results(
@@ -3666,6 +3664,7 @@ class ParallelACExecutor:
         results: list[ACExecutionResult],
         session_id: str,
         execution_id: str,
+        coordinator_revalidated: bool = False,
     ) -> list[ACExecutionResult]:
         """Fail closed when final shared-workspace evidence is no longer valid.
 
@@ -3676,6 +3675,9 @@ class ParallelACExecutor:
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        if not self._run_verify_commands:
+            return results
 
         successful_contracts: dict[int, AcceptanceCriterionSpec] = {}
         verify_mutated_workspace = False
@@ -3690,7 +3692,7 @@ class ParallelACExecutor:
             if isinstance(spec, AcceptanceCriterionSpec) and (
                 spec.verify_command or spec.expected_artifacts
             ):
-                successful_contracts[id(result)] = spec
+                successful_contracts[result.ac_index] = spec
 
         if not successful_contracts and not verify_mutated_workspace:
             return results
@@ -3698,35 +3700,135 @@ class ParallelACExecutor:
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         final_digest = self._workspace_content_digest(cwd)
         settled: list[ACExecutionResult] = []
+        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
+
         for result in results:
             if not result.success:
                 settled.append(result)
                 continue
-            spec = successful_contracts.get(id(result))
-            should_invalidate = verify_mutated_workspace or spec is not None
-            if not should_invalidate:
+
+            spec = successful_contracts.get(result.ac_index)
+            if spec is None:
+                # A mutating final verifier invalidates all successes, including
+                # description-only ACs.  Defer the replacement until every
+                # final verifier has been inspected.
                 settled.append(result)
                 continue
-            missing_artifacts = (
-                _missing_expected_artifacts(spec.expected_artifacts, cwd)
-                if spec is not None
-                else ()
-            )
-            reason: str | None = None
+
             if verify_mutated_workspace:
-                reason = (
-                    "Final acceptance rejected because a verify_command mutated the "
-                    "workspace or its digest could not be revalidated."
-                )
-            elif final_digest is None:
-                reason = "Final workspace digest unavailable for acceptance evidence."
-            elif missing_artifacts:
-                reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
-
-            if reason is None:
+                # Once one final verifier has changed (or made unreadable) the
+                # workspace, do not execute any additional arbitrary commands.
+                # The complete success set will be invalidated below.
                 settled.append(result)
                 continue
 
+            outcome = result.verify_gate_outcome
+            if not isinstance(outcome, _VerifyGateOutcome):
+                individual_failures[result.ac_index] = (
+                    "Final verify gate evidence is unavailable for acceptance.",
+                    None,
+                )
+                settled.append(result)
+                continue
+
+            if not outcome.passed:
+                individual_failures[result.ac_index] = (
+                    f"Final workspace verify gate failed: {outcome.reason}",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if final_digest is None:
+                individual_failures[result.ac_index] = (
+                    "Final workspace digest unavailable for acceptance evidence.",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+            if missing_artifacts:
+                individual_failures[result.ac_index] = (
+                    "Final expected_artifacts missing: " + ", ".join(missing_artifacts),
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            if spec.verify_command:
+                if coordinator_revalidated:
+                    # Coordinator revalidation deliberately refuses to replay
+                    # arbitrary shell contracts.  A command-bearing success
+                    # that survived that boundary is therefore not admissible.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because coordinator revalidation "
+                        "did not replay verify_command.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                cached_digest = outcome.workspace_digest
+                if cached_digest is None:
+                    individual_failures[result.ac_index] = (
+                        "Final verify gate workspace digest unavailable for acceptance.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                if cached_digest != final_digest:
+                    # A later worker changed the workspace after this command
+                    # passed.  Re-run the explicit contract exactly once at the
+                    # final boundary, where its result can be bound to the
+                    # settled workspace.  Coordinator-triggered revalidation is
+                    # excluded above because arbitrary commands may have
+                    # external effects that cannot be safely replayed.
+                    rerun = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                        spec=spec,
+                        cwd=cwd,
+                    )
+                    result = replace(result, verify_gate_outcome=rerun)
+                    if rerun.workspace_mutated:
+                        verify_mutated_workspace = True
+                    if not rerun.passed:
+                        individual_failures[result.ac_index] = (
+                            f"Final workspace verify gate failed: {rerun.reason}",
+                            rerun,
+                        )
+                    settled.append(result)
+                    continue
+
+            settled.append(result)
+
+        if verify_mutated_workspace:
+            # A verifier is an observation boundary, not another writer.  If
+            # any final verifier changed the shared workspace (or its digest
+            # became unreadable), every success observed before or after that
+            # command is stale.  Fail closed for the complete finalization set.
+            mutation_reason = (
+                "Final acceptance rejected because a verify_command mutated the "
+                "workspace or its digest could not be revalidated."
+            )
+            individual_failures = {
+                result.ac_index: (mutation_reason, result.verify_gate_outcome)
+                for result in settled
+                if result.success
+            }
+
+        finalized: list[ACExecutionResult] = []
+        for result in settled:
+            failure = individual_failures.get(result.ac_index)
+            if failure is None:
+                finalized.append(result)
+                continue
+            reason, outcome = failure
+            spec = successful_contracts.get(result.ac_index)
+            missing_artifacts = (
+                list(outcome.missing_artifacts) if isinstance(outcome, _VerifyGateOutcome) else []
+            )
             await self._safe_emit_event(
                 BaseEvent(
                     type="execution.verify.failed",
@@ -3741,14 +3843,14 @@ class ParallelACExecutor:
                         "expected_artifacts": (
                             list(spec.expected_artifacts) if spec is not None else []
                         ),
-                        "missing_artifacts": list(missing_artifacts),
+                        "missing_artifacts": missing_artifacts,
                         "reason": reason,
                         "failure_class": FailureClass.EVIDENCE_MISSING.value,
                         "final_workspace_revalidation": True,
                     },
                 )
             )
-            settled.append(
+            finalized.append(
                 replace(
                     result,
                     success=False,
@@ -3762,7 +3864,7 @@ class ParallelACExecutor:
                     ),
                 )
             )
-        return settled
+        return finalized
 
     def _coerce_decomposition_decision(
         self,
@@ -6720,11 +6822,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
                 output_tail="",
                 missing_artifacts=missing_artifacts,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         command = spec.verify_command
         if not command:
-            return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+            return _VerifyGateOutcome(
+                passed=True,
+                reason=None,
+                output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
+            )
         workspace_before = self._workspace_content_digest(cwd)
 
         def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
@@ -6742,6 +6850,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     ),
                     output_tail=output_tail,
                     workspace_mutated=True,
+                    workspace_digest=workspace_after,
                 )
             return None
 
@@ -6785,6 +6894,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
                 output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
@@ -6798,6 +6908,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -6806,8 +6917,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     f"output_assertion {spec.output_assertion!r} not found in verify_command output"
                 ),
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
-        return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
+        return _VerifyGateOutcome(
+            passed=True,
+            reason=None,
+            output_tail=tail,
+            workspace_digest=self._workspace_content_digest(cwd),
+        )
 
     async def _apply_verify_gate(
         self,
