@@ -2164,6 +2164,81 @@ class TestOrchestratorRunner:
             runner._unregister_session(tracker.execution_id, tracker.session_id)
 
     @pytest.mark.asyncio
+    async def test_resume_paused_projection_failure_preserves_owner(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume auxiliary failure after PAUSED cannot enter generic FAILED cleanup."""
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+
+        tracker = SessionTracker.create(
+            "exec_resume_projection",
+            "seed_resume",
+            session_id="sess_resume_projection",
+        ).with_status(SessionStatus.PAUSED)
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Codex rejected the resume command",
+                data={
+                    "subtype": "error",
+                    "recoverable": True,
+                    "recovery": {"kind": "resume_retry"},
+                },
+            )
+
+        async def append(event: BaseEvent) -> None:
+            if event.type == "execution.terminal":
+                raise PersistenceError("execution projection unavailable")
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.append.side_effect = append
+        mark_failed = AsyncMock(return_value=Result.ok(True))
+
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_paused",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+                patch.object(runner._session_repo, "mark_failed", mark_failed),
+            ):
+                result = await runner.resume_session(tracker.session_id, sample_seed)
+
+            assert result.is_ok
+            assert result.value.success is False
+            mark_failed.assert_not_awaited()
+            assert runner._has_live_process_local_authority(
+                tracker.session_id,
+                tracker.execution_id,
+                tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert is_holder_alive(tracker.session_id)
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
     async def test_resume_pause_preserves_late_cancellation_marker(
         self,
         runner: OrchestratorRunner,
@@ -2660,6 +2735,101 @@ class TestOrchestratorRunner:
             )
             assert is_holder_alive(tracker.session_id)
             assert tracker.execution_id not in runner.active_sessions
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
+    async def test_parallel_paused_projection_failure_preserves_owner(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel auxiliary failure after PAUSED cannot escape into FAILED cleanup."""
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_projection",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_projection",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        generation, already_claimed = runner._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+        )
+        assert generation is not None
+        assert already_claimed is False
+        runner._register_session(tracker.execution_id, tracker.session_id)
+        message = AgentMessage(
+            type="result",
+            content="Quota window exhausted. Retry after 2 hours.",
+            data={"subtype": "error", "error_type": "OpenCodeError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(message,),
+                    final_message=message.content,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            total_messages=1,
+        )
+
+        async def append(event: BaseEvent) -> None:
+            if event.type == "execution.terminal":
+                raise PersistenceError("execution projection unavailable")
+
+        mock_event_store.append.side_effect = append
+
+        try:
+            with (
+                patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+                patch(
+                    "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                    AsyncMock(return_value=parallel_result),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_paused",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+            ):
+                result = await runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                    force_sequential_levels=True,
+                )
+
+            assert result.is_ok
+            assert result.value.success is False
+            assert runner._has_live_process_local_authority(
+                tracker.session_id,
+                tracker.execution_id,
+                tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert is_holder_alive(tracker.session_id)
         finally:
             runner._retire_process_local_authority(
                 session_id=tracker.session_id,
