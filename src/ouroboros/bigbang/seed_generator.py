@@ -56,6 +56,26 @@ EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
 _LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[\s*[^\s\"'\[\]][^\[\]\r\n]*\]\s+\S")
+
+
+def _is_legacy_bracket_prose(text: str) -> bool:
+    """True for ``[tag] prose`` where the leading group is not itself JSON.
+
+    A leading bracket group that parses as a JSON array on its own (e.g.
+    ``[null]``, ``[123, "x"]``) signals JSON intent with trailing garbage,
+    not a legacy ``[P0]``-style tag, so it must not fall back to pipe
+    splitting.
+    """
+    if not _LEGACY_BRACKET_PREFIX_RE.match(text):
+        return False
+    bracket_group = text[: text.index("]") + 1]
+    try:
+        json.loads(bracket_group)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -87,7 +107,7 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError as e:
-            if not _LEGACY_BRACKET_PREFIX_RE.match(text):
+            if not _is_legacy_bracket_prose(text):
                 raise ValueError(
                     f"CONSTRAINTS looks like a JSON array but is not valid JSON: {e}. "
                     f"Value: {text[:200]}"

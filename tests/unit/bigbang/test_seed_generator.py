@@ -546,6 +546,12 @@ class TestSeedGeneratorExtraction:
         with pytest.raises(ValueError, match="JSON array"):
             _parse_constraint_values('["--lang ko|en"] stray text')
 
+    def test_parse_constraint_values_rejects_json_parseable_group_with_trailing_text(self) -> None:
+        """A leading bracket group that is itself valid JSON is intent, not a tag."""
+        for malformed in ('[null, "x"] stray text', "[null] stray text", "[123] stray | text"):
+            with pytest.raises(ValueError, match="JSON array"):
+                _parse_constraint_values(malformed)
+
     def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
         """Any malformed array missing its closing bracket raises for retry."""
         for malformed in ('["--lang ko|en"', "[--lang ko|en"):
@@ -560,6 +566,7 @@ class TestSeedGeneratorExtraction:
             "[--lang ko|en | keep exact flag",
             '["--lang ko|en"] stray text',
             "[null]",
+            '[null, "x"] stray text',
         ),
     )
     async def test_generate_retries_on_malformed_json_constraints(
