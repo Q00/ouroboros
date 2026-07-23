@@ -3093,16 +3093,30 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
 
 @lru_cache(maxsize=1)
 def _data_forbidden_operation_pattern() -> re.Pattern[str]:
-    """One word-boundary regex over the canonical forbidden-operation list."""
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        _data_context_lane_policy,
-    )
+    """Mutating-operation SHAPES, not bare words.
 
-    words = _data_context_lane_policy()["forbidden_operation_patterns"]
-    return re.compile(
-        r"\b(" + "|".join(re.escape(str(word)) for word in words) + r")\b",
-        re.IGNORECASE,
+    The canonical ``forbidden_operation_patterns`` word list stays the
+    machine-readable host-side declaration (hosts apply it when selecting
+    tools), but the server-side scan matches operation shapes: a bare-word
+    scan rejected legitimate read-only evidence like "call volume by day",
+    "merge rate of premium upgrades", or "grant program signups" — blocking
+    the exact aggregates the lane exists to deliver. Every shape below still
+    catches the reviewed probes (DROP TABLE, DELETE FROM, UPSERT/REPLACE
+    INTO, CALL proc()).
+    """
+    shapes = (
+        r"\b(?:insert|upsert|replace|merge)\s+into\b",
+        r"\bdelete\s+from\b",
+        r"\bupdate\s+\S+\s+set\b",
+        r"\b(?:drop|truncate|alter|create)\s+"
+        r"(?:table|database|schema|index|view|user|role|procedure|function|column)\b",
+        r"\bgrant\s+(?:all|select|insert|update|delete|usage|create|execute)\b",
+        r"\bcall\s+\w+\s*\(",
+        r"\bexec(?:ute)?\s+(?:immediate\b|procedure\b|\w+\s*\()",
+        r"\btruncate\s+\S+",
+        r"\b(?:write|save|upload|publish)\s+(?:to|into|file|files|report|dataset|table)\b",
     )
+    return re.compile("|".join(f"(?:{shape})" for shape in shapes), re.IGNORECASE)
 
 
 def _is_row_shaped_value(value: str) -> bool:
@@ -3218,7 +3232,7 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             if isinstance(field_value, str) and (match := forbidden.search(field_value)):
                 errors.append(
                     f"evidence[{index}].{field_name}: claims forbidden operation "
-                    f"{match.group(1).lower()!r}; the data lane is read-only"
+                    f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
                 )
     proposals = output.get("proposed_queries")
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
@@ -3230,7 +3244,7 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             # must never make an explicitly mutating operation permissible.
             errors.append(
                 f"proposed_queries[{index}].query: proposes forbidden operation "
-                f"{match.group(1).lower()!r}; the data lane is read-only"
+                f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
             )
     return errors
 

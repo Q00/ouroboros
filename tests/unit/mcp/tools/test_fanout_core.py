@@ -1463,7 +1463,13 @@ def test_executed_evidence_claiming_mutation_is_rejected(tmp_path: Any) -> None:
     errors = _data_evidence_boundary_violations(deleted_evidence)
     assert any("delete" in error and "read-only" in error for error in errors)
 
-    for operation in ("UPSERT INTO t VALUES (1)", "REPLACE INTO t VALUES (1)", "CALL cleanup()"):
+    for operation in (
+        "UPSERT INTO t VALUES (1)",
+        "REPLACE INTO t VALUES (1)",
+        "CALL cleanup()",
+        "UPDATE users SET tier = 'free'",
+        "GRANT ALL ON db TO intern",
+    ):
         proposal = {
             "lane_id": "data_context",
             "data_needed": True,
@@ -1483,6 +1489,46 @@ def test_executed_evidence_claiming_mutation_is_rejected(tmp_path: Any) -> None:
         assert any(
             "read-only" in error for error in _data_evidence_boundary_violations(proposal)
         ), operation
+
+
+def test_read_only_vocabulary_is_not_a_forbidden_operation() -> None:
+    """The scan matches operation SHAPES, not bare English words.
+
+    Wide-lens regression guard: the lane exists to DELIVER aggregates, and a
+    bare-word list rejected legitimate read-only evidence whose provenance
+    merely contained "call", "merge", "replace", "grant", or "update".
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for legit_summary in (
+        "call volume by day per plan",
+        "merge rate of premium upgrades",
+        "weekly replace rate of devices",
+        "monthly grant program signups",
+        "update frequency of the cache per hour",
+        "distribution by created_at",
+    ):
+        output = _minimal_data_output("78% of MAU are on the free tier")
+        output["evidence"][0]["query_summary"] = legit_summary
+        assert _data_evidence_boundary_violations(output) == [], legit_summary
+
+    legit_proposal = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "warehouse",
+                "query": "count calls per user last 30d",
+                "expected_decision": "Whether call volume justifies the tier.",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    assert _data_evidence_boundary_violations(legit_proposal) == []
 
 
 def test_single_newline_two_row_value_is_rejected(tmp_path: Any) -> None:
