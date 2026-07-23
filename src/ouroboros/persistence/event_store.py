@@ -875,6 +875,41 @@ class EventStore:
         # malformed envelope must not even transiently acquire a terminal or
         # acceptance winner that a caller could mistake for a committed CAS.
         acceptance_events = _validated_terminal_acceptance_events(event)
+        if acceptance_events:
+            # The payload's self-consistent session/execution pair is not
+            # sufficient: bind it to the immutable durable session-start
+            # identity before either CAS can win.  Without this check a caller
+            # could finalize ``exec_other`` under a session that started
+            # ``exec_real`` and permanently consume the wrong root guard.
+            started_execution_id = await self._resolve_execution_id_for_session(event.aggregate_id)
+            if started_execution_id is None:
+                raise PersistenceError(
+                    "Final acceptance requires a durable session-start execution identity.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_identity_missing": True,
+                    },
+                )
+            mismatched = next(
+                (
+                    acceptance_event.data.get("execution_id")
+                    for acceptance_event in acceptance_events
+                    if acceptance_event.data.get("execution_id") != started_execution_id
+                ),
+                None,
+            )
+            if mismatched is not None:
+                raise PersistenceError(
+                    "Final acceptance execution_id does not match the durable session start.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "started_execution_id": started_execution_id,
+                        "acceptance_execution_id": mismatched,
+                        "acceptance_identity_conflict": True,
+                    },
+                )
 
         for attempt in range(3):
             try:

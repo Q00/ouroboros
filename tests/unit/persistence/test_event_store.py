@@ -136,6 +136,26 @@ class TestEventStoreInitialization:
 class TestEventStoreAppend:
     """Test EventStore.append() method."""
 
+    @staticmethod
+    async def _seed_session_start(
+        event_store: EventStore,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={
+                    "execution_id": execution_id,
+                    "seed_id": "seed-acceptance",
+                    "start_time": datetime.now(UTC).isoformat(),
+                },
+            )
+        )
+
     async def test_append_stores_event(
         self, event_store: EventStore, sample_event: BaseEvent
     ) -> None:
@@ -274,6 +294,11 @@ class TestEventStoreAppend:
             data={"acceptance_finalizations": [payload, dict(payload)]},
         )
 
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-idempotent",
+            execution_id="exec-acceptance-idempotent",
+        )
         assert await event_store.append(terminal) is True
 
         replayed = await event_store.replay("execution", payload["execution_id"])
@@ -295,10 +320,17 @@ class TestEventStoreAppend:
             data={"acceptance_finalizations": [payload.data, conflicting]},
         )
 
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-conflict",
+            execution_id="exec-acceptance-conflict",
+        )
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
             await event_store.append(terminal)
 
-        assert await event_store.replay("session", terminal.aggregate_id) == []
+        assert [
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ] == ["orchestrator.session.started"]
         assert await event_store.replay("execution", payload.aggregate_id) == []
 
     async def test_terminal_acceptance_plan_is_atomic(self, event_store: EventStore) -> None:
@@ -317,13 +349,45 @@ class TestEventStoreAppend:
             data={"acceptance_finalizations": [payload]},
         )
 
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-plan",
+            execution_id="exec-acceptance-plan",
+        )
         assert await event_store.append(terminal) is True
-        assert [
+        assert sorted(
             event.type for event in await event_store.replay("session", terminal.aggregate_id)
-        ] == ["orchestrator.session.completed"]
+        ) == sorted(["orchestrator.session.started", "orchestrator.session.completed"])
         assert [
             event.type for event in await event_store.replay("execution", payload["execution_id"])
         ] == ["execution.ac.acceptance_finalized"]
+
+    async def test_terminal_acceptance_binds_execution_to_session_start(
+        self, event_store: EventStore
+    ) -> None:
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-identity-bound",
+            execution_id="exec-real",
+        )
+        payload = self._acceptance_event(
+            execution_id="exec-other",
+            session_id="sess-identity-bound",
+            acceptance_generation_id=acceptance_generation_id_for_session(
+                "sess-identity-bound", "exec-other"
+            ),
+        ).data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-identity-bound",
+            data={"acceptance_finalizations": [payload]},
+        )
+
+        with pytest.raises(PersistenceError, match="durable session start"):
+            await event_store.append(terminal)
+
+        assert await event_store.replay("execution", "exec-other") == []
 
     async def test_terminal_acceptance_plan_rolls_back_on_conflict(
         self, event_store: EventStore
@@ -347,9 +411,16 @@ class TestEventStoreAppend:
             data={"acceptance_finalizations": [existing.data, conflicting]},
         )
 
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-plan-conflict",
+            execution_id="exec-acceptance-plan-conflict",
+        )
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
             await event_store.append(terminal)
-        assert await event_store.replay("session", terminal.aggregate_id) == []
+        assert [
+            event.type for event in await event_store.replay("session", terminal.aggregate_id)
+        ] == ["orchestrator.session.started"]
 
     async def test_acceptance_digest_includes_additional_payload_fields(
         self, event_store: EventStore
@@ -370,6 +441,11 @@ class TestEventStoreAppend:
             data={"acceptance_finalizations": [event.data, conflicting]},
         )
 
+        await self._seed_session_start(
+            event_store,
+            session_id="sess-acceptance-digest",
+            execution_id="exec-acceptance-digest",
+        )
         with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
             await event_store.append(terminal)
 
@@ -398,6 +474,11 @@ class TestEventStoreAppend:
                 aggregate_type="session",
                 aggregate_id="sess-acceptance-guard",
                 data={"acceptance_finalizations": [payload]},
+            )
+            await self._seed_session_start(
+                event_store,
+                session_id="sess-acceptance-guard",
+                execution_id="exec-acceptance-guard",
             )
             await event_store.append(terminal)
 

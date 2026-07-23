@@ -104,6 +104,7 @@ from ouroboros.orchestrator.execution_authority import (
     _release_process_local_authority_generation,
     _retire_process_local_authority_generation,
     collect_cancellation_acceptance_plan,
+    collect_terminal_acceptance_plan,
     constructor_model_contract,
     request_process_local_cancellation,
     runtime_execution_proves_effective_model,
@@ -2549,12 +2550,46 @@ class OrchestratorRunner:
         """Terminally record a lost local capability without trying a fallback."""
         error = self._process_local_resume_unavailable_error(session_id, execution_id)
         last_error: object | None = None
+        acceptance_finalizations: list[dict[str, Any]] | None = None
+        try:
+            acceptance_finalizations = await collect_terminal_acceptance_plan(
+                session_id=session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+                terminal_status=SessionStatus.FAILED.value,
+            )
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            last_error = exc
+
+        if acceptance_finalizations is None:
+            self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                execution_id=execution_id,
+                status=SessionStatus.FAILED,
+                error_message=error.message,
+                error_details=dict(error.details),
+                acceptance_finalizations=None,
+            )
+            return OrchestratorError(
+                message="Failed to collect lost process-local authority acceptance plan",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "requested_status": SessionStatus.FAILED.value,
+                    "cause": str(last_error),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
+                },
+            )
+
         for attempt in range(3):
             try:
                 result = await self._session_repo.mark_failed_if_active(
                     session_id,
                     error.message,
                     error.details,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
             except (Exception, asyncio.CancelledError) as exc:
                 durable_status = await self._reconcile_durable_terminal_and_cleanup(
@@ -2571,6 +2606,7 @@ class OrchestratorRunner:
                         status=SessionStatus.FAILED,
                         error_message=error.message,
                         error_details=dict(error.details),
+                        acceptance_finalizations=acceptance_finalizations,
                     )
                     self._preserve_process_local_owner_for_retry(
                         session_id=session_id,
@@ -2606,6 +2642,7 @@ class OrchestratorRunner:
             status=SessionStatus.FAILED,
             error_message=error.message,
             error_details=dict(error.details),
+            acceptance_finalizations=acceptance_finalizations,
         )
         return OrchestratorError(
             message="Failed to persist lost process-local authority terminal state",
@@ -2641,6 +2678,7 @@ class OrchestratorRunner:
                     tracker.session_id,
                     message,
                     dict(details),
+                    acceptance_finalizations=[],
                 )
             except (Exception, asyncio.CancelledError) as exc:
                 durable_status = await self._reconcile_durable_terminal_and_cleanup(
@@ -2658,6 +2696,7 @@ class OrchestratorRunner:
                         error_message=message,
                         error_details=dict(details),
                         messages_processed=tracker.messages_processed,
+                        acceptance_finalizations=[],
                     )
                     self._preserve_process_local_owner_for_retry(
                         session_id=tracker.session_id,
@@ -2685,6 +2724,7 @@ class OrchestratorRunner:
             error_message=message,
             error_details=dict(details),
             messages_processed=tracker.messages_processed,
+            acceptance_finalizations=[],
         )
         return str(last_error)
 
@@ -3026,14 +3066,32 @@ class OrchestratorRunner:
             intent.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}
             and replayed_acceptance_finalizations is None
         ):
-            # A terminal intent without a captured plan is not replayable.
-            # Keeping it pending is safer than committing a lifecycle winner
-            # that can never be joined to its complete root decision set.
-            return self._terminal_persistence_pending_result(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-                requested_status=intent.status,
-                cause=PersistenceError("Pending terminal intent is missing its acceptance plan."),
+            # Preparation and lost-authority failures may have been interrupted
+            # before the first plan snapshot was retained. Reconstruct the exact
+            # plan from durable attempt telemetry before retrying the terminal CAS.
+            try:
+                replayed_acceptance_finalizations = await collect_terminal_acceptance_plan(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    event_store=self._event_store,
+                    terminal_status=intent.status.value,
+                )
+            except asyncio.CancelledError:
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                raise
+            except Exception as exc:
+                return self._terminal_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    requested_status=intent.status,
+                    cause=exc,
+                )
+            self._pending_lifecycle_intents[tracker.session_id] = replace(
+                intent,
+                acceptance_finalizations=[dict(item) for item in replayed_acceptance_finalizations],
             )
 
         resolved_status: SessionStatus

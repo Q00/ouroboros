@@ -32,7 +32,10 @@ from ouroboros.orchestrator.heartbeat import (
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import (
+    EventStore,
+    validate_acceptance_finalization_payload,
+)
 
 
 class JobStatus(StrEnum):
@@ -1299,9 +1302,55 @@ class JobManager:
             event_type="execution.terminal",
             limit=1,
         )
-        if not terminal_events:
-            return None
-        terminal_data = terminal_events[0].data
+        terminal_data = terminal_events[0].data if terminal_events else None
+        if terminal_data is None:
+            # Foundation B commits the session terminal event and all final
+            # acceptance events atomically. The older execution.terminal
+            # projection can still be missing after a crash, so recover from
+            # that authoritative state instead of manufacturing INTERRUPTED.
+            session_id = snapshot.links.session_id
+            if not session_id:
+                return None
+            session_events = await self._event_store.replay("session", session_id)
+            session_completed = next(
+                (
+                    event
+                    for event in reversed(session_events)
+                    if event.type == "orchestrator.session.completed"
+                ),
+                None,
+            )
+            if session_completed is None:
+                return None
+            final_acceptance_events = await self._event_store.query_events(
+                aggregate_id=snapshot.links.execution_id,
+                event_type="execution.ac.acceptance_finalized",
+                limit=None,
+            )
+            if not final_acceptance_events:
+                return None
+            for acceptance_event in final_acceptance_events:
+                try:
+                    validate_acceptance_finalization_payload(
+                        acceptance_event.data,
+                        aggregate_id=acceptance_event.aggregate_id,
+                    )
+                except PersistenceError:
+                    return None
+                data = acceptance_event.data
+                if (
+                    data.get("session_id") != session_id
+                    or data.get("execution_id") != snapshot.links.execution_id
+                    or data.get("terminal_status") != "completed"
+                    or data.get("accepted") is not True
+                ):
+                    return None
+            summary = session_completed.data.get("summary")
+            if isinstance(summary, dict):
+                final_message = summary.get("final_message")
+                if isinstance(final_message, str) and final_message.strip():
+                    return final_message.strip()
+            return "Execution complete"
         if terminal_data.get("status") != "completed":
             return None
 

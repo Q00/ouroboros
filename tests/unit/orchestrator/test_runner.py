@@ -878,6 +878,7 @@ class TestOrchestratorRunner:
                 "fat_harness_mode": False,
                 "cause": "store unavailable",
             },
+            acceptance_finalizations=[],
         )
 
     @pytest.mark.asyncio

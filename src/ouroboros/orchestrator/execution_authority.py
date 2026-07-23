@@ -784,13 +784,14 @@ def _retire_process_local_authority_generation(
     return _PROCESS_LOCAL_AUTHORITY_REGISTRY.retire(session_id, execution_id, adapter)
 
 
-async def collect_cancellation_acceptance_plan(
+async def collect_terminal_acceptance_plan(
     *,
     session_id: str,
     execution_id: str,
     event_store: Any,
+    terminal_status: str,
 ) -> list[dict[str, Any]]:
-    """Build the one cancellation plan used by every terminal writer.
+    """Build the one terminal acceptance plan used by every terminal writer.
 
     The collector is intentionally independent of runner-global state and of
     Foundation A's process-local correlation ID.  It derives a deterministic
@@ -798,17 +799,25 @@ async def collect_cancellation_acceptance_plan(
     selects the latest provisional judgment for each observed root.  Read
     failures, malformed judgments, and conflicting duplicates fail closed so
     cancellation cannot commit a terminal winner without its exact decision
-    set.
+    set. Preparation failures legitimately produce an empty plan; terminal
+    retries reconstruct a non-empty plan from the same durable attempt stream.
     """
     from ouroboros.core.errors import PersistenceError
     from ouroboros.persistence.event_store import acceptance_generation_id_for_session
+
+    if terminal_status not in {"completed", "failed", "cancelled"}:
+        raise PersistenceError(
+            "Terminal acceptance planning requires a hard terminal status.",
+            operation="collect_terminal_acceptance_plan",
+            details={"terminal_status": terminal_status},
+        )
 
     acceptance_generation_id = acceptance_generation_id_for_session(session_id, execution_id)
     query_events = getattr(event_store, "query_events", None)
     if not callable(query_events):
         raise PersistenceError(
             "Cannot finalize cancellation without readable attempt telemetry.",
-            operation="collect_cancellation_acceptance_plan",
+            operation="collect_terminal_acceptance_plan",
             details={"session_id": session_id, "execution_id": execution_id},
         )
 
@@ -829,7 +838,7 @@ async def collect_cancellation_acceptance_plan(
             )
             raise PersistenceError(
                 "Cannot finalize cancellation while attempt telemetry is unreadable.",
-                operation="collect_cancellation_acceptance_plan",
+                operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             ) from exc
 
@@ -854,7 +863,7 @@ async def collect_cancellation_acceptance_plan(
         ):
             raise PersistenceError(
                 "Cancellation attempt telemetry has an invalid root or retry identity.",
-                operation="collect_cancellation_acceptance_plan",
+                operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             )
         candidate = (retry, event_priority[event_type])
@@ -895,7 +904,7 @@ async def collect_cancellation_acceptance_plan(
             else:
                 raise PersistenceError(
                     "Cancellation attempt telemetry has a non-canonical outcome.",
-                    operation="collect_cancellation_acceptance_plan",
+                    operation="collect_terminal_acceptance_plan",
                     details={
                         "session_id": session_id,
                         "execution_id": execution_id,
@@ -907,7 +916,7 @@ async def collect_cancellation_acceptance_plan(
         if len(normalized_outcomes) != 1:
             raise PersistenceError(
                 "Cancellation attempt telemetry has conflicting latest judgments.",
-                operation="collect_cancellation_acceptance_plan",
+                operation="collect_terminal_acceptance_plan",
                 details={
                     "session_id": session_id,
                     "execution_id": execution_id,
@@ -916,6 +925,19 @@ async def collect_cancellation_acceptance_plan(
                 },
             )
         outcome = next(iter(normalized_outcomes))
+        accepted = terminal_status == "completed" and outcome in {
+            "succeeded",
+            "satisfied_externally",
+        }
+        disposition = (
+            "accepted"
+            if accepted
+            else (
+                "cancelled"
+                if terminal_status == "cancelled"
+                else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+            )
+        )
         plan.append(
             {
                 "execution_id": execution_id,
@@ -923,13 +945,28 @@ async def collect_cancellation_acceptance_plan(
                 "acceptance_generation_id": acceptance_generation_id,
                 "root_ac_index": root,
                 "final_retry_attempt": retry,
-                "accepted": False,
-                "disposition": "cancelled",
+                "accepted": accepted,
+                "disposition": disposition,
                 "outcome": outcome,
-                "terminal_status": "cancelled",
+                "terminal_status": terminal_status,
             }
         )
     return plan
+
+
+async def collect_cancellation_acceptance_plan(
+    *,
+    session_id: str,
+    execution_id: str,
+    event_store: Any,
+) -> list[dict[str, Any]]:
+    """Build the cancellation plan used by every cancellation writer."""
+    return await collect_terminal_acceptance_plan(
+        session_id=session_id,
+        execution_id=execution_id,
+        event_store=event_store,
+        terminal_status="cancelled",
+    )
 
 
 async def request_process_local_cancellation(

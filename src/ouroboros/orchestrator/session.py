@@ -888,6 +888,8 @@ class SessionRepository:
         session_id: str,
         error_message: str,
         error_details: dict[str, Any] | None = None,
+        *,
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
     ) -> Result[bool, PersistenceError]:
         """Fail an active session without overwriting an existing terminal result.
 
@@ -895,7 +897,12 @@ class SessionRepository:
         already durable. All terminal writers now use the same CAS boundary;
         this compatibility name delegates to the canonical method.
         """
-        return await self.mark_failed(session_id, error_message, error_details)
+        return await self.mark_failed(
+            session_id,
+            error_message,
+            error_details,
+            acceptance_finalizations=acceptance_finalizations,
+        )
 
     async def mark_paused(
         self,

@@ -32,7 +32,11 @@ from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.checkpoint import CheckpointStore
-from ouroboros.persistence.event_store import EventStore, PersistenceError
+from ouroboros.persistence.event_store import (
+    EventStore,
+    PersistenceError,
+    acceptance_generation_id_for_session,
+)
 
 
 def _build_store(tmp_path) -> EventStore:
@@ -6261,6 +6265,63 @@ class TestZombieJobReconciliation:
             assert [event.type for event in events] == [
                 "mcp.job.created",
                 "mcp.job.failed",
+            ]
+        finally:
+            await store.close()
+
+    async def test_dead_owner_recovers_completed_job_from_session_acceptance(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        try:
+            session_id = "orch_terminal_completed"
+            execution_id = "exec_terminal_completed"
+            await self._seed_running_job(
+                store,
+                "job_linked_terminal_completed",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            repository = SessionRepository(store)
+            await repository.create_session(
+                execution_id=execution_id,
+                seed_id="seed-terminal-completed",
+                session_id=session_id,
+            )
+            acceptance = {
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "acceptance_generation_id": acceptance_generation_id_for_session(
+                    session_id, execution_id
+                ),
+                "root_ac_index": 0,
+                "final_retry_attempt": 0,
+                "accepted": True,
+                "disposition": "accepted",
+                "outcome": "succeeded",
+                "terminal_status": "completed",
+            }
+            completed = await repository.mark_completed(
+                session_id,
+                summary={"final_message": "authoritative completion"},
+                acceptance_finalizations=[acceptance],
+            )
+            assert completed.is_ok and completed.value is True
+
+            restarted = JobManager(store)
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                snapshot = await restarted.get_snapshot("job_linked_terminal_completed")
+
+            assert snapshot.status is JobStatus.COMPLETED
+            assert snapshot.result_text == "authoritative completion"
+            events, _ = await store.get_events_after(
+                "job", "job_linked_terminal_completed", last_row_id=0
+            )
+            assert [event.type for event in events] == [
+                "mcp.job.created",
+                "mcp.job.completed",
             ]
         finally:
             await store.close()
