@@ -899,6 +899,11 @@ class OrchestratorRunner:
         self._announced_param_degradations: set[tuple[str, str]] = set()
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
+        # Resume restores invocation-specific routing/guidance into runner
+        # fields for compatibility with the existing execution path. Serialize
+        # the whole resume invocation so one session cannot observe another
+        # session's restored contract between those mutations and first use.
+        self._resume_lock = asyncio.Lock()
 
     def _apply_efficiency_mode_to_router(self) -> None:
         """Apply the public efficiency preference to the resolved tier router."""
@@ -7573,6 +7578,15 @@ class OrchestratorRunner:
         return finalizations
 
     async def resume_session(
+        self,
+        session_id: str,
+        seed: Seed,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Serialize resume invocations that temporarily restore runner state."""
+        async with self._resume_lock:
+            return await self._resume_session_impl(session_id, seed)
+
+    async def _resume_session_impl(
         self,
         session_id: str,
         seed: Seed,

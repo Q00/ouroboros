@@ -1279,6 +1279,7 @@ class _VerifyGateOutcome:
     reason: str | None
     output_tail: str
     missing_artifacts: tuple[str, ...] = ()
+    workspace_mutated: bool = False
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -1325,6 +1326,7 @@ def _revalidate_cached_verify_gate_outcome(
         reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
         output_tail=outcome.output_tail,
         missing_artifacts=missing_artifacts,
+        workspace_mutated=outcome.workspace_mutated,
     )
 
 
@@ -2244,6 +2246,7 @@ class ParallelACExecutor:
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
         session_id: str | None = None,
+        orchestrator_session_id: str | None = None,
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
@@ -2255,6 +2258,7 @@ class ParallelACExecutor:
             runtime_handle=runtime_handle,
             execution_id=execution_id,
             session_id=session_id,
+            orchestrator_session_id=orchestrator_session_id,
             result_summary=result_summary,
             success=success,
             error=error,
@@ -2441,6 +2445,9 @@ class ParallelACExecutor:
         # before that writer runs is not authoritative until the settled
         # workspace has been checked again at the final boundary.
         coordinator_mutated_workspace = False
+        post_coordinator_revalidation_required = False
+        post_coordinator_revalidated = False
+        post_coordinator_revalidation_workspace_digest: str | None = None
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
@@ -2477,6 +2484,37 @@ class ParallelACExecutor:
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
                     )
                     if checkpoint_matches_invocation:
+                        coordinator_mutated_workspace = bool(
+                            checkpoint_state.get("coordinator_mutated_workspace", False)
+                        )
+                        post_coordinator_revalidation_required = bool(
+                            checkpoint_state.get("post_coordinator_revalidation_required", False)
+                        )
+                        post_coordinator_revalidated = bool(
+                            checkpoint_state.get("post_coordinator_revalidated", False)
+                        )
+                        raw_final_digest = checkpoint_state.get(
+                            "final_workspace_digest",
+                            checkpoint_state.get("post_coordinator_revalidation_workspace_digest"),
+                        )
+                        if isinstance(raw_final_digest, str) and raw_final_digest:
+                            post_coordinator_revalidation_workspace_digest = raw_final_digest
+                        # A checkpoint may have been written before the final
+                        # revalidation.  Never let its provisional successes be
+                        # accepted on recovery without replaying that boundary.
+                        if post_coordinator_revalidation_required:
+                            current_digest = self._workspace_content_digest(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            )
+                            if (
+                                not post_coordinator_revalidated
+                                or current_digest is None
+                                or current_digest != post_coordinator_revalidation_workspace_digest
+                            ):
+                                coordinator_mutated_workspace = True
+                                post_coordinator_revalidated = False
                         resume_from_level = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
@@ -2514,7 +2552,10 @@ class ParallelACExecutor:
                             restored_contexts=len(level_contexts),
                         )
                         # Reconstruct all_results for completed/failed/skipped ACs.
-                        restored_outcomes = checkpoint_state.get("ac_outcomes", {})
+                        restored_outcomes = checkpoint_state.get(
+                            "revalidated_ac_outcomes",
+                            checkpoint_state.get("ac_outcomes", {}),
+                        )
                         for prev_stage in execution_plan.stages[:resume_from_level]:
                             for ac_idx in self._get_stage_ac_indices(prev_stage):
                                 if ac_idx >= total_acs:
@@ -3103,6 +3144,10 @@ class ParallelACExecutor:
                             or workspace_changed
                             or self._coordinator_review_may_mutate_workspace(review)
                         )
+                        if coordinator_mutated_workspace:
+                            post_coordinator_revalidation_required = True
+                            post_coordinator_revalidated = False
+                            post_coordinator_revalidation_workspace_digest = None
                         await self._emit_coordinator_runtime_events(
                             execution_id=execution_id,
                             session_id=session_id,
@@ -3145,6 +3190,17 @@ class ParallelACExecutor:
                                     self._task_cwd
                                     or getattr(self._adapter, "working_directory", None)
                                     or os.getcwd()
+                                ),
+                                "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                                "post_coordinator_revalidation_required": (
+                                    post_coordinator_revalidation_required
+                                ),
+                                "post_coordinator_revalidated": post_coordinator_revalidated,
+                                "post_coordinator_revalidation_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
+                                ),
+                                "final_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
                                 ),
                                 "completed_levels": level_idx + 1,
                                 "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
@@ -3202,7 +3258,10 @@ class ParallelACExecutor:
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
 
-        if coordinator_mutated_workspace:
+        needs_post_coordinator_revalidation = (
+            coordinator_mutated_workspace and not post_coordinator_revalidated
+        ) or (post_coordinator_revalidation_required and not post_coordinator_revalidated)
+        if needs_post_coordinator_revalidation:
             # The coordinator may have edited files after a worker's verify
             # gate passed.  Re-run every success contract against the settled
             # workspace; contract-less successes fail closed because there is
@@ -3213,6 +3272,35 @@ class ParallelACExecutor:
                 session_id=session_id,
                 execution_id=execution_id,
             )
+            post_coordinator_revalidation_required = True
+            post_coordinator_revalidated = True
+            post_coordinator_revalidation_workspace_digest = self._workspace_content_digest(
+                self._task_cwd or self._adapter.working_directory or os.getcwd()
+            )
+            if post_coordinator_revalidation_workspace_digest is None:
+                # The final evidence must be bound to a readable workspace. A
+                # successful command without a final digest is not durable
+                # acceptance evidence.
+                final_digest_error = (
+                    "Final workspace digest unavailable after coordinator revalidation."
+                )
+                all_results = [
+                    replace(
+                        result,
+                        success=False,
+                        error=final_digest_error,
+                        final_message=final_digest_error,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                    if result.success
+                    and result.outcome
+                    in {
+                        ACExecutionOutcome.SUCCEEDED,
+                        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                    }
+                    else result
+                    for result in all_results
+                ]
             by_index = {result.ac_index: result for result in all_results}
             stage_results = [
                 replace(
@@ -3223,6 +3311,76 @@ class ParallelACExecutor:
                 )
                 for stage in stage_results
             ]
+
+            # Persist the post-coordinator verdict after, not before, the
+            # revalidation.  A crash after the old checkpoint write therefore
+            # resumes through this same boundary instead of reviving stale ACs.
+            if self._checkpoint_store:
+                try:
+                    from ouroboros.persistence.checkpoint import CheckpointData
+
+                    seed_id = getattr(seed, "id", session_id)
+                    checkpoint = CheckpointData.create(
+                        seed_id=seed_id,
+                        phase="parallel_execution",
+                        state={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "workspace_identity": canonical_workspace_authority(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            ),
+                            "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                            "post_coordinator_revalidation_required": (
+                                post_coordinator_revalidation_required
+                            ),
+                            "post_coordinator_revalidated": post_coordinator_revalidated,
+                            "post_coordinator_revalidation_workspace_digest": (
+                                post_coordinator_revalidation_workspace_digest
+                            ),
+                            "final_workspace_digest": post_coordinator_revalidation_workspace_digest,
+                            "completed_levels": total_levels,
+                            "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                            "ac_retry_attempts": {str(k): v for k, v in ac_retry_attempts.items()},
+                            "ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "revalidated_ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "failed_indices": sorted(failed_indices),
+                            "blocked_indices": sorted(blocked_indices),
+                            "completed_count": completed_count,
+                            "level_contexts": serialize_level_contexts(level_contexts),
+                            "decomposition_decisions": {
+                                node_id: record.to_dict()
+                                for node_id, record in self._decomposition_decisions.items()
+                            },
+                        },
+                    )
+                    save_result = self._checkpoint_store.save(checkpoint)
+                    if not getattr(save_result, "is_ok", False):
+                        log.warning(
+                            "parallel_executor.final_revalidation_checkpoint_save_failed",
+                            seed_id=seed_id,
+                            error=str(getattr(save_result, "error", "unknown error")),
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "parallel_executor.final_revalidation_checkpoint_save_failed",
+                        error=str(exc),
+                    )
 
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
@@ -3317,6 +3475,15 @@ class ParallelACExecutor:
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
                         digest.update(b"\0")
                         digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+                    elif path.is_dir():
+                        # Empty-directory creation/removal is observable workspace
+                        # state.  Hash a directory marker as well as its mode so a
+                        # coordinator cannot evade revalidation by only changing
+                        # the tree shape.
+                        digest.update(b"D\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
                     elif path.is_file():
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
@@ -3352,6 +3519,7 @@ class ParallelACExecutor:
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
         revalidated: list[ACExecutionResult] = []
+        verify_mutated_workspace = False
         for result in results:
             if not result.success or result.outcome not in {
                 ACExecutionOutcome.SUCCEEDED,
@@ -3399,12 +3567,29 @@ class ParallelACExecutor:
                 )
                 continue
 
+            workspace_before_verify = self._workspace_content_digest(cwd)
             outcome = await _invoke_execution_authority_entry(
                 self,
                 _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
                 spec=spec,
                 cwd=cwd,
             )
+            workspace_after_verify = self._workspace_content_digest(cwd)
+            if (
+                workspace_before_verify is None
+                or workspace_after_verify is None
+                or workspace_before_verify != workspace_after_verify
+            ):
+                outcome = replace(
+                    outcome,
+                    passed=False,
+                    reason=(
+                        "verify_command mutated the workspace or its digest could not be "
+                        "revalidated"
+                    ),
+                    workspace_mutated=True,
+                )
+            verify_mutated_workspace = verify_mutated_workspace or outcome.workspace_mutated
             if not outcome.passed:
                 reason = f"Final workspace verify gate failed: {outcome.reason}"
                 detail = reason
@@ -3425,6 +3610,33 @@ class ParallelACExecutor:
                 continue
 
             revalidated.append(replace(result, verify_gate_outcome=outcome))
+
+        if verify_mutated_workspace:
+            # A verifier is an observation boundary, not another writer.  If
+            # any final verifier changed the shared workspace (or its digest
+            # became unreadable), every success observed before or after that
+            # command is stale.  Fail closed for the complete finalization set.
+            reason = (
+                "Final acceptance rejected because a verify_command mutated the "
+                "workspace or its digest could not be revalidated."
+            )
+            revalidated = [
+                replace(
+                    result,
+                    success=False,
+                    error=reason,
+                    final_message=reason,
+                    outcome=ACExecutionOutcome.FAILED,
+                )
+                if result.success
+                and result.outcome
+                in {
+                    ACExecutionOutcome.SUCCEEDED,
+                    ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                }
+                else result
+                for result in revalidated
+            ]
         return revalidated
 
     def _coerce_decomposition_decision(
@@ -6019,6 +6231,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=runtime_handle,
                 execution_id=execution_context_id,
                 session_id=ac_session_id,
+                orchestrator_session_id=session_id,
                 result_summary=result_final_message or None,
                 success=success,
                 error=(
@@ -6087,6 +6300,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=dispatch_state.runtime_handle,
                 execution_id=execution_context_id,
                 session_id=dispatch_state.ac_session_id,
+                orchestrator_session_id=session_id,
                 success=False,
                 error=str(e),
             )

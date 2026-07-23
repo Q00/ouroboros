@@ -1,5 +1,6 @@
 """Runner wiring for declared project execution guidance."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -63,6 +64,35 @@ def test_empty_guidance_preserves_prompt_bytes() -> None:
     baseline = build_system_prompt(seed)
 
     assert build_system_prompt(seed, guidance_fragment="") == baseline
+
+
+@pytest.mark.asyncio
+async def test_resume_invocations_serialize_restored_runner_state(tmp_path: Path) -> None:
+    runner, _store = _runner(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def fake_resume(session_id: str, seed: Seed) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        entered.set()
+        await release.wait()
+        active -= 1
+        return session_id
+
+    runner._resume_session_impl = fake_resume  # type: ignore[method-assign]
+    first = asyncio.create_task(runner.resume_session("session-one", _seed()))
+    await entered.wait()
+    second = asyncio.create_task(runner.resume_session("session-two", _seed()))
+    await asyncio.sleep(0)
+    assert max_active == 1
+
+    release.set()
+    assert await first == "session-one"
+    assert await second == "session-two"
 
 
 def test_execution_contract_persists_declared_guidance(tmp_path: Path) -> None:

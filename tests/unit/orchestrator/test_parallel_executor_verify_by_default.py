@@ -1270,6 +1270,61 @@ async def test_final_workspace_revalidation_does_not_reuse_cached_command_result
 
 
 @pytest.mark.asyncio
+async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="stable", verify_command="exit 0"),
+        AcceptanceCriterionSpec(
+            description="mutating verifier",
+            verify_command=(
+                'python3 -c "from pathlib import Path; '
+                "Path('verify-side-effect.txt').write_text('side effect')\""
+            ),
+        ),
+    )
+    results = [
+        ACExecutionResult(
+            ac_index=0,
+            ac_content="stable",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        ),
+        ACExecutionResult(
+            ac_index=1,
+            ac_content="mutating verifier",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        ),
+    ]
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=results,
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert [result.outcome for result in revalidated] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+    ]
+    assert all("mutated the workspace" in (result.error or "") for result in revalidated)
+
+
+def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:
+    empty_directory = tmp_path / "expected-artifact-directory"
+    empty_directory.mkdir()
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    empty_directory.rmdir()
+
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
+@pytest.mark.asyncio
 async def test_final_workspace_revalidation_fails_closed_without_contract(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs("description-only AC")

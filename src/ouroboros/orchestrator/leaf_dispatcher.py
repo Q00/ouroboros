@@ -183,6 +183,7 @@ class LeafDispatcher:
                                 runtime_handle=state.runtime_handle,
                                 execution_id=execution_context_id,
                                 session_id=state.ac_session_id,
+                                orchestrator_session_id=session_id,
                             )
                             emitted_recovery_turn_ids.add(replacement_turn_id)
 
@@ -226,6 +227,7 @@ class LeafDispatcher:
                         runtime_handle=state.runtime_handle,
                         execution_id=execution_context_id,
                         session_id=persisted_session_id,
+                        orchestrator_session_id=session_id,
                     )
                     lifecycle_emitted = True
                     executor._remember_ac_runtime_handle(

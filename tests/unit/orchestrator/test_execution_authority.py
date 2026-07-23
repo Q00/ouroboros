@@ -1823,6 +1823,44 @@ async def test_terminal_plan_fills_every_durable_root() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_plan_ignores_other_session_attempts_before_validation() -> None:
+    session_id = "session-shared-target"
+    execution_id = "execution-shared"
+    malformed_other_session = BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "execution_id": execution_id,
+            "session_id": "session-shared-other",
+            "root_ac_index": 0,
+        },
+    )
+    target_attempt = _attempt_judged(session_id=session_id, execution_id=execution_id)
+    store = MagicMock()
+    store.replay = AsyncMock(
+        return_value=[_session_start(session_id=session_id, execution_id=execution_id, roots=[0])]
+    )
+    store.query_events = AsyncMock(
+        side_effect=lambda **kwargs: (
+            [malformed_other_session, target_attempt]
+            if kwargs.get("event_type") == "execution.ac.attempt_judged"
+            else []
+        )
+    )
+
+    plan = await collect_terminal_acceptance_plan(
+        session_id=session_id,
+        execution_id=execution_id,
+        event_store=store,
+        terminal_status="completed",
+    )
+
+    assert plan[0]["accepted"] is True
+    assert plan[0]["session_id"] == session_id
+
+
+@pytest.mark.asyncio
 async def test_terminal_plan_fails_when_session_replay_is_unreadable() -> None:
     store = MagicMock()
     store.replay = AsyncMock(side_effect=RuntimeError("database unavailable"))

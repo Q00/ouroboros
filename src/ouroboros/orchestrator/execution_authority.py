@@ -968,14 +968,25 @@ async def collect_terminal_acceptance_plan(
                 details={"session_id": session_id, "execution_id": execution_id},
             )
         if aggregate_id is not None and aggregate_id != execution_id:
+            # A shared execution aggregate may contain attempts from another
+            # orchestration session.  Query/replay selection must scope those
+            # records out before validating their payload.
+            continue
+        event_session_id = data.get("session_id")
+        event_execution_id = data.get("execution_id")
+        if event_session_id != session_id:
+            if event_session_id is None:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry is missing its session identity.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            # Telemetry for a different session is unrelated to this terminal
+            # acceptance plan, even when the execution aggregate is shared.
+            continue
+        if event_execution_id != execution_id:
             raise PersistenceError(
-                "Cancellation attempt telemetry has a mismatched aggregate identity.",
-                operation="collect_terminal_acceptance_plan",
-                details={"session_id": session_id, "execution_id": execution_id},
-            )
-        if data.get("execution_id") != execution_id or data.get("session_id") != session_id:
-            raise PersistenceError(
-                "Cancellation attempt telemetry belongs to a different execution or session.",
+                "Cancellation attempt telemetry has a mismatched execution identity.",
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             )
@@ -1009,15 +1020,36 @@ async def collect_terminal_acceptance_plan(
     for item in attempts:
         data = getattr(item, "data", {})
         event_type = getattr(item, "type", None)
+        aggregate_id = getattr(item, "aggregate_id", None)
+        if aggregate_id is not None and aggregate_id != execution_id:
+            continue
+        if not isinstance(data, Mapping):
+            raise PersistenceError(
+                "Cancellation attempt telemetry must contain a mapping payload.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        event_session_id = data.get("session_id")
+        event_execution_id = data.get("execution_id")
+        if event_session_id != session_id:
+            if event_session_id is None:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry is missing its session identity.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            continue
+        if event_execution_id != execution_id:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has a mismatched execution identity.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
         try:
             judgment = validate_attempt_judgment_payload(
                 data,
                 event_type=event_type,
-                aggregate_id=(
-                    getattr(item, "aggregate_id", None)
-                    if isinstance(getattr(item, "aggregate_id", None), str)
-                    else None
-                ),
+                aggregate_id=(aggregate_id if isinstance(aggregate_id, str) else None),
                 expected_execution_id=execution_id,
                 expected_session_id=session_id,
             )

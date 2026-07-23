@@ -145,10 +145,17 @@ def _event_belongs_to_linked_session(event: BaseEvent, snapshot: JobSnapshot) ->
     execution_id = snapshot.links.execution_id
     if not session_id or not execution_id:
         return False
-    if event.aggregate_id != execution_id:
-        return False
     data = event.data
-    return data.get("session_id") == session_id
+    if event.aggregate_id != execution_id and data.get("execution_id") != execution_id:
+        return False
+    orchestrator_session_id = data.get("orchestrator_session_id")
+    if orchestrator_session_id is not None:
+        return orchestrator_session_id == session_id
+    # Parent execution projections historically stored the orchestration
+    # session directly in ``session_id``. Child runtime lifecycle events must
+    # carry the explicit field above; without it, a child aggregate is not
+    # trusted as evidence for a parent job.
+    return event.aggregate_id == execution_id and data.get("session_id") == session_id
 
 
 _JOB_TTL = timedelta(hours=1)
@@ -1686,6 +1693,7 @@ class JobManager:
                 return None
             terminal_failure_events = [authoritative.terminal_event]
             failed_session_events: list[BaseEvent] = []
+            foreign_failed_session_events: list[BaseEvent] = []
             failed_outcomes = [
                 event
                 for event in authoritative.acceptance_events
@@ -1717,14 +1725,23 @@ class JobManager:
                     return None
                 terminal_failure_events.append(terminal_event)
 
-            failed_session_events = [
-                event
-                for event in await self._event_store.query_execution_related_events(
+            all_failed_session_events = list(
+                await self._event_store.query_execution_related_events(
                     snapshot.links.execution_id,
                     event_type="execution.session.failed",
                     limit=None,
                 )
+            )
+            failed_session_events = [
+                event
+                for event in all_failed_session_events
+                if _event_belongs_to_linked_session(event, snapshot)
+            ]
+            foreign_failed_session_events = [
+                event
+                for event in all_failed_session_events
                 if event.data.get("execution_id") == snapshot.links.execution_id
+                and not _event_belongs_to_linked_session(event, snapshot)
             ]
 
             raw_attempt_events = await self._event_store.query_events(
@@ -1741,6 +1758,7 @@ class JobManager:
                 )
             )
             failed_attempt_events: list[BaseEvent] = []
+            failed_legacy_outcome_events: list[BaseEvent] = []
             for event in raw_attempt_events:
                 if not _event_belongs_to_linked_session(event, snapshot):
                     continue
@@ -1759,6 +1777,8 @@ class JobManager:
                     return None
                 if not judgment.success:
                     failed_attempt_events.append(event)
+                    if event.type == "execution.ac.outcome_finalized":
+                        failed_legacy_outcome_events.append(event)
 
             final_acceptance_events = await self._event_store.query_events(
                 aggregate_id=snapshot.links.execution_id,
@@ -1776,13 +1796,15 @@ class JobManager:
                 # failure proof.
                 return None
 
-            # Provisional failed attempts are diagnostic only and must never
-            # determine terminal job disposition.  A dead owner with only
-            # attempt telemetry is interrupted by the owner-recovery path;
-            # only durable terminal/session failure evidence may become a
-            # linked MCP failure.
-            if not terminal_failure_events and (
-                not failed_session_events or not allow_nonterminal_evidence
+            # Current ``attempt_judged`` failures are diagnostic only and must
+            # never determine terminal job disposition. A dead owner with only
+            # that provisional telemetry is interrupted by owner recovery. The
+            # historical ``outcome_finalized`` alias remains a compatibility
+            # fallback for pre-Foundation-B sessions.
+            if (
+                not terminal_failure_events
+                and not failed_session_events
+                and (not failed_legacy_outcome_events or not allow_nonterminal_evidence)
             ):
                 return None
             failed_outcomes = failed_attempt_events
@@ -1790,7 +1812,8 @@ class JobManager:
             return None
 
         detail = None
-        for event in [*terminal_failure_events, *failed_session_events, *failed_outcomes]:
+        detail_events = [*terminal_failure_events, *failed_session_events, *failed_outcomes]
+        for event in detail_events:
             data = event.data
             for key in ("error", "error_message", "final_message", "message"):
                 value = data.get(key)
@@ -1799,6 +1822,19 @@ class JobManager:
                     break
             if detail:
                 break
+        if not detail and failed_outcomes and foreign_failed_session_events:
+            # A foreign child session never contributes failure evidence. Its
+            # diagnostic text may still explain a target-session failure that
+            # is already established by a target outcome-finalized event.
+            for event in foreign_failed_session_events:
+                data = event.data
+                for key in ("error", "error_message", "final_message", "message"):
+                    value = data.get(key)
+                    if isinstance(value, str) and value.strip():
+                        detail = value.strip()
+                        break
+                if detail:
+                    break
 
         base = (
             "Linked execution failed before the MCP job reached a terminal event "

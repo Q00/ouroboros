@@ -927,6 +927,7 @@ class ACRuntimeHandleManager:
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
         session_id: str | None = None,
+        orchestrator_session_id: str | None = None,
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
@@ -959,6 +960,7 @@ class ACRuntimeHandleManager:
                     runtime_handle.to_persisted_dict() if runtime_handle is not None else None
                 ),
                 "session_id": effective_session_id,
+                "orchestrator_session_id": orchestrator_session_id,
                 "server_session_id": server_session_id,
                 "success": success,
                 "result_summary": result_summary,
