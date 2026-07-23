@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 import pickle
 from threading import Event
 from types import SimpleNamespace
@@ -5244,6 +5245,104 @@ async def test_execute_handler_resumes_with_the_retained_process_local_runner(
         handler._process_local_resume_owners.clear()
         handler._process_local_owned_event_stores.clear()
         runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_retained_resume_restores_persisted_workspace_lock_when_worktree_flag_is_false(
+    tmp_path,
+) -> None:
+    """A retained resume cannot bypass a persisted workspace lock via ``use_worktree``."""
+    workspace = TaskWorkspace(
+        durable_id="retained-resume-lock",
+        repo_root=str(tmp_path),
+        repo_name="repo",
+        original_cwd=str(tmp_path),
+        effective_cwd=str(tmp_path),
+        worktree_path=str(tmp_path),
+        branch="test/retained-resume-lock",
+        lock_path=str(tmp_path / "retained-resume.lock"),
+    )
+    runner = _runner()
+    runner._task_workspace = workspace
+    tracker = await _prepare(
+        runner,
+        session_id="session-retained-resume-lock",
+        execution_id="exec-retained-resume-lock",
+    )
+    paused_tracker = _paused(tracker)
+    runner._release_task_workspace_for_identity(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+    )
+    assert not Path(workspace.lock_path).exists()
+
+    handler = ExecuteSeedHandler(event_store=_HandlerEventStore())
+    handler._remember_process_local_owner(paused_tracker, runner)
+    observer_repo = MagicMock()
+    observer_repo.reconstruct_session = AsyncMock(return_value=Result.ok(paused_tracker))
+
+    async def resume_with_lock(*_: object) -> Result:
+        # The effect boundary is the proof point: restoration must happen before
+        # the retained runner can execute any resumed work.
+        assert Path(workspace.lock_path).exists()
+        assert runner._task_workspace_lock_held is True
+        assert runner._task_workspace is not None
+        runner._task_workspace_users.add((tracker.session_id, tracker.execution_id))
+        return Result.ok(
+            OrchestratorResult(
+                success=False,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                final_message="Still paused",
+            )
+        )
+
+    try:
+        with (
+            patch.object(runner, "resume_session", AsyncMock(side_effect=resume_with_lock)),
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+                return_value=observer_repo,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                side_effect=AssertionError("retained resume must not construct a fresh runtime"),
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.resolve_dashboard_run_url",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": paused_tracker.session_id,
+                    "seed_content": yaml.safe_dump(_seed().to_dict()),
+                    "cwd": str(tmp_path),
+                    "use_worktree": False,
+                    "skip_qa": True,
+                },
+                synchronous=True,
+            )
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "paused"
+    finally:
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
+        handler._process_local_resume_handoffs.clear()
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._release_task_workspace_for_identity(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
         )

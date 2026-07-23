@@ -599,6 +599,10 @@ The Foundation A implementation must demonstrate all of the following:
 84. cancellation-marker acknowledgement retries a transient unlink failure up
     to the bounded retry limit and surfaces the final `OSError`; a terminal
     caller cannot report successful cleanup while the file-backed marker remains.
+85. a retained resume restores and reacquires every persisted task-workspace
+    lock before the retained runner can produce an effect, even when the
+    caller passes `use_worktree=false`; that flag cannot bypass authoritative
+    workspace exclusion, and missing restoration fails closed before claim.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

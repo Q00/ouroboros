@@ -1516,13 +1516,21 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 resume_blocked="process_local_authority_held_elsewhere",
                             )
                         )
-                    if use_worktree:
+                    # A persisted task workspace is authoritative for resume,
+                    # even when the caller omits ``use_worktree``.  That flag
+                    # controls provisioning of a *new* workspace; it must not
+                    # bypass reacquisition of the lock for a retained runner.
+                    # Otherwise the runner keeps the workspace object, claims
+                    # process-local authority, and only flips its in-memory
+                    # ``_task_workspace_lock_held`` bit while the durable lock
+                    # remains absent.
+                    persisted = TaskWorkspace.from_progress_dict(
+                        tracker.progress.get("workspace")
+                    )
+                    if use_worktree or persisted is not None:
                         if retained_owner is not None:
                             workspace_reservation_runner = retained_owner
                             workspace_reservation = retained_owner._reserve_task_workspace()
-                        persisted = TaskWorkspace.from_progress_dict(
-                            tracker.progress.get("workspace")
-                        )
                         try:
                             workspace = maybe_restore_task_workspace(
                                 session_id,
