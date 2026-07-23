@@ -1524,9 +1524,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # process-local authority, and only flips its in-memory
                     # ``_task_workspace_lock_held`` bit while the durable lock
                     # remains absent.
-                    persisted = TaskWorkspace.from_progress_dict(
-                        tracker.progress.get("workspace")
-                    )
+                    persisted = TaskWorkspace.from_progress_dict(tracker.progress.get("workspace"))
                     if use_worktree or persisted is not None:
                         if retained_owner is not None:
                             workspace_reservation_runner = retained_owner
