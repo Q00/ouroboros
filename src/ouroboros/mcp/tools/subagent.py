@@ -1171,8 +1171,8 @@ def _plugin_advisory_contract_section(
         return ""
     lane_lines = []
     data_policy: Any = None
-    data_contract: Any = None
     known_data_tools: Any = None
+    contract_blocks: list[str] = []
     for lane in advisory_fanout_contract.get("lanes") or ():
         if not isinstance(lane, Mapping):
             continue
@@ -1181,9 +1181,20 @@ def _plugin_advisory_contract_section(
             f"- {lane_id} (capability={lane.get('capability')}, "
             f"required={bool(lane.get('required'))})"
         )
+        # EVERY lane contract is rendered, not just the data lane's
+        # (bot-review round-9 probe): re-entry enforces any registered
+        # contract, so an additive lane's contract omitted here would make
+        # the promised v1 path unsatisfiable for the plugin child.
+        lane_contract = lane.get("answer_contract")
+        if isinstance(lane_contract, Mapping):
+            contract_id = str(lane_contract.get("contract_id") or "unversioned")
+            contract_blocks.append(
+                f"{lane_id} answer contract ({contract_id}, complete — fill this "
+                "form exactly; it is validated server-side at re-entry):\n"
+                + json.dumps(lane_contract, ensure_ascii=False)
+            )
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
-            data_contract = lane.get("answer_contract")
             known_data_tools = lane.get("known_data_tools")
     fanout_line = (
         f"fanout_id: {advisory_fanout_id}"
@@ -1191,7 +1202,9 @@ def _plugin_advisory_contract_section(
         else "fanout_id: (registration unavailable — skip re-entry this turn)"
     )
     policy_json = json.dumps(data_policy, ensure_ascii=False) if data_policy else "{}"
-    contract_json = json.dumps(data_contract, ensure_ascii=False) if data_contract else "{}"
+    contracts_section = (
+        "\n\n".join(contract_blocks) if contract_blocks else "(no lane carries an answer contract)"
+    )
     known_tools_line = (
         f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
         if isinstance(known_data_tools, list) and known_data_tools
@@ -1213,9 +1226,7 @@ lanes:
 data_context data_policy (enforce, do not just read):
 {policy_json}
 
-data_context answer contract (data_evidence_answer.v1, complete — fill this
-form exactly; it is validated server-side at re-entry):
-{contract_json}
+{contracts_section}
 
 After the advisory lanes run, submit one {{"key": <lane_id>, "content":
 <lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`,
@@ -3403,6 +3414,22 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                     f"evidence[{index}].{field_name}: claims forbidden operation "
                     f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
                 )
+        # An identifier-shaped source is the tool that WAS executed, so it
+        # gets the same mutating-verb check as proposal tool names
+        # (bot-review round-9 probe: source="delete_database"). Prose sources
+        # ("call center logs") are exempt from token matching — the SQL-shape
+        # scan above covers prose — because free text legitimately contains
+        # words like "call" or "update".
+        source = item.get("source")
+        if (
+            isinstance(source, str)
+            and not re.search(r"\s", source.strip())
+            and (verb := _mutating_tool_verb(source))
+        ):
+            errors.append(
+                f"evidence[{index}].source: names a mutating tool ({verb!r}); "
+                "the data lane is read-only"
+            )
     proposals = output.get("proposed_queries")
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
         if not isinstance(item, Mapping):

@@ -1972,7 +1972,13 @@ class SubmitFanoutResultsHandler:
                 MCPToolParameter(
                     name="session_id",
                     type=ToolInputType.STRING,
-                    description="Interview/lateral session id the fan-out belongs to.",
+                    description=(
+                        "Interview/lateral session id the fan-out belongs to. "
+                        "Effectively required: every current producer registers "
+                        "it, and omitting a registered identity is a "
+                        "correlation_mismatch. Schema-optional ONLY for legacy "
+                        "records registered without a session identity."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -1986,7 +1992,10 @@ class SubmitFanoutResultsHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "The result_correlation_key from the originating meta "
-                        "(e.g. 'context.persona' or 'code_facts')."
+                        "(e.g. 'context.persona' or 'code_facts'). Effectively "
+                        "required, like session_id: omitting a registered "
+                        "correlation key is a correlation_mismatch; "
+                        "schema-optional only for legacy identity-less records."
                     ),
                     required=False,
                 ),

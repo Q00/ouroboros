@@ -205,9 +205,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      interfaces, rollout, or system shape.
 
    The lane set can grow within v1 (see `lane_compatibility_rules`): dispatch
-   unknown lanes as-is or skip them, and dispatch unsupported capabilities
-   anyway — their no-op finding IS the completion signal, so never silently
-   drop a lane's result.
+   unknown lanes as-is, skipping only OPTIONAL unknown lanes — a required
+   unknown lane gates completion, so dispatch it generically (or submit its
+   no-op finding), never skip it. Dispatch unsupported capabilities anyway —
+   their no-op finding IS the completion signal, so never silently drop a
+   lane's result.
 
    Synthesize advisory results into a compact helper for the user: 2-3 answer
    options, one recommended draft, or a short "I found these ambiguities" note.

@@ -2072,6 +2072,65 @@ def test_unknown_lane_answer_contract_reaches_the_child_prompt() -> None:
     assert "generic Output section below is superseded" in prompt
 
 
+def test_executed_evidence_source_identifier_is_checked(tmp_path: Any) -> None:
+    """Executed evidence gets the same tool-identifier check as proposals.
+
+    Bot-review round-9 probe (PR #1703): ``source="delete_database"`` on an
+    executed evidence item completed and persisted. Identifier-shaped
+    sources are now verb-checked; prose sources stay exempt from token
+    matching so "call center logs" is not a false positive.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    mutating_source = _minimal_data_output("78% of MAU are on the free tier")
+    mutating_source["evidence"][0]["source"] = "delete_database"
+    errors = _data_evidence_boundary_violations(mutating_source)
+    assert any("mutating tool" in error for error in errors)
+
+    for prose_source in ("call center logs", "external metered warehouse", "update stream digest"):
+        clean = _minimal_data_output("78% of MAU are on the free tier")
+        clean["evidence"][0]["source"] = prose_source
+        assert _data_evidence_boundary_violations(clean) == [], prose_source
+
+
+def test_plugin_recipe_renders_every_lane_contract() -> None:
+    """Additive lane contracts ride the plugin child prompt (round-9 probe).
+
+    Re-entry enforces ANY registered contract, so the only prompt the bridge
+    delivers must carry every lane's contract — not just data_context's.
+    """
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+
+    contract = {
+        "lanes": [
+            {
+                "lane_id": "data_context",
+                "capability": "call_mcp",
+                "required": False,
+                "data_policy": {"read_only": True},
+                "answer_contract": {
+                    "contract_id": "data_evidence_answer.v1",
+                    "response_model_schema": {"type": "object"},
+                },
+            },
+            {
+                "lane_id": "future_lane",
+                "capability": "future_capability",
+                "required": True,
+                "answer_contract": {
+                    "contract_id": "future_answer.v1",
+                    "response_model_schema": {"type": "object"},
+                },
+            },
+        ],
+    }
+    section = _plugin_advisory_contract_section("fanout_abc", contract, "sess-plugin")
+    assert "data_evidence_answer.v1" in section
+    assert "future_answer.v1" in section
+    assert "future_lane answer contract" in section
+    assert "session_id: sess-plugin" in section
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
