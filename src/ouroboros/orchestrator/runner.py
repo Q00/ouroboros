@@ -2695,13 +2695,40 @@ class OrchestratorRunner:
         manufacturing an unowned durable RUNNING session.
         """
         last_error: object | None = None
+        acceptance_finalizations: list[dict[str, Any]] | None = None
+        try:
+            # Preparation failures happen before the executor has emitted any
+            # attempt telemetry.  The collector still reconstructs a complete
+            # rejecting plan from the immutable session root set, so a current
+            # session cannot become terminal with missing root decisions.
+            acceptance_finalizations = await collect_terminal_acceptance_plan(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                event_store=self._event_store,
+                terminal_status=SessionStatus.FAILED.value,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Fail closed when the durable telemetry/root contract is unreadable:
+            # omitting the plan makes current-format EventStore CAS reject the
+            # terminal transition and leaves a replayable pending intent.
+            log.warning(
+                "orchestrator.runner.prepare_terminal_plan_unavailable",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=str(exc),
+            )
         for attempt in range(3):
             try:
+                mark_failed_kwargs: dict[str, Any] = {}
+                if acceptance_finalizations is not None:
+                    mark_failed_kwargs["acceptance_finalizations"] = acceptance_finalizations
                 result = await self._session_repo.mark_failed(
                     tracker.session_id,
                     message,
                     dict(details),
-                    acceptance_finalizations=[],
+                    **mark_failed_kwargs,
                 )
             except (Exception, asyncio.CancelledError) as exc:
                 durable_status = await self._reconcile_durable_terminal_and_cleanup(
@@ -2719,7 +2746,7 @@ class OrchestratorRunner:
                         error_message=message,
                         error_details=dict(details),
                         messages_processed=tracker.messages_processed,
-                        acceptance_finalizations=[],
+                        acceptance_finalizations=acceptance_finalizations,
                     )
                     self._preserve_process_local_owner_for_retry(
                         session_id=tracker.session_id,
@@ -2747,7 +2774,7 @@ class OrchestratorRunner:
             error_message=message,
             error_details=dict(details),
             messages_processed=tracker.messages_processed,
-            acceptance_finalizations=[],
+            acceptance_finalizations=acceptance_finalizations,
         )
         return str(last_error)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -89,6 +89,15 @@ class JobSnapshot:
             JobStatus.CANCELLED,
             JobStatus.INTERRUPTED,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthoritativeSessionAcceptance:
+    """Validated terminal session plan and its atomically persisted events."""
+
+    terminal_status: str
+    terminal_event: BaseEvent
+    acceptance_events: tuple[BaseEvent, ...]
 
 
 def _safe_meta(value: Any) -> Any:
@@ -1289,6 +1298,187 @@ class JobManager:
         )
         return True
 
+    async def _read_authoritative_session_acceptance(
+        self,
+        snapshot: JobSnapshot,
+    ) -> _AuthoritativeSessionAcceptance | None:
+        """Validate the complete Foundation B terminal plan for one linked session.
+
+        ``None`` means that no Foundation B terminal plan is present. A present
+        but malformed, incomplete, mis-scoped, or partially persisted plan raises
+        ``PersistenceError`` so recovery fails closed instead of falling back to
+        provisional attempt telemetry.
+        """
+        session_id = snapshot.links.session_id
+        execution_id = snapshot.links.execution_id
+        if not session_id or not execution_id:
+            return None
+
+        session_events = await self._event_store.replay("session", session_id)
+        start_event = next(
+            (event for event in session_events if event.type == "orchestrator.session.started"),
+            None,
+        )
+        if start_event is None:
+            return None
+        if start_event.data.get("execution_id") != execution_id:
+            raise PersistenceError(
+                "Linked session start belongs to a different execution.",
+                operation="mcp_recover_authoritative_acceptance",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+
+        terminal_event = next(
+            (
+                event
+                for event in reversed(session_events)
+                if event.type
+                in {
+                    "orchestrator.session.completed",
+                    "orchestrator.session.failed",
+                    "orchestrator.session.cancelled",
+                }
+            ),
+            None,
+        )
+        if terminal_event is None or "acceptance_finalizations" not in terminal_event.data:
+            return None
+        terminal_status = {
+            "orchestrator.session.completed": "completed",
+            "orchestrator.session.failed": "failed",
+            "orchestrator.session.cancelled": "cancelled",
+        }[terminal_event.type]
+        raw_plan = terminal_event.data.get("acceptance_finalizations")
+        if not isinstance(raw_plan, list):
+            raise PersistenceError(
+                "Linked terminal session has a malformed acceptance plan.",
+                operation="mcp_recover_authoritative_acceptance",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+
+        expected_roots: set[int] | None = None
+        if ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY in start_event.data:
+            raw_roots = start_event.data[ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY]
+            if not isinstance(raw_roots, list):
+                raise PersistenceError(
+                    "Linked session has a malformed durable acceptance root set.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            expected_roots = set()
+            for raw_root in raw_roots:
+                if (
+                    isinstance(raw_root, bool)
+                    or not isinstance(raw_root, int)
+                    or raw_root < 0
+                    or raw_root in expected_roots
+                ):
+                    raise PersistenceError(
+                        "Linked session has an invalid durable acceptance root set.",
+                        operation="mcp_recover_authoritative_acceptance",
+                        details={"session_id": session_id, "execution_id": execution_id},
+                    )
+                expected_roots.add(raw_root)
+
+        planned_by_root: dict[int, dict[str, Any]] = {}
+        for raw_payload in raw_plan:
+            if not isinstance(raw_payload, Mapping):
+                raise PersistenceError(
+                    "Linked terminal acceptance plan contains a malformed entry.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            payload = dict(raw_payload)
+            try:
+                _generation, root = validate_acceptance_finalization_payload(
+                    payload,
+                    aggregate_id=execution_id,
+                )
+            except PersistenceError as exc:
+                raise PersistenceError(
+                    "Linked terminal acceptance plan contains invalid final evidence.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                ) from exc
+            if (
+                payload.get("session_id") != session_id
+                or payload.get("execution_id") != execution_id
+                or payload.get("terminal_status") != terminal_status
+            ):
+                raise PersistenceError(
+                    "Linked terminal acceptance plan is mis-scoped.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            existing = planned_by_root.get(root)
+            if existing is not None:
+                raise PersistenceError(
+                    "Linked terminal acceptance plan contains duplicate root decisions.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            planned_by_root[root] = payload
+
+        if expected_roots is not None and set(planned_by_root) != expected_roots:
+            raise PersistenceError(
+                "Linked terminal acceptance plan is incomplete for its durable root set.",
+                operation="mcp_recover_authoritative_acceptance",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "expected_root_indices": sorted(expected_roots),
+                    "planned_root_indices": sorted(planned_by_root),
+                },
+            )
+
+        all_final_events = await self._event_store.query_events(
+            aggregate_id=execution_id,
+            event_type="execution.ac.acceptance_finalized",
+            limit=None,
+        )
+        scoped_events = tuple(
+            event for event in all_final_events if event.data.get("session_id") == session_id
+        )
+        persisted_by_root: dict[int, dict[str, Any]] = {}
+        for acceptance_event in scoped_events:
+            try:
+                _generation, root = validate_acceptance_finalization_payload(
+                    acceptance_event.data,
+                    aggregate_id=acceptance_event.aggregate_id,
+                )
+            except PersistenceError as exc:
+                raise PersistenceError(
+                    "Linked session contains malformed persisted final acceptance.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                ) from exc
+            payload = dict(acceptance_event.data)
+            existing = persisted_by_root.get(root)
+            if existing is not None:
+                raise PersistenceError(
+                    "Linked session contains duplicate persisted final acceptance.",
+                    operation="mcp_recover_authoritative_acceptance",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            persisted_by_root[root] = payload
+
+        if persisted_by_root != planned_by_root:
+            raise PersistenceError(
+                "Linked terminal plan and persisted final acceptance set disagree.",
+                operation="mcp_recover_authoritative_acceptance",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "planned_root_indices": sorted(planned_by_root),
+                    "persisted_root_indices": sorted(persisted_by_root),
+                },
+            )
+        return _AuthoritativeSessionAcceptance(
+            terminal_status=terminal_status,
+            terminal_event=terminal_event,
+            acceptance_events=scoped_events,
+        )
+
     async def _derive_completed_execution_result(self, snapshot: JobSnapshot) -> str | None:
         """Return a terminal result when linked execution state proves completion.
 
@@ -1312,54 +1502,17 @@ class JobManager:
             # acceptance events atomically. The older execution.terminal
             # projection can still be missing after a crash, so recover from
             # that authoritative state instead of manufacturing INTERRUPTED.
-            session_id = snapshot.links.session_id
-            if not session_id:
+            try:
+                authoritative = await self._read_authoritative_session_acceptance(snapshot)
+            except PersistenceError:
                 return None
-            session_events = await self._event_store.replay("session", session_id)
-            session_completed = next(
-                (
-                    event
-                    for event in reversed(session_events)
-                    if event.type == "orchestrator.session.completed"
-                ),
-                None,
-            )
-            if session_completed is None:
+            if authoritative is None or authoritative.terminal_status != "completed":
                 return None
-            final_acceptance_events = await self._event_store.query_events(
-                aggregate_id=snapshot.links.execution_id,
-                event_type="execution.ac.acceptance_finalized",
-                limit=None,
-            )
-            if not final_acceptance_events:
-                # An explicit empty plan is authoritative for a valid zero-AC
-                # execution.  A missing plan remains inconclusive and must not
-                # be promoted to a completed MCP job.
-                if session_completed.data.get("acceptance_finalizations") == []:
-                    summary = session_completed.data.get("summary")
-                    if isinstance(summary, dict):
-                        final_message = summary.get("final_message")
-                        if isinstance(final_message, str) and final_message.strip():
-                            return final_message.strip()
-                    return "Execution complete"
+            if any(
+                event.data.get("accepted") is not True for event in authoritative.acceptance_events
+            ):
                 return None
-            for acceptance_event in final_acceptance_events:
-                try:
-                    validate_acceptance_finalization_payload(
-                        acceptance_event.data,
-                        aggregate_id=acceptance_event.aggregate_id,
-                    )
-                except PersistenceError:
-                    return None
-                data = acceptance_event.data
-                if (
-                    data.get("session_id") != session_id
-                    or data.get("execution_id") != snapshot.links.execution_id
-                    or data.get("terminal_status") != "completed"
-                    or data.get("accepted") is not True
-                ):
-                    return None
-            summary = session_completed.data.get("summary")
+            summary = authoritative.terminal_event.data.get("summary")
             if isinstance(summary, dict):
                 final_message = summary.get("final_message")
                 if isinstance(final_message, str) and final_message.strip():
@@ -1463,9 +1616,6 @@ class JobManager:
             if status not in {"failed", "cancelled", "interrupted"}:
                 return None
             terminal_failure_events.append(terminal_events[0])
-        if not terminal_failure_events and not allow_nonterminal_evidence:
-            return None
-
         failed_session_events = await self._event_store.query_execution_related_events(
             snapshot.links.execution_id,
             event_type="execution.session.failed",
@@ -1489,19 +1639,34 @@ class JobManager:
             event_type="execution.ac.acceptance_finalized",
             limit=None,
         )
+        scoped_final_acceptance_events = [
+            event
+            for event in final_acceptance_events
+            if event.data.get("session_id") == snapshot.links.session_id
+        ]
+        try:
+            authoritative = await self._read_authoritative_session_acceptance(snapshot)
+        except PersistenceError:
+            return None
+        if authoritative is not None:
+            if authoritative.terminal_status == "completed":
+                return None
+            terminal_failure_events.append(authoritative.terminal_event)
+            failed_outcomes = [
+                event
+                for event in authoritative.acceptance_events
+                if event.data.get("accepted") is False
+            ]
+        elif scoped_final_acceptance_events:
+            # A current-session final event without its complete atomic terminal
+            # plan is malformed historical state, not trustworthy failure proof.
+            return None
         # A final acceptance is the Final Gate's authoritative disposition.
         # Provisional failed attempts are diagnostic only and must not
         # override a later accepted final event during dead-owner recovery.
-        if final_acceptance_events:
-            failed_outcomes = [
-                event
-                for event in final_acceptance_events
-                if event.data.get("accepted") is False
-                or str(event.data.get("outcome") or "").casefold() == "failed"
-                or str(event.data.get("disposition") or "").casefold()
-                in {"rejected", "blocked", "cancelled"}
-            ]
         else:
+            if not terminal_failure_events and not allow_nonterminal_evidence:
+                return None
             failed_outcomes = [
                 event
                 for event in failed_attempt_events

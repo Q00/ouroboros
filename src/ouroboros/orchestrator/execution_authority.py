@@ -28,6 +28,7 @@ from typing import Any
 import uuid
 
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
@@ -802,8 +803,9 @@ async def collect_terminal_acceptance_plan(
     selects the latest provisional judgment for each observed root.  Read
     failures, malformed judgments, and conflicting duplicates fail closed so
     cancellation cannot commit a terminal winner without its exact decision
-    set. Preparation failures legitimately produce an empty plan; terminal
-    retries reconstruct a non-empty plan from the same durable attempt stream.
+    set. Current-format preparation failures reconstruct explicit rejecting
+    decisions for every durable root; zero-AC sessions use an explicit empty
+    plan. Terminal retries reconstruct the same plan from durable telemetry.
     """
     from ouroboros.core.errors import PersistenceError
     from ouroboros.persistence.event_store import acceptance_generation_id_for_session
@@ -826,51 +828,90 @@ async def collect_terminal_acceptance_plan(
 
     durable_root_indices: set[int] | None = None
     replay = getattr(event_store, "replay", None)
-    if callable(replay):
-        try:
-            session_events = await replay("session", session_id)
-        except Exception:
+    if not callable(replay):
+        raise PersistenceError(
+            "Cannot finalize a terminal session without readable session-start metadata.",
+            operation="collect_terminal_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        )
+    try:
+        replay_result = replay("session", session_id)
+        if inspect.isawaitable(replay_result):
+            session_events = await replay_result
+        elif isinstance(replay_result, list):
+            # A historical repository adapter exposed replay synchronously.
+            # Keep that compatibility only for the legacy path; the current
+            # EventStore implementation is asynchronous and therefore remains
+            # fail-closed on unreadable durable metadata below.
+            session_events = replay_result
+        else:
             session_events = None
-        if isinstance(session_events, list):
-            start_event = next(
-                (
-                    item
-                    for item in session_events
-                    if getattr(item, "type", None) == "orchestrator.session.started"
-                ),
-                None,
+    except Exception as exc:
+        raise PersistenceError(
+            "Cannot finalize a terminal session while session-start metadata is unreadable.",
+            operation="collect_terminal_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        ) from exc
+    if not isinstance(session_events, list):
+        # A legacy/mock repository may not implement session replay yet.  Keep
+        # that compatibility path only when no current-format root contract is
+        # available; a durable current session remains fail-closed below.
+        if expected_root_indices is not None:
+            raise PersistenceError(
+                "Session replay returned an invalid event stream.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
             )
-            if start_event is not None:
-                start_data = getattr(start_event, "data", {})
-                if not isinstance(start_data, Mapping):
+        session_events = []
+    start_event = next(
+        (
+            item
+            for item in session_events
+            if getattr(item, "type", None) == "orchestrator.session.started"
+        ),
+        None,
+    )
+    if start_event is not None:
+        start_data = getattr(start_event, "data", {})
+        if not isinstance(start_data, Mapping):
+            raise PersistenceError(
+                "Durable session-start metadata is malformed.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id},
+            )
+        if start_data.get("execution_id") != execution_id:
+            raise PersistenceError(
+                "Durable session-start execution identity does not match.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if _ACCEPTANCE_ROOT_INDICES_KEY in start_data:
+            raw_roots = start_data[_ACCEPTANCE_ROOT_INDICES_KEY]
+            if isinstance(raw_roots, (str, bytes, bytearray)) or not isinstance(
+                raw_roots, Iterable
+            ):
+                raise PersistenceError(
+                    "Durable acceptance root set is malformed.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id},
+                )
+            durable_root_indices = set()
+            durable_root_values: list[int] = []
+            for raw_root in raw_roots:
+                if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
                     raise PersistenceError(
-                        "Durable session-start metadata is malformed.",
+                        "Durable acceptance root set contains an invalid root.",
                         operation="collect_terminal_acceptance_plan",
                         details={"session_id": session_id},
                     )
-                raw_roots = start_data.get(_ACCEPTANCE_ROOT_INDICES_KEY)
-                if raw_roots is not None:
-                    if isinstance(raw_roots, (str, bytes, bytearray)) or not isinstance(
-                        raw_roots, Iterable
-                    ):
-                        raise PersistenceError(
-                            "Durable acceptance root set is malformed.",
-                            operation="collect_terminal_acceptance_plan",
-                            details={"session_id": session_id},
-                        )
-                    durable_root_indices = set()
-                    for raw_root in raw_roots:
-                        if (
-                            isinstance(raw_root, bool)
-                            or not isinstance(raw_root, int)
-                            or raw_root < 0
-                        ):
-                            raise PersistenceError(
-                                "Durable acceptance root set contains an invalid root.",
-                                operation="collect_terminal_acceptance_plan",
-                                details={"session_id": session_id},
-                            )
-                        durable_root_indices.add(raw_root)
+                durable_root_values.append(raw_root)
+                durable_root_indices.add(raw_root)
+            if len(durable_root_values) != len(durable_root_indices):
+                raise PersistenceError(
+                    "Durable acceptance root set contains duplicate roots.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
 
     attempts: list[Any] = []
     for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
@@ -895,6 +936,12 @@ async def collect_terminal_acceptance_plan(
                 attempts.extend(
                     item for item in replayed if getattr(item, "type", None) == event_type
                 )
+                continue
+            if durable_root_indices is None and expected_root_indices is None:
+                # Historical/mock stores without a readable execution stream
+                # cannot contribute observed roots; the terminal fallback plan
+                # remains explicit and is still validated by EventStore when a
+                # durable current session exists.
                 continue
             _LOG.warning(
                 "process_local_authority.cancellation_acceptance_scan_failed",
@@ -932,55 +979,58 @@ async def collect_terminal_acceptance_plan(
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             )
-        root = data.get("root_ac_index")
-        retry = data.get("retry_attempt")
         event_type = getattr(item, "type", None)
-        if (
-            isinstance(root, bool)
-            or not isinstance(root, int)
-            or root < 0
-            or isinstance(retry, bool)
-            or not isinstance(retry, int)
-            or retry < 0
-            or event_type not in event_priority
-        ):
+        if event_type not in event_priority:
             raise PersistenceError(
-                "Cancellation attempt telemetry has an invalid root or retry identity.",
+                "Cancellation attempt telemetry has an invalid event type.",
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
             )
-        success = data.get("success")
-        raw_outcome = data.get("outcome")
-        if not isinstance(success, bool) or not isinstance(raw_outcome, str):
+        try:
+            judgment = validate_attempt_judgment_payload(
+                data,
+                event_type=event_type,
+                aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                expected_execution_id=execution_id,
+                expected_session_id=session_id,
+            )
+        except ValueError as exc:
             raise PersistenceError(
-                "Cancellation attempt telemetry has an incomplete outcome contract.",
+                f"Cancellation attempt telemetry violates the attempt contract: {exc}",
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
-            )
-        if raw_outcome not in {
-            "succeeded",
-            "satisfied_externally",
-            "failed",
-            "blocked",
-            "invalid",
-            "cancelled",
-        } or success != (raw_outcome in {"succeeded", "satisfied_externally"}):
-            raise PersistenceError(
-                "Cancellation attempt telemetry has contradictory success/outcome fields.",
-                operation="collect_terminal_acceptance_plan",
-                details={"session_id": session_id, "execution_id": execution_id},
-            )
-        candidate = (retry, event_priority[event_type])
-        latest_by_root[root] = max(latest_by_root.get(root, (-1, -1)), candidate)
+            ) from exc
+        candidate = (judgment.retry_attempt, event_priority[event_type])
+        latest_by_root[judgment.root_ac_index] = max(
+            latest_by_root.get(judgment.root_ac_index, (-1, -1)), candidate
+        )
 
     selected_by_root: dict[int, list[Any]] = {}
     for item in attempts:
         data = getattr(item, "data", {})
-        root = data.get("root_ac_index")
+        event_type = getattr(item, "type", None)
+        try:
+            judgment = validate_attempt_judgment_payload(
+                data,
+                event_type=event_type,
+                aggregate_id=(
+                    getattr(item, "aggregate_id", None)
+                    if isinstance(getattr(item, "aggregate_id", None), str)
+                    else None
+                ),
+                expected_execution_id=execution_id,
+                expected_session_id=session_id,
+            )
+        except ValueError as exc:
+            raise PersistenceError(
+                f"Cancellation attempt telemetry violates the attempt contract: {exc}",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            ) from exc
+        root = judgment.root_ac_index
         if root not in latest_by_root:
             continue
-        event_type = getattr(item, "type", None)
-        candidate = (data.get("retry_attempt"), event_priority.get(event_type, -1))
+        candidate = (judgment.retry_attempt, event_priority.get(event_type, -1))
         if candidate == latest_by_root[root]:
             selected_by_root.setdefault(root, []).append(item)
 
@@ -1007,6 +1057,7 @@ async def collect_terminal_acceptance_plan(
 
     expected_roots: set[int] = set()
     if expected_root_indices is not None:
+        expected_root_values: list[int] = []
         for raw_root in expected_root_indices:
             if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
                 raise PersistenceError(
@@ -1014,13 +1065,31 @@ async def collect_terminal_acceptance_plan(
                     operation="collect_terminal_acceptance_plan",
                     details={"root_ac_index": raw_root},
                 )
+            expected_root_values.append(raw_root)
             expected_roots.add(raw_root)
+        if len(expected_root_values) != len(expected_roots):
+            raise PersistenceError(
+                "Terminal acceptance planning has duplicate expected roots.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
     if durable_root_indices is not None:
         if expected_root_indices is not None and expected_roots != durable_root_indices:
             raise PersistenceError(
                 "Terminal acceptance plan does not match the durable session root set.",
                 operation="collect_terminal_acceptance_plan",
                 details={"session_id": session_id, "execution_id": execution_id},
+            )
+        unexpected_roots = set(latest_by_root) - durable_root_indices
+        if unexpected_roots:
+            raise PersistenceError(
+                "Attempt telemetry contains roots outside the durable session root set.",
+                operation="collect_terminal_acceptance_plan",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "unexpected_root_indices": sorted(unexpected_roots),
+                },
             )
         expected_roots = durable_root_indices
 

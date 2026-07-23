@@ -142,17 +142,21 @@ class TestEventStoreAppend:
         *,
         session_id: str,
         execution_id: str,
+        acceptance_root_indices: list[int] | None = None,
     ) -> None:
+        data = {
+            "execution_id": execution_id,
+            "seed_id": "seed-acceptance",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        if acceptance_root_indices is not None:
+            data["acceptance_root_indices"] = acceptance_root_indices
         await event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
                 aggregate_type="session",
                 aggregate_id=session_id,
-                data={
-                    "execution_id": execution_id,
-                    "seed_id": "seed-acceptance",
-                    "start_time": datetime.now(UTC).isoformat(),
-                },
+                data=data,
             )
         )
 
@@ -361,6 +365,127 @@ class TestEventStoreAppend:
         assert [
             event.type for event in await event_store.replay("execution", payload["execution_id"])
         ] == ["execution.ac.acceptance_finalized"]
+
+    @pytest.mark.parametrize(
+        "roots",
+        [[], [0], [0, 2], [0, 1, 2]],
+    )
+    async def test_current_terminal_plan_requires_exact_root_set(
+        self,
+        event_store: EventStore,
+        roots: list[int],
+    ) -> None:
+        session_id = "sess-root-set"
+        execution_id = "exec-root-set"
+
+        def payload(root: int) -> dict[str, object]:
+            return self._acceptance_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    session_id, execution_id
+                ),
+                root_ac_index=root,
+                accepted=False,
+                disposition="failed",
+                outcome="failed",
+                terminal_status="failed",
+            ).data
+
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[0, 1],
+        )
+        terminal = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"acceptance_finalizations": [payload(root) for root in roots]},
+        )
+        with pytest.raises(PersistenceError, match="exactly match"):
+            await event_store.append(terminal)
+
+        assert [event.type for event in await event_store.replay("session", session_id)] == [
+            "orchestrator.session.started"
+        ]
+
+    async def test_current_zero_root_session_requires_explicit_empty_plan(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        session_id = "sess-zero-root-plan"
+        execution_id = "exec-zero-root-plan"
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[],
+        )
+
+        with pytest.raises(PersistenceError, match="explicit acceptance plan"):
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.completed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={},
+                )
+            )
+
+        assert (
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.completed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={"acceptance_finalizations": []},
+                )
+            )
+            is True
+        )
+
+    async def test_current_terminal_plan_accepts_exact_durable_root_set(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        session_id = "sess-exact-root-set"
+        execution_id = "exec-exact-root-set"
+        await self._seed_session_start(
+            event_store,
+            session_id=session_id,
+            execution_id=execution_id,
+            acceptance_root_indices=[0, 1],
+        )
+        plan = [
+            self._acceptance_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    session_id, execution_id
+                ),
+                root_ac_index=root,
+                accepted=False,
+                disposition="failed",
+                outcome="failed",
+                terminal_status="failed",
+            ).data
+            for root in (0, 1)
+        ]
+
+        assert (
+            await event_store.append(
+                BaseEvent(
+                    type="orchestrator.session.failed",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={"acceptance_finalizations": plan},
+                )
+            )
+            is True
+        )
+        assert len(await event_store.replay("execution", execution_id)) == 2
 
     async def test_terminal_acceptance_binds_execution_to_session_start(
         self, event_store: EventStore

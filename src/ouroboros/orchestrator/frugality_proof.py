@@ -52,6 +52,7 @@ from ouroboros.orchestrator.evidence.common import (
     execution_run_anchor,
     parse_retry_attempt,
     parse_root_ac_index,
+    validate_attempt_judgment_payload,
 )
 from ouroboros.orchestrator.evidence.common import (
     finite_number as _finite_number,
@@ -283,23 +284,32 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         if etype in {EVENT_AC_ATTEMPT_JUDGED, EVENT_AC_OUTCOME_FINALIZED}:
             run_key = execution_run_anchor(data)
             root_index = parse_root_ac_index(data)
-            attempt = parse_retry_attempt(data)
-            success = _strict_bool(data.get("success"))
-            is_decomposed = _strict_bool(data.get("is_decomposed"))
             if root_index is None:
                 continue
-            if attempt is None:
+            aggregate_id = (
+                event.get("aggregate_id")
+                if isinstance(event, Mapping)
+                else getattr(event, "aggregate_id", None)
+            )
+            try:
+                judgment = validate_attempt_judgment_payload(
+                    data,
+                    event_type=etype,
+                    aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                )
+            except ValueError:
                 # A malformed marker for a known root must poison admission for
                 # that root. Ignoring it would let the assembler fall back to an
                 # older successful marker and potentially PASS after the producer
                 # emitted a newer-but-corrupt authoritative outcome.
                 judged_invalid.add((run_key, root_index))
                 continue
+            attempt = judgment.retry_attempt
             # Preserve malformed booleans as ``None`` instead of dropping the
             # marker. If this is the latest root attempt, admission must fail closed
             # rather than falling back to an older successful marker.
             judged.setdefault((run_key, root_index), {}).setdefault(attempt, []).append(
-                (success, is_decomposed)
+                (judgment.success, judgment.is_decomposed)
             )
         elif etype == EVENT_AC_ACCEPTANCE_FINALIZED:
             run_key = execution_run_anchor(data)

@@ -722,6 +722,7 @@ class TestDeliverVerdict:
                 "type": EVENT_AC_ATTEMPT_JUDGED,
                 "data": {
                     "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
                     "root_ac_index": 0,
                     "retry_attempt": 0,
                     "attempt_number": 1,
@@ -1117,6 +1118,7 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
             "type": EVENT_AC_ATTEMPT_JUDGED,
             "data": {
                 "execution_id": run_id,
+                "session_id": f"session-{run_id}",
                 "root_ac_index": root_ac_index,
                 "retry_attempt": 0,
                 "attempt_number": 1,

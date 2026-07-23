@@ -91,6 +91,8 @@ def _triad_events(
         _evt(
             EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id=run,
+            execution_id=run,
+            session_id=f"session-{run}",
             root_ac_index=root_ac_index,
             retry_attempt=retry_attempt,
             attempt_number=retry_attempt + 1,
@@ -373,6 +375,8 @@ class TestAssembleTriads:
             _evt(
                 EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
                 attempt_number=2,
@@ -447,6 +451,8 @@ class TestAssembleTriads:
             _evt(
                 EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
                 attempt_number=2,
@@ -470,6 +476,8 @@ class TestAssembleTriads:
             _evt(
                 EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
                 attempt_number=2,
@@ -493,6 +501,8 @@ class TestAssembleTriads:
             _evt(
                 EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=0,
                 attempt_number=1,
@@ -513,6 +523,8 @@ class TestAssembleTriads:
         malformed = _evt(
             EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id="r1",
+            execution_id="r1",
+            session_id="session-r1",
             root_ac_index=0,
             retry_attempt=malformed_attempt,
             attempt_number=2,
@@ -523,6 +535,30 @@ class TestAssembleTriads:
         if malformed_attempt is None:
             malformed["data"].pop("retry_attempt")
         events.append(malformed)
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("missing_field", ["attempt_number", "is_decomposed"])
+    def test_missing_current_attempt_contract_field_fails_closed(
+        self,
+        missing_field: str,
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
+        marker["data"].pop(missing_field)
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_contradictory_attempt_success_and_outcome_fails_closed(self) -> None:
+        events = _triad_events("ac1", "r1")
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
+        marker["data"].update(success=True, outcome="failed")
 
         row = assemble_triads(events)[0]
 

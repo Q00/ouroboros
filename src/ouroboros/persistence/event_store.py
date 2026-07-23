@@ -74,6 +74,7 @@ _SESSION_TERMINAL_EVENT_TYPES = frozenset(
 )
 
 _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE = "execution.ac.acceptance_finalized"
+_ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
 _AC_ACCEPTANCE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _AC_ACCEPTANCE_OUTCOMES = frozenset(
     {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
@@ -368,6 +369,41 @@ def _validated_terminal_acceptance_events(event: BaseEvent) -> tuple[BaseEvent, 
         _acceptance_key_fields(acceptance_event)
         validated.append(acceptance_event)
     return tuple(validated)
+
+
+def _normalize_durable_acceptance_root_indices(
+    value: object,
+    *,
+    session_id: str,
+    operation: str,
+) -> frozenset[int]:
+    """Validate the immutable root set stored by a current-format session."""
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (list, tuple)):
+        raise PersistenceError(
+            "Durable acceptance root set must be a list of non-negative integers.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    normalized: set[int] = set()
+    for raw_root in value:
+        if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+            raise PersistenceError(
+                "Durable acceptance root set contains an invalid root index.",
+                operation=operation,
+                details={
+                    "session_id": session_id,
+                    "root_ac_index": raw_root,
+                    "acceptance_root_set_invalid": True,
+                },
+            )
+        normalized.add(raw_root)
+    if len(normalized) != len(value):
+        raise PersistenceError(
+            "Durable acceptance root set contains duplicate root indices.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    return frozenset(normalized)
 
 
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
@@ -875,6 +911,37 @@ class EventStore:
         # malformed envelope must not even transiently acquire a terminal or
         # acceptance winner that a caller could mistake for a committed CAS.
         acceptance_events = _validated_terminal_acceptance_events(event)
+        durable_root_indices = await self._resolve_acceptance_root_indices_for_session(
+            event.aggregate_id
+        )
+        if durable_root_indices is not None:
+            if (
+                "acceptance_finalizations" not in event.data
+                or event.data.get("acceptance_finalizations") is None
+            ):
+                raise PersistenceError(
+                    "Current-format terminal sessions require an explicit acceptance plan.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_plan_missing": True,
+                    },
+                )
+            plan_root_indices = {
+                int(acceptance_event.data["root_ac_index"])
+                for acceptance_event in acceptance_events
+            }
+            if plan_root_indices != durable_root_indices:
+                raise PersistenceError(
+                    "Terminal acceptance plan must exactly match the durable session root set.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "durable_root_indices": sorted(durable_root_indices),
+                        "plan_root_indices": sorted(plan_root_indices),
+                        "acceptance_root_set_conflict": True,
+                    },
+                )
         if acceptance_events:
             # The payload's self-consistent session/execution pair is not
             # sufficient: bind it to the immutable durable session-start
@@ -2256,6 +2323,53 @@ class EventStore:
                 if isinstance(execution_id, str) and execution_id:
                     return execution_id
             return None
+
+    async def _resolve_acceptance_root_indices_for_session(
+        self,
+        session_id: str,
+    ) -> set[int] | None:
+        """Return the immutable root set for current-format sessions.
+
+        A missing field is deliberately returned as ``None`` for historical
+        sessions.  Current sessions persist the field at publication time,
+        including an explicit empty set for a zero-AC execution; terminal CAS
+        then requires an exact plan match before it can win.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="resolve_acceptance_root_indices_for_session",
+            )
+
+        async with self._engine.begin() as conn:
+            query = (
+                select(events_table.c.payload)
+                .where(events_table.c.aggregate_type == "session")
+                .where(events_table.c.aggregate_id == session_id)
+                .where(events_table.c.event_type == "orchestrator.session.started")
+                .order_by(events_table.c.timestamp.asc())
+                .limit(1)
+            )
+            result = await conn.execute(query)
+            row = result.first()
+            if row is None:
+                return None
+            payload = row[0]
+            if not isinstance(payload, Mapping):
+                raise PersistenceError(
+                    "Durable session-start payload is malformed.",
+                    operation="resolve_acceptance_root_indices_for_session",
+                    details={"session_id": session_id},
+                )
+            if "acceptance_root_indices" not in payload:
+                return None
+            return set(
+                _normalize_durable_acceptance_root_indices(
+                    payload["acceptance_root_indices"],
+                    session_id=session_id,
+                    operation="resolve_acceptance_root_indices_for_session",
+                )
+            )
 
     async def _resolve_session_started_at(self, session_id: str) -> Any | None:
         """Return the persisted start timestamp for a session, if available."""

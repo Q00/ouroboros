@@ -360,6 +360,7 @@ class _EmitterHarness:
                         aggregate_id=run_id,
                         data={
                             "execution_id": run_id,
+                            "session_id": session_id,
                             "root_ac_index": 0,
                             "retry_attempt": 0,
                             "attempt_number": 1,

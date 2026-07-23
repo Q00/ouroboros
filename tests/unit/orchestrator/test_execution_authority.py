@@ -10,11 +10,14 @@ import weakref
 import pytest
 
 from ouroboros.backends import runtime_backend_choices
+from ouroboros.core.errors import PersistenceError
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
+    collect_terminal_acceptance_plan,
     execution_authority_boundary_contract,
 )
 import ouroboros.orchestrator.parallel_executor as parallel_executor_module
@@ -23,6 +26,45 @@ from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfi
 from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 from ouroboros.orchestrator.verifier import VerifierVerdict, structural_atomic_verifier
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
+
+
+def _session_start(*, session_id: str, execution_id: str, roots: list[int]) -> BaseEvent:
+    return BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "execution_id": execution_id,
+            "seed_id": "seed-foundation-b",
+            "acceptance_root_indices": roots,
+        },
+    )
+
+
+def _attempt_judged(
+    *,
+    session_id: str,
+    execution_id: str,
+    root: int = 0,
+    **overrides: object,
+) -> BaseEvent:
+    data: dict[str, object] = {
+        "execution_id": execution_id,
+        "session_id": session_id,
+        "root_ac_index": root,
+        "retry_attempt": 0,
+        "attempt_number": 1,
+        "success": True,
+        "outcome": "succeeded",
+        "is_decomposed": False,
+    }
+    data.update(overrides)
+    return BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
 
 
 class _Runtime:
@@ -1746,3 +1788,108 @@ async def test_executor_root_drift_rejects_before_decomposition_dispatch(
         )
 
     assert runtime.dispatched is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_plan_fills_every_durable_root() -> None:
+    session_id = "session-terminal-plan-roots"
+    execution_id = "execution-terminal-plan-roots"
+    attempt = _attempt_judged(session_id=session_id, execution_id=execution_id)
+    store = MagicMock()
+    store.replay = AsyncMock(
+        return_value=[
+            _session_start(session_id=session_id, execution_id=execution_id, roots=[0, 1])
+        ]
+    )
+    store.query_events = AsyncMock(
+        side_effect=lambda **kwargs: (
+            [attempt] if kwargs.get("event_type") == "execution.ac.attempt_judged" else []
+        )
+    )
+
+    plan = await collect_terminal_acceptance_plan(
+        session_id=session_id,
+        execution_id=execution_id,
+        event_store=store,
+        terminal_status="failed",
+        fallback_outcome="failed",
+    )
+
+    assert [item["root_ac_index"] for item in plan] == [0, 1]
+    assert plan[0]["final_retry_attempt"] == 0
+    assert plan[0]["outcome"] == "succeeded"
+    assert plan[0]["accepted"] is False
+    assert plan[1]["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_terminal_plan_fails_when_session_replay_is_unreadable() -> None:
+    store = MagicMock()
+    store.replay = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    store.query_events = AsyncMock(return_value=[])
+
+    with pytest.raises(PersistenceError, match="session-start metadata is unreadable"):
+        await collect_terminal_acceptance_plan(
+            session_id="session-unreadable-roots",
+            execution_id="execution-unreadable-roots",
+            event_store=store,
+            terminal_status="failed",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["attempt_number", "is_decomposed"])
+async def test_terminal_plan_rejects_incomplete_current_attempt_contract(
+    missing_field: str,
+) -> None:
+    session_id = "session-incomplete-attempt"
+    execution_id = "execution-incomplete-attempt"
+    attempt = _attempt_judged(session_id=session_id, execution_id=execution_id)
+    attempt.data.pop(missing_field)
+    store = MagicMock()
+    store.replay = AsyncMock(
+        return_value=[_session_start(session_id=session_id, execution_id=execution_id, roots=[0])]
+    )
+    store.query_events = AsyncMock(
+        side_effect=lambda **kwargs: (
+            [attempt] if kwargs.get("event_type") == "execution.ac.attempt_judged" else []
+        )
+    )
+
+    with pytest.raises(PersistenceError, match="attempt contract"):
+        await collect_terminal_acceptance_plan(
+            session_id=session_id,
+            execution_id=execution_id,
+            event_store=store,
+            terminal_status="failed",
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_plan_rejects_attempt_root_outside_durable_set() -> None:
+    session_id = "session-unexpected-attempt-root"
+    execution_id = "execution-unexpected-attempt-root"
+    attempt = _attempt_judged(
+        session_id=session_id,
+        execution_id=execution_id,
+        root=99,
+    )
+    store = MagicMock()
+    store.replay = AsyncMock(
+        return_value=[
+            _session_start(session_id=session_id, execution_id=execution_id, roots=[0, 1])
+        ]
+    )
+    store.query_events = AsyncMock(
+        side_effect=lambda **kwargs: (
+            [attempt] if kwargs.get("event_type") == "execution.ac.attempt_judged" else []
+        )
+    )
+
+    with pytest.raises(PersistenceError, match="outside the durable session root set"):
+        await collect_terminal_acceptance_plan(
+            session_id=session_id,
+            execution_id=execution_id,
+            event_store=store,
+            terminal_status="failed",
+        )
