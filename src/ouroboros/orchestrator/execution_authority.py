@@ -10,7 +10,7 @@ exact live object for this process; it is never made portable by introspection.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -790,6 +790,8 @@ async def collect_terminal_acceptance_plan(
     execution_id: str,
     event_store: Any,
     terminal_status: str,
+    expected_root_indices: Iterable[int] | None = None,
+    fallback_outcome: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the one terminal acceptance plan used by every terminal writer.
 
@@ -832,6 +834,19 @@ async def collect_terminal_acceptance_plan(
                 )
             )
         except Exception as exc:
+            # Some legacy/test stores expose replay but not the newer filtered
+            # query API.  Replay is still the same durable source of truth; use
+            # it before treating telemetry as unreadable.
+            replay = getattr(event_store, "replay", None)
+            try:
+                replayed = await replay("execution", execution_id) if callable(replay) else None
+            except Exception:
+                replayed = None
+            if isinstance(replayed, list):
+                attempts.extend(
+                    item for item in replayed if getattr(item, "type", None) == event_type
+                )
+                continue
             _LOG.warning(
                 "process_local_authority.cancellation_acceptance_scan_failed",
                 extra={"session_id": session_id, "execution_id": execution_id},
@@ -880,7 +895,6 @@ async def collect_terminal_acceptance_plan(
         if candidate == latest_by_root[root]:
             selected_by_root.setdefault(root, []).append(item)
 
-    plan: list[dict[str, Any]] = []
     canonical_outcomes = {
         "succeeded",
         "satisfied_externally",
@@ -889,21 +903,67 @@ async def collect_terminal_acceptance_plan(
         "invalid",
         "cancelled",
     }
-    for root in sorted(latest_by_root):
-        retry, _priority = latest_by_root[root]
-        normalized_outcomes: set[str] = set()
-        for item in selected_by_root.get(root, []):
-            data = getattr(item, "data", {})
-            raw_outcome = data.get("outcome")
-            if isinstance(raw_outcome, str) and raw_outcome in canonical_outcomes:
-                outcome = raw_outcome
-            elif (raw_outcome is None or raw_outcome == "") and isinstance(
-                data.get("success"), bool
-            ):
-                outcome = "succeeded" if data["success"] else "cancelled"
-            else:
+    if fallback_outcome is None:
+        fallback_outcome = {
+            "completed": "failed",
+            "failed": "blocked",
+            "cancelled": "cancelled",
+        }[terminal_status]
+    if fallback_outcome not in canonical_outcomes:
+        raise PersistenceError(
+            "Terminal acceptance planning has a non-canonical fallback outcome.",
+            operation="collect_terminal_acceptance_plan",
+            details={"fallback_outcome": fallback_outcome},
+        )
+
+    expected_roots: set[int] = set()
+    if expected_root_indices is not None:
+        for raw_root in expected_root_indices:
+            if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
                 raise PersistenceError(
-                    "Cancellation attempt telemetry has a non-canonical outcome.",
+                    "Terminal acceptance planning has an invalid expected root.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"root_ac_index": raw_root},
+                )
+            expected_roots.add(raw_root)
+
+    plan: list[dict[str, Any]] = []
+    for root in sorted(latest_by_root.keys() | expected_roots):
+        retry, _priority = latest_by_root.get(root, (0, -1))
+        selected = selected_by_root.get(root, [])
+        if not selected:
+            # A root can be decided without an attempt event (for example a
+            # dependency-blocked or externally-satisfied AC).  When the
+            # caller supplies the durable seed root set, retain a deterministic
+            # non-accepting decision rather than silently dropping that root.
+            retry = 0
+            outcome = fallback_outcome
+        else:
+            normalized_outcomes: set[str] = set()
+            for item in selected:
+                data = getattr(item, "data", {})
+                raw_outcome = data.get("outcome")
+                if isinstance(raw_outcome, str) and raw_outcome in canonical_outcomes:
+                    outcome = raw_outcome
+                elif (raw_outcome is None or raw_outcome == "") and isinstance(
+                    data.get("success"), bool
+                ):
+                    outcome = "succeeded" if data["success"] else "cancelled"
+                else:
+                    raise PersistenceError(
+                        "Cancellation attempt telemetry has a non-canonical outcome.",
+                        operation="collect_terminal_acceptance_plan",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "root_ac_index": root,
+                            "retry_attempt": retry,
+                        },
+                    )
+                normalized_outcomes.add(outcome)
+            if len(normalized_outcomes) != 1:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry has conflicting latest judgments.",
                     operation="collect_terminal_acceptance_plan",
                     details={
                         "session_id": session_id,
@@ -912,19 +972,7 @@ async def collect_terminal_acceptance_plan(
                         "retry_attempt": retry,
                     },
                 )
-            normalized_outcomes.add(outcome)
-        if len(normalized_outcomes) != 1:
-            raise PersistenceError(
-                "Cancellation attempt telemetry has conflicting latest judgments.",
-                operation="collect_terminal_acceptance_plan",
-                details={
-                    "session_id": session_id,
-                    "execution_id": execution_id,
-                    "root_ac_index": root,
-                    "retry_attempt": retry,
-                },
-            )
-        outcome = next(iter(normalized_outcomes))
+            outcome = next(iter(normalized_outcomes))
         accepted = terminal_status == "completed" and outcome in {
             "succeeded",
             "satisfied_externally",
@@ -959,6 +1007,7 @@ async def collect_cancellation_acceptance_plan(
     session_id: str,
     execution_id: str,
     event_store: Any,
+    expected_root_indices: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the cancellation plan used by every cancellation writer."""
     return await collect_terminal_acceptance_plan(
@@ -966,6 +1015,8 @@ async def collect_cancellation_acceptance_plan(
         execution_id=execution_id,
         event_store=event_store,
         terminal_status="cancelled",
+        expected_root_indices=expected_root_indices,
+        fallback_outcome="cancelled",
     )
 
 
@@ -988,6 +1039,15 @@ async def request_process_local_cancellation(
     session_id = getattr(tracker, "session_id", None)
     execution_id = getattr(tracker, "execution_id", None)
     progress = getattr(tracker, "progress", None)
+    expected_root_indices: tuple[int, ...] | None = None
+    if isinstance(progress, Mapping):
+        raw_total_acs = progress.get("total_acceptance_criteria")
+        if (
+            isinstance(raw_total_acs, int)
+            and not isinstance(raw_total_acs, bool)
+            and raw_total_acs >= 0
+        ):
+            expected_root_indices = tuple(range(raw_total_acs))
     authority = (
         progress.get("execution_contract", {}).get("foundation_a_authority")
         if isinstance(progress, Mapping) and isinstance(progress.get("execution_contract"), Mapping)
@@ -1165,6 +1225,7 @@ async def request_process_local_cancellation(
             session_id=session_id,
             execution_id=execution_id,
             event_store=getattr(session_repo, "_event_store", None),
+            expected_root_indices=expected_root_indices,
         )
         cancel_result = await session_repo.mark_cancelled_if_active(
             session_id=session_id,

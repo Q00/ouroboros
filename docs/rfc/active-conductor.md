@@ -603,7 +603,9 @@ Proactive briefings use existing relay `kind` values with structured `subtype`:
 - `progress_advanced / level_started`
 - `progress_advanced / ac_routing`
 - `progress_advanced / harness_changed`
-- `progress_advanced / ac_verified`
+- `progress_advanced / ac_attempt_judged`
+- `progress_advanced / ac_accepted`
+- `progress_advanced / ac_rejected`
 
 Default cadence:
 
@@ -612,7 +614,8 @@ Default cadence:
 - discovery: only on material target change;
 - level start/completion: once per level;
 - model/harness: initial dispatch and changes only;
-- AC completion: once with compact evidence;
+- provisional AC attempt judgment: once per retry attempt with compact evidence;
+- final AC acceptance/rejection: once per terminal root decision;
 - raw logs and unchanged heartbeats: never.
 
 The user can request an on-demand AC assurance view at any time. That view shows

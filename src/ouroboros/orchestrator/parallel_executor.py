@@ -260,6 +260,7 @@ from ouroboros.orchestrator.evidence_schema import (
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ExecutionAuthorityLiveBinding,
+    canonical_workspace_authority,
 )
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
@@ -2457,12 +2458,36 @@ class ParallelACExecutor:
                 load_result = self._checkpoint_store.load(seed_id)
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
-                    if cp.phase == "parallel_execution":
+                    checkpoint_state = cp.state if isinstance(cp.state, Mapping) else {}
+                    current_workspace_identity = canonical_workspace_authority(
+                        self._task_cwd
+                        or getattr(self._adapter, "working_directory", None)
+                        or os.getcwd()
+                    )
+                    checkpoint_matches_invocation = (
+                        cp.seed_id == seed_id
+                        and cp.phase == "parallel_execution"
+                        and checkpoint_state.get("session_id") == session_id
+                        and checkpoint_state.get("execution_id") == execution_id
+                        and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                    )
+                    if checkpoint_matches_invocation:
                         resume_from_level = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
+                        for idx, retry_attempt in checkpoint_state.get(
+                            "ac_retry_attempts", {}
+                        ).items():
+                            if (
+                                isinstance(retry_attempt, int)
+                                and not isinstance(retry_attempt, bool)
+                                and retry_attempt >= 0
+                            ):
+                                ac_retry_attempts[int(idx)] = retry_attempt
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
+                        for idx in checkpoint_state.get("blocked_indices", []):
+                            blocked_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
                         # Restore level contexts so subsequent levels
                         # have access to completed levels' output
@@ -2484,12 +2509,37 @@ class ParallelACExecutor:
                             restored_contexts=len(level_contexts),
                         )
                         # Reconstruct all_results for completed/failed/skipped ACs.
+                        restored_outcomes = checkpoint_state.get("ac_outcomes", {})
                         for prev_stage in execution_plan.stages[:resume_from_level]:
                             for ac_idx in self._get_stage_ac_indices(prev_stage):
                                 if ac_idx >= total_acs:
                                     continue
                                 status = ac_statuses.get(ac_idx, "pending")
-                                is_completed = status == "completed"
+                                raw_outcome = (
+                                    restored_outcomes.get(str(ac_idx))
+                                    if isinstance(restored_outcomes, Mapping)
+                                    else None
+                                )
+                                outcome = (
+                                    raw_outcome
+                                    if isinstance(raw_outcome, str)
+                                    and raw_outcome
+                                    in {
+                                        "succeeded",
+                                        "satisfied_externally",
+                                        "failed",
+                                        "blocked",
+                                        "invalid",
+                                    }
+                                    else (
+                                        "succeeded"
+                                        if status == "completed"
+                                        else "blocked"
+                                        if status == "skipped"
+                                        else "failed"
+                                    )
+                                )
+                                is_completed = outcome in {"succeeded", "satisfied_externally"}
                                 is_skipped = status == "skipped"
                                 all_results.append(
                                     ACExecutionResult(
@@ -2501,18 +2551,26 @@ class ParallelACExecutor:
                                         ),
                                         error=(
                                             "Skipped: dependency failed"
-                                            if is_skipped
+                                            if outcome == "blocked" or is_skipped
                                             else None
                                             if is_completed
                                             else "Failed (restored from checkpoint)"
                                         ),
                                         retry_attempt=ac_retry_attempts.get(ac_idx, 0),
+                                        outcome=ACExecutionOutcome(outcome),
                                     )
                                 )
                         self._console.print(
                             f"[cyan]Resuming from level {resume_from_level + 1} "
                             f"(checkpoint recovered, "
                             f"{len(level_contexts)} level context(s) restored)[/cyan]"
+                        )
+                    elif cp.phase == "parallel_execution":
+                        log.info(
+                            "parallel_executor.recovery.checkpoint_identity_mismatch",
+                            seed_id=seed_id,
+                            session_id=session_id,
+                            execution_id=execution_id,
                         )
             except Exception as e:
                 log.warning(
@@ -2707,6 +2765,12 @@ class ParallelACExecutor:
                     )
                     all_results.append(satisfied_result)
                     stage_ac_results.append(satisfied_result)
+                    await self._emit_ac_attempt_judged(
+                        result=satisfied_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     ac_statuses[ac_idx] = "completed"
                     completed_count += 1
                     level_success += 1
@@ -2730,6 +2794,12 @@ class ParallelACExecutor:
                     )
                     all_results.append(blocked_result)
                     stage_ac_results.append(blocked_result)
+                    await self._emit_ac_attempt_judged(
+                        result=blocked_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     blocked_indices.add(ac_idx)
                     ac_statuses[ac_idx] = "skipped"
                     log.info(
@@ -2838,6 +2908,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
 
                             log.error(
                                 "parallel_executor.ac.exception",
@@ -2873,6 +2949,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
                             log.error(
                                 "parallel_executor.ac.stall_abandoned",
                                 session_id=session_id,
@@ -3039,9 +3121,26 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "workspace_identity": canonical_workspace_authority(
+                                    self._task_cwd
+                                    or getattr(self._adapter, "working_directory", None)
+                                    or os.getcwd()
+                                ),
                                 "completed_levels": level_idx + 1,
                                 "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                                "ac_retry_attempts": {
+                                    str(k): v for k, v in ac_retry_attempts.items()
+                                },
+                                "ac_outcomes": {
+                                    str(result.ac_index): (
+                                        result.outcome.value
+                                        if result.outcome is not None
+                                        else ("succeeded" if result.success else "failed")
+                                    )
+                                    for result in all_results
+                                },
                                 "failed_indices": sorted(failed_indices),
+                                "blocked_indices": sorted(blocked_indices),
                                 "completed_count": completed_count,
                                 "level_contexts": serialize_level_contexts(level_contexts),
                                 "decomposition_decisions": {

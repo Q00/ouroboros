@@ -871,10 +871,29 @@ class CancelExecutionHandler:
 
             # Historical/non-Foundation-A sessions have no live capability to
             # protect, so retain their established direct cancellation path.
+            from ouroboros.orchestrator.execution_authority import (
+                collect_cancellation_acceptance_plan,
+            )
+
+            raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+            expected_root_indices = (
+                range(raw_total_acs)
+                if isinstance(raw_total_acs, int)
+                and not isinstance(raw_total_acs, bool)
+                and raw_total_acs >= 0
+                else None
+            )
+            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=tracker.session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+                expected_root_indices=expected_root_indices,
+            )
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id=tracker.session_id,
                 reason=reason,
                 cancelled_by="mcp_tool",
+                acceptance_finalizations=acceptance_finalizations,
             )
             if cancel_result.is_err:
                 return Result.err(

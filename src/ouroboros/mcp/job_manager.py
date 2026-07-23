@@ -1328,6 +1328,16 @@ class JobManager:
                 limit=None,
             )
             if not final_acceptance_events:
+                # An explicit empty plan is authoritative for a valid zero-AC
+                # execution.  A missing plan remains inconclusive and must not
+                # be promoted to a completed MCP job.
+                if session_completed.data.get("acceptance_finalizations") == []:
+                    summary = session_completed.data.get("summary")
+                    if isinstance(summary, dict):
+                        final_message = summary.get("final_message")
+                        if isinstance(final_message, str) and final_message.strip():
+                            return final_message.strip()
+                    return "Execution complete"
                 return None
             for acceptance_event in final_acceptance_events:
                 try:
@@ -2206,10 +2216,37 @@ class JobManager:
                 SessionStatus.CANCELLED,
             }
             if not latest_terminal:
-                cancel_result = await repo.mark_cancelled(
+                from ouroboros.orchestrator.execution_authority import (
+                    collect_cancellation_acceptance_plan,
+                )
+
+                raw_total_acs = latest_session.value.progress.get("total_acceptance_criteria")
+                expected_root_indices = (
+                    range(raw_total_acs)
+                    if isinstance(raw_total_acs, int)
+                    and not isinstance(raw_total_acs, bool)
+                    and raw_total_acs >= 0
+                    else None
+                )
+                acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                    session_id=snapshot.links.session_id,
+                    execution_id=snapshot.links.execution_id or latest_session.value.execution_id,
+                    event_store=self._event_store,
+                    expected_root_indices=expected_root_indices,
+                )
+                mark_cancelled = repo.mark_cancelled
+                mark_cancelled_kwargs: dict[str, Any] = {
+                    "reason": "Background job cancelled",
+                    "cancelled_by": "mcp_job_manager",
+                }
+                # Preserve compatibility with injected legacy repositories;
+                # the production SessionRepository accepts the plan-bearing
+                # terminal CAS above.
+                if "acceptance_finalizations" in inspect.signature(mark_cancelled).parameters:
+                    mark_cancelled_kwargs["acceptance_finalizations"] = acceptance_finalizations
+                cancel_result = await mark_cancelled(
                     snapshot.links.session_id,
-                    reason="Background job cancelled",
-                    cancelled_by="mcp_job_manager",
+                    **mark_cancelled_kwargs,
                 )
                 if cancel_result.is_err:
                     raise ValueError(

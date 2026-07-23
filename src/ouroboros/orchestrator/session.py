@@ -1507,6 +1507,19 @@ class SessionRepository:
                         session_id=tracker.session_id,
                         execution_id=tracker.execution_id,
                         event_store=self._event_store,
+                        expected_root_indices=(
+                            range(tracker.progress["total_acceptance_criteria"])
+                            if isinstance(
+                                tracker.progress.get("total_acceptance_criteria"),
+                                int,
+                            )
+                            and not isinstance(
+                                tracker.progress.get("total_acceptance_criteria"),
+                                bool,
+                            )
+                            and tracker.progress["total_acceptance_criteria"] >= 0
+                            else None
+                        ),
                     )
                     result = await self.mark_cancelled(
                         session_id=tracker.session_id,

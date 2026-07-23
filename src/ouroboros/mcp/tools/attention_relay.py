@@ -381,14 +381,10 @@ def _proactive_relays(
                     },
                 )
             )
-        elif (
-            event.type
-            in {
-                "execution.ac.attempt_judged",
-                "execution.ac.outcome_finalized",
-            }
-            and data.get("success") is True
-        ):
+        elif event.type in {
+            "execution.ac.attempt_judged",
+            "execution.ac.outcome_finalized",
+        }:
             relays.append(
                 _progress(
                     event,

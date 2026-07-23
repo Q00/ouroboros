@@ -20,7 +20,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -1821,19 +1821,41 @@ class OrchestratorRunner:
                 cause=PersistenceError("Cannot persist FAILED without the seed acceptance plan."),
             )
         reconciled_during_exception = False
-        acceptance_finalizations = (
-            self._build_terminal_acceptance_finalizations(
-                seed=seed,
-                parallel_result=None,
-                execution_id=execution_id,
-                session_id=session_id,
-                terminal_status=SessionStatus.FAILED.value,
-                default_outcome="failed",
-                execution_contract=execution_contract,
-            )
-            if seed is not None
-            else None
-        )
+        acceptance_finalizations: list[dict[str, Any]] | None = None
+        if seed is not None:
+            try:
+                # The exception path may run after one or more retries have
+                # already emitted durable attempt judgments.  Rebuild from
+                # that telemetry instead of fabricating retry-0/failed facts.
+                acceptance_finalizations = await collect_terminal_acceptance_plan(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    event_store=self._event_store,
+                    terminal_status=SessionStatus.FAILED.value,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                    fallback_outcome="failed",
+                )
+            except (Exception, asyncio.CancelledError) as planning_error:
+                if isinstance(planning_error, asyncio.CancelledError):
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    raise
+                self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                    execution_id=execution_id,
+                    status=SessionStatus.FAILED,
+                    error_message=str(error),
+                    error_type=type(error).__name__,
+                    messages_processed=messages_processed,
+                    acceptance_finalizations=None,
+                )
+                return None, self._terminal_persistence_pending_result(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    requested_status=SessionStatus.FAILED,
+                    cause=planning_error,
+                )
         try:
             durable_status = await self._persist_session_terminal_status(
                 session_id=session_id,
@@ -5075,10 +5097,34 @@ class OrchestratorRunner:
             )
 
         # Historical sessions have no live Foundation A capability to coordinate.
+        raw_total_acs = tracker.progress.get("total_acceptance_criteria")
+        expected_root_indices = (
+            range(raw_total_acs)
+            if isinstance(raw_total_acs, int)
+            and not isinstance(raw_total_acs, bool)
+            and raw_total_acs >= 0
+            else None
+        )
+        try:
+            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+                expected_root_indices=expected_root_indices,
+            )
+        except Exception as exc:
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+                cancellation_reason=reason,
+                cancelled_by=cancelled_by,
+            )
         cancel_result = await self._session_repo.mark_cancelled(
             session_id=session_id,
             reason=reason,
             cancelled_by=cancelled_by,
+            acceptance_finalizations=acceptance_finalizations,
         )
 
         if cancel_result.is_err:
@@ -5462,6 +5508,7 @@ class OrchestratorRunner:
         execution_id: str,
         messages_processed: int,
         start_time: datetime,
+        expected_root_indices: Iterable[int] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Handle a detected cancellation by marking the session and returning a result.
 
@@ -5575,6 +5622,7 @@ class OrchestratorRunner:
                 session_id=session_id,
                 execution_id=execution_id,
                 event_store=self._event_store,
+                expected_root_indices=expected_root_indices,
             )
         except Exception as exc:
             return self._cancellation_persistence_pending_result(
@@ -5622,6 +5670,7 @@ class OrchestratorRunner:
                     execution_id=execution_id,
                     messages_processed=messages_processed,
                     start_time=start_time,
+                    expected_root_indices=expected_root_indices,
                 )
             log.warning(
                 "orchestrator.runner.mark_cancelled_raised",
@@ -5662,6 +5711,7 @@ class OrchestratorRunner:
                     execution_id=execution_id,
                     messages_processed=messages_processed,
                     start_time=start_time,
+                    expected_root_indices=expected_root_indices,
                 )
             return self._cancellation_persistence_pending_result(
                 session_id=session_id,
@@ -6237,6 +6287,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
 
             # Build prompts with strategy. The fat-harness default path must use
@@ -6451,6 +6502,7 @@ class OrchestratorRunner:
                                     execution_id=exec_id,
                                     messages_processed=messages_processed,
                                     start_time=start_time,
+                                    expected_root_indices=range(len(seed.acceptance_criteria)),
                                 )
                                 break
 
@@ -6885,6 +6937,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     messages_processed=messages_processed,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             if await self._cleanup_if_durable_terminal(
                 session_id=tracker.session_id,
@@ -7102,6 +7155,7 @@ class OrchestratorRunner:
                 execution_id=exec_id,
                 messages_processed=0,
                 start_time=start_time,
+                expected_root_indices=range(len(seed.acceptance_criteria)),
             )
 
         try:
@@ -7134,6 +7188,7 @@ class OrchestratorRunner:
                 execution_id=exec_id,
                 messages_processed=parallel_result.total_messages,
                 start_time=start_time,
+                expected_root_indices=range(len(seed.acceptance_criteria)),
             )
 
         # Calculate duration
@@ -7632,6 +7687,7 @@ class OrchestratorRunner:
                         execution_id=tracker.execution_id,
                         messages_processed=tracker.messages_processed,
                         start_time=datetime.now(UTC),
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
                     )
             except asyncio.CancelledError:
                 self._release_process_local_authority(
@@ -7799,6 +7855,7 @@ class OrchestratorRunner:
                     execution_id=tracker.execution_id,
                     messages_processed=tracker.messages_processed,
                     start_time=datetime.now(UTC),
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
 
             if execution_contract_changed:
@@ -7977,6 +8034,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                                     execution_id=tracker.execution_id,
                                     messages_processed=messages_processed,
                                     start_time=start_time,
+                                    expected_root_indices=range(len(seed.acceptance_criteria)),
                                 )
                                 break
 
@@ -8291,6 +8349,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     messages_processed=messages_processed,
                     start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
             if await self._cleanup_if_durable_terminal(
                 session_id=session_id,
