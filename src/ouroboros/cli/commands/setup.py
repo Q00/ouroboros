@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Annotated, Literal
@@ -97,17 +98,77 @@ def _ensure_claude_mcp_entry() -> None:
     legacy timeout key.  Skips the file write when nothing changed.
     """
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print_warning(
+            f"Could not create {mcp_config_path.parent} — MCP registration skipped: {exc}"
+        )
+        return
 
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
+    try:
+        config_exists = mcp_config_path.exists()
+    except OSError as exc:
+        print_warning(f"Could not inspect {mcp_config_path} — leaving it untouched: {exc}")
+        return
 
-    mcp_data.setdefault("mcpServers", {})
+    mcp_data: dict[str, object] = {}
+    if config_exists:
+        try:
+            mcp_data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            print_warning(
+                f"Could not decode {mcp_config_path} as UTF-8 — leaving it untouched. "
+                "Fix the file encoding and re-run setup."
+            )
+            return
+        except json.JSONDecodeError:
+            print_warning(
+                f"Could not parse {mcp_config_path} — skipping MCP registration to avoid "
+                "overwriting existing settings. Fix the JSON syntax and re-run setup."
+            )
+            return
+        except OSError as exc:
+            print_warning(f"Could not read {mcp_config_path} — leaving it untouched: {exc}")
+            return
+        if not isinstance(mcp_data, dict):
+            print_warning(f"{mcp_config_path} top-level is not an object — leaving it untouched.")
+            return
 
-    existing = mcp_data["mcpServers"].get("ouroboros")
+    if "mcpServers" not in mcp_data:
+        servers: dict[str, object] = {}
+        mcp_data["mcpServers"] = servers
+    else:
+        raw_servers = mcp_data["mcpServers"]
+        if not isinstance(raw_servers, dict):
+            print_warning(
+                f"{mcp_config_path} 'mcpServers' section is not an object — leaving it untouched."
+            )
+            return
+        servers = raw_servers
+
+    if "ouroboros" not in servers:
+        existing: dict[str, object] | None = None
+    else:
+        raw_existing = servers["ouroboros"]
+        if not isinstance(raw_existing, dict):
+            print_warning(
+                f"{mcp_config_path} mcpServers.ouroboros is not an object — leaving it untouched."
+            )
+            return
+        existing = raw_existing
+        if "command" in existing and not isinstance(existing["command"], str):
+            print_warning(
+                f"{mcp_config_path} mcpServers.ouroboros.command is not a string — "
+                "leaving it untouched."
+            )
+            return
+
     detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
     needs_write = False
+    registered = False
+    removed_timeout = False
+    updated_entry = False
 
     if existing is None:
         if detected is None:
@@ -116,15 +177,15 @@ def _ensure_claude_mcp_entry() -> None:
                 "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
             )
             return
-        mcp_data["mcpServers"]["ouroboros"] = detected
+        servers["ouroboros"] = detected
         needs_write = True
-        print_success("Registered MCP server in ~/.claude/mcp.json")
+        registered = True
     else:
         # Remove legacy timeout key
         if "timeout" in existing:
             del existing["timeout"]
             needs_write = True
-            print_info("Removed legacy MCP timeout override.")
+            removed_timeout = True
 
         # Update entry to match currently detected install method, but only
         # for known standard commands. Custom entries (docker, nix, etc.) are
@@ -138,14 +199,25 @@ def _ensure_claude_mcp_entry() -> None:
                 existing["command"] = detected["command"]
                 existing["args"] = detected["args"]
                 needs_write = True
-                print_info("Updated MCP server entry to match current install method.")
+                updated_entry = True
 
         if not needs_write:
             print_info("MCP server already registered.")
 
     if needs_write:
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
+        try:
+            mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if config_exists else 0o644
+            _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2), mode=mode)
+        except (OSError, TypeError, ValueError) as exc:
+            print_warning(f"Could not write {mcp_config_path} — leaving it untouched: {exc}")
+            return
+
+        if registered:
+            print_success("Registered MCP server in ~/.claude/mcp.json")
+        if removed_timeout:
+            print_info("Removed legacy MCP timeout override.")
+        if updated_entry:
+            print_info("Updated MCP server entry to match current install method.")
 
 
 app = typer.Typer(
@@ -2542,6 +2614,8 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_name, path)
         try:
             os.chmod(path, mode)
