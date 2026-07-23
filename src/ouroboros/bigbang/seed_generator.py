@@ -575,7 +575,7 @@ ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: <constraint 1> | <constraint 2> | ... (escape literal pipes as \\|)
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -674,7 +674,7 @@ ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 GOAL: <clear goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+CONSTRAINTS: <constraint 1> | <constraint 2> | ... (escape literal pipes as \\|)
 ACCEPTANCE_CRITERIA:
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
@@ -803,8 +803,11 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
         # Parse constraints
         constraints: tuple[str, ...] = ()
         if "constraints" in requirements and requirements["constraints"]:
+            # Keep legacy pipe-delimited extraction while preserving escaped literal pipes.
             constraints = tuple(
-                c.strip() for c in requirements["constraints"].split("|") if c.strip()
+                c.replace(r"\|", "|").strip()
+                for c in re.split(r"(?<!\\)\|", requirements["constraints"])
+                if c.strip()
             )
 
         # Parse acceptance criteria
