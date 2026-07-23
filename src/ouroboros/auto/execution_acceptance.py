@@ -408,14 +408,28 @@ def _restore_surviving_acceptance_specs(
                 target = _AUTORESEARCH_CANONICAL_AC[canonical_index]
             else:
                 target = subject
-            transferred = _build_transferred_spec(criterion, target)  # type: ignore[arg-type]
             _pop(index)
-            if not _place_transferred_onto_emission(emissions, target, transferred):
-                emissions.append(((1, float(index)), transferred))
+            if not _place_transferred_onto_emission(
+                emissions,
+                target,
+                _build_transferred_spec(criterion, target),  # type: ignore[arg-type]
+            ):
+                # The target is occupied by a distinct contract (or absent):
+                # emit the source under its OWN unwrapped description so it stays
+                # uniquely reachable rather than colliding on the target text.
+                emissions.append(
+                    ((1, float(index)), _build_transferred_spec(criterion, subject))  # type: ignore[arg-type]
+                )
             continue
         _pop(index)
         emissions.append(((1, float(index)), criterion))
 
+    # Reconcile atomically: multiple passes (exact-canonical, canonicalizing
+    # collapse, contract transfer) can emit the same description more than once.
+    # Group by description and keep one criterion per DISTINCT identity so the
+    # result is loss-free, has no duplicate execution units, and is idempotent
+    # under re-normalization.
+    emissions = _reconcile_emissions(emissions)
     emissions.sort(key=lambda item: item[0])
     # Normalization is loss-free: it never deletes a distinct caller-authorized
     # contract to force description uniqueness. Two criteria that arrive sharing
@@ -423,6 +437,54 @@ def _restore_surviving_acceptance_specs(
     # a pre-existing boundary limitation for such inputs, not something to fix by
     # discarding a valid Seed contract here.
     return tuple(emission for _key, emission in emissions)
+
+
+def _reconcile_emissions(
+    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
+) -> list[tuple[tuple[int, float], AcceptanceCriterionInput]]:
+    """Keep one emission per (description, distinct identity), earliest position.
+
+    Restoration resolves equivalence across several passes, so the same
+    description can be emitted more than once (an exact-canonical source and a
+    canonicalizing component; a transfer and a passthrough).  Grouping by
+    description and collapsing byte-identical identities here — after every pass
+    — guarantees no duplicate execution unit shares an identity, while genuinely
+    distinct identities survive.  Choosing the earliest position per identity
+    makes the result stable and idempotent under re-normalization.
+    """
+    order: list[str] = []
+    groups: dict[str, list[tuple[tuple[int, float], AcceptanceCriterionInput]]] = {}
+    for entry in emissions:
+        description = ac_text(entry[1]).strip()
+        if description not in groups:
+            groups[description] = []
+            order.append(description)
+        groups[description].append(entry)
+
+    reconciled: list[tuple[tuple[int, float], AcceptanceCriterionInput]] = []
+    for description in order:
+        group = groups[description]
+        contract_entries = [entry for entry in group if _carries_explicit_contract(entry[1])]
+        if not contract_entries:
+            # All bare: one representative at the earliest position.
+            min_key = min(key for key, _item in group)
+            reconciled.append((min_key, group[0][1]))
+            continue
+        signatures: list[tuple[object, ...]] = []
+        chosen: list[tuple[tuple[int, float], AcceptanceCriterionInput]] = []
+        for key, item in contract_entries:
+            signature = _identity_signature(item)  # type: ignore[arg-type]
+            existing = next(
+                (i for i, s in enumerate(signatures) if s == signature),
+                None,
+            )
+            if existing is None:
+                signatures.append(signature)
+                chosen.append((key, item))
+            elif key < chosen[existing][0]:
+                chosen[existing] = (key, chosen[existing][1])
+        reconciled.extend(chosen)
+    return reconciled
 
 
 def _collapse_exact_match_criteria(
@@ -491,20 +553,29 @@ def _place_transferred_onto_emission(
     position and gains the contract, so the executor sees exactly one contracted
     AC instead of a bare requirement plus a duplicate contracted copy.
 
-    An emission that already carries explicit authority is only treated as
-    representing this source when their identities are equivalent; a *different*
-    identity (distinct command, artifacts, assertion, investment, or explicit
-    key) returns False so the caller preserves the source separately.  Comparison
-    is on explicit identity — an auto-derived key is not intended identity, so two
-    equivalent contracts differing only in a derived key still collapse once.
+    ALL emissions sharing ``target_text`` are scanned: if any already carries an
+    equivalent identity the source collapses onto it; otherwise a bare emission
+    (if any) is enriched with the contract.  Only when every same-text emission
+    carries a *distinct* contract does this return False, so the caller can
+    preserve the source under its own description rather than colliding on one.
+    Comparison is on explicit identity — an auto-derived key is not intended
+    identity, so two equivalent contracts differing only in a derived key still
+    collapse once.
     """
     target = target_text.strip()
-    for position, (key, item) in enumerate(emissions):
+    bare_position: int | None = None
+    for position, (_key, item) in enumerate(emissions):
         if ac_text(item).strip() != target:
             continue
         if isinstance(item, AcceptanceCriterionSpec) and _carries_explicit_contract(item):
-            return _autoresearch_identity_matches(item, transferred)
-        emissions[position] = (key, transferred)
+            if _autoresearch_identity_matches(item, transferred):
+                return True
+            continue
+        if bare_position is None:
+            bare_position = position
+    if bare_position is not None:
+        key, _item = emissions[bare_position]
+        emissions[bare_position] = (key, transferred)
         return True
     return False
 

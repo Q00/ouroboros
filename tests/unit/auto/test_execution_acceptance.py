@@ -973,6 +973,78 @@ def test_normalize_execution_acceptance_exact_canonical_source_keeps_sequence() 
     assert list(texts) == list(_AUTORESEARCH_CANONICAL_AC)
 
 
+def test_normalize_execution_acceptance_mixed_canonical_restatement_reachable() -> None:
+    """Blocker regression: a distinct restatement stays uniquely reachable.
+
+    An exact canonical baseline (cmd_a) plus a known restatement carrying a
+    different command (cmd_b) must not collapse onto one canonical description —
+    the restatement keeps its own description so `_seed_ac_spec_map` reaches both
+    contracts.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    reachable = {spec.verify_command for spec in _seed_ac_spec_map(normalized).values()}
+    assert "cmd_a" in reachable
+    assert "cmd_b" in reachable
+
+
+def test_normalize_execution_acceptance_equivalent_restatement_collapses_across_matches() -> None:
+    """Blocker regression: an equivalent contract collapses onto any matching AC.
+
+    With two canonical contracts (cmd_a, cmd_b) and a restatement equivalent to
+    the second (cmd_b), the restatement must collapse onto the existing cmd_b AC
+    rather than being emitted a third time — scanning every same-text emission,
+    not just the first.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    cmd_b_count = sum(
+        1
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "cmd_b"
+    )
+    assert cmd_b_count == 1
+
+
+def test_normalize_execution_acceptance_is_idempotent() -> None:
+    """Blocker regression: re-normalizing a normalized Seed is a fixed point."""
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    once = normalize_execution_acceptance(seed)
+    twice = normalize_execution_acceptance(once)
+    assert ac_texts(once.acceptance_criteria) == ac_texts(twice.acceptance_criteria)
+
+
 def test_normalize_execution_acceptance_wrapped_structured_runs_once() -> None:
     """Blocker regression: a wrapped structured requirement produces one contracted AC.
 
