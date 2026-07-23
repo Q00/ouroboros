@@ -83,6 +83,20 @@ class _SuccessfulRuntime(_CountingRuntime):
         yield AgentMessage(type="result", content="completed", data={"subtype": "success"})
 
 
+class _RecoverablePauseRuntime(_CountingRuntime):
+    """Runtime double that requests a durable usage-limit pause."""
+
+    runtime_backend = "codex_cli"
+
+    async def execute_task(self, **_: object):
+        self.execute_calls += 1
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+
+
 def _seed() -> Seed:
     return Seed(
         goal="Keep authority process-local",
@@ -174,6 +188,56 @@ async def test_prepare_session_registers_an_opaque_live_generation() -> None:
         tracker.execution_id,
         contract,
     )
+
+
+@pytest.mark.asyncio
+async def test_pause_persistence_failure_keeps_durable_running_owner(tmp_path) -> None:
+    """A failed PAUSED write cannot publish success or orphan durable RUNNING."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'pause-pending.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_RecoverablePauseRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-pause-pending",
+        session_id="session-pause-pending",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+
+    try:
+        with patch.object(
+            runner._session_repo,
+            "mark_paused",
+            AsyncMock(return_value=Result.err(PersistenceError("pause write unavailable"))),
+        ):
+            result = await runner.execute_precreated_session(
+                seed=_seed(),
+                tracker=tracker,
+                parallel=False,
+            )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "pause_persistence_pending"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.RUNNING
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+        session_events = await event_store.replay("session", tracker.session_id)
+        assert "orchestrator.session.paused" not in [event.type for event in session_events]
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
 
 
 @pytest.mark.asyncio

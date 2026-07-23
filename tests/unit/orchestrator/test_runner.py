@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.errors import ConfigError
+from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -46,6 +46,9 @@ from ouroboros.orchestrator.runner import (
     _seed_has_investment_metadata,
     build_system_prompt,
     build_task_prompt,
+    clear_cancellation,
+    is_cancellation_requested,
+    request_cancellation,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
@@ -1482,6 +1485,73 @@ class TestOrchestratorRunner:
         retrospective.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_execute_precreated_pause_persistence_failure_preserves_owner(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Sequential pause must not report success while durable state is still RUNNING."""
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+
+        tracker = SessionTracker.create(
+            "exec_pause_pending",
+            sample_seed.metadata.seed_id,
+            session_id="sess_pause_pending",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mark_paused = AsyncMock(
+            return_value=Result.err(PersistenceError("pause write unavailable"))
+        )
+
+        try:
+            with patch.object(runner._session_repo, "mark_paused", mark_paused):
+                result = await runner.execute_precreated_session(
+                    seed=sample_seed,
+                    tracker=tracker,
+                    parallel=False,
+                )
+
+            assert result.is_err
+            assert result.error.details["resume_blocked"] == "pause_persistence_pending"
+            assert result.error.details["requested_status"] == SessionStatus.PAUSED.value
+            assert runner._has_live_process_local_authority(
+                tracker.session_id,
+                tracker.execution_id,
+                tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert is_holder_alive(tracker.session_id)
+            assert tracker.execution_id not in runner.active_sessions
+            terminal_events = [
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if getattr(call.args[0], "type", None) == "execution.terminal"
+            ]
+            assert not terminal_events
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
     async def test_execute_precreated_mirrors_the_durable_terminal_cas_winner(
         self,
         runner: OrchestratorRunner,
@@ -2024,6 +2094,137 @@ class TestOrchestratorRunner:
             execution_id=running_tracker.execution_id,
         )
 
+    @pytest.mark.asyncio
+    async def test_resume_pause_persistence_failure_preserves_owner(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume pause persistence failure must not masquerade as a PAUSED result."""
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+
+        tracker = SessionTracker.create(
+            "exec_resume_pending",
+            "seed_resume",
+            session_id="sess_resume_pause_pending",
+        ).with_status(
+            SessionStatus.PAUSED,
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id="sess_resume_pause_pending",
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Codex rejected the resume command",
+                data={
+                    "subtype": "error",
+                    "recoverable": True,
+                    "recovery": {"kind": "resume_retry"},
+                },
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_paused",
+                    AsyncMock(return_value=Result.err(PersistenceError("pause write unavailable"))),
+                ),
+            ):
+                result = await runner.resume_session(tracker.session_id, sample_seed)
+
+            assert result.is_err
+            assert result.error.details["resume_blocked"] == "pause_persistence_pending"
+            assert runner._has_live_process_local_authority(
+                tracker.session_id,
+                tracker.execution_id,
+                tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert is_holder_alive(tracker.session_id)
+            assert tracker.execution_id not in runner.active_sessions
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
+    async def test_resume_pause_preserves_late_cancellation_marker(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A cancellation arriving during resumed pause publication is not acknowledged."""
+        tracker = SessionTracker.create(
+            "exec_resume_cancel",
+            "seed_resume",
+            session_id="sess_resume_pause_cancel",
+        ).with_status(
+            SessionStatus.PAUSED,
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id="sess_resume_pause_cancel",
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Codex rejected the resume command",
+                data={
+                    "subtype": "error",
+                    "recoverable": True,
+                    "recovery": {"kind": "resume_retry"},
+                },
+            )
+
+        async def mark_paused(*args: Any, **kwargs: Any) -> Result[None, PersistenceError]:
+            del args, kwargs
+            await request_cancellation(tracker.session_id)
+            return Result.ok(None)
+
+        mock_adapter.execute_task = mock_execute
+
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch.object(runner._session_repo, "mark_paused", mark_paused),
+            ):
+                result = await runner.resume_session(tracker.session_id, sample_seed)
+
+            assert result.is_ok
+            assert await is_cancellation_requested(tracker.session_id)
+        finally:
+            await clear_cancellation(tracker.session_id)
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
     def test_recoverable_failure_ignores_ordinary_429(
         self,
         runner: OrchestratorRunner,
@@ -2376,6 +2577,178 @@ class TestOrchestratorRunner:
         assert pause is not None
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
+
+    @pytest.mark.asyncio
+    async def test_parallel_pause_persistence_failure_preserves_owner(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel pause persistence failure must remain typed and retryable."""
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_pause_pending",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_pause_pending",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        generation, already_claimed = runner._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+        )
+        assert generation is not None
+        assert already_claimed is False
+        runner._register_session(tracker.execution_id, tracker.session_id)
+        message = AgentMessage(
+            type="result",
+            content="Quota window exhausted. Retry after 2 hours.",
+            data={"subtype": "error", "error_type": "OpenCodeError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(message,),
+                    final_message=message.content,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            total_messages=1,
+        )
+
+        try:
+            with (
+                patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+                patch(
+                    "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                    AsyncMock(return_value=parallel_result),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_paused",
+                    AsyncMock(return_value=Result.err(PersistenceError("pause write unavailable"))),
+                ),
+            ):
+                result = await runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                    force_sequential_levels=True,
+                )
+
+            assert result.is_err
+            assert result.error.details["resume_blocked"] == "pause_persistence_pending"
+            assert runner._has_live_process_local_authority(
+                tracker.session_id,
+                tracker.execution_id,
+                tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert is_holder_alive(tracker.session_id)
+            assert tracker.execution_id not in runner.active_sessions
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
+    async def test_parallel_pause_preserves_late_cancellation_marker(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """A cancellation arriving during parallel pause publication remains pending."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_pause_cancel",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_pause_cancel",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        generation, already_claimed = runner._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+        )
+        assert generation is not None
+        assert already_claimed is False
+        runner._register_session(tracker.execution_id, tracker.session_id)
+        message = AgentMessage(
+            type="result",
+            content="Quota window exhausted. Retry after 2 hours.",
+            data={"subtype": "error", "error_type": "OpenCodeError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(message,),
+                    final_message=message.content,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            total_messages=1,
+        )
+
+        async def mark_paused(*args: Any, **kwargs: Any) -> Result[None, PersistenceError]:
+            del args, kwargs
+            await request_cancellation(tracker.session_id)
+            return Result.ok(None)
+
+        try:
+            with (
+                patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+                patch(
+                    "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                    AsyncMock(return_value=parallel_result),
+                ),
+                patch.object(runner._session_repo, "mark_paused", mark_paused),
+            ):
+                result = await runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                    force_sequential_levels=True,
+                )
+
+            assert result.is_ok
+            assert await is_cancellation_requested(tracker.session_id)
+        finally:
+            await clear_cancellation(tracker.session_id)
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            runner._unregister_session(tracker.execution_id, tracker.session_id)
 
     @pytest.mark.asyncio
     async def test_resume_session_allows_paused_sessions(

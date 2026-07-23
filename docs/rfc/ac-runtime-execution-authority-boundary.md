@@ -431,6 +431,19 @@ The Foundation A implementation must demonstrate all of the following:
     identity-mismatch response crosses the same durable-publication boundary:
     definite absence retires, a committed start terminalizes, and ambiguous
     persistence retains the exact owner instead of guessing.
+37. a sequential recoverable failure reports `PAUSED` only after
+    `mark_paused()` succeeds; persistence failure returns typed
+    `pause_persistence_pending` while retaining the exact owner and lease.
+38. a parallel recoverable failure applies the same durable pause boundary and
+    cannot emit `execution.terminal(status=paused)` over durable `RUNNING`.
+39. a recoverable failure during resume applies the same durable pause boundary
+    and cannot return a resumable success while pause persistence is pending.
+40. a cross-process cancellation marker arriving during parallel pause
+    publication remains pending after the claim is released, so the next exact
+    owner terminalizes it before effects.
+41. a cross-process cancellation marker arriving during resumed pause
+    publication is likewise preserved; only a terminal lifecycle path may
+    acknowledge and clear it.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

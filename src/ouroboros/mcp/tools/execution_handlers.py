@@ -103,6 +103,7 @@ _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
         "typed_evidence_gate_required",
         "investment_authority_required",
         "cancellation_persistence_pending",
+        "pause_persistence_pending",
         "terminal_persistence_pending",
         # This error path already conditionally persisted its own terminal
         # result (or observed a concurrent terminal winner). A background

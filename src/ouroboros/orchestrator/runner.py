@@ -1412,6 +1412,32 @@ class OrchestratorRunner:
             )
         )
 
+    def _pause_persistence_pending_result(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        cause: object,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Return a typed pause failure without publishing a false PAUSED state."""
+        self._preserve_process_local_owner_for_retry(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        return Result.err(
+            OrchestratorError(
+                message="Failed to persist paused session state; process-local authority remains live",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "requested_status": SessionStatus.PAUSED.value,
+                    "cause": str(cause),
+                    "resume_blocked": "pause_persistence_pending",
+                    "pause_persistence_pending": True,
+                },
+            )
+        )
+
     @staticmethod
     def _requested_terminal_status_from_error(error: BaseException) -> SessionStatus | None:
         """Recover the original terminal intent from a typed persistence error."""
@@ -5743,7 +5769,7 @@ class OrchestratorRunner:
                     )
                 )
             elif recoverable_failure_pause is not None:
-                await self._session_repo.mark_paused(
+                pause_result = await self._session_repo.mark_paused(
                     tracker.session_id,
                     reason=recoverable_failure_pause.reason,
                     resume_hint=recoverable_failure_pause.resume_hint,
@@ -5751,6 +5777,12 @@ class OrchestratorRunner:
                     resume_after=recoverable_failure_pause.resume_after,
                     pause_kind=recoverable_failure_pause.pause_kind,
                 )
+                if pause_result.is_err:
+                    return self._pause_persistence_pending_result(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        cause=pause_result.error,
+                    )
 
                 self._console.print(
                     Panel(
@@ -6214,7 +6246,7 @@ class OrchestratorRunner:
                 )
             )
         elif recoverable_failure_pause is not None:
-            await self._session_repo.mark_paused(
+            pause_result = await self._session_repo.mark_paused(
                 tracker.session_id,
                 reason=recoverable_failure_pause.reason,
                 resume_hint=recoverable_failure_pause.resume_hint,
@@ -6222,6 +6254,12 @@ class OrchestratorRunner:
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
             )
+            if pause_result.is_err:
+                return self._pause_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    cause=pause_result.error,
+                )
 
             self._console.print(
                 Panel(
@@ -6348,7 +6386,8 @@ class OrchestratorRunner:
             tracker.session_id,
             release_liveness_lease=terminal_status != "paused",
         )
-        await clear_cancellation(tracker.session_id)
+        if terminal_status != "paused":
+            await clear_cancellation(tracker.session_id)
         if self._task_workspace is not None:
             release_lock(self._task_workspace.lock_path)
 
@@ -7014,7 +7053,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                 )
             elif recoverable_resume_failure is not None:
-                await self._session_repo.mark_paused(
+                pause_result = await self._session_repo.mark_paused(
                     session_id,
                     reason=recoverable_resume_failure.reason,
                     resume_hint=recoverable_resume_failure.resume_hint,
@@ -7022,6 +7061,12 @@ Note: This is a resumed session. Please continue from where execution was interr
                     resume_after=recoverable_resume_failure.resume_after,
                     pause_kind=recoverable_resume_failure.pause_kind,
                 )
+                if pause_result.is_err:
+                    return self._pause_persistence_pending_result(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        cause=pause_result.error,
+                    )
                 self._console.print(
                     Panel(
                         Text(final_message[:1000], style="yellow"),
@@ -7117,8 +7162,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                 duration_seconds=duration,
             )
 
-            # Clear the in-memory cancellation flag so it doesn't linger
-            await clear_cancellation(session_id)
+            # A paused owner has not acknowledged a cancellation that may have
+            # arrived after its final execution checkpoint. Preserve that
+            # marker so the next resume entry point terminalizes before effects.
+            if terminal_status != "paused":
+                await clear_cancellation(session_id)
 
             # Clean up session tracking
             if terminal_status != "paused":
