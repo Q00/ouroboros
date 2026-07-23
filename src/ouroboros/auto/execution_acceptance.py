@@ -9,6 +9,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     Seed,
     ac_text,
+    derive_semantic_ac_key,
 )
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
@@ -214,27 +215,51 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     return normalized_seed
 
 
-def _carries_explicit_contract(criterion: AcceptanceCriterionInput) -> bool:
-    """Return whether a criterion holds evidence a rewrite must never drop.
+def _has_explicit_semantic_key(criterion: AcceptanceCriterionSpec) -> bool:
+    """Return whether a criterion's semantic key was explicitly supplied.
 
-    ``Seed`` materializes every criterion — including legacy strings — into an
-    ``AcceptanceCriterionSpec`` with an auto-derived ``semantic_ac_key``.  That
-    derived key is not, on its own, a contract: only an explicit verification
-    command/artifact/assertion or a declared investment carries authority a
-    canonicalizing rewrite would silently discard.
+    ``Seed`` auto-derives a key for every criterion from its description and
+    contract, so a key that equals ``derive_semantic_ac_key`` carries no author
+    intent.  A key that *differs* from the derived value is an explicit identity
+    that runtime routing and recovery correlate events on — canonicalization
+    must never destroy it.
     """
-    return isinstance(criterion, AcceptanceCriterionSpec) and (
-        criterion.has_success_contract or criterion.investment is not None
+    return (
+        criterion.semantic_ac_key is not None
+        and criterion.semantic_ac_key != derive_semantic_ac_key(criterion)
     )
 
 
-def _contract_signature(criterion: AcceptanceCriterionSpec) -> tuple[object, ...]:
-    """Return the comparable verification contract, ignoring description/key."""
+def _carries_explicit_contract(criterion: AcceptanceCriterionInput) -> bool:
+    """Return whether a criterion holds authority a rewrite must never drop.
+
+    ``Seed`` materializes every criterion — including legacy strings — into an
+    ``AcceptanceCriterionSpec`` with an auto-derived ``semantic_ac_key``.  That
+    derived key is not, on its own, a contract.  But an explicit verification
+    command/artifact/assertion, a declared investment, *or* an explicitly
+    supplied semantic identity all carry authority a canonicalizing rewrite
+    would silently discard.
+    """
+    return isinstance(criterion, AcceptanceCriterionSpec) and (
+        criterion.has_success_contract
+        or criterion.investment is not None
+        or _has_explicit_semantic_key(criterion)
+    )
+
+
+def _identity_signature(criterion: AcceptanceCriterionSpec) -> tuple[object, ...]:
+    """Return the full identity a collapse must not conflate.
+
+    Two contract-bearing sources are safe to collapse only when both their
+    verification contract *and* their explicit identity match; either differing
+    makes them independent criteria.
+    """
     return (
         criterion.verify_command,
         criterion.expected_artifacts,
         criterion.output_assertion,
         criterion.investment,
+        criterion.semantic_ac_key if _has_explicit_semantic_key(criterion) else None,
     )
 
 
@@ -245,85 +270,118 @@ def _restore_surviving_acceptance_specs(
     """Reattach structured contracts to canonicalized criteria without loss.
 
     Normalization rewrites known-equivalent criteria to a canonical text.  That
-    rewrite must never conflate or drop a criterion's verification evidence, so
-    the restoration holds one invariant: **no criterion carrying an explicit
-    contract is silently merged away or stripped**.
+    rewrite must never conflate, drop, or reorder a criterion's verification
+    evidence or explicit identity.  The restoration therefore preserves three
+    properties simultaneously:
 
-    - A canonical text backed only by bare/legacy sources collapses to one
-      plain string (the deduplicated hello_auto observation AC).
-    - A canonical text backed by exactly one contract, or by several
-      byte-identical contracts, keeps that single contract under the canonical
-      description.
-    - A canonical text that would conflate *distinct* contracts refuses the
-      collapse: each contract-bearing source is preserved verbatim (its own
-      description and evidence), staying uniquely reachable through the
-      description-keyed persistence/evaluation boundary.
-    - Any contract-bearing source a normalizer replaced or dropped (e.g. the
-      autoresearch canonical rewrite, which this matcher does not model) is
-      re-appended verbatim so its evidence survives every canonicalization path.
+    - **Identity** — a source carrying an explicit contract or an explicitly
+      supplied ``semantic_ac_key`` is never merged away or stripped.  A canonical
+      text that would conflate *distinct* identities refuses the collapse and
+      keeps each source verbatim.  Bare/legacy equivalents (auto-derived keys,
+      no contract) still collapse to one plain string.
+    - **Order** — every emitted criterion is anchored to its originating source
+      position and re-sorted, so a refused collapse or an autoresearch
+      replacement can never move a contract ahead of or behind its siblings
+      (sequential execution reads tuple order as stage order).
+    - **Unique reachability** — no two emitted criteria share a description, so
+      the description-keyed persistence/evaluation map reaches every contract.
     """
-    remaining = list(original)
-    restored: list[AcceptanceCriterionInput] = []
-    for text in filtered:
+    remaining_indices = list(range(len(original)))
+
+    def _pop(index: int) -> tuple[AcceptanceCriterionInput, str]:
+        remaining_indices.remove(index)
+        return original[index]
+
+    # (anchor, item): anchor orders emissions by originating source position.
+    # Normalizer-injected texts (no source, e.g. autoresearch canonical ACs)
+    # anchor to their filtered position so they keep the normalizer's order.
+    emissions: list[tuple[float, AcceptanceCriterionInput]] = []
+    for filtered_pos, text in enumerate(filtered):
         canonical_indices = [
             index
-            for index, (criterion, original_text) in enumerate(remaining)
-            if isinstance(criterion, AcceptanceCriterionSpec)
-            and _structured_criterion_normalizes_to(original_text, text)
+            for index in remaining_indices
+            if isinstance(original[index][0], AcceptanceCriterionSpec)
+            and _structured_criterion_normalizes_to(original[index][1], text)
         ]
         if canonical_indices:
-            sources = [remaining[index] for index in canonical_indices]
-            contract_specs = [
-                criterion
-                for criterion, _original_text in sources
-                if _carries_explicit_contract(criterion)
+            identity_specs = [
+                original[index][0]
+                for index in canonical_indices
+                if _carries_explicit_contract(original[index][0])
             ]
-            distinct_contracts = {
-                _contract_signature(spec)  # type: ignore[arg-type]
-                for spec in contract_specs
+            distinct_identities = {
+                _identity_signature(spec)  # type: ignore[arg-type]
+                for spec in identity_specs
             }
-            if len(distinct_contracts) > 1:
-                # Conflating distinct contracts would strand every command but
-                # the first behind one canonical description.  Keep the
-                # contract-bearing sources verbatim; consume only the bare
-                # siblings the canonical text safely subsumes.
-                for index in reversed(canonical_indices):
-                    if not _carries_explicit_contract(remaining[index][0]):
-                        remaining.pop(index)
+            if len(distinct_identities) > 1:
+                # Conflating distinct identities would strand every command but
+                # the first behind one canonical description.  Keep each
+                # identity-bearing source verbatim at its own position; consume
+                # only the bare siblings the canonical text safely subsumes.
+                for index in list(canonical_indices):
+                    criterion, _text = _pop(index)
+                    if _carries_explicit_contract(criterion):
+                        emissions.append((float(index), criterion))
                 continue
-            for index in reversed(canonical_indices):
-                remaining.pop(index)
-            restored.append(
-                _collapse_canonical_acceptance_specs(
-                    [criterion for criterion, _original_text in sources],  # type: ignore[misc]
-                    description=text,
+            anchor = float(min(canonical_indices))
+            specs = [_pop(index)[0] for index in canonical_indices]
+            emissions.append(
+                (
+                    anchor,
+                    _collapse_canonical_acceptance_specs(
+                        specs,  # type: ignore[arg-type]
+                        description=text,
+                    ),
                 )
             )
             continue
 
         exact_index = next(
-            (
-                index
-                for index, (_criterion, original_text) in enumerate(remaining)
-                if original_text == text
-            ),
+            (index for index in remaining_indices if original[index][1] == text),
             None,
         )
         if exact_index is not None:
-            criterion, _original_text = remaining.pop(exact_index)
-            restored.append(criterion)
+            criterion, _text = _pop(exact_index)
+            emissions.append((float(exact_index), criterion))
             continue
 
-        restored.append(text)
+        # Normalizer-injected text with no originating source.  Anchor between
+        # integer source positions using the filtered offset so injected ACs
+        # keep their relative normalizer order without displacing sources.
+        emissions.append((filtered_pos - 0.5, text))
 
-    # Invariant backstop: never let a canonicalization path drop an explicit
-    # contract.  Sources unmatched above (e.g. autoresearch replacements or a
-    # refused distinct-contract collapse) are re-appended verbatim, uniquely
-    # reachable by their own descriptions.
-    for criterion, _original_text in remaining:
+    # Never let a canonicalization path drop an explicit contract/identity: any
+    # source a normalizer replaced or dropped (e.g. the autoresearch rewrite the
+    # matcher above does not model) is restored verbatim at its source anchor.
+    for index in list(remaining_indices):
+        criterion = original[index][0]
         if _carries_explicit_contract(criterion):
-            restored.append(criterion)
-    return tuple(restored)
+            _pop(index)
+            emissions.append((float(index), criterion))
+
+    emissions.sort(key=lambda item: item[0])
+    return _dedupe_by_description(emission for _anchor, emission in emissions)
+
+
+def _dedupe_by_description(
+    criteria: object,
+) -> tuple[AcceptanceCriterionInput, ...]:
+    """Keep the first criterion per description so every contract is reachable.
+
+    Persistence and MCP evaluation key contracts by description text, so two
+    criteria sharing a description leave the later one's contract unreachable.
+    Collapsing to the first occurrence guarantees a unique, deterministic
+    criterion-to-contract association through the whole boundary.
+    """
+    seen: set[str] = set()
+    deduped: list[AcceptanceCriterionInput] = []
+    for criterion in criteria:  # type: ignore[attr-defined]
+        key = ac_text(criterion).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(criterion)
+    return tuple(deduped)
 
 
 def _collapse_canonical_acceptance_specs(
@@ -331,21 +389,20 @@ def _collapse_canonical_acceptance_specs(
     *,
     description: str,
 ) -> AcceptanceCriterionInput:
-    """Collapse sources with an equivalent contract into one canonical AC.
+    """Collapse sources with an equivalent identity into one canonical AC.
 
-    Callers guarantee the sources hold at most one distinct explicit contract,
-    so this never merges conflicting evidence.  The lone contract (if any) is
-    kept under the canonical description and the first source's semantic
-    identity; ``expected_artifacts`` are an order-preserving union so equivalent
-    contracts stay byte-identical.  A collapse of purely bare legacy strings
-    carries no contract and degrades to a plain string, preserving legacy
-    persistence exactly.
+    Callers guarantee the sources hold at most one distinct explicit
+    contract/identity, so this never merges conflicting evidence.  The lone
+    contract (if any) is kept under the canonical description and its own
+    semantic identity; ``expected_artifacts`` are an order-preserving union so
+    equivalent contracts stay byte-identical.  A collapse of purely bare legacy
+    strings — no contract, no explicit identity — degrades to a plain string,
+    preserving legacy persistence exactly.
     """
-    contract_source = next(
+    identity = next(
         (spec for spec in specs if _carries_explicit_contract(spec)),
-        None,
+        specs[0],
     )
-    identity = contract_source or specs[0]
     artifacts: list[str] = []
     for spec in specs:
         for artifact in spec.expected_artifacts:
@@ -354,7 +411,11 @@ def _collapse_canonical_acceptance_specs(
     merged = identity.model_copy(
         update={"description": description, "expected_artifacts": tuple(artifacts)}
     )
-    if not merged.has_success_contract and merged.investment is None:
+    if (
+        not merged.has_success_contract
+        and merged.investment is None
+        and not _has_explicit_semantic_key(merged)
+    ):
         return merged.description
     return merged
 
