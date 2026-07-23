@@ -553,6 +553,11 @@ class SessionRepository:
 
             result = await self.reconstruct_session(snapshot.session_id)
             if result.is_ok:
+                if result.value.status not in (
+                    SessionStatus.RUNNING,
+                    SessionStatus.PAUSED,
+                ):
+                    continue
                 if self._usage_limit_pause_cleanup_deferred(
                     result.value,
                     now=now,

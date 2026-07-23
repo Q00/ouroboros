@@ -850,6 +850,31 @@ async def request_process_local_cancellation(
         )
         return reconstructed_status, True
 
+    async def _outcome_after_cancellation_publication() -> ProcessLocalCancellationOutcome:
+        """Reconcile a terminal winner that raced cooperative publication.
+
+        A claimed local owner or heartbeat-backed foreign owner can finish
+        between the initial ownership observation and publication of the
+        cancellation signal.  Reconstruct after publication so a late marker
+        cannot outlive an already-terminal aggregate or report a request to an
+        owner that has already retired.
+        """
+        reconstructed_status, terminal_winner = await _await_process_local_cleanup(
+            _reconcile_terminalizing_owner()
+        )
+        if terminal_winner:
+            return ProcessLocalCancellationOutcome(
+                (
+                    ProcessLocalCancellationDisposition.CANCELLED
+                    if reconstructed_status == "cancelled"
+                    else ProcessLocalCancellationDisposition.ALREADY_TERMINAL
+                ),
+                retired=True,
+            )
+        return ProcessLocalCancellationOutcome(
+            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+        )
+
     terminalization_started, authority_claimed = _begin_process_local_authority_terminalization(
         session_id,
         execution_id,
@@ -878,9 +903,7 @@ async def request_process_local_cancellation(
                 reason=reason,
                 cancelled_by=cancelled_by,
             )
-            return ProcessLocalCancellationOutcome(
-                ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
-            )
+            return await _outcome_after_cancellation_publication()
         # A local claimed runner owns the effect boundary.  It observes this
         # signal and persists cancellation before its own teardown.
         await request_cancellation(
@@ -888,9 +911,7 @@ async def request_process_local_cancellation(
             reason=reason,
             cancelled_by=cancelled_by,
         )
-        return ProcessLocalCancellationOutcome(
-            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
-        )
+        return await _outcome_after_cancellation_publication()
 
     if not terminalization_started and is_holder_alive(session_id):
         # Do not terminalize beneath a foreign process's active effects. The
@@ -909,9 +930,7 @@ async def request_process_local_cancellation(
                 ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
                 error=exc,
             )
-        return ProcessLocalCancellationOutcome(
-            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
-        )
+        return await _outcome_after_cancellation_publication()
 
     cancellation_request_published = False
     try:

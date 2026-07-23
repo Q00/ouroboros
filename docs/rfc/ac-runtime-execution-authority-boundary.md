@@ -534,6 +534,32 @@ The Foundation A implementation must demonstrate all of the following:
     reconstructed tracker before classification; late `RUNNING` progress cannot
     revive or report a durable `COMPLETED`, `FAILED`, or `CANCELLED` session as
     orphaned.
+66. runner-wide workspace exclusion is reference-counted by effectful session
+    identity: completion, failure, cancellation, pause, or persistence-pending
+    cleanup for one session cannot release a lock still used by another session,
+    and the last relinquishing identity releases it exactly once.
+67. snapshot-based orphan detection applies the same reconstructed-status check
+    as replay fallback, so an active-looking snapshot cannot append a durable
+    terminal tracker to the orphan set.
+68. a duplicate preparation using the exact same session and execution IDs on
+    the same runner cannot retire the older registered generation, its liveness
+    lease, or its workspace ownership when the new generation is rejected.
+69. workspace cleanup is idempotent across runner, handler, callback, and outer
+    `finally` layers: after the last identity releases the lock, repeated
+    cleanup for that identity cannot release the same lock again.
+70. direct cancellation that observes an already-terminal durable tracker
+    drains any matching retained authority and its final workspace ownership;
+    the early `already_terminal` return cannot leak live resources.
+71. cooperative cancellation rechecks durable status after publishing to both
+    a claimed local owner and a heartbeat-backed foreign owner; if completion
+    won the race, the late in-memory or file-backed signal is cleared and the
+    caller observes `already_terminal` instead of `cancellation_requested`.
+72. an in-flight preparation reserves runner-wide workspace exclusion before
+    its first await, so another session finishing during contract construction
+    cannot release the lock before the new identity is registered or aborted.
+73. a retained resume reserves workspace exclusion before restoring the
+    worktree and holds it until the resumed identity is claimed or the handoff
+    fails, so a sibling session cannot release the shared lock in that window.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
