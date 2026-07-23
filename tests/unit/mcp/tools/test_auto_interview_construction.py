@@ -1020,6 +1020,88 @@ def test_auto_handler_run_constructs_and_invokes_authoring_interviewer_path(
     assert constructed_handler.suppress_tool_use_prompt_cues is True
 
 
+def test_auto_handler_wires_answer_refiner_factory_result_into_driver(
+    tmp_path: Path,
+) -> None:
+    """``AutoHandler._run`` must pass ``build_answer_refiner()``'s result into the
+    driver, not drop it.
+
+    The suite-wide conftest guard stubs ``build_answer_refiner`` to ``None`` (no
+    real CLI spawn); this test re-patches it to a sentinel and proves the
+    consumer→driver wiring so the guard cannot silently mask a broken hand-off.
+    """
+    sentinel_refiner = object()
+    engine = _FakeInterviewEngine(state_dir=tmp_path)
+    supplied_handler = InterviewHandler(
+        interview_engine=engine, llm_backend="claude", data_dir=tmp_path
+    )
+    handler = AutoHandler(
+        interview_handler=supplied_handler,
+        store=None,
+        llm_backend="claude",
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_pipeline(self, state):  # type: ignore[no-untyped-def]
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            runtime_backend=state.runtime_backend,
+            opencode_mode=state.opencode_mode,
+        )
+
+    with (
+        patch(
+            "ouroboros.mcp.tools.auto_handler.build_answer_refiner",
+            return_value=sentinel_refiner,
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.backend_supports_tool_envelope",
+            return_value=True,
+        ),
+        patch(
+            "ouroboros.mcp.tools.authoring_handlers.resolve_llm_backend",
+            side_effect=lambda backend: backend or "claude",
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.resolve_auto_stage_runtime_plan",
+            return_value=AutoStageRuntimePlan(
+                default=StageRuntime("opencode", "plugin"),
+                interview=StageRuntime("opencode", "plugin"),
+                execute=StageRuntime("opencode", "plugin"),
+                evaluate=StageRuntime("opencode", "plugin"),
+                reflect=StageRuntime("opencode", "plugin"),
+            ),
+        ),
+        patch(
+            "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+            new=_capture_pipeline,
+        ),
+    ):
+        result = asyncio.run(
+            handler.handle(
+                {
+                    "goal": "Wire the answer refiner",
+                    "cwd": str(tmp_path),
+                    "max_interview_rounds": 1,
+                    "skip_run": True,
+                }
+            )
+        )
+
+    assert result.is_ok, result.error
+    assert captured["pipeline"].interview_driver.answer_refiner is sentinel_refiner
+
+
 def test_mocked_auto_interviewer_flow_returns_plain_text_question(
     tmp_path: Path,
 ) -> None:

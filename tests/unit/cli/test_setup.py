@@ -16,6 +16,7 @@ import yaml
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
 import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
+    _codex_uses_profile_v2,  # real fn bound at import; bypasses the autouse probe guard
     _display_repos_table,
     _ensure_opencode_mcp_entry,
     _find_opencode_config,
@@ -42,7 +43,7 @@ class TestCodexSetup:
         completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
-            assert setup_cmd._codex_uses_profile_v2("/usr/local/bin/codex") is True
+            assert _codex_uses_profile_v2("/usr/local/bin/codex") is True
 
     def test_codex_profile_v2_detection_for_legacy_split_profile_help(self) -> None:
         """Codex 0.133 alpha keeps --profile legacy even when --profile-v2 exists."""
@@ -56,7 +57,7 @@ class TestCodexSetup:
         completed = subprocess.CompletedProcess(["codex", "--help"], 0, stdout=help_text, stderr="")
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
-            assert setup_cmd._codex_uses_profile_v2("/Applications/Codex.app/codex") is False
+            assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""

@@ -12,7 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.cli import opencode_config as _opencode_config_mod
 from ouroboros.cli.opencode_config import find_opencode_config, opencode_config_dir
+
+# Real probe captured at import, before the suite-wide spawn guard replaces the
+# module attribute — this class tests the probe itself (with subprocess.run
+# mocked per test), so it must run the real function rather than the guard stub.
+_REAL_DEBUG_PATHS_CONFIG_DIR = _opencode_config_mod._debug_paths_config_dir
 
 _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
@@ -139,6 +145,21 @@ class TestFindOpencodeConfig:
 class TestOpencodeConfigDir:
     """Tests for active OpenCode config-directory resolution."""
 
+    @pytest.fixture
+    def real_debug_paths_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Opt-in: undo the suite-wide ``_debug_paths_config_dir`` spawn guard.
+
+        Restore the real probe ONLY for tests that also mock ``subprocess.run``,
+        so no real OpenCode CLI is ever executed. Autouse restoration would be
+        unsafe: the darwin/XDG-fallback tests below do not mock ``subprocess.run``
+        nor clear ``OUROBOROS_OPENCODE_CLI_PATH``/``OPENCODE_CLI_PATH``, so an
+        externally configured executable would actually run during the probe.
+        They keep the conftest guard (probe → ``None``) instead.
+        """
+        monkeypatch.setattr(
+            _opencode_config_mod, "_debug_paths_config_dir", _REAL_DEBUG_PATHS_CONFIG_DIR
+        )
+
     def test_honors_opencode_config_dir_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -151,7 +172,7 @@ class TestOpencodeConfigDir:
         assert result == custom
 
     def test_uses_debug_paths_config_when_available(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_debug_paths_probe: None
     ) -> None:
         """The OpenCode CLI-reported config dir is authoritative."""
         reported = tmp_path / ".config" / "opencode"
@@ -171,7 +192,7 @@ class TestOpencodeConfigDir:
         assert run.call_args.args[0][:3] == ["/bin/opencode", "debug", "paths"]
 
     def test_uses_persisted_opencode_cli_path_for_debug_paths(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_debug_paths_probe: None
     ) -> None:
         """Post-setup cleanup/uninstall use the configured OpenCode binary."""
         reported = tmp_path / "active" / "opencode"
@@ -196,7 +217,7 @@ class TestOpencodeConfigDir:
         assert run.call_args.args[0][:3] == ["/configured/bin/opencode", "debug", "paths"]
 
     def test_does_not_query_path_opencode_without_configured_cli(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_debug_paths_probe: None
     ) -> None:
         """Avoid targeting a different OpenCode install from PATH after setup."""
         monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)

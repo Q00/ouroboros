@@ -1,8 +1,12 @@
 """Pytest configuration for Ouroboros."""
 
+import atexit
 import inspect
 import os
+from pathlib import Path
+import shutil
 import sys
+import tempfile
 
 import pytest
 import pytest_asyncio
@@ -20,6 +24,57 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 # effects, non-deterministic URL in responses). Force it OFF by default; tests that
 # exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
 os.environ["OUROBOROS_DASHBOARD"] = "0"
+
+
+# ── Hermetic home isolation (before collection) ──────────────────────────────
+# Ouroboros resolves its state root two ways: ``Path.home()`` AND
+# ``os.path.expanduser("~")`` (e.g. cli/commands/{cancel,run,job,resume,tui}.py
+# build the default ``EventStore`` DB path via ``expanduser``). ``$HOME`` is the
+# single chokepoint both go through — ``Path.home()`` calls ``expanduser("~")``
+# internally — so redirecting ``$HOME`` isolates config, the default DB, logs,
+# and import-time constants (e.g. ``tui.DEFAULT_DB_PATH``) in one move, and
+# subprocesses spawned by tests inherit the isolated home instead of the real
+# one. We set it at conftest import — *before* collection — so it also covers
+# effects the per-test fixture cannot reach (module-level constants, a logging
+# handler opening ``~/.ouroboros/logs/ouroboros.log``, ``config.loader`` reading
+# ``~/.ouroboros/.env`` at import).
+#
+# External tools that legitimately need the real home get an explicit location:
+# ``uv build`` (exercised by the wheel-packaging test) keeps its real cache via
+# ``UV_CACHE_DIR``. git fixtures set per-repo identity, so no global git config
+# is required under the isolated home.
+_REAL_HOME = Path(os.path.expanduser("~"))
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="ouroboros-test-home-"))
+atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
+os.environ.setdefault("UV_CACHE_DIR", str(_REAL_HOME / ".cache" / "uv"))
+os.environ["HOME"] = str(_SESSION_HOME)
+# Exposed so tests can assert import-time constants were captured under the
+# isolated home rather than the developer's real ``~``.
+os.environ["_OUROBOROS_TEST_SESSION_HOME"] = str(_SESSION_HOME)
+
+
+@pytest.fixture(autouse=True)
+def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
+    """Give each test its own home dir on top of the session-wide baseline set
+    above, so per-test runtime state does not bleed across tests.
+
+    Runtime-backend resolution and the default ``EventStore`` DB path resolve
+    through ``get_config_dir()`` / ``expanduser`` → ``$HOME``. Two concrete
+    failure modes this prevents:
+
+    * Runtime-inference tests read the developer's real ``config.yaml``
+      ``runtime_profile`` (e.g. ``interview: codex``) and fail locally with
+      ``codex != opencode`` while passing on CI's empty home — the classic
+      "passes on CI, fails on my machine" split.
+    * A no-arg ``EventStore()`` writes into a single shared ``ouroboros.db``;
+      under ``pytest -n`` a per-test home keeps that off any shared file.
+
+    Tests that need a specific home still win: their own
+    ``monkeypatch.setenv("HOME", ...)`` / ``patch("pathlib.Path.home", ...)`` is
+    applied after this fixture.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -80,6 +135,60 @@ def block_runner_real_llm_adapter(monkeypatch):
             )
 
         monkeypatch.setattr(runner_mod, "create_llm_adapter", _blocked_create_llm_adapter)
+
+
+@pytest.fixture(autouse=True)
+def block_interview_answer_refiner_cli_spawn(monkeypatch):
+    """Stop the auto interview's answer refiner from spawning real agent CLIs.
+
+    ``build_answer_refiner()`` builds an ``LLMAnswerRefiner`` from the configured
+    interview backend via ``ouroboros.providers.create_llm_adapter``. When a
+    matching CLI (claude, ...) is installed, the safe-default synthesis path then
+    spawns it for a REAL completion per open section — ~4 ``claude`` subprocesses
+    and ~13s in a single otherwise-mocked auto test locally, while CI (no CLI
+    auth) simply degrades the refiner to ``None``.
+
+    Force the refiner OFF by default. Its own documented fallback is
+    deterministic-only answering (``build_answer_refiner`` returns ``None`` when
+    the provider is unavailable), so this preserves behavior and makes local runs
+    match CI. Tests that exercise the refiner inject an ``LLMAnswerRefiner``
+    directly or re-patch after this fixture and win.
+
+    Patched in the consuming modules (where the name is bound at import) and
+    gated on sys.modules so tests that never import them don't pay.
+    """
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_answer_refiner"):
+            monkeypatch.setattr(mod, "build_answer_refiner", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def block_setup_probe_cli_spawns(monkeypatch):
+    """Stop ``ooo setup`` capability probes from spawning real codex/opencode CLIs.
+
+    ``_codex_uses_profile_v2`` spawns ``codex --help`` and ``_debug_paths_config_dir``
+    spawns ``opencode debug paths`` to sniff installed-CLI capabilities. On a
+    machine where those CLIs happen to be installed the probe result — and thus
+    the setup tests' behavior — depends on the real binary's output, so the same
+    test can branch differently across machines (the "passes on CI, fails on my
+    machine" split). Pin both to their documented CLI-unavailable fallback
+    (``False`` / ``None``), which is exactly the behavior on a clean CI with no
+    such CLI on PATH. Tests that exercise the probe re-patch after this fixture
+    and win.
+
+    Note: this deliberately does NOT touch runtime adapters (e.g. the zcode/codex
+    CLI runtimes) that exec a caller-provided CLI path — those tests build a stub
+    binary under ``tmp_path`` and executing it IS the behavior under test.
+
+    Gated on sys.modules so tests that never import these modules don't pay.
+    """
+    setup_mod = sys.modules.get("ouroboros.cli.commands.setup")
+    if setup_mod is not None and hasattr(setup_mod, "_codex_uses_profile_v2"):
+        monkeypatch.setattr(setup_mod, "_codex_uses_profile_v2", lambda *_a, **_k: False)
+    opencode_mod = sys.modules.get("ouroboros.cli.opencode_config")
+    if opencode_mod is not None and hasattr(opencode_mod, "_debug_paths_config_dir"):
+        monkeypatch.setattr(opencode_mod, "_debug_paths_config_dir", lambda *_a, **_k: None)
 
 
 @pytest_asyncio.fixture(autouse=True)

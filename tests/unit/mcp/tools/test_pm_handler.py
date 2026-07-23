@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -238,9 +239,17 @@ class TestPrdMetaFileLocation:
     alongside interview state files (AC 6)."""
 
     def test_default_data_dir_is_ouroboros_data(self) -> None:
-        """_DATA_DIR points to ~/.ouroboros/data/."""
-        expected = Path.home() / ".ouroboros" / "data"
-        assert expected == _DATA_DIR
+        """_DATA_DIR points to ``<home>/.ouroboros/data/``.
+
+        ``_DATA_DIR`` is a module-level constant captured at import time. conftest
+        redirects ``$HOME`` to a throwaway session home *before* collection, so
+        the constant is captured under that isolated home — never the developer's
+        real ``~``. Assert exactly that, which also proves the pre-collection
+        isolation held (the live per-test ``Path.home()`` differs, so we compare
+        against the recorded session home rather than it).
+        """
+        session_home = Path(os.environ["_OUROBOROS_TEST_SESSION_HOME"])
+        assert session_home / ".ouroboros" / "data" == _DATA_DIR
 
     def test_meta_path_uses_session_id_in_filename(self) -> None:
         """_meta_path produces pm_meta_{session_id}.json naming."""

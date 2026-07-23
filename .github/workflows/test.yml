@@ -56,7 +56,7 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
+          uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
