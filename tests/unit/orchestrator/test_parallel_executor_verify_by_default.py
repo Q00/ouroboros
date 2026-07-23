@@ -1237,6 +1237,57 @@ async def test_apply_verify_gate_fails_artifacts_only_ac(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_final_workspace_revalidation_does_not_reuse_cached_command_result(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path / "final-verify-count.txt"
+    command = (
+        "python3 -c \"from pathlib import Path; p=Path('final-verify-count.txt'); "
+        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+        'raise SystemExit(0 if n == 0 else 7)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=True,
+        verify_gate_outcome=cached,
+    )
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[result],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "2"
+    assert revalidated[0].success is False
+    assert revalidated[0].outcome is ACExecutionOutcome.FAILED
+    assert "Final workspace verify gate failed" in (revalidated[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_workspace_revalidation_fails_closed_without_contract(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs("description-only AC")
+    result = ACExecutionResult(ac_index=0, ac_content="description-only AC", success=True)
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[result],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert revalidated[0].success is False
+    assert revalidated[0].outcome is ACExecutionOutcome.FAILED
+    assert "no deterministic post-coordinator success contract" in (revalidated[0].error or "")
+
+
+@pytest.mark.asyncio
 async def test_sibling_flip_gated_out_by_artifacts_only_contract(tmp_path: Any) -> None:
     executor = _make_executor(working_directory=str(tmp_path))
     (tmp_path / "present.md").write_text("here\n")

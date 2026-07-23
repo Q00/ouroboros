@@ -33,6 +33,7 @@ import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
+import hashlib
 import json
 import math
 import os
@@ -2436,6 +2437,10 @@ class ParallelACExecutor:
         blocked_indices: set[int] = set()
         stage_results: list[ParallelExecutionStageResult] = []
         level_contexts = list(reconciled_level_contexts or [])
+        # A coordinator is an effectful writer.  Acceptance evidence collected
+        # before that writer runs is not authoritative until the settled
+        # workspace has been checked again at the final boundary.
+        coordinator_mutated_workspace = False
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
@@ -3077,11 +3082,26 @@ class ParallelACExecutor:
                             conflicts=conflicts,
                         )
                         _invoke_execution_authority_guard(self)
+                        workspace_root = (
+                            self._task_cwd or self._adapter.working_directory or os.getcwd()
+                        )
+                        workspace_before = self._workspace_content_digest(workspace_root)
                         review = await self._authority_coordinator_review(
                             execution_id=execution_id,
                             conflicts=conflicts,
                             level_context=level_ctx,
                             level_number=level_num,
+                        )
+                        workspace_after = self._workspace_content_digest(workspace_root)
+                        workspace_changed = (
+                            workspace_before is None
+                            or workspace_after is None
+                            or workspace_before != workspace_after
+                        )
+                        coordinator_mutated_workspace = (
+                            coordinator_mutated_workspace
+                            or workspace_changed
+                            or self._coordinator_review_may_mutate_workspace(review)
                         )
                         await self._emit_coordinator_runtime_events(
                             execution_id=execution_id,
@@ -3182,6 +3202,28 @@ class ParallelACExecutor:
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
 
+        if coordinator_mutated_workspace:
+            # The coordinator may have edited files after a worker's verify
+            # gate passed.  Re-run every success contract against the settled
+            # workspace; contract-less successes fail closed because there is
+            # no deterministic post-mutation evidence to bind to acceptance.
+            all_results = await self._revalidate_results_after_coordinator(
+                seed=seed,
+                results=all_results,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            by_index = {result.ac_index: result for result in all_results}
+            stage_results = [
+                replace(
+                    stage,
+                    results=tuple(
+                        by_index.get(result.ac_index, result) for result in stage.results
+                    ),
+                )
+                for stage in stage_results
+            ]
+
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -3221,6 +3263,169 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
         )
+
+    @staticmethod
+    def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
+        """Return whether a coordinator review could have changed the workspace.
+
+        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
+        structured review summary is not treated as proof of a mutation: a
+        model can report a proposed fix without applying one.  The caller also
+        compares workspace digests around the review, so direct writes remain
+        observable even when a runtime omits tool messages.
+        """
+        if review is None:
+            return False
+        for message in getattr(review, "messages", ()) or ():
+            if getattr(message, "tool_name", None) in {"Write", "Edit", "Bash"}:
+                return True
+        return False
+
+    @staticmethod
+    def _workspace_content_digest(cwd: str) -> str | None:
+        """Hash the observable workspace tree for coordinator mutation checks.
+
+        The digest intentionally excludes runtime/cache directories that are
+        not part of the task workspace contract.  Read failures return
+        ``None`` so the caller fails closed instead of trusting pre-coordinator
+        evidence it could not compare.
+        """
+        ignored_directories = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "node_modules",
+        }
+        try:
+            root = Path(cwd).expanduser().resolve(strict=False)
+            if not root.is_dir():
+                return hashlib.sha256(
+                    f"missing-workspace\0{root}".encode("utf-8", "surrogateescape")
+                ).hexdigest()
+            digest = hashlib.sha256()
+            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            for path in paths:
+                relative = path.relative_to(root)
+                if any(part in ignored_directories for part in relative.parts):
+                    continue
+                try:
+                    stat = path.lstat()
+                    if path.is_symlink():
+                        digest.update(b"L\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+                    elif path.is_file():
+                        digest.update(b"F\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
+                        digest.update(b"\0")
+                        with path.open("rb") as handle:
+                            while chunk := handle.read(1024 * 1024):
+                                digest.update(chunk)
+                except (OSError, ValueError):
+                    return None
+            return digest.hexdigest()
+        except (OSError, ValueError):
+            return None
+
+    async def _revalidate_results_after_coordinator(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> list[ACExecutionResult]:
+        """Bind successful ACs to the workspace settled by the coordinator.
+
+        A cached verify result is intentionally not reused here.  The
+        coordinator is an effectful writer and can invalidate a previously
+        passing command after the worker-level gate.  Re-running the explicit
+        success contract is deterministic; description-only ACs fail closed
+        because no independent post-mutation contract exists.
+        """
+        from ouroboros.events.base import BaseEvent
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        revalidated: list[ACExecutionResult] = []
+        for result in results:
+            if not result.success or result.outcome not in {
+                ACExecutionOutcome.SUCCEEDED,
+                ACExecutionOutcome.SATISFIED_EXTERNALLY,
+            }:
+                revalidated.append(result)
+                continue
+
+            spec = (
+                seed.acceptance_criteria[result.ac_index]
+                if 0 <= result.ac_index < len(seed.acceptance_criteria)
+                else None
+            )
+            has_contract = isinstance(spec, AcceptanceCriterionSpec) and bool(
+                spec.verify_command or spec.expected_artifacts
+            )
+            if not self._run_verify_commands or not has_contract:
+                reason = (
+                    "Final workspace changed during coordinator reconciliation; "
+                    "the AC has no deterministic post-coordinator success contract."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                        },
+                    )
+                )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            outcome = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
+                spec=spec,
+                cwd=cwd,
+            )
+            if not outcome.passed:
+                reason = f"Final workspace verify gate failed: {outcome.reason}"
+                detail = reason
+                if outcome.output_tail:
+                    detail = (
+                        f"{reason}\n--- verify_command output (tail) ---\n{outcome.output_tail}"
+                    )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=detail,
+                        final_message=detail,
+                        outcome=ACExecutionOutcome.FAILED,
+                        verify_gate_outcome=outcome,
+                    )
+                )
+                continue
+
+            revalidated.append(replace(result, verify_gate_outcome=outcome))
+        return revalidated
 
     def _coerce_decomposition_decision(
         self,

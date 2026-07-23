@@ -199,6 +199,7 @@ class TestJobManager:
                     aggregate_type="execution",
                     aggregate_id="exec_complete",
                     data={
+                        "session_id": "orch_complete",
                         "completed_count": 2,
                         "total_count": 2,
                         "current_phase": "Deliver",
@@ -922,6 +923,7 @@ class TestJobManager:
                     aggregate_type="execution",
                     aggregate_id="exec_stalled",
                     data={
+                        "session_id": "orch_stalled",
                         "completed_count": 0,
                         "total_count": 23,
                         "current_phase": "Deliver",
@@ -1480,6 +1482,10 @@ class TestJobManager:
                     data={
                         "execution_id": "exec_default_failed",
                         "session_id": "orch_default_failed",
+                        "root_ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
                         "success": False,
                         "outcome": "failed",
                     },
@@ -1645,7 +1651,11 @@ class TestJobManager:
                     type="workflow.progress.updated",
                     aggregate_type="execution",
                     aggregate_id="exec_wait",
-                    data={"completed_count": 1, "total_count": 1},
+                    data={
+                        "session_id": "orch_wait",
+                        "completed_count": 1,
+                        "total_count": 1,
+                    },
                 )
             )
             await store.append(
@@ -1715,7 +1725,11 @@ class TestJobManager:
                         type="workflow.progress.updated",
                         aggregate_type="execution",
                         aggregate_id="exec_stubborn",
-                        data={"completed_count": 1, "total_count": 1},
+                        data={
+                            "session_id": "orch_stubborn",
+                            "completed_count": 1,
+                            "total_count": 1,
+                        },
                     )
                 )
                 await store.append(
@@ -6269,6 +6283,60 @@ class TestZombieJobReconciliation:
         finally:
             await store.close()
 
+    async def test_dead_owner_with_only_provisional_attempt_is_interrupted(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        try:
+            session_id = "orch_provisional_only"
+            execution_id = "exec_provisional_only"
+            await self._seed_running_job(
+                store,
+                "job_provisional_only",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await store.append(
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id=session_id,
+                    data={
+                        "execution_id": execution_id,
+                        "seed_id": "seed-provisional-only",
+                        "acceptance_root_indices": [0],
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.ac.attempt_judged",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id,
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "root_ac_index": 0,
+                        "retry_attempt": 0,
+                        "attempt_number": 1,
+                        "is_decomposed": False,
+                        "success": False,
+                        "outcome": "failed",
+                    },
+                )
+            )
+
+            restarted = JobManager(store)
+            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+                snapshot = await restarted.get_snapshot("job_provisional_only")
+
+            assert snapshot.status is JobStatus.INTERRUPTED
+            assert snapshot.result_meta.get("interrupted_from_dead_owner") is True
+            events, _ = await store.get_events_after("job", "job_provisional_only", 0)
+            assert [event.type for event in events][-1] == "mcp.job.interrupted"
+        finally:
+            await store.close()
+
     async def test_dead_owner_recovers_completed_job_from_session_acceptance(
         self, tmp_path
     ) -> None:
@@ -6307,7 +6375,7 @@ class TestZombieJobReconciliation:
             completed = await repository.mark_completed(
                 session_id,
                 summary={"final_message": "authoritative completion"},
-                acceptance_finalizations=[acceptance],
+                acceptance_finalizations=[acceptance, dict(acceptance)],
             )
             assert completed.is_ok and completed.value is True
 
@@ -6430,6 +6498,96 @@ class TestZombieJobReconciliation:
         now = datetime.now(UTC)
         snapshot = JobSnapshot(
             job_id="job-other-session-final",
+            job_type="run",
+            status=JobStatus.RUNNING,
+            message="running",
+            created_at=now,
+            updated_at=now,
+            links=JobLinks(session_id=session_id, execution_id=execution_id),
+        )
+
+        assert (
+            await manager._derive_linked_execution_failure_result(
+                snapshot,
+                allow_nonterminal_evidence=True,
+            )
+            is None
+        )
+
+    async def test_completion_recovery_ignores_terminal_projection_from_other_session(self) -> None:
+        session_id = "orch_current_terminal_session"
+        execution_id = "exec_shared_terminal_projection"
+        other_session_id = "orch_other_terminal_session"
+        current_start = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"execution_id": execution_id, "seed_id": "seed-current"},
+        )
+        other_terminal = BaseEvent(
+            type="execution.terminal",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={"session_id": other_session_id, "status": "completed"},
+        )
+        store = MagicMock()
+        store.replay = AsyncMock(return_value=[current_start])
+        store.query_events = AsyncMock(
+            side_effect=lambda **kwargs: (
+                [other_terminal] if kwargs.get("event_type") == "execution.terminal" else []
+            )
+        )
+        manager = JobManager(store)
+        now = datetime.now(UTC)
+        snapshot = JobSnapshot(
+            job_id="job-other-terminal-projection",
+            job_type="run",
+            status=JobStatus.RUNNING,
+            message="running",
+            created_at=now,
+            updated_at=now,
+            links=JobLinks(session_id=session_id, execution_id=execution_id),
+        )
+
+        assert await manager._derive_completed_execution_result(snapshot) is None
+
+    async def test_failure_recovery_ignores_attempt_judgment_from_other_session(self) -> None:
+        session_id = "orch_current_attempt_session"
+        execution_id = "exec_shared_attempts"
+        other_session_id = "orch_other_attempt_session"
+        current_start = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"execution_id": execution_id, "seed_id": "seed-current"},
+        )
+        other_attempt = BaseEvent(
+            type="execution.ac.attempt_judged",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "execution_id": execution_id,
+                "session_id": other_session_id,
+                "root_ac_index": 0,
+                "retry_attempt": 0,
+                "attempt_number": 1,
+                "success": False,
+                "outcome": "failed",
+                "is_decomposed": False,
+            },
+        )
+        store = MagicMock()
+        store.replay = AsyncMock(return_value=[current_start])
+        store.query_execution_related_events = AsyncMock(return_value=[])
+        store.query_events = AsyncMock(
+            side_effect=lambda **kwargs: (
+                [other_attempt] if kwargs.get("event_type") == "execution.ac.attempt_judged" else []
+            )
+        )
+        manager = JobManager(store)
+        now = datetime.now(UTC)
+        snapshot = JobSnapshot(
+            job_id="job-other-attempt",
             job_type="run",
             status=JobStatus.RUNNING,
             message="running",
