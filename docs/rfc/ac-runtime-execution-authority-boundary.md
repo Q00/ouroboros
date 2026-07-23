@@ -392,6 +392,10 @@ The Foundation A implementation must demonstrate all of the following:
 25. a runner emits `execution.terminal` only after the session terminal CAS has
     selected a durable winner, and a CAS loser projects the winner rather than
     its stale requested status.
+26. replay and pre-aggregated session-activity snapshots both treat an explicit
+    `COMPLETED`, `FAILED`, or `CANCELLED` lifecycle event as absorbing; a late
+    `runtime_status: running` progress checkpoint cannot make orphan detection
+    or another snapshot consumer observe the session as active again.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
