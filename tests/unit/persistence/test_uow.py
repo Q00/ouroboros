@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.events import (
+    create_session_cancelled_event,
+    create_session_completed_event,
+)
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.persistence.uow import PhaseTransaction, UnitOfWork
@@ -184,6 +188,50 @@ class TestUnitOfWork:
         # Verify both events persisted
         events = await event_store.replay(event1.aggregate_type, event1.aggregate_id)
         assert len(events) == 2
+
+    async def test_commit_routes_terminal_session_event_through_cas(
+        self,
+        uow: UnitOfWork,
+        event_store: EventStore,
+    ) -> None:
+        """Public terminal factories remain compatible with UnitOfWork."""
+        terminal = create_session_completed_event(
+            "sess-uow-terminal",
+            summary={"result": "ok"},
+            messages_processed=3,
+        )
+        uow.add_event(terminal)
+
+        result = await uow.commit()
+
+        assert result.is_ok
+        assert uow.pending_event_count == 0
+        events = await event_store.replay("session", "sess-uow-terminal")
+        assert [event.type for event in events] == ["orchestrator.session.completed"]
+
+    async def test_commit_clears_terminal_cas_loser_from_pending(
+        self,
+        uow: UnitOfWork,
+        event_store: EventStore,
+    ) -> None:
+        """A competing terminal winner is a successful, non-retrying no-op."""
+        session_id = "sess-uow-terminal-loser"
+        winner = create_session_cancelled_event(session_id, reason="cancel won")
+        assert await event_store.append(winner) is True
+        uow.add_event(
+            create_session_completed_event(
+                session_id,
+                summary={"result": "stale"},
+                messages_processed=1,
+            )
+        )
+
+        result = await uow.commit()
+
+        assert result.is_ok
+        assert uow.pending_event_count == 0
+        events = await event_store.replay("session", session_id)
+        assert [event.type for event in events] == ["orchestrator.session.cancelled"]
 
 
 class TestPhaseTransaction:

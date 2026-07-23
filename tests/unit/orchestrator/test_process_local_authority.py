@@ -31,6 +31,7 @@ from ouroboros.orchestrator.execution_authority import (
     request_process_local_cancellation,
 )
 from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -285,6 +286,202 @@ async def test_paused_projection_failure_keeps_durable_paused_owner(tmp_path) ->
         event_types = [event.type for event in session_events]
         assert event_types.count("orchestrator.session.paused") == 1
         assert "orchestrator.session.failed" not in event_types
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_sequential_pause_reconciles_preexisting_terminal_winner(tmp_path) -> None:
+    """A terminal winner immediately before PAUSED retires all live ownership."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'pause-terminal-sequential.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_RecoverablePauseRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-pause-terminal-sequential",
+        session_id="session-pause-terminal-sequential",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_mark_paused = runner._session_repo.mark_paused
+
+    async def terminal_then_pause(*args: object, **kwargs: object):
+        cancelled = await runner._session_repo.mark_cancelled(
+            tracker.session_id,
+            reason="terminal wins before pause",
+        )
+        assert cancelled.is_ok and cancelled.value is True
+        return await original_mark_paused(*args, **kwargs)
+
+    try:
+        with patch.object(runner._session_repo, "mark_paused", terminal_then_pause):
+            result = await runner.execute_precreated_session(
+                seed=_seed(),
+                tracker=tracker,
+                parallel=False,
+            )
+
+        assert result.is_ok
+        assert result.value.success is False
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.CANCELLED
+        events = await event_store.replay("session", tracker.session_id)
+        assert "orchestrator.session.paused" not in [event.type for event in events]
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_reconciles_preexisting_terminal_winner(tmp_path) -> None:
+    """The parallel pause path projects and cleans up the durable terminal winner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'pause-terminal-parallel.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_RecoverablePauseRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-pause-terminal-parallel",
+        session_id="session-pause-terminal-parallel",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None and already_claimed is False
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+    parallel_result = ParallelExecutionResult(
+        results=(
+            ACExecutionResult(
+                ac_index=0,
+                ac_content=_seed().acceptance_criteria[0],
+                success=False,
+                messages=(message,),
+                final_message=message.content,
+            ),
+        ),
+        success_count=0,
+        failure_count=1,
+        total_messages=1,
+    )
+    original_mark_paused = runner._session_repo.mark_paused
+
+    async def terminal_then_pause(*args: object, **kwargs: object):
+        cancelled = await runner._session_repo.mark_cancelled(
+            tracker.session_id,
+            reason="terminal wins before parallel pause",
+        )
+        assert cancelled.is_ok and cancelled.value is True
+        return await original_mark_paused(*args, **kwargs)
+
+    try:
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ),
+            patch.object(runner._session_repo, "mark_paused", terminal_then_pause),
+        ):
+            result = await runner._execute_parallel(
+                seed=_seed(),
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                force_sequential_levels=True,
+            )
+
+        assert result.is_ok
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.CANCELLED
+        events = await event_store.replay("session", tracker.session_id)
+        assert "orchestrator.session.paused" not in [event.type for event in events]
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_pause_reconciles_preexisting_terminal_winner(tmp_path) -> None:
+    """A resumed recoverable failure cannot preserve authority beside CANCELLED."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'pause-terminal-resume.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_RecoverablePauseRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-pause-terminal-resume",
+        session_id="session-pause-terminal-resume",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    initial_pause = await runner._session_repo.mark_paused(
+        tracker.session_id,
+        reason="initial resumable pause",
+    )
+    assert initial_pause.is_ok and initial_pause.value is True
+    original_mark_paused = runner._session_repo.mark_paused
+
+    async def terminal_then_pause(*args: object, **kwargs: object):
+        cancelled = await runner._session_repo.mark_cancelled(
+            tracker.session_id,
+            reason="terminal wins before resumed pause",
+        )
+        assert cancelled.is_ok and cancelled.value is True
+        return await original_mark_paused(*args, **kwargs)
+
+    try:
+        with patch.object(runner._session_repo, "mark_paused", terminal_then_pause):
+            result = await runner.resume_session(tracker.session_id, _seed())
+
+        assert result.is_ok
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.CANCELLED
+        events = await event_store.replay("session", tracker.session_id)
+        assert [event.type for event in events].count("orchestrator.session.paused") == 1
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
     finally:
         runner._retire_process_local_authority(
             session_id=tracker.session_id,

@@ -89,18 +89,32 @@ class UnitOfWork:
             Result.err(PersistenceError) on failure.
         """
         try:
-            # Persist all pending events atomically in a single batch
-            if self._pending_events:
-                await self._event_store.append_batch(self._pending_events)
+            # Ordinary events retain atomic batch persistence. Terminal
+            # session events must pass through EventStore.append() so the
+            # one-winner CAS cannot be bypassed. A CAS loser is a successful
+            # no-op and is removed from pending just like a winning append.
+            while self._pending_events:
+                terminal_index = next(
+                    (
+                        index
+                        for index, event in enumerate(self._pending_events)
+                        if self._event_store.is_session_terminal_event(event)
+                    ),
+                    len(self._pending_events),
+                )
+                if terminal_index:
+                    await self._event_store.append_batch(self._pending_events[:terminal_index])
+                    del self._pending_events[:terminal_index]
+                    continue
+
+                await self._event_store.append(self._pending_events[0])
+                del self._pending_events[0]
 
             # Save checkpoint if provided
             if checkpoint is not None:
                 checkpoint_result = self._checkpoint_store.save(checkpoint)
                 if checkpoint_result.is_err:
                     return checkpoint_result
-
-            # Clear pending events after successful commit
-            self._pending_events.clear()
 
             return Result.ok(None)
 

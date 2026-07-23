@@ -231,7 +231,7 @@ async def _list_active_sessions(event_store) -> list:
 async def _cancel_all_running(
     event_store,
     reason: str = "Cancelled all running sessions via CLI",
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """Cancel all running/paused sessions.
 
     Args:
@@ -239,7 +239,8 @@ async def _cancel_all_running(
         reason: Reason for cancellation.
 
     Returns:
-        Tuple of (cancelled_count, requested_count, skipped_count).
+        Tuple of (cancelled_count, requested_count,
+        retryable_failed_count, skipped_count).
     """
     from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
@@ -249,10 +250,11 @@ async def _cancel_all_running(
     session_events = await event_store.get_all_sessions()
 
     if not session_events:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
 
     cancelled = 0
     requested = 0
+    retryable_failed = 0
     skipped = 0
 
     for event in session_events:
@@ -261,7 +263,8 @@ async def _cancel_all_running(
         # Reconstruct to get current status
         result = await repo.reconstruct_session(session_id)
         if result.is_err:
-            skipped += 1
+            retryable_failed += 1
+            console.print(f"  [yellow]Retry required:[/] {session_id} (session read failed)")
             continue
 
         tracker = result.value
@@ -285,6 +288,13 @@ async def _cancel_all_running(
             ):
                 requested += 1
                 console.print(f"  [dim]Cancellation requested:[/] {session_id}")
+            elif (
+                process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING
+            ):
+                retryable_failed += 1
+                console.print(
+                    f"  [yellow]Retry required:[/] {session_id} (cancellation persistence pending)"
+                )
             else:
                 skipped += 1
             continue
@@ -299,10 +309,13 @@ async def _cancel_all_running(
         if cancel_result.is_ok and cancel_result.value is not False:
             cancelled += 1
             console.print(f"  [dim]Cancelled:[/] {session_id}")
+        elif cancel_result.is_err:
+            retryable_failed += 1
+            console.print(f"  [yellow]Retry required:[/] {session_id} (terminal write failed)")
         else:
             skipped += 1
 
-    return (cancelled, requested, skipped)
+    return (cancelled, requested, retryable_failed, skipped)
 
 
 def _display_active_sessions(sessions: list) -> None:
@@ -465,15 +478,21 @@ async def _cancel_execution_async(
     try:
         if all_:
             print_info("Cancelling all running executions...")
-            cancelled, requested, skipped = await _cancel_all_running(event_store, reason)
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(
+                event_store, reason
+            )
 
-            if cancelled == 0 and requested == 0:
+            if cancelled == 0 and requested == 0 and retryable_failed == 0:
                 print_info("No running executions found to cancel.")
             else:
                 if cancelled:
                     print_success(f"Cancelled {cancelled} execution(s).")
                 if requested:
                     print_info(f"Cancellation requested for {requested} execution(s).")
+                if retryable_failed:
+                    print_warning(
+                        f"Cancellation failed for {retryable_failed} execution(s); retry required."
+                    )
         else:
             assert execution_id is not None
             disposition = await _cancel_session(event_store, execution_id, reason)

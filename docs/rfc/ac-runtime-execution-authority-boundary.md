@@ -450,6 +450,16 @@ The Foundation A implementation must demonstrate all of the following:
 43. CLI cancellation preserves the typed distinction between a durable
     `CANCELLED` winner and `CANCELLATION_REQUESTED`; single and `--all` output
     and counts never report a live-owner request as completed cancellation.
+44. PAUSED publication is conditional on the absence of an explicit terminal
+    winner in the same persistence transaction; sequential, parallel, and
+    resumed runners reconstruct a losing terminal winner, project it, and
+    retire authority, heartbeat, routing, and workspace ownership.
+45. `UnitOfWork` routes exported terminal session events through the same
+    one-winner EventStore append instead of `append_batch`; both a CAS winner
+    and loser are successful commits and leave no permanently pending event.
+46. `cancel --all` counts marker/session persistence failures separately from
+    skipped or requested sessions, prints retry guidance, and never reports
+    "No running executions" when an active cancellation attempt failed.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

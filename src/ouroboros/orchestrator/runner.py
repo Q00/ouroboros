@@ -1439,6 +1439,61 @@ class OrchestratorRunner:
             )
         )
 
+    async def _resolve_pause_publication(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        pause_result: Result[bool, PersistenceError],
+    ) -> tuple[
+        SessionStatus | None,
+        Result[OrchestratorResult, OrchestratorError] | None,
+    ]:
+        """Resolve conditional PAUSED publication against a terminal winner.
+
+        ``PAUSED`` means the pause append won. An explicit terminal status
+        means the pause lost and callers must project/clean up that durable
+        winner. An unreadable winner is retryable and preserves the exact
+        process-local owner rather than guessing at lifecycle state.
+        """
+        if pause_result.is_err:
+            return None, self._pause_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=pause_result.error,
+            )
+        if pause_result.value:
+            return SessionStatus.PAUSED, None
+
+        try:
+            reconstructed = await self._session_repo.reconstruct_session(session_id)
+        except Exception as exc:
+            return None, self._pause_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+            )
+        if reconstructed.is_ok and reconstructed.value.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            return reconstructed.value.status, None
+
+        cause: object = (
+            reconstructed.error
+            if reconstructed.is_err
+            else PersistenceError(
+                "Conditional pause lost but no durable terminal winner could be reconstructed",
+                details={"session_id": session_id},
+            )
+        )
+        return None, self._pause_persistence_pending_result(
+            session_id=session_id,
+            execution_id=execution_id,
+            cause=cause,
+        )
+
     async def _project_execution_outcome(
         self,
         *,
@@ -5805,20 +5860,30 @@ class OrchestratorRunner:
                     resume_after=recoverable_failure_pause.resume_after,
                     pause_kind=recoverable_failure_pause.pause_kind,
                 )
-                if pause_result.is_err:
-                    return self._pause_persistence_pending_result(
-                        session_id=tracker.session_id,
-                        execution_id=exec_id,
-                        cause=pause_result.error,
-                    )
-
-                self._console.print(
-                    Panel(
-                        Text(final_message[:1000], style="yellow"),
-                        title="[yellow]Execution Paused[/yellow]",
-                        border_style="yellow",
-                    )
+                pause_status, pause_pending = await self._resolve_pause_publication(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    pause_result=pause_result,
                 )
+                if pause_pending is not None:
+                    return pause_pending
+                assert pause_status is not None
+                if pause_status is SessionStatus.PAUSED:
+                    self._console.print(
+                        Panel(
+                            Text(final_message[:1000], style="yellow"),
+                            title="[yellow]Execution Paused[/yellow]",
+                            border_style="yellow",
+                        )
+                    )
+                else:
+                    durable_terminal_status = pause_status
+                    recoverable_failure_pause = None
+                    success = pause_status is SessionStatus.COMPLETED
+                    final_message = (
+                        "Execution pause was not persisted because the session was already "
+                        f"{pause_status.value}."
+                    )
             else:
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
@@ -6277,20 +6342,30 @@ class OrchestratorRunner:
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
             )
-            if pause_result.is_err:
-                return self._pause_persistence_pending_result(
-                    session_id=tracker.session_id,
-                    execution_id=exec_id,
-                    cause=pause_result.error,
-                )
-
-            self._console.print(
-                Panel(
-                    Text(final_message, style="yellow"),
-                    title="[yellow]Parallel Execution Paused[/yellow]",
-                    border_style="yellow",
-                )
+            pause_status, pause_pending = await self._resolve_pause_publication(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                pause_result=pause_result,
             )
+            if pause_pending is not None:
+                return pause_pending
+            assert pause_status is not None
+            if pause_status is SessionStatus.PAUSED:
+                self._console.print(
+                    Panel(
+                        Text(final_message, style="yellow"),
+                        title="[yellow]Parallel Execution Paused[/yellow]",
+                        border_style="yellow",
+                    )
+                )
+            else:
+                durable_terminal_status = pause_status
+                recoverable_failure_pause = None
+                success = pause_status is SessionStatus.COMPLETED
+                final_message = (
+                    "Parallel pause was not persisted because the session was already "
+                    f"{pause_status.value}."
+                )
         else:
             durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
@@ -7078,19 +7153,30 @@ Note: This is a resumed session. Please continue from where execution was interr
                     resume_after=recoverable_resume_failure.resume_after,
                     pause_kind=recoverable_resume_failure.pause_kind,
                 )
-                if pause_result.is_err:
-                    return self._pause_persistence_pending_result(
-                        session_id=session_id,
-                        execution_id=tracker.execution_id,
-                        cause=pause_result.error,
-                    )
-                self._console.print(
-                    Panel(
-                        Text(final_message[:1000], style="yellow"),
-                        title="[yellow]Resumed Execution Paused[/yellow]",
-                        border_style="yellow",
-                    )
+                pause_status, pause_pending = await self._resolve_pause_publication(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    pause_result=pause_result,
                 )
+                if pause_pending is not None:
+                    return pause_pending
+                assert pause_status is not None
+                if pause_status is SessionStatus.PAUSED:
+                    self._console.print(
+                        Panel(
+                            Text(final_message[:1000], style="yellow"),
+                            title="[yellow]Resumed Execution Paused[/yellow]",
+                            border_style="yellow",
+                        )
+                    )
+                else:
+                    durable_terminal_status = pause_status
+                    recoverable_resume_failure = None
+                    success = pause_status is SessionStatus.COMPLETED
+                    final_message = (
+                        "Resumed execution pause was not persisted because the session was already "
+                        f"{pause_status.value}."
+                    )
             else:
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=session_id,

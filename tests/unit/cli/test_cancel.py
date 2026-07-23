@@ -906,10 +906,11 @@ class TestCancelHelperFunctions:
             )
             mock_repo.mark_cancelled = AsyncMock(return_value=Result.ok(None))
 
-            cancelled, requested, skipped = await _cancel_all_running(mock_es)
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
 
         assert cancelled == 1
         assert requested == 0
+        assert retryable_failed == 0
         assert skipped == 1
 
     @pytest.mark.asyncio
@@ -920,11 +921,88 @@ class TestCancelHelperFunctions:
         mock_es = AsyncMock()
         mock_es.get_all_sessions = AsyncMock(return_value=[])
 
-        cancelled, requested, skipped = await _cancel_all_running(mock_es)
+        cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
 
         assert cancelled == 0
         assert requested == 0
+        assert retryable_failed == 0
         assert skipped == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_counts_process_local_persistence_pending_as_retryable(self) -> None:
+        """Marker/terminal persistence failure must not disappear into skipped."""
+        from ouroboros.cli.commands.cancel import _cancel_all_running
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.execution_authority import (
+            ProcessLocalCancellationOutcome,
+        )
+
+        mock_es = AsyncMock()
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_pending",
+                    data={},
+                )
+            ]
+        )
+        tracker = _make_tracker(session_id="orch_pending", status=SessionStatus.RUNNING)
+
+        with (
+            patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo,
+            patch(
+                "ouroboros.cli.commands.cancel.request_process_local_cancellation",
+                AsyncMock(
+                    return_value=ProcessLocalCancellationOutcome(
+                        ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
+                        error=PersistenceError("marker unavailable"),
+                    )
+                ),
+            ),
+        ):
+            MockRepo.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
+
+        assert (cancelled, requested, retryable_failed, skipped) == (0, 0, 1, 0)
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_cancel_all_reports_retryable_terminal_write_failure(
+        self,
+        mock_get_es: AsyncMock,
+    ) -> None:
+        """An all-failed batch prints retry guidance, never 'no running'."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_es = AsyncMock()
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_write_failure",
+                    data={},
+                )
+            ]
+        )
+        mock_get_es.return_value = mock_es
+        tracker = _make_tracker(
+            session_id="orch_write_failure",
+            status=SessionStatus.RUNNING,
+        )
+
+        with patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            mock_repo.mark_cancelled = AsyncMock(
+                return_value=Result.err(PersistenceError("terminal write failed"))
+            )
+            result = runner.invoke(app, ["cancel", "execution", "--all"])
+
+        assert result.exit_code == 0
+        assert "retry required" in result.output.lower()
+        assert "No running executions" not in result.output
 
     @pytest.mark.asyncio
     async def test_cancel_session_handles_mark_cancelled_error(self) -> None:

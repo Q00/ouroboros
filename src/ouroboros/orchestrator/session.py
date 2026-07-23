@@ -891,7 +891,7 @@ class SessionRepository:
         pause_seconds: int | None = None,
         resume_after: datetime | None = None,
         pause_kind: str | None = None,
-    ) -> Result[None, PersistenceError]:
+    ) -> Result[bool, PersistenceError]:
         """Mark session as paused and resumable.
 
         Args:
@@ -900,7 +900,8 @@ class SessionRepository:
             resume_hint: Optional retry guidance.
 
         Returns:
-            Result indicating success or failure.
+            Result whose value is ``True`` when PAUSED became durable, or
+            ``False`` when an explicit terminal session event already won.
         """
         data: dict[str, Any] = {
             "reason": reason,
@@ -922,13 +923,19 @@ class SessionRepository:
         )
 
         try:
-            await self._event_store.append(event)
-            log.info(
-                "orchestrator.session.paused",
-                session_id=session_id,
-                reason=reason,
-            )
-            return Result.ok(None)
+            persisted = await self._event_store.append_session_pause_if_active(event)
+            if persisted:
+                log.info(
+                    "orchestrator.session.paused",
+                    session_id=session_id,
+                    reason=reason,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.pause_terminal_preserved",
+                    session_id=session_id,
+                )
+            return Result.ok(persisted)
         except Exception as e:
             log.exception(
                 "orchestrator.session.pause_failed",

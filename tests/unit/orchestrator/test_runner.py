@@ -1443,7 +1443,7 @@ class TestOrchestratorRunner:
             )
 
         mock_adapter.execute_task = mock_execute
-        mark_paused = AsyncMock(return_value=Result.ok(None))
+        mark_paused = AsyncMock(return_value=Result.ok(True))
         mark_failed = AsyncMock(return_value=Result.ok(None))
 
         with (
@@ -2068,7 +2068,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner._session_repo,
                 "mark_paused",
-                AsyncMock(return_value=Result.ok(None)),
+                AsyncMock(return_value=Result.ok(True)),
             ) as mark_paused,
             patch.object(
                 runner._session_repo,
@@ -2216,7 +2216,7 @@ class TestOrchestratorRunner:
                 patch.object(
                     runner._session_repo,
                     "mark_paused",
-                    AsyncMock(return_value=Result.ok(None)),
+                    AsyncMock(return_value=Result.ok(True)),
                 ),
                 patch.object(runner._session_repo, "mark_failed", mark_failed),
             ):
@@ -2272,10 +2272,10 @@ class TestOrchestratorRunner:
                 },
             )
 
-        async def mark_paused(*args: Any, **kwargs: Any) -> Result[None, PersistenceError]:
+        async def mark_paused(*args: Any, **kwargs: Any) -> Result[bool, PersistenceError]:
             del args, kwargs
             await request_cancellation(tracker.session_id)
-            return Result.ok(None)
+            return Result.ok(True)
 
         mock_adapter.execute_task = mock_execute
 
@@ -2808,7 +2808,7 @@ class TestOrchestratorRunner:
                 patch.object(
                     runner._session_repo,
                     "mark_paused",
-                    AsyncMock(return_value=Result.ok(None)),
+                    AsyncMock(return_value=Result.ok(True)),
                 ),
             ):
                 result = await runner._execute_parallel(
@@ -2885,10 +2885,10 @@ class TestOrchestratorRunner:
             total_messages=1,
         )
 
-        async def mark_paused(*args: Any, **kwargs: Any) -> Result[None, PersistenceError]:
+        async def mark_paused(*args: Any, **kwargs: Any) -> Result[bool, PersistenceError]:
             del args, kwargs
             await request_cancellation(tracker.session_id)
-            return Result.ok(None)
+            return Result.ok(True)
 
         try:
             with (

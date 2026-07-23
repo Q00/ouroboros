@@ -153,6 +153,7 @@ class TestSessionRepository:
         """Create a mock event store."""
         store = AsyncMock()
         store.append = AsyncMock()
+        store.append_session_pause_if_active = AsyncMock(return_value=True)
         store.replay = AsyncMock(return_value=[])
         return store
 
@@ -368,7 +369,7 @@ class TestSessionRepository:
         )
 
         assert result.is_ok
-        event = mock_event_store.append.call_args[0][0]
+        event = mock_event_store.append_session_pause_if_active.call_args[0][0]
         assert event.type == "orchestrator.session.paused"
         assert event.data["reason"] == "Codex resume failed before reconnect"
         assert event.data["resume_hint"] == "Retry with --resume after fixing the CLI issue."
@@ -392,7 +393,7 @@ class TestSessionRepository:
         )
 
         assert result.is_ok
-        event = mock_event_store.append.call_args[0][0]
+        event = mock_event_store.append_session_pause_if_active.call_args[0][0]
         assert event.type == "orchestrator.session.paused"
         assert event.data["pause_seconds"] == 18000
         assert event.data["resume_after"] == resume_after.isoformat()

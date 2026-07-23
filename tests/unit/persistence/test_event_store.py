@@ -234,6 +234,30 @@ class TestEventStoreAppend:
 
         assert await event_store.replay("session", "sess-raw-terminal-path") == []
 
+    async def test_conditional_pause_preserves_existing_terminal_winner(
+        self, event_store: EventStore
+    ) -> None:
+        """PAUSED cannot be appended behind an explicit terminal winner."""
+        session_id = "sess-terminal-before-pause"
+        cancelled = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"reason": "terminal wins"},
+        )
+        paused = BaseEvent(
+            type="orchestrator.session.paused",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"reason": "too late"},
+        )
+
+        assert await event_store.append(cancelled) is True
+        assert await event_store.append_session_pause_if_active(paused) is False
+
+        events = await event_store.replay("session", session_id)
+        assert [event.type for event in events] == ["orchestrator.session.cancelled"]
+
     async def test_append_preserves_event_data(
         self, event_store: EventStore, sample_event: BaseEvent
     ) -> None:

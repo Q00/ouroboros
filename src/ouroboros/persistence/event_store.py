@@ -539,6 +539,98 @@ class EventStore:
             details={"event_id": event.id, "event_type": event.type},
         )
 
+    async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
+        """Append PAUSED only while no explicit terminal session event exists.
+
+        Returns ``True`` when the pause event was inserted and ``False`` when
+        a completed, failed, or cancelled event already won.  The terminal
+        check and pause append share one write transaction so a runner cannot
+        preserve live resumable authority beside an already-terminal session.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_pause_if_active",
+            )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(
+                event,
+                operation="append_session_pause_if_active",
+            )
+        if event.aggregate_type != "session" or event.type != "orchestrator.session.paused":
+            raise PersistenceError(
+                "Conditional session pause append requires an explicit paused session event.",
+                operation="append_session_pause_if_active",
+                table="events",
+                details={
+                    "aggregate_type": event.aggregate_type,
+                    "event_type": event.type,
+                },
+            )
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+
+                    try:
+                        terminal_query = (
+                            select(events_table.c.id)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                            )
+                            .limit(1)
+                        )
+                        if await conn.scalar(terminal_query) is not None:
+                            if sqlite:
+                                await conn.rollback()
+                            elif transaction is not None:
+                                await transaction.rollback()
+                            return False
+
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return True
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_pause_if_active.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append paused session event: {e}",
+                    operation="append_session_pause_if_active",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from e
+        raise PersistenceError(
+            "Failed to conditionally append paused session event after retries.",
+            operation="append_session_pause_if_active",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
+
+    @staticmethod
+    def is_session_terminal_event(event: object) -> bool:
+        """Return whether ``event`` requires the terminal one-winner append."""
+        return _is_session_terminal_event(event)
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
