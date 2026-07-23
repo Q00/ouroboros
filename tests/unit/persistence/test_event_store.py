@@ -869,6 +869,41 @@ class TestSessionActivitySnapshots:
         assert snapshot.last_activity is not None
         assert snapshot.status_event_type == "orchestrator.session.completed"
 
+    async def test_terminal_status_absorbs_later_running_progress(
+        self, event_store: EventStore
+    ) -> None:
+        session_id = "sess-terminal-with-late-progress"
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"execution_id": "exec-terminal-with-late-progress"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.cancelled",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"reason": "user requested cancellation"},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id=session_id,
+                data={"progress": {"runtime_status": "running", "phase": "late"}},
+            )
+        )
+
+        snapshots = await event_store.get_session_activity_snapshots()
+        snapshot = next(item for item in snapshots if item.session_id == session_id)
+
+        assert snapshot.status_event_type == "orchestrator.session.cancelled"
+        assert snapshot.runtime_status is None
+
     async def test_includes_progress_only_session_without_started_event(
         self, event_store: EventStore
     ) -> None:

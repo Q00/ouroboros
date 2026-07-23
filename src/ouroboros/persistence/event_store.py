@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 from uuid import uuid4
 
-from sqlalchemy import and_, event, func, or_, select, text
+from sqlalchemy import and_, case, event, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
@@ -1085,7 +1085,21 @@ class EventStore:
                 func.row_number()
                 .over(
                     partition_by=events_table.c.aggregate_id,
-                    order_by=(events_table.c.timestamp.desc(), events_table.c.id.desc()),
+                    order_by=(
+                        # Explicit terminal lifecycle is absorbing. A delayed
+                        # progress checkpoint may be newer in wall-clock order,
+                        # but it cannot revive a completed/failed/cancelled
+                        # session in the snapshot path used for orphan cleanup.
+                        case(
+                            (
+                                events_table.c.event_type.in_(_SESSION_TERMINAL_EVENT_TYPES),
+                                0,
+                            ),
+                            else_=1,
+                        ),
+                        events_table.c.timestamp.desc(),
+                        events_table.c.id.desc(),
+                    ),
                 )
                 .label("rn"),
             )
