@@ -3056,6 +3056,90 @@ async def test_public_cancel_interruption_reconciles_committed_terminal_state() 
 
 
 @pytest.mark.asyncio
+async def test_public_cancel_unreadable_post_cas_stays_non_effectful_until_retry(
+    tmp_path,
+) -> None:
+    """An ambiguous post-CAS read cannot restore terminalizing authority."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'public-cancel-retry.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-public-cancel-retry",
+        session_id="session-public-cancel-retry",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    public_repo = SessionRepository(event_store)
+    original_mark_cancelled = public_repo.mark_cancelled_if_active
+    original_reconstruct = public_repo.reconstruct_session
+
+    async def _commit_then_cancel(*args: object, **kwargs: object):
+        committed = await original_mark_cancelled(*args, **kwargs)
+        assert committed.is_ok and committed.value is True
+        raise asyncio.CancelledError
+
+    try:
+        with (
+            patch.object(
+                public_repo,
+                "mark_cancelled_if_active",
+                AsyncMock(side_effect=_commit_then_cancel),
+            ),
+            patch.object(
+                public_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.err(PersistenceError("winner unreadable"))),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await request_process_local_cancellation(
+                tracker,
+                public_repo,
+                reason="cancel with unreadable winner",
+                cancelled_by="mcp_tool",
+            )
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.CANCELLED
+        generation, already_claimed = runner._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert generation is None
+        assert already_claimed is True
+        assert heartbeat.is_holder_alive(tracker.session_id)
+
+        public_repo.reconstruct_session = original_reconstruct
+        retried = await request_process_local_cancellation(
+            tracker,
+            public_repo,
+            reason="retry terminal reconciliation",
+            cancelled_by="mcp_tool",
+        )
+
+        assert retried is not None
+        assert retried.disposition is ProcessLocalCancellationDisposition.CANCELLED
+        assert retried.retired is True
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert not await is_cancellation_requested(tracker.session_id)
+    finally:
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_repeated_public_cancel_interruption_drains_terminal_cleanup() -> None:
     """A second cancellation cannot restore a committed public reservation."""
     runner = _runner()

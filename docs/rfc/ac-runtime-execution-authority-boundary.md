@@ -494,6 +494,13 @@ The Foundation A implementation must demonstrate all of the following:
 55. preparation-failure terminalization uses the same durable-winner boundary;
     cancellation after a committed `FAILED` append drains the early authority
     and heartbeat before it propagates.
+56. an interrupted public cancellation with an unreadable post-CAS winner
+    keeps its exact owner in non-effectful `TERMINALIZING` state; a later
+    cancellation request retries durable reconciliation and retires a proven
+    terminal winner instead of restoring execution authority.
+57. the active-runner cancellation entry point forwards the caller's bounded
+    `reason` and `cancelled_by` metadata unchanged to the cooperative request
+    consumed by terminal persistence.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
