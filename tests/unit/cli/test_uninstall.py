@@ -112,6 +112,24 @@ class TestRemoveCodexMcp:
         assert "[other]" in content
         assert 'model = "gpt-5"' in content
 
+    def test_removes_mcp_from_literal_custom_codex_home(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CODEX_HOME", "~/custom-codex")
+        codex_config = tmp_path / "~" / "custom-codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n\n'
+            "[profiles.ouroboros-fast]\n"
+            'model_reasoning_effort = "low"\n\n'
+            "[other]\nfoo = 1\n"
+        )
+
+        assert _remove_codex_mcp(dry_run=False) is True
+        assert "[mcp_servers.ouroboros]" not in codex_config.read_text()
+        assert "[profiles.ouroboros-fast]" not in codex_config.read_text()
+        assert "[other]" in codex_config.read_text()
+
     def test_preserves_user_comments_outside_managed_block(self, tmp_path: Path) -> None:
         """User comments outside the ouroboros section are preserved."""
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -221,6 +239,25 @@ class TestRemoveCodexArtifacts:
         assert not (skills_dir / "ouroboros-interview").exists()
         assert not (skills_dir / "ouroboros-run").exists()
         assert (skills_dir / "other").exists()
+
+    def test_removes_artifacts_from_literal_custom_codex_home(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CODEX_HOME", "~/custom-codex")
+        codex_dir = tmp_path / "~" / "custom-codex"
+        rules_path = codex_dir / "rules" / "ouroboros.md"
+        skill_path = codex_dir / "skills" / "ouroboros-status"
+        profile_path = codex_dir / "ouroboros-fast.config.toml"
+        rules_path.parent.mkdir(parents=True)
+        skill_path.mkdir(parents=True)
+        rules_path.write_text("rules", encoding="utf-8")
+        profile_path.write_text('model_reasoning_effort = "low"\n', encoding="utf-8")
+
+        assert _remove_codex_artifacts(dry_run=False) is True
+        assert not rules_path.exists()
+        assert not skill_path.exists()
+        assert not profile_path.exists()
 
 
 # ── _remove_claude_md_block ──────────────────────────────────────

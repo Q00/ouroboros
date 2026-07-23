@@ -46,6 +46,18 @@ app = typer.Typer(
 # Failures are reported via print_warning — never raise.
 
 
+def _active_codex_home() -> Path:
+    from .mcp_doctor import _codex_home_from_env
+
+    return _codex_home_from_env().absolute()
+
+
+def _managed_codex_profile_names() -> set[str]:
+    from .setup import _CODEX_DEFAULT_PROFILE_SECTIONS, _CODEX_WORKER_PROFILE_NAME
+
+    return {*_CODEX_DEFAULT_PROFILE_SECTIONS, _CODEX_WORKER_PROFILE_NAME}
+
+
 def _remove_claude_mcp(dry_run: bool) -> bool:
     """Remove ouroboros entry from ~/.claude/mcp.json."""
     mcp_path = Path.home() / ".claude" / "mcp.json"
@@ -76,21 +88,30 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
 
 
 def _remove_codex_mcp(dry_run: bool) -> bool:
-    """Remove ouroboros MCP section from ~/.codex/config.toml."""
-    codex_config = Path.home() / ".codex" / "config.toml"
+    """Remove the Ouroboros MCP section from the active Codex home."""
+    codex_config = _active_codex_home() / "config.toml"
     if not codex_config.exists():
         return False
 
     try:
         raw = codex_config.read_text()
     except OSError:
-        print_warning("~/.codex/config.toml is unreadable — skipping.")
+        print_warning(f"{codex_config} is unreadable — skipping.")
         return False
-    if "[mcp_servers.ouroboros]" not in raw:
+    managed_profile_headers = {f"[profiles.{name}]" for name in _managed_codex_profile_names()}
+
+    def is_managed_header(header: str) -> bool:
+        return (
+            header == "[mcp_servers.ouroboros]"
+            or header.startswith("[mcp_servers.ouroboros.")
+            or header in managed_profile_headers
+        )
+
+    if not any(is_managed_header(line.strip()) for line in raw.splitlines()):
         return False
 
     if dry_run:
-        print_info("[dry-run] Would remove ouroboros from ~/.codex/config.toml")
+        print_info(f"[dry-run] Would remove ouroboros from {codex_config}")
         return True
 
     lines = raw.splitlines()
@@ -108,7 +129,7 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
             continue
         in_comment_block = False
 
-        if stripped == "[mcp_servers.ouroboros]" or stripped.startswith("[mcp_servers.ouroboros."):
+        if is_managed_header(stripped):
             skip = True
             continue
         if skip:
@@ -129,9 +150,9 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     try:
         codex_config.write_text(cleaned)
     except OSError:
-        print_warning("Could not write ~/.codex/config.toml — skipping.")
+        print_warning(f"Could not write {codex_config} — skipping.")
         return False
-    print_success("Removed ouroboros from ~/.codex/config.toml")
+    print_success(f"Removed ouroboros from {codex_config}")
     return True
 
 
@@ -141,14 +162,22 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     Returns True only if ALL existing artifacts were removed successfully.
     Returns False if any artifact could not be removed.
     """
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _active_codex_home()
     try:
         with resolve_packaged_codex_assets() as assets:
             managed_relative_paths = set(assets.managed_relative_install_paths)
     except FileNotFoundError:
         managed_relative_paths = {Path("rules") / CODEX_RULE_FILENAME}
     managed_relative_paths.add(Path("skills") / "ouroboros")  # legacy setup path
+    managed_relative_paths.update(
+        Path(f"{name}.config.toml") for name in _managed_codex_profile_names()
+    )
 
+    profile_paths = [
+        codex_dir / relative_path
+        for relative_path in managed_relative_paths
+        if len(relative_path.parts) == 1 and (codex_dir / relative_path).exists()
+    ]
     rule_paths = [
         codex_dir / relative_path
         for relative_path in managed_relative_paths
@@ -161,6 +190,18 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     ]
     had_work = False
     all_ok = True
+
+    for profile_path in profile_paths:
+        had_work = True
+        if dry_run:
+            print_info(f"[dry-run] Would remove {profile_path}")
+        else:
+            try:
+                profile_path.unlink()
+                print_success(f"Removed {profile_path}")
+            except OSError:
+                print_warning(f"Could not remove {profile_path} — skipping.")
+                all_ok = False
 
     for rules_path in rule_paths:
         had_work = True
@@ -431,12 +472,19 @@ def uninstall(
         except (json.JSONDecodeError, OSError):
             targets.append("MCP server registration (~/.claude/mcp.json — may be malformed)")
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = _active_codex_home() / "config.toml"
     try:
-        if codex_config.exists() and "[mcp_servers.ouroboros]" in codex_config.read_text():
-            targets.append("Codex MCP config (~/.codex/config.toml)")
+        if codex_config.exists():
+            codex_text = codex_config.read_text()
+            managed_profile_headers = {
+                f"[profiles.{name}]" for name in _managed_codex_profile_names()
+            }
+            if "[mcp_servers.ouroboros]" in codex_text or any(
+                header in codex_text for header in managed_profile_headers
+            ):
+                targets.append(f"Codex MCP/profile config ({codex_config})")
     except OSError:
-        targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
+        targets.append(f"Codex MCP/profile config ({codex_config} — may be unreadable)")
 
     opencode_config = _find_opencode_config()
     try:
@@ -447,15 +495,18 @@ def uninstall(
     except (json.JSONDecodeError, OSError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _active_codex_home()
     try:
         with resolve_packaged_codex_assets() as assets:
             managed_relative_paths = set(assets.managed_relative_install_paths)
     except FileNotFoundError:
         managed_relative_paths = {Path("rules") / CODEX_RULE_FILENAME}
     managed_relative_paths.add(Path("skills") / "ouroboros")
+    managed_relative_paths.update(
+        Path(f"{name}.config.toml") for name in _managed_codex_profile_names()
+    )
     if any((codex_dir / relative_path).exists() for relative_path in managed_relative_paths):
-        targets.append("Codex rules and skills (~/.codex/)")
+        targets.append(f"Codex profiles, rules, and skills ({codex_dir})")
 
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"
