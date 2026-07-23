@@ -1184,15 +1184,25 @@ def _plugin_advisory_contract_section(
         # EVERY lane contract is rendered, not just the data lane's
         # (bot-review round-9 probe): re-entry enforces any registered
         # contract, so an additive lane's contract omitted here would make
-        # the promised v1 path unsatisfiable for the plugin child.
+        # the promised v1 path unsatisfiable for the plugin child. Oversized
+        # contracts are excluded WHOLE (round-11): registration skips them
+        # too, so nothing enforced was ever torn.
         lane_contract = lane.get("answer_contract")
         if isinstance(lane_contract, Mapping):
             contract_id = str(lane_contract.get("contract_id") or "unversioned")
-            contract_blocks.append(
-                f"{lane_id} answer contract ({contract_id}, complete — fill this "
-                "form exactly; it is validated server-side at re-entry):\n"
-                + json.dumps(lane_contract, ensure_ascii=False)
-            )
+            if _contract_within_delivery_budget(lane_contract):
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}, complete — fill this "
+                    "form exactly; it is validated server-side at re-entry):\n"
+                    + json.dumps(lane_contract, ensure_ascii=False)
+                )
+            else:
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}): OMITTED — it "
+                    "exceeds the whole-form delivery budget and is therefore "
+                    "NOT enforced at re-entry; return the generic output shape "
+                    "for this lane."
+                )
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
             known_data_tools = lane.get("known_data_tools")
@@ -1547,19 +1557,31 @@ def build_interview_question_advisory_subagents(
             # contract gets that contract rendered — re-entry validates
             # against it, so a child answering the generic Output shape
             # would land in contract_violations through no fault of its own.
+            # An OVERSIZED contract is rejected whole instead of rendered
+            # torn (round-11): registration skips it too, so the lane falls
+            # back to the generic shape consistently on both sides.
             if isinstance(lane_answer_contract, Mapping):
-                unknown_contract_json = _bounded_json(
-                    lane_answer_contract,
-                    _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
-                )
-                extra = (
-                    "## Answer Contract\n"
-                    f"```json\n{unknown_contract_json}\n```\n"
-                    "This lane carries an answer contract: the generic Output "
-                    "section below is superseded — return EXACTLY one JSON "
-                    "object matching the contract's response_model_schema; it "
-                    "is validated server-side at re-entry."
-                )
+                if _contract_within_delivery_budget(lane_answer_contract):
+                    unknown_contract_json = _bounded_json(
+                        lane_answer_contract,
+                        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+                    )
+                    extra = (
+                        "## Answer Contract\n"
+                        f"```json\n{unknown_contract_json}\n```\n"
+                        "This lane carries an answer contract: the generic Output "
+                        "section below is superseded — return EXACTLY one JSON "
+                        "object matching the contract's response_model_schema; it "
+                        "is validated server-side at re-entry."
+                    )
+                else:
+                    extra = (
+                        "## Answer Contract\n"
+                        "This lane declared an answer contract that exceeds the "
+                        "whole-form delivery budget; it is OMITTED and NOT "
+                        "enforced at re-entry. Return the generic Output shape "
+                        "below."
+                    )
 
         prompt = f"""## Task
 You are an Ouroboros interview advisory subagent.
@@ -2880,9 +2902,12 @@ class FanoutRegistry:
     handlers that know the resolved interview state dir thread it in via
     :meth:`rebase_default`; until then the zero-arg default falls back to
     ``~/.ouroboros/data/fanout``.
-    Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
-    a persistence failure degrades re-entry (submissions report the fan-out as
-    unknown) but never breaks the fan-out request path.
+    Each record is a single ``{fanout_id}.json`` file. Write failures have
+    explicit, caller-visible outcomes rather than a uniform degradation:
+    a failed registration returns ``None`` (no fan-out id is advertised), a
+    failed accumulation reports ``accumulation_persisted=false``, and a
+    failed terminal write returns ``completion_not_persisted`` — the request
+    path itself never breaks.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
@@ -2924,7 +2949,15 @@ class FanoutRegistry:
 
         cutoff = time.time() - self._RECORD_RETENTION_SECONDS
         try:
-            entries = [*self._dir.glob("*.json"), *self._dir.glob(".*.lock")]
+            entries = [
+                *self._dir.glob("*.json"),
+                *self._dir.glob(".*.lock"),
+                # Atomic-save leftovers: a crash between temp write and
+                # replace strands record contents in a temp file (bot-review
+                # round-11) — aged ones are crash artifacts, never live
+                # state, so they sweep without the lock protocol.
+                *self._dir.glob(".*.tmp-*"),
+            ]
         except OSError:
             return
         for path in entries:
@@ -2933,7 +2966,12 @@ class FanoutRegistry:
                     continue
             except OSError:
                 continue
-            if path.name.endswith(".lock"):
+            if ".tmp-" in path.name:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif path.name.endswith(".lock"):
                 self._unlink_lock_if_unheld(path)
             else:
                 self._unlink_record_if_unlocked(path, cutoff)
@@ -3294,6 +3332,46 @@ def _mutating_tool_verb(tool_name: str) -> str | None:
     return next((token for token in tokens if token in verbs), None)
 
 
+def _contract_within_delivery_budget(contract: Mapping[str, Any]) -> bool:
+    """Whether a lane answer contract can be delivered to a child WHOLE.
+
+    Invariant (bot-review round-11): a contract is enforced at re-entry IFF
+    it was delivered untorn to the child. An oversized contract is rejected
+    explicitly on BOTH sides — not rendered truncated (an unsatisfiable
+    form) and not registered for enforcement — so the lane falls back to
+    the generic output shape consistently.
+    """
+    try:
+        rendered = json.dumps(contract, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+    return len(rendered) <= _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS
+
+
+def _mutating_source_identifier_verb(source: str) -> str | None:
+    """Mutating verb carried by a tool IDENTIFIER inside ``source``, if any.
+
+    ``source`` is free text naming the executed tool. A whitespace guard
+    alone is a bypass ("delete_database tool" — bot-review round-11), so
+    every whitespace-separated token is examined: a token counts as a tool
+    identifier when it is the entire source (bare tool name) or a COMPOUND
+    identifier (snake_case/kebab/dotted/camelCase). Bare English words
+    inside longer prose are not identifiers, keeping "call center logs"
+    valid.
+    """
+    stripped = source.strip()
+    if not stripped:
+        return None
+    tokens = stripped.split()
+    if len(tokens) == 1:
+        return _mutating_tool_verb(tokens[0])
+    for token in tokens:
+        is_compound = bool(re.search(r"[_.\-]", token) or re.search(r"(?<=[a-z0-9])[A-Z]", token))
+        if is_compound and (verb := _mutating_tool_verb(token)):
+            return verb
+    return None
+
+
 def _is_row_shaped_value(value: str) -> bool:
     """True when an evidence value looks like serialized rows, not an aggregate.
 
@@ -3456,18 +3534,16 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                     "(serialized-record) content is raw evidence and may not "
                     "ride any persisted field"
                 )
-        # An identifier-shaped source is the tool that WAS executed, so it
-        # gets the same mutating-verb check as proposal tool names
-        # (bot-review round-9 probe: source="delete_database"). Prose sources
-        # ("call center logs") are exempt from token matching — the SQL-shape
-        # scan above covers prose — because free text legitimately contains
-        # words like "call" or "update".
+        # The executed-tool identity inside ``source`` gets the same
+        # mutating-verb check as proposal tool names. Detection is per
+        # whitespace-separated token, so surrounding prose cannot disable it
+        # (bot-review round-11 probe: "delete_database tool"): a token is
+        # treated as a TOOL IDENTIFIER when it is either the whole source or
+        # a compound identifier (snake_case/kebab/dotted/camelCase). Bare
+        # English words inside prose ("call center logs") are not
+        # identifiers and stay exempt — the SQL-shape scan covers prose.
         source = item.get("source")
-        if (
-            isinstance(source, str)
-            and not re.search(r"\s", source.strip())
-            and (verb := _mutating_tool_verb(source))
-        ):
+        if isinstance(source, str) and (verb := _mutating_source_identifier_verb(source)):
             errors.append(
                 f"evidence[{index}].source: names a mutating tool ({verb!r}); "
                 "the data lane is read-only"
@@ -3737,7 +3813,17 @@ def register_question_advisory_fanout_from_lanes(
         # persisted interview state.
         answer_contract = lane.get("answer_contract")
         if isinstance(answer_contract, Mapping):
-            lane_answer_contracts[lane_id] = dict(answer_contract)
+            # Enforced IFF deliverable whole (round-11): an oversized
+            # contract is skipped here so re-entry never validates against a
+            # schema the child could only have received torn.
+            if _contract_within_delivery_budget(answer_contract):
+                lane_answer_contracts[lane_id] = dict(answer_contract)
+            else:
+                log.warning(
+                    "fanout.lane_contract.oversized_not_enforced",
+                    lane_id=lane_id,
+                    contract_id=str(answer_contract.get("contract_id") or ""),
+                )
     if not expected_keys:
         return None
     synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}

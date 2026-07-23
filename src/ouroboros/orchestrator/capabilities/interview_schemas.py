@@ -693,7 +693,8 @@ def _data_context_answer_contract() -> dict[str, Any]:
         },
         "runtime_instruction": (
             "Fill this form so the confirming user can decide with full "
-            "context: what you executed (evidence with tool, query, value), "
+            "context: what you executed (evidence with source, query_summary, "
+            "value), "
             "what you deliberately did not execute and why (proposed_queries "
             "with source_class), and point-in-time caveats. Every data answer "
             "requires user confirmation; there is no auto-confirmed grade."

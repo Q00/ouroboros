@@ -37,6 +37,7 @@ from ouroboros.mcp.tools.subagent import (
     register_code_investigation_fanout,
     register_lateral_persona_fanout,
     register_question_advisory_fanout,
+    register_question_advisory_fanout_from_lanes,
     stamp_fanout_meta,
     submit_fanout_results,
 )
@@ -2199,6 +2200,125 @@ def test_mutating_known_data_tool_hint_is_rejected_before_dispatch(monkeypatch: 
     )
     lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
     assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]
+
+
+def test_mutating_source_detection_survives_surrounding_prose() -> None:
+    """Whitespace must not disable executed-tool identity checks (round-11).
+
+    ``source="delete_database tool"`` previously bypassed the identifier
+    check via its space. Compound identifiers are now detected per token;
+    bare English words in prose stay exempt.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for probe in ("delete_database tool", "backup DropTables job", "delete_database"):
+        output = _minimal_data_output("78% of MAU are on the free tier")
+        output["evidence"][0]["source"] = probe
+        errors = _data_evidence_boundary_violations(output)
+        assert any("mutating tool" in error for error in errors), probe
+
+    for clean in ("call center logs", "external metered warehouse", "update stream digest"):
+        output = _minimal_data_output("78% of MAU are on the free tier")
+        output["evidence"][0]["source"] = clean
+        assert _data_evidence_boundary_violations(output) == [], clean
+
+
+def test_oversized_lane_contract_is_rejected_whole(tmp_path: Any) -> None:
+    """A contract is enforced IFF it was deliverable untorn (round-11).
+
+    A 25k-char contract previously rendered truncated while re-entry
+    enforced the full schema — an unsatisfiable form. Oversized contracts
+    are now excluded from BOTH rendering and enforcement, and the child is
+    told explicitly.
+    """
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+
+    oversized_contract = {
+        "contract_id": "huge_answer.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["lane_id", "tail_field"],
+            "properties": {
+                "lane_id": {"const": "huge_lane"},
+                **{f"field_{i}": {"type": "string", "description": "x" * 200} for i in range(120)},
+                "tail_field": {"type": "string"},
+            },
+        },
+    }
+    lanes = [
+        {
+            "lane_id": "huge_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": oversized_contract,
+        },
+        {
+            "lane_id": "ambiguity_contrarian",
+            "capability": "run_lateral_review",
+            "persona": "contrarian",
+            "required": True,
+        },
+    ]
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-oversized", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    # Not registered for enforcement: the child could never receive it whole.
+    assert "huge_lane" not in record.synthesizer_input.get("lane_answer_contracts", {})
+
+    # Submitting a generic-shaped output for the lane completes cleanly.
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-oversized",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "huge_lane", "content": "generic finding"},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+
+    # Generic child prompt says OMITTED explicitly and never renders a torn form.
+    request = {
+        "session_id": "sess-oversized",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": [lanes[0]],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    prompt = payloads[0].prompt
+    assert "OMITTED" in prompt or "exceeds the whole-form delivery budget" in prompt
+    assert "[truncated]" not in prompt
+
+    # Plugin recipe applies the same rule.
+    section = _plugin_advisory_contract_section("fanout_x", {"lanes": lanes}, "sess-oversized")
+    assert "OMITTED" in section
+    assert "tail_field" not in section
+
+
+def test_gc_sweeps_aged_atomic_write_leftovers(tmp_path: Any) -> None:
+    """Crash artifacts from atomic saves respect retention (round-11)."""
+    import os as os_module
+    import time
+
+    registry = FanoutRegistry(tmp_path)
+    stale_tmp = tmp_path / ".fanout_crash.json.tmp-deadbeef"
+    stale_tmp.write_text('{"partial": "record"}')
+    ancient = time.time() - FanoutRegistry._RECORD_RETENTION_SECONDS - 3600
+    os_module.utime(stale_tmp, (ancient, ancient))
+    fresh_tmp = tmp_path / ".fanout_live.json.tmp-cafebabe"
+    fresh_tmp.write_text('{"partial": "record"}')
+
+    registry._gc_stale_records()
+    assert not stale_tmp.exists(), "aged atomic-write leftover is swept"
+    assert fresh_tmp.exists(), "fresh temp file (possibly mid-write) survives"
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
