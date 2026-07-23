@@ -1,6 +1,7 @@
 """Tests for keyword-detector.py — setup gate and routing behavior."""
 
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,70 @@ detect_keywords = _mod.detect_keywords
 SETUP_BYPASS_SKILLS = _mod.SETUP_BYPASS_SKILLS
 main = _mod.main
 is_first_time = _mod.is_first_time
+is_mcp_configured = _mod.is_mcp_configured
+
+
+class TestMcpConfiguration:
+    def test_claude_registration_requires_usable_transport(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        config_path = claude_dir / "mcp.json"
+        with patch.object(_mod.Path, "home", return_value=tmp_path):
+            config_path.write_text('{"mcpServers": {"ouroboros": {}}}')
+            assert is_mcp_configured("claude") is False
+            config_path.write_text(
+                '{"mcpServers": {"ouroboros": {"command": "uvx"}}}', encoding="utf-8"
+            )
+            assert is_mcp_configured("claude") is True
+
+    def test_codex_hook_does_not_reconstruct_parent_configuration(self, tmp_path, capsys):
+        payload = {
+            "session_id": "codex-session",
+            "turn_id": "codex-turn",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
+        assert "/ouroboros:setup" not in context
+
+    def test_claude_hook_without_registration_routes_setup(self, tmp_path, capsys):
+        payload = {
+            "session_id": "claude-session",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:status" not in context
+
+    def test_raw_input_preserves_legacy_claude_setup_boundary(self, tmp_path, capsys):
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.read.return_value = "ooo status"
+            main()
+
+        context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:setup" in context
+        assert "/ouroboros:status" not in context
 
 
 class TestFirstTimePrefs:
@@ -72,7 +137,7 @@ class TestFirstTimePrefs:
         # MCP registered in ~/.claude/mcp.json means setup has already run.
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
-        (claude_dir / "mcp.json").write_text('{"mcpServers": {"ouroboros": {}}}')
+        (claude_dir / "mcp.json").write_text('{"mcpServers": {"ouroboros": {"command": "uvx"}}}')
 
         with patch.object(_mod.Path, "home", return_value=tmp_path):
             assert is_first_time() is False
@@ -325,3 +390,97 @@ class TestMainGate:
         out = capsys.readouterr().out
         assert "/ouroboros:setup" not in out
         assert "/ouroboros:resume-session" in out
+
+
+class TestHookProtocol:
+    """UserPromptSubmit input and output follow the shared hook JSON protocol."""
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_json_payload_detection_uses_only_prompt_field(self, _first, capsys):
+        payload = {
+            "session_id": "ooo status",
+            "prompt": "hello world",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        assert capsys.readouterr().out == ""
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_json_payload_match_emits_structured_context(self, _first, _mcp, capsys):
+        payload = {
+            "session_id": "test-session",
+            "prompt": "ooo status",
+            "hook_event_name": "UserPromptSubmit",
+        }
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        assert output == {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": (
+                    "<skill-suggestion>\n🎯 MATCHED SKILLS:\n"
+                    '- /ouroboros:status - Detected "ooo status"\n'
+                    "</skill-suggestion>"
+                ),
+            }
+        }
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_raw_text_fallback_remains_supported(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = "ooo qa"
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:qa" in context
+        assert "ooo qa" in context
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_raw_json_object_text_without_hook_marker_remains_prompt(self, _first, _mcp, capsys):
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = '{"command": "ooo status"}'
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_hook_shaped_raw_json_without_session_id_remains_prompt(self, _first, _mcp, capsys):
+        raw_prompt = json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "explain this payload",
+                "command": "ooo status",
+            }
+        )
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = raw_prompt
+            main()
+
+        output = json.loads(capsys.readouterr().out)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "/ouroboros:status" in context
+
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_deeply_nested_raw_json_falls_back_without_crashing(self, _first, capsys):
+        raw_prompt = "[" * 10_000 + "]" * 10_000
+        with (
+            patch("sys.stdin") as mock_stdin,
+            patch.object(_mod.json, "loads", side_effect=RecursionError),
+        ):
+            mock_stdin.read.return_value = raw_prompt
+            main()
+
+        assert capsys.readouterr().out == ""

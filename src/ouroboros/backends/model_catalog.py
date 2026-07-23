@@ -319,7 +319,9 @@ def configured_default_model(backend: str) -> str | None:
         if capability.name == "codex":
             import tomllib
 
-            config_path = Path.home() / ".codex" / "config.toml"
+            from ouroboros.cli.commands.mcp_doctor import _codex_home_from_env
+
+            config_path = _codex_home_from_env().absolute() / "config.toml"
             if not config_path.exists():
                 return None
             data = tomllib.loads(config_path.read_text())

@@ -8,8 +8,8 @@ IMPORTANT: If MCP is not configured (ooo setup not run),
 ALL ooo commands (except setup/help) redirect to setup first.
 
 Hook: UserPromptSubmit
-Input: User prompt text via stdin (piped by Claude Code)
-Output: Modified prompt with skill suggestion appended
+Input: JSON hook payload via stdin, with raw prompt text supported as a fallback
+Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
@@ -155,13 +155,33 @@ KEYWORD_MAP = [
 ]
 
 
-def is_mcp_configured() -> bool:
-    """Check if MCP server is registered in ~/.claude/mcp.json."""
+def _usable_mcp_transport(server: object) -> bool:
+    if not isinstance(server, dict) or server.get("enabled") is False:
+        return False
+    return any(
+        isinstance(server.get(key), str) and bool(server[key].strip()) for key in ("command", "url")
+    )
+
+
+def _claude_mcp_configured(config_text: str) -> bool:
+    claude_config = json.loads(config_text)
+    if not isinstance(claude_config, dict):
+        return False
+    mcp_servers = claude_config.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        return False
+    return _usable_mcp_transport(mcp_servers.get("ouroboros"))
+
+
+def is_mcp_configured(host: str | None = None) -> bool:
+    """Check the legacy Claude host's Ouroboros MCP registration."""
+    if host not in (None, "claude"):
+        return False
     try:
-        mcp_path = Path.home() / ".claude" / "mcp.json"
-        if not mcp_path.exists():
-            return False
-        return "ouroboros" in mcp_path.read_text()
+        claude_path = Path.home() / ".claude" / "mcp.json"
+        return claude_path.exists() and _claude_mcp_configured(
+            claude_path.read_text(encoding="utf-8")
+        )
     except Exception:
         return False
 
@@ -275,53 +295,84 @@ def detect_keywords(text: str) -> dict:
     return {"detected": False, "keyword": None, "suggested_skill": None}
 
 
-def main() -> None:
-    # Read user prompt from stdin
+def _extract_prompt_and_host(hook_input: str) -> tuple[str, str | None]:
+    """Extract prompt and identify the hook host from its envelope."""
     try:
-        user_input = sys.stdin.read().strip()
+        payload = json.loads(hook_input)
+    except (ValueError, RecursionError):
+        return hook_input, "claude"
+
+    if (
+        isinstance(payload, dict)
+        and payload.get("hook_event_name") == "UserPromptSubmit"
+        and isinstance(payload.get("session_id"), str)
+        and isinstance(payload.get("prompt"), str)
+    ):
+        host = "codex" if isinstance(payload.get("turn_id"), str) else "claude"
+        return payload["prompt"], host
+    return hook_input, "claude"
+
+
+def _extract_prompt(hook_input: str) -> str:
+    """Extract prompt text from a hook payload, falling back to raw stdin."""
+    return _extract_prompt_and_host(hook_input)[0]
+
+
+def _emit_context(context: str) -> None:
+    """Emit a UserPromptSubmit response understood by Claude Code and Codex."""
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def main() -> None:
+    # Read the hook payload from stdin. Older integrations may still pipe raw text.
+    try:
+        hook_input = sys.stdin.read().strip()
     except Exception:
-        user_input = ""
+        hook_input = ""
+
+    user_input, host = _extract_prompt_and_host(hook_input)
 
     result = detect_keywords(user_input)
 
-    # First-time user: append welcome suggestion to their first message
+    # First-time user: add welcome context to their first message.
     if not result["detected"] and is_first_time():
         skill_name = "welcome"
-        print(f"""{user_input}
-
-<skill-suggestion>
+        _emit_context(f"""<skill-suggestion>
 🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
 IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
-</skill-suggestion>
-""")
+</skill-suggestion>""")
         return
 
     if result["detected"]:
         skill = result["suggested_skill"]
         keyword = result["keyword"]
 
-        # Gate check: if MCP not configured and skill requires it, redirect to setup
-        if skill not in SETUP_BYPASS_SKILLS and not is_mcp_configured():
-            print(f"""{user_input}
-
-<skill-suggestion>
+        # Codex hook payloads do not expose the parent session's --profile/-c
+        # layers. Reconstructing state in a child CLI can contradict the active
+        # session, so only the legacy Claude path applies the setup gate.
+        needs_setup = host != "codex" and not is_mcp_configured("claude")
+        if skill not in SETUP_BYPASS_SKILLS and needs_setup:
+            _emit_context("""<skill-suggestion>
 🎯 REQUIRED SKILL:
 - /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
-</skill-suggestion>
-""")
+</skill-suggestion>""")
         else:
             skill_name = skill.replace("/ouroboros:", "")
-            print(f"""{user_input}
-
-<skill-suggestion>
+            _emit_context(f"""<skill-suggestion>
 🎯 MATCHED SKILLS:
 - /ouroboros:{skill_name} - Detected "{keyword}"
-</skill-suggestion>
-""")
-    else:
-        # Pass through unchanged when no keyword detected
-        print(user_input)
+</skill-suggestion>""")
 
 
 if __name__ == "__main__":

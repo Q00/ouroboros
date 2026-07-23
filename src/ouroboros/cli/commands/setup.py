@@ -716,15 +716,22 @@ def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     return False
 
 
+def _active_codex_home() -> Path:
+    """Resolve the one Codex home used by every setup artifact."""
+    from .mcp_doctor import _codex_home_from_env
+
+    return _codex_home_from_env().absolute()
+
+
 def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
-    """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
+    """Register the Ouroboros MCP/env hookup in the active Codex home."""
     import tomllib
 
     if mode == "preserve":
         print_info("Preserved Codex MCP config.")
         return
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = _active_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -934,7 +941,7 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = _active_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
@@ -997,10 +1004,10 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
 
 
 def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
-    """Register the managed Codex worker profile in ~/.codex/config.toml."""
+    """Register the managed Codex worker profile in the active Codex home."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = _active_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -1174,16 +1181,19 @@ def _install_codex_default_llm_profiles(
 def _print_codex_config_guidance(config_path: Path) -> None:
     """Explain where Codex users should configure Ouroboros vs. Codex settings."""
     print_info(f"Configure Ouroboros runtime and per-role model overrides in {config_path}.")
+    codex_home = _active_codex_home()
     print_info(
-        "Use ~/.codex/config.toml for the Codex MCP/env hookup. Codex profile-v2 anchors live in ~/.codex/<profile>.config.toml on current Codex CLI releases."
+        f"Use {codex_home / 'config.toml'} for the Codex MCP/env hookup. "
+        f"Codex profile-v2 anchors live in {codex_home}/<profile>.config.toml "
+        "on current Codex CLI releases."
     )
 
 
 def _install_codex_artifacts() -> None:
-    """Install packaged Ouroboros rules and skills into ~/.codex/."""
+    """Install packaged Ouroboros rules and skills into the active Codex home."""
     from ouroboros.codex import install_codex_artifacts
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _active_codex_home()
 
     try:
         result = install_codex_artifacts(codex_dir=codex_dir, prune=True)
@@ -1244,10 +1254,10 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
             f"Installed Ouroboros role profile defaults for {len(added_role_profiles)} roles."
         )
 
-    # Install Codex-native rules and skills into ~/.codex/
+    # Install Codex-native rules and skills into the active Codex home.
     _install_codex_artifacts()
 
-    # Register MCP server in Codex config (~/.codex/config.toml)
+    # Register MCP server and profiles in the active Codex home.
     _register_codex_mcp_server(mode=mcp_mode)
     _register_codex_default_profiles(codex_path=codex_path)
     _register_codex_worker_profile(codex_path=codex_path)
@@ -3328,7 +3338,7 @@ def refresh_artifacts() -> None:
 
     refreshed: list[str] = []
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _active_codex_home()
     if codex_dir.exists() or shutil.which("codex"):
         from ouroboros.codex import install_codex_artifacts
 
