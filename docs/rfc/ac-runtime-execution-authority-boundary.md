@@ -560,6 +560,26 @@ The Foundation A implementation must demonstrate all of the following:
 73. a retained resume reserves workspace exclusion before restoring the
     worktree and holds it until the resumed identity is claimed or the handoff
     fails, so a sibling session cannot release the shared lock in that window.
+74. cancellation shielding drains the selected lifecycle cleanup but preserves
+    the first caller `CancelledError` and re-raises it after cleanup; shielding
+    cannot turn a cancelled public operation into an ordinary successful return.
+75. public terminalization treats authority retirement, all registered
+    finalizers, and cancellation-marker acknowledgement as one cancellation-
+    resistant boundary; a cancelling finalizer cannot leave a terminal session
+    with a pending cooperative request.
+76. an existing-terminal runner reconciliation retires authority, heartbeat,
+    active routing, and workspace ownership before its final cancellation-marker
+    clear, preventing a concurrent publisher from outliving terminal cleanup.
+77. the owning runner's durable `CANCELLED` path applies the same final-clear
+    ordering and propagates caller cancellation only after every live resource
+    and the request marker have been drained.
+78. resumed terminal completion applies the same final-clear ordering, while a
+    durable `PAUSED` result deliberately preserves a late marker for the next
+    exact-owner resume checkpoint.
+79. cancelling a claimed-owner public cancellation probe during durable
+    reconstruction drains the probe, preserves the nonterminal owner's request
+    marker, and then re-propagates `CancelledError`; it cannot return the normal
+    `cancellation_requested` disposition to a cancelled caller.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

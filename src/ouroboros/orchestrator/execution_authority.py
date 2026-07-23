@@ -80,12 +80,22 @@ async def _await_process_local_cleanup(awaitable: Awaitable[Any]) -> Any:
     returns; only cleanup receives shielding.
     """
     task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
     while not task.done():
         try:
             await asyncio.shield(task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
             continue
-    return task.result()
+    try:
+        result = task.result()
+    except BaseException as child_error:
+        if cancellation is not None:
+            raise cancellation from child_error
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 class _ProcessLocalAuthorityGeneration:
@@ -808,6 +818,45 @@ async def request_process_local_cancellation(
     from ouroboros.orchestrator.heartbeat import is_holder_alive
     from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 
+    async def _retire_and_acknowledge_terminal_owner() -> tuple[bool, bool]:
+        """Retire live state and reconcile its marker as one cleanup boundary."""
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            (
+                retired,
+                claim_became_active,
+            ) = await _retire_process_local_authority_after_terminal_persistence(
+                session_id,
+                execution_id,
+                authority,
+            )
+        except asyncio.CancelledError as exc:
+            # ``_retire_process_local_authority_after_terminal_persistence``
+            # raises only after a successful retirement has drained all of its
+            # finalizers.  Marker acknowledgement must still happen before the
+            # cancellation is propagated to the public caller.
+            cancellation = exc
+            retired = True
+            claim_became_active = False
+
+        async def _acknowledge() -> None:
+            if claim_became_active:
+                await request_cancellation(
+                    session_id,
+                    reason=reason,
+                    cancelled_by=cancelled_by,
+                )
+            else:
+                await clear_cancellation(session_id)
+
+        try:
+            await _await_process_local_cleanup(_acknowledge())
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        if cancellation is not None:
+            raise cancellation
+        return retired, claim_became_active
+
     async def _reconcile_terminalizing_owner() -> tuple[str | None, bool]:
         """Reconstruct and retire a terminal winner without restoring effects."""
         try:
@@ -823,22 +872,9 @@ async def request_process_local_cancellation(
         )
         if reconstructed_status not in {"completed", "failed", "cancelled"}:
             return reconstructed_status, False
-        (
-            retired,
-            claim_became_active,
-        ) = await _retire_process_local_authority_after_terminal_persistence(
-            session_id,
-            execution_id,
-            authority,
+        retired, claim_became_active = await _await_process_local_cleanup(
+            _retire_and_acknowledge_terminal_owner()
         )
-        if claim_became_active:
-            await request_cancellation(
-                session_id,
-                reason=reason,
-                cancelled_by=cancelled_by,
-            )
-        else:
-            await clear_cancellation(session_id)
         _LOG.info(
             "process_local_authority.interrupted_terminal_reconciled",
             extra={
@@ -1002,19 +1038,9 @@ async def request_process_local_cancellation(
             error=cancel_result.error,
         )
 
-    retired, claim_became_active = await _retire_process_local_authority_after_terminal_persistence(
-        session_id,
-        execution_id,
-        authority,
+    retired, claim_became_active = await _await_process_local_cleanup(
+        _retire_and_acknowledge_terminal_owner()
     )
-    if claim_became_active:
-        await request_cancellation(
-            session_id,
-            reason=reason,
-            cancelled_by=cancelled_by,
-        )
-    else:
-        await clear_cancellation(session_id)
 
     if cancel_result.value:
         return ProcessLocalCancellationOutcome(

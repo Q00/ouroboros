@@ -1408,6 +1408,28 @@ class OrchestratorRunner:
             execution_id=execution_id,
         )
 
+    async def _cleanup_terminal_process_local_state(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Retire all live state, then acknowledge cancellation last."""
+
+        async def _cleanup() -> None:
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            self._unregister_session(execution_id, session_id)
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await clear_cancellation(session_id)
+
+        await _await_process_local_cleanup(_cleanup())
+
     def _release_task_workspace_for_identity(
         self,
         *,
@@ -1719,13 +1741,7 @@ class OrchestratorRunner:
                 return None
             durable_status = reconstructed.value.status
             self._pending_lifecycle_intents.pop(session_id, None)
-            self._retire_process_local_authority(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            self._unregister_session(execution_id, session_id)
-            await clear_cancellation(session_id)
-            self._release_task_workspace_for_identity(
+            await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
                 execution_id=execution_id,
             )
@@ -1806,13 +1822,7 @@ class OrchestratorRunner:
             )
 
         if not reconciled_during_exception:
-            self._retire_process_local_authority(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            self._unregister_session(execution_id, session_id)
-            await clear_cancellation(session_id)
-            self._release_task_workspace_for_identity(
+            await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
                 execution_id=execution_id,
             )
@@ -2519,7 +2529,6 @@ class OrchestratorRunner:
                         session_id=session_id,
                         execution_id=execution_id,
                     )
-                    await clear_cancellation(session_id)
                     return error
                 last_error = result.error
             log.warning(
@@ -2634,6 +2643,7 @@ class OrchestratorRunner:
         """
 
         async def _reconcile() -> bool:
+            terminal_cleanup_completed = False
             try:
                 reconstructed = await self._session_repo.reconstruct_session(session_id)
             except Exception:
@@ -2658,11 +2668,11 @@ class OrchestratorRunner:
                         SessionStatus.FAILED,
                         SessionStatus.CANCELLED,
                     }:
-                        self._retire_process_local_authority(
+                        await self._cleanup_terminal_process_local_state(
                             session_id=session_id,
                             execution_id=execution_id,
                         )
-                        await clear_cancellation(session_id)
+                        terminal_cleanup_completed = True
                     else:
                         terminal_mark_error = await self._mark_preparation_failed_best_effort(
                             tracker=tracker,
@@ -2674,11 +2684,11 @@ class OrchestratorRunner:
                             },
                         )
                         if terminal_mark_error is None:
-                            self._retire_process_local_authority(
+                            await self._cleanup_terminal_process_local_state(
                                 session_id=session_id,
                                 execution_id=execution_id,
                             )
-                            await clear_cancellation(session_id)
+                            terminal_cleanup_completed = True
                         else:
                             log.warning(
                                 "orchestrator.runner.create_session_cancel_terminal_pending",
@@ -2686,10 +2696,11 @@ class OrchestratorRunner:
                                 execution_id=execution_id,
                                 error=terminal_mark_error,
                             )
-            self._release_task_workspace_for_identity(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
+            if not terminal_cleanup_completed:
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
             return (session_id, execution_id) in self._process_local_authorities
 
         return bool(await _await_process_local_cleanup(_reconcile()))
@@ -3033,17 +3044,15 @@ class OrchestratorRunner:
                     tracker.session_id,
                     release_liveness_lease=False,
                 )
-            else:
-                self._retire_process_local_authority(
+                self._release_task_workspace_for_identity(
                     session_id=tracker.session_id,
                     execution_id=tracker.execution_id,
                 )
-                self._unregister_session(tracker.execution_id, tracker.session_id)
-                await clear_cancellation(tracker.session_id)
-            self._release_task_workspace_for_identity(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
+            else:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
 
         self._pending_lifecycle_intents.pop(tracker.session_id, None)
         return Result.ok(
@@ -4785,15 +4794,10 @@ class OrchestratorRunner:
             SessionStatus.FAILED,
             SessionStatus.CANCELLED,
         }:
-            self._retire_process_local_authority(
+            await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
                 execution_id=execution_id,
             )
-            self._release_task_workspace_for_identity(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            await clear_cancellation(session_id)
             return Result.ok(
                 {
                     "execution_id": execution_id,
@@ -5305,7 +5309,6 @@ class OrchestratorRunner:
 
             async def _reconcile_existing_terminal_owner() -> None:
                 try:
-                    await clear_cancellation(session_id)
                     if not execution_terminal_events:
                         await self._event_store.append(
                             create_execution_terminal_event(
@@ -5324,12 +5327,7 @@ class OrchestratorRunner:
                             )
                         )
                 finally:
-                    self._retire_process_local_authority(
-                        session_id=session_id,
-                        execution_id=execution_id,
-                    )
-                    self._unregister_session(execution_id, session_id)
-                    self._release_task_workspace_for_identity(
+                    await self._cleanup_terminal_process_local_state(
                         session_id=session_id,
                         execution_id=execution_id,
                     )
@@ -5431,7 +5429,6 @@ class OrchestratorRunner:
         # durable CAS has committed.
         async def _reconcile_cancelled_owner() -> None:
             try:
-                await clear_cancellation(session_id)
                 await self._event_store.append(
                     create_execution_terminal_event(
                         execution_id=execution_id,
@@ -5442,12 +5439,7 @@ class OrchestratorRunner:
                     )
                 )
             finally:
-                self._retire_process_local_authority(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-                self._unregister_session(execution_id, session_id)
-                self._release_task_workspace_for_identity(
+                await self._cleanup_terminal_process_local_state(
                     session_id=session_id,
                     execution_id=execution_id,
                 )
@@ -5881,12 +5873,10 @@ class OrchestratorRunner:
                 SessionStatus.CANCELLED,
                 SessionStatus.FAILED,
             }:
-                self._cleanup_pre_execution_state(
-                    durable_tracker.execution_id,
-                    durable_tracker.session_id,
-                    session_registered=False,
+                await self._cleanup_terminal_process_local_state(
+                    session_id=durable_tracker.session_id,
+                    execution_id=durable_tracker.execution_id,
                 )
-                await clear_cancellation(durable_tracker.session_id)
                 return Result.err(
                     OrchestratorError(
                         message=(
@@ -6579,9 +6569,8 @@ class OrchestratorRunner:
                 duration_seconds=duration,
             )
 
-            # Clean up session tracking
             if terminal_status != "paused":
-                self._retire_process_local_authority(
+                await self._cleanup_terminal_process_local_state(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                 )
@@ -6590,17 +6579,15 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                 )
-            self._unregister_session(
-                exec_id,
-                tracker.session_id,
-                release_liveness_lease=terminal_status != "paused",
-            )
-            if terminal_status != "paused":
-                await clear_cancellation(tracker.session_id)
-            self._release_task_workspace_for_identity(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
+                self._unregister_session(
+                    exec_id,
+                    tracker.session_id,
+                    release_liveness_lease=False,
+                )
+                self._release_task_workspace_for_identity(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
 
             return Result.ok(
                 OrchestratorResult(
@@ -7073,9 +7060,8 @@ class OrchestratorRunner:
             duration_seconds=duration,
         )
 
-        # Clean up session tracking
         if terminal_status != "paused":
-            self._retire_process_local_authority(
+            await self._cleanup_terminal_process_local_state(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
             )
@@ -7084,17 +7070,15 @@ class OrchestratorRunner:
                 session_id=tracker.session_id,
                 execution_id=exec_id,
             )
-        self._unregister_session(
-            exec_id,
-            tracker.session_id,
-            release_liveness_lease=terminal_status != "paused",
-        )
-        if terminal_status != "paused":
-            await clear_cancellation(tracker.session_id)
-        self._release_task_workspace_for_identity(
-            session_id=tracker.session_id,
-            execution_id=tracker.execution_id,
-        )
+            self._unregister_session(
+                exec_id,
+                tracker.session_id,
+                release_liveness_lease=False,
+            )
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
         return Result.ok(
             OrchestratorResult(
@@ -7154,12 +7138,10 @@ class OrchestratorRunner:
             SessionStatus.FAILED,
         ):
             self._pending_lifecycle_intents.pop(session_id, None)
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
+            await self._cleanup_terminal_process_local_state(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
             )
-            await clear_cancellation(session_id)
             return Result.err(
                 OrchestratorError(
                     message=f"Session is in terminal state {tracker.status.value}, cannot resume",
@@ -7183,6 +7165,8 @@ class OrchestratorRunner:
                 session_registered=False,
                 retire_authority=False,
             )
+            if error.details.get("terminal_persistence_pending") is not True:
+                await clear_cancellation(session_id)
             return Result.err(error)
 
         # Persisted process-local authority is arbitrated before any policy
@@ -7222,6 +7206,8 @@ class OrchestratorRunner:
                 session_registered=False,
                 retire_authority=False,
             )
+            if error.details.get("terminal_persistence_pending") is not True:
+                await clear_cancellation(session_id)
             return Result.err(error)
 
         # A RUNNING tracker with a current Foundation A contract belongs to an
@@ -7827,32 +7813,31 @@ Note: This is a resumed session. Please continue from where execution was interr
                 duration_seconds=duration,
             )
 
-            # A paused owner has not acknowledged a cancellation that may have
-            # arrived after its final execution checkpoint. Preserve that
-            # marker so the next resume entry point terminalizes before effects.
-            if terminal_status != "paused":
-                await clear_cancellation(session_id)
+            async def _cleanup_resumed_owner() -> None:
+                # A paused owner has not acknowledged a cancellation that may
+                # have arrived after its final execution checkpoint. Preserve
+                # that marker so the next resume terminalizes before effects.
+                if terminal_status != "paused":
+                    await self._cleanup_terminal_process_local_state(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                else:
+                    self._release_process_local_authority(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    self._unregister_session(
+                        tracker.execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                    self._release_task_workspace_for_identity(
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                    )
 
-            # Clean up session tracking
-            if terminal_status != "paused":
-                self._retire_process_local_authority(
-                    session_id=session_id,
-                    execution_id=tracker.execution_id,
-                )
-            else:
-                self._release_process_local_authority(
-                    session_id=session_id,
-                    execution_id=tracker.execution_id,
-                )
-            self._unregister_session(
-                tracker.execution_id,
-                session_id,
-                release_liveness_lease=terminal_status != "paused",
-            )
-            self._release_task_workspace_for_identity(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
+            await _await_process_local_cleanup(_cleanup_resumed_owner())
 
             return Result.ok(
                 OrchestratorResult(
