@@ -381,10 +381,14 @@ def _proactive_relays(
                     },
                 )
             )
-        elif event.type in {
-            "execution.ac.attempt_judged",
-            "execution.ac.outcome_finalized",
-        } and data.get("success") is True:
+        elif (
+            event.type
+            in {
+                "execution.ac.attempt_judged",
+                "execution.ac.outcome_finalized",
+            }
+            and data.get("success") is True
+        ):
             relays.append(
                 _progress(
                     event,
@@ -404,9 +408,7 @@ def _proactive_relays(
                 _progress(
                     event,
                     kind="progress_advanced",
-                    subtype=(
-                        "ac_accepted" if data.get("accepted") is True else "ac_rejected"
-                    ),
+                    subtype=("ac_accepted" if data.get("accepted") is True else "ac_rejected"),
                     job_id=job_id,
                     evidence={
                         "root_ac_index": data.get("root_ac_index"),

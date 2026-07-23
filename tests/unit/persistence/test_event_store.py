@@ -262,7 +262,9 @@ class TestEventStoreAppend:
 
         assert EventStore.is_ac_acceptance_finalized_event(event) is True
         assert await event_store.append(event) is True
-        assert await event_store.append(event.model_copy(update={"id": "duplicate-event-id"})) is False
+        assert (
+            await event_store.append(event.model_copy(update={"id": "duplicate-event-id"})) is False
+        )
 
         replayed = await event_store.replay("execution", event.aggregate_id)
         assert [item.type for item in replayed] == ["execution.ac.acceptance_finalized"]
@@ -299,7 +301,9 @@ class TestEventStoreAppend:
     async def test_malformed_final_acceptance_is_rejected(
         self, event_store: EventStore, overrides: dict[str, object]
     ) -> None:
-        with pytest.raises(PersistenceError, match="Final acceptance|Accepted final|Rejected final"):
+        with pytest.raises(
+            PersistenceError, match="Final acceptance|Accepted final|Rejected final"
+        ):
             await event_store.append(self._acceptance_event(**overrides))
 
     async def test_final_acceptance_raw_append_paths_are_rejected(

@@ -7269,21 +7269,30 @@ class OrchestratorRunner:
             if outcome is None and default_outcome is not None:
                 outcome = default_outcome
             if not isinstance(outcome, str) or not outcome.strip():
-                outcome = "blocked" if result is None else ("failed" if not result.success else "succeeded")
+                outcome = (
+                    "blocked"
+                    if result is None
+                    else ("failed" if not result.success else "succeeded")
+                )
             retry_attempt = getattr(result, "retry_attempt", 0) if result is not None else 0
-            if isinstance(retry_attempt, bool) or not isinstance(retry_attempt, int) or retry_attempt < 0:
+            if (
+                isinstance(retry_attempt, bool)
+                or not isinstance(retry_attempt, int)
+                or retry_attempt < 0
+            ):
                 retry_attempt = 0
             accepted = bool(
                 terminal_status == SessionStatus.COMPLETED.value
                 and (
                     root_ac_index in accepted_root_indices
                     if accepted_root_indices is not None
-                    else result is not None
-                    and outcome in {"succeeded", "satisfied_externally"}
+                    else result is not None and outcome in {"succeeded", "satisfied_externally"}
                 )
             )
-            disposition = "accepted" if accepted else (
-                "cancelled" if terminal_status == SessionStatus.CANCELLED.value else outcome
+            disposition = (
+                "accepted"
+                if accepted
+                else ("cancelled" if terminal_status == SessionStatus.CANCELLED.value else outcome)
             )
             await self._event_store.append(
                 BaseEvent(

@@ -185,7 +185,11 @@ def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
             operation="append_ac_acceptance_finalized_if_absent",
             details={"event_type": event.type, "event_id": event.id},
         )
-    if not accepted and isinstance(disposition, str) and disposition.strip().casefold() == "accepted":
+    if (
+        not accepted
+        and isinstance(disposition, str)
+        and disposition.strip().casefold() == "accepted"
+    ):
         raise PersistenceError(
             "Rejected final acceptance cannot use accepted disposition.",
             operation="append_ac_acceptance_finalized_if_absent",
@@ -1184,9 +1188,7 @@ class EventStore:
                 details={"count": len(terminal_session_events)},
             )
 
-        acceptance_events = [
-            event for event in events if _is_ac_acceptance_finalized_event(event)
-        ]
+        acceptance_events = [event for event in events if _is_ac_acceptance_finalized_event(event)]
         if acceptance_events:
             raise PersistenceError(
                 "Final acceptance events cannot be appended in a batch; use append() "

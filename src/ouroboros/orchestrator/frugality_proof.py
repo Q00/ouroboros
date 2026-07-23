@@ -516,10 +516,9 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         )
         if acceptance_records:
             unique_acceptance = set(acceptance_records)
-            if (
-                (v.get("seed_run_id"), root_index) not in acceptance_invalid
-                and len(unique_acceptance) == 1
-            ):
+            if (v.get("seed_run_id"), root_index) not in acceptance_invalid and len(
+                unique_acceptance
+            ) == 1:
                 _authority, final_attempt, accepted, disposition, terminal_status = next(
                     iter(unique_acceptance)
                 )

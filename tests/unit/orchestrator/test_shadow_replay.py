@@ -351,38 +351,40 @@ class _EmitterHarness:
         root_key = (run_id, 0)
         if root_key not in self._finalized_roots:
             self._finalized_roots.add(root_key)
-            self.events.extend([
-                BaseEvent(
-                    type=EVENT_AC_ATTEMPT_JUDGED,
-                    aggregate_type="execution",
-                    aggregate_id=run_id,
-                    data={
-                        "execution_id": run_id,
-                        "root_ac_index": 0,
-                        "retry_attempt": 0,
-                        "attempt_number": 1,
-                        "success": True,
-                        "outcome": "succeeded",
-                        "is_decomposed": True,
-                    },
-                ),
-                BaseEvent(
-                    type=EVENT_AC_ACCEPTANCE_FINALIZED,
-                    aggregate_type="execution",
-                    aggregate_id=run_id,
-                    data={
-                        "execution_id": run_id,
-                        "session_id": session_id,
-                        "authority_correlation_id": f"authority-{run_id}",
-                        "root_ac_index": 0,
-                        "final_retry_attempt": 0,
-                        "accepted": True,
-                        "disposition": "accepted",
-                        "outcome": "succeeded",
-                        "terminal_status": "completed",
-                    },
-                ),
-            ])
+            self.events.extend(
+                [
+                    BaseEvent(
+                        type=EVENT_AC_ATTEMPT_JUDGED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "root_ac_index": 0,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "success": True,
+                            "outcome": "succeeded",
+                            "is_decomposed": True,
+                        },
+                    ),
+                    BaseEvent(
+                        type=EVENT_AC_ACCEPTANCE_FINALIZED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "session_id": session_id,
+                            "authority_correlation_id": f"authority-{run_id}",
+                            "root_ac_index": 0,
+                            "final_retry_attempt": 0,
+                            "accepted": True,
+                            "disposition": "accepted",
+                            "outcome": "succeeded",
+                            "terminal_status": "completed",
+                        },
+                    ),
+                ]
+            )
 
 
 class TestProofContractClosesWithBaseline:
