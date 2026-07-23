@@ -5919,17 +5919,29 @@ class OrchestratorRunner:
         self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
 
+        create_session_kwargs: dict[str, Any] = {
+            "execution_id": exec_id,
+            "seed_id": seed.metadata.seed_id,
+            "session_id": resolved_session_id,
+            "seed_goal": seed.goal,
+            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+            "llm_backend": getattr(self._adapter, "llm_backend", None),
+            "execution_contract": execution_contract,
+        }
         try:
-            session_result = await self._session_repo.create_session(
-                execution_id=exec_id,
-                seed_id=seed.metadata.seed_id,
-                session_id=resolved_session_id,
-                seed_goal=seed.goal,
-                runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                llm_backend=getattr(self._adapter, "llm_backend", None),
-                execution_contract=execution_contract,
-                acceptance_root_indices=range(len(seed.acceptance_criteria)),
-            )
+            if (
+                "acceptance_root_indices"
+                in inspect.signature(self._session_repo.create_session).parameters
+            ):
+                create_session_kwargs["acceptance_root_indices"] = range(
+                    len(seed.acceptance_criteria)
+                )
+        except (TypeError, ValueError):
+            # Legacy/mock repositories may not expose an inspectable signature;
+            # the durable SessionRepository path always does.
+            pass
+        try:
+            session_result = await self._session_repo.create_session(**create_session_kwargs)
         except asyncio.CancelledError:
             await self._reconcile_session_publication_interruption(
                 session_id=resolved_session_id,
@@ -6035,7 +6047,6 @@ class OrchestratorRunner:
             "fat_harness_mode": self._fat_harness_mode,
             "messages_processed": 0,
             EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
-            ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY: list(range(len(seed.acceptance_criteria))),
         }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
