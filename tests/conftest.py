@@ -113,6 +113,34 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
             monkeypatch.setattr(mod, "build_answer_refiner", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def block_setup_probe_cli_spawns(monkeypatch):
+    """Stop ``ooo setup`` capability probes from spawning real codex/opencode CLIs.
+
+    ``_codex_uses_profile_v2`` spawns ``codex --help`` and ``_debug_paths_config_dir``
+    spawns ``opencode debug paths`` to sniff installed-CLI capabilities. On a
+    machine where those CLIs happen to be installed the probe result — and thus
+    the setup tests' behavior — depends on the real binary's output, so the same
+    test can branch differently across machines (the "passes on CI, fails on my
+    machine" split). Pin both to their documented CLI-unavailable fallback
+    (``False`` / ``None``), which is exactly the behavior on a clean CI with no
+    such CLI on PATH. Tests that exercise the probe re-patch after this fixture
+    and win.
+
+    Note: this deliberately does NOT touch runtime adapters (e.g. the zcode/codex
+    CLI runtimes) that exec a caller-provided CLI path — those tests build a stub
+    binary under ``tmp_path`` and executing it IS the behavior under test.
+
+    Gated on sys.modules so tests that never import these modules don't pay.
+    """
+    setup_mod = sys.modules.get("ouroboros.cli.commands.setup")
+    if setup_mod is not None and hasattr(setup_mod, "_codex_uses_profile_v2"):
+        monkeypatch.setattr(setup_mod, "_codex_uses_profile_v2", lambda *_a, **_k: False)
+    opencode_mod = sys.modules.get("ouroboros.cli.opencode_config")
+    if opencode_mod is not None and hasattr(opencode_mod, "_debug_paths_config_dir"):
+        monkeypatch.setattr(opencode_mod, "_debug_paths_config_dir", lambda *_a, **_k: None)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def close_test_owned_stores(monkeypatch):
     """Close stores created during a test to prevent aiosqlite leak warnings."""
