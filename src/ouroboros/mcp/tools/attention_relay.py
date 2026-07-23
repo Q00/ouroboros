@@ -227,6 +227,7 @@ def _proactive_relays(
     new_event_ids: set[str],
     *,
     job_id: str | None,
+    session_id: str | None,
 ) -> list[dict[str, object]]:
     relays: list[dict[str, object]] = []
     last_route_by_ac: dict[str, tuple[object, ...]] = {}
@@ -400,6 +401,12 @@ def _proactive_relays(
                 )
             )
         elif event.type == "execution.ac.acceptance_finalized":
+            # A linked execution stream may contain multiple orchestration
+            # sessions. Final acceptance is authority-bearing and must only be
+            # relayed for the job's linked session; exposing another session's
+            # acceptance under this job is a false progress claim.
+            if session_id is not None and data.get("session_id") != session_id:
+                continue
             relays.append(
                 _progress(
                     event,
@@ -444,6 +451,7 @@ def classify_relay_events(
     *,
     new_event_ids: set[str] | None = None,
     job_id: str | None = None,
+    session_id: str | None = None,
     available_tools: Set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Classify bounded proactive and attention relay envelopes.
@@ -455,7 +463,12 @@ def classify_relay_events(
     history = _event_order(history_events)
     registered = available_tools or frozenset()
     new_ids = new_event_ids if new_event_ids is not None else {event.id for event in history}
-    relays = _proactive_relays(history, new_ids, job_id=job_id)
+    relays = _proactive_relays(
+        history,
+        new_ids,
+        job_id=job_id,
+        session_id=session_id,
+    )
 
     recovery_by_key: dict[str, BaseEvent] = {}
     for event in history:

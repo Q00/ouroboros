@@ -123,6 +123,70 @@ def _proof_reference(events: Iterable[object]) -> str | None:
     return None
 
 
+def _event_aggregate_id(event: object) -> str | None:
+    value = (
+        event.get("aggregate_id")
+        if isinstance(event, Mapping)
+        else getattr(event, "aggregate_id", None)
+    )
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _event_aggregate_type(event: object) -> str | None:
+    value = (
+        event.get("aggregate_type")
+        if isinstance(event, Mapping)
+        else getattr(event, "aggregate_type", None)
+    )
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _event_session_anchor(event: object, data: Mapping[str, object]) -> str | None:
+    for key in ("session_id", "orchestrator_session_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if _event_aggregate_type(event) == "session":
+        return _event_aggregate_id(event)
+    return None
+
+
+def _session_scoped_events(
+    events: Iterable[object], *, execution_id: str, session_id: str
+) -> list[object]:
+    """Keep only evidence belonging to one execution/session authority.
+
+    Current producers put the orchestration session on every frugality event,
+    while older execution-scoped telemetry may omit it.  Sessionless rows are
+    retained only when the supplied stream has no competing explicit session;
+    if two sessions share an execution, ambiguity fails closed instead of
+    allowing one session's evidence to leak into the other.
+    """
+    materialized = list(events)
+    explicit_sessions = {
+        anchor
+        for event in materialized
+        for anchor in [_event_session_anchor(event, event_data(event))]
+        if anchor is not None
+    }
+    scoped: list[object] = []
+    for event in materialized:
+        data = event_data(event)
+        event_execution = data.get("execution_id")
+        if isinstance(event_execution, str) and event_execution != execution_id:
+            continue
+        if _event_aggregate_type(event) == "session" and _event_aggregate_id(event) != session_id:
+            continue
+        anchor = _event_session_anchor(event, data)
+        if anchor is not None:
+            if anchor == session_id:
+                scoped.append(event)
+            continue
+        if not explicit_sessions or explicit_sessions == {session_id}:
+            scoped.append(event)
+    return scoped
+
+
 def build_frugality_retrospective(
     events: Iterable[object],
     *,
@@ -134,7 +198,11 @@ def build_frugality_retrospective(
     if terminal_status not in HARD_FINAL_STATUSES:
         return None
 
-    event_list = list(events)
+    event_list = _session_scoped_events(
+        events,
+        execution_id=execution_id,
+        session_id=session_id,
+    )
     attempts: dict[_AttemptKey, _AttemptEvidence] = {}
     invalid_attempt_keys: set[_AttemptKey] = set()
     anonymous_invalid_attempts: set[str] = set()
@@ -144,6 +212,7 @@ def build_frugality_retrospective(
     invalid_outcome_roots: set[int] = set()
     acceptance_by_root: dict[int, list[tuple[int, bool, str, str | None]]] = {}
     invalid_acceptance_roots: set[int] = set()
+    acceptance_generations: set[str] = set()
 
     for position, event in enumerate(event_list):
         current_type = event_type(event)
@@ -202,7 +271,7 @@ def build_frugality_retrospective(
         try:
             _generation, root_ac_index = validate_acceptance_finalization_payload(
                 data,
-                aggregate_id=getattr(event, "aggregate_id", None),
+                aggregate_id=_event_aggregate_id(event),
             )
         except Exception:
             if candidate_root is not None:
@@ -220,6 +289,7 @@ def build_frugality_retrospective(
         retry_attempt = data["final_retry_attempt"]
         accepted = data["accepted"]
         outcome = data["outcome"]
+        acceptance_generations.add(_generation)
         acceptance_by_root.setdefault(root_ac_index, []).append(
             (retry_attempt, accepted, outcome, current_id)
         )
@@ -374,6 +444,8 @@ def build_frugality_retrospective(
     proof_reference = _proof_reference(event_list)
     if proof_reference is not None:
         payload["proof_reference"] = proof_reference
+    if len(acceptance_generations) == 1:
+        payload["acceptance_generation_id"] = next(iter(acceptance_generations))
     return payload
 
 
@@ -393,17 +465,28 @@ async def report_frugality_retrospective(
     if terminal_status not in HARD_FINAL_STATUSES:
         return False
     events = await event_store.query_execution_related_events(execution_id, limit=None)
-    if any(event_type(event) == FRUGALITY_RETROSPECTIVE_EVENT_TYPE for event in events):
+    scoped_events = _session_scoped_events(
+        events,
+        execution_id=execution_id,
+        session_id=session_id,
+    )
+    if any(event_type(event) == FRUGALITY_RETROSPECTIVE_EVENT_TYPE for event in scoped_events):
         return False
     payload = build_frugality_retrospective(
-        events,
+        scoped_events,
         execution_id=execution_id,
         session_id=session_id,
         terminal_status=terminal_status,
     )
     if payload is None:
         return False
-    await event_store.append(create_frugality_retrospective_event(execution_id, payload))
+    await event_store.append(
+        create_frugality_retrospective_event(
+            execution_id,
+            payload,
+            session_id=session_id,
+        )
+    )
     return True
 
 

@@ -207,6 +207,41 @@ def test_proactive_relay_has_no_action_menu_and_deduplicates_unchanged_route() -
     assert plan_relay["evidence"]["first_ac_summaries"] == ["API", "CLI"]
 
 
+def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
+    acceptance_a = _event(
+        1,
+        "execution.ac.acceptance_finalized",
+        {
+            "root_ac_index": 0,
+            "final_retry_attempt": 0,
+            "accepted": True,
+            "disposition": "accepted",
+            "terminal_status": "completed",
+        },
+    )
+    acceptance_b = _event(
+        2,
+        "execution.ac.acceptance_finalized",
+        {
+            "session_id": "orch_2",
+            "root_ac_index": 1,
+            "final_retry_attempt": 0,
+            "accepted": True,
+            "disposition": "accepted",
+            "terminal_status": "completed",
+        },
+    )
+
+    relays = classify_relay_events(
+        [acceptance_a, acceptance_b],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    accepted = [relay for relay in relays if relay.get("subtype") == "ac_accepted"]
+    assert [relay["source_event_id"] for relay in accepted] == [acceptance_a.id]
+
+
 def test_synapse_completed_relay_carries_only_bounded_reply_summary() -> None:
     completed = _event(
         1,

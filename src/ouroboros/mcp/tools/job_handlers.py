@@ -1791,6 +1791,7 @@ class JobWaitHandler:
                 history_events,
                 new_event_ids=new_event_ids,
                 job_id=snapshot.job_id,
+                session_id=snapshot.links.session_id,
                 available_tools=self.available_conductor_tools,
             )
             if snapshot.is_terminal:
@@ -2130,6 +2131,7 @@ class JobResultHandler:
                 for relay in classify_relay_events(
                     history_events,
                     job_id=snapshot.job_id,
+                    session_id=snapshot.links.session_id,
                     available_tools=self.available_conductor_tools,
                 )
                 if relay.get("kind") == "attention_required"

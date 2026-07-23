@@ -161,6 +161,30 @@ class TestAssembleTriads:
         assert r.authoritatively_accepted and r.attempts_paired
         assert r.has_all_axes and r.counts_in_proof
 
+    def test_shared_execution_keeps_sessions_and_acceptance_generations_separate(self) -> None:
+        """A caller-supplied execution id is not an acceptance authority."""
+        session_a = "session-a"
+        session_b = "session-b"
+        events: list[dict] = []
+        for session_id in (session_a, session_b):
+            scoped = _triad_events("ac1", "shared-execution")
+            for event in scoped:
+                data = event["data"]
+                data["execution_id"] = "shared-execution"
+                data["session_id"] = session_id
+                if event["type"] == EVENT_AC_ACCEPTANCE_FINALIZED:
+                    data["acceptance_generation_id"] = acceptance_generation_id_for_session(
+                        session_id, "shared-execution"
+                    )
+            events.extend(scoped)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 2
+        assert {row.session_id for row in rows} == {session_a, session_b}
+        assert all(row.authoritatively_accepted for row in rows)
+        assert all(row.counts_in_proof for row in rows)
+
     def test_effort_only_row_does_not_count(self) -> None:
         rows = assemble_triads(
             [
