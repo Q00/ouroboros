@@ -381,6 +381,7 @@ class JobManager:
         self._backstops: dict[str, asyncio.Task[None]] = {}
         self._started_job_ids: set[str] = set()
         self._monitor_terminalized_jobs: set[str] = set()
+        self._drained_job_ids: set[str] = set()
         self._recovery_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
@@ -2320,7 +2321,11 @@ class JobManager:
         Returns the number of jobs whose tasks finished within the grace.
         """
         self._draining = True
-        live_job_ids = [job_id for job_id, task in self._tasks.items() if not task.done()]
+        live_job_ids = [
+            job_id
+            for job_id, task in self._tasks.items()
+            if not task.done() and job_id not in self._drained_job_ids
+        ]
         log.info(
             "mcp.job.drain_start",
             live_job_count=len(live_job_ids),
@@ -2430,6 +2435,11 @@ class JobManager:
                 continue
             if snapshot.is_terminal:
                 drained += 1
+                # The terminal event can become durable just before
+                # ``_run_job`` removes its still-live task from ``_tasks``.
+                # Remember that this invocation already counted the job so a
+                # repeated drain in that scheduling window remains idempotent.
+                self._drained_job_ids.add(job_id)
         log.info(
             "mcp.job.drain_complete",
             drained=drained,
@@ -2486,6 +2496,7 @@ class JobManager:
             self._monitors.pop(job_id, None)
             self._recovery_locks.pop(job_id, None)
             self._monitor_terminalized_jobs.discard(job_id)
+            self._drained_job_ids.discard(job_id)
             self._started_job_ids.discard(job_id)
         return len(expired)
 
