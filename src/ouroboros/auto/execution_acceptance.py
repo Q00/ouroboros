@@ -315,13 +315,14 @@ def _restore_surviving_acceptance_specs(
             }
             if len(distinct_identities) > 1:
                 # Conflating distinct identities would strand every command but
-                # the first behind one canonical description.  Keep each
-                # identity-bearing source verbatim at its own position; consume
-                # only the bare siblings the canonical text safely subsumes.
+                # the first behind one canonical description.  Refuse the
+                # collapse and keep EVERY source verbatim at its own position —
+                # both the distinct contracts and the bare requirement the
+                # canonical text would otherwise represent.  Dropping a bare
+                # sibling here silently deletes a caller-authorized requirement.
                 for index in list(canonical_indices):
                     criterion, _text = _pop(index)
-                    if _carries_explicit_contract(criterion):
-                        emissions.append((float(index), criterion))
+                    emissions.append((float(index), criterion))
                 continue
             anchor = float(min(canonical_indices))
             specs = [_pop(index)[0] for index in canonical_indices]
@@ -360,28 +361,12 @@ def _restore_surviving_acceptance_specs(
             emissions.append((float(index), criterion))
 
     emissions.sort(key=lambda item: item[0])
-    return _dedupe_by_description(emission for _anchor, emission in emissions)
-
-
-def _dedupe_by_description(
-    criteria: object,
-) -> tuple[AcceptanceCriterionInput, ...]:
-    """Keep the first criterion per description so every contract is reachable.
-
-    Persistence and MCP evaluation key contracts by description text, so two
-    criteria sharing a description leave the later one's contract unreachable.
-    Collapsing to the first occurrence guarantees a unique, deterministic
-    criterion-to-contract association through the whole boundary.
-    """
-    seen: set[str] = set()
-    deduped: list[AcceptanceCriterionInput] = []
-    for criterion in criteria:  # type: ignore[attr-defined]
-        key = ac_text(criterion).strip()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(criterion)
-    return tuple(deduped)
+    # Normalization is loss-free: it never deletes a distinct caller-authorized
+    # contract to force description uniqueness. Two criteria that arrive sharing
+    # a description keep both contracts; the description-keyed evaluation map is
+    # a pre-existing boundary limitation for such inputs, not something to fix by
+    # discarding a valid Seed contract here.
+    return tuple(emission for _anchor, emission in emissions)
 
 
 def _collapse_canonical_acceptance_specs(
@@ -395,29 +380,29 @@ def _collapse_canonical_acceptance_specs(
     contract/identity, so this never merges conflicting evidence.  The lone
     contract (if any) is kept under the canonical description and its own
     semantic identity; ``expected_artifacts`` are an order-preserving union so
-    equivalent contracts stay byte-identical.  A collapse of purely bare legacy
-    strings — no contract, no explicit identity — degrades to a plain string,
-    preserving legacy persistence exactly.
+    equivalent contracts stay byte-identical.
+
+    A collapse of purely bare legacy strings — no contract, no explicit identity
+    on the *source* — degrades to a plain string so ``Seed`` re-derives a fresh
+    key from the canonical description.  The degrade decision is made on the
+    original identity, not the rewritten copy: changing the description would
+    otherwise make an auto-derived key diverge from its derived value and be
+    mistaken for an explicit identity, persisting a stale key.
     """
     identity = next(
         (spec for spec in specs if _carries_explicit_contract(spec)),
         specs[0],
     )
+    if not _carries_explicit_contract(identity):
+        return description
     artifacts: list[str] = []
     for spec in specs:
         for artifact in spec.expected_artifacts:
             if artifact not in artifacts:
                 artifacts.append(artifact)
-    merged = identity.model_copy(
+    return identity.model_copy(
         update={"description": description, "expected_artifacts": tuple(artifacts)}
     )
-    if (
-        not merged.has_success_contract
-        and merged.investment is None
-        and not _has_explicit_semantic_key(merged)
-    ):
-        return merged.description
-    return merged
 
 
 def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:

@@ -21,8 +21,8 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
-    ac_text,
     ac_texts,
+    derive_semantic_ac_key,
 )
 
 
@@ -350,16 +350,35 @@ def test_normalize_execution_acceptance_collapses_legacy_equivalents_without_dup
     only = normalized.acceptance_criteria[0]
     assert isinstance(only, AcceptanceCriterionSpec)
     assert not only.has_success_contract
+    # A bare legacy collapse carries a key freshly derived from the canonical
+    # description, never a stale key inherited from a source description. (Seed
+    # always materializes a derived key, so persistence is a
+    # {description, semantic_ac_key} dict — the key must match the canonical
+    # text, not any collapsed source.)
+    assert only.semantic_ac_key == derive_semantic_ac_key(only)
+    stale_source_key = derive_semantic_ac_key(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
+        )
+    )
+    assert only.semantic_ac_key != stale_source_key
+    serialized = normalized.to_dict()["acceptance_criteria"]
+    assert serialized == [
+        {
+            "description": _SINGLE_HELLO_AUTO_OBSERVATION_AC,
+            "semantic_ac_key": derive_semantic_ac_key(only),
+        }
+    ]
 
 
 def test_normalize_execution_acceptance_preserves_distinct_contracts_reachably() -> None:
-    """Multi-source regression: distinct contracts are never conflated.
+    """Multi-source regression: refusing a collapse is loss-free.
 
     When several sources carry *different* verification contracts, collapsing
     them into one scalar ``AcceptanceCriterionSpec`` would drop every command
-    but the first (the evaluation map keys contracts by description).  Each
-    distinct contract must instead survive verbatim and stay uniquely reachable;
-    the bare sibling the canonical text safely subsumes is dropped.
+    but the first.  Refusing the collapse must keep EVERY source verbatim —
+    both distinct contracts and the bare requirement the canonical text would
+    otherwise represent — never silently deleting a caller-authorized AC.
     """
     from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
 
@@ -374,13 +393,12 @@ def test_normalize_execution_acceptance_preserves_distinct_contracts_reachably()
         expected_artifacts=("tests/test_hello_auto.py",),
         output_assertion="1 passed",
     )
+    bare_requirement = "The exact command `uv run pytest tests/test_hello_auto.py` passes."
     seed = _seed(
         returns_spec,
         imports_spec,
-        # Bare sibling: no contract, safely subsumed by the canonical text.
-        AcceptanceCriterionSpec(
-            description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
-        ),
+        # Bare requirement: must survive the refused collapse, not be deleted.
+        AcceptanceCriterionSpec(description=bare_requirement),
     ).model_copy(
         update={
             "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
@@ -389,14 +407,14 @@ def test_normalize_execution_acceptance_preserves_distinct_contracts_reachably()
 
     normalized = normalize_execution_acceptance(seed)
 
-    # Both distinct contracts survive verbatim; the bare sibling is subsumed.
+    # Every source survives verbatim in source order — nothing deleted.
     assert ac_texts(normalized.acceptance_criteria) == (
         returns_spec.description,
         imports_spec.description,
+        bare_requirement,
     )
 
     spec_map = _seed_ac_spec_map(normalized)
-    assert set(spec_map) == {returns_spec.description, imports_spec.description}
     assert (
         spec_map[returns_spec.description].verify_command == "python -m pytest tests/test_return.py"
     )
@@ -523,29 +541,27 @@ def test_normalize_execution_acceptance_preserves_source_order_of_refused_collap
     assert texts.index(contract_a.description) < texts.index(contract_b.description)
 
 
-def test_normalize_execution_acceptance_guarantees_unique_description_reachability() -> None:
-    """Two criteria with one description resolve to a single reachable contract.
+def test_normalize_execution_acceptance_never_deletes_same_description_contracts() -> None:
+    """Duplicate descriptions must not cost a distinct contract.
 
-    ``_seed_ac_spec_map`` keys contracts by description, so emitting two criteria
-    with the same description would leave the second contract unreachable.  The
-    restoration collapses to the first, keeping a unique, deterministic
-    criterion-to-contract association.
+    Two criteria that arrive sharing a description but carrying different verify
+    commands are a caller-authored (if awkward) Seed.  Normalization must not
+    delete either contract to force description uniqueness — both survive to
+    durable handoff.  The description-keyed evaluation map is a pre-existing
+    boundary limitation, not a licence to discard a valid contract here.
     """
-    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
-
     shared_description = (
         "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
     )
-    seed = _seed(
-        AcceptanceCriterionSpec(
-            description=shared_description,
-            verify_command="python -m pytest tests/test_first.py",
-        ),
-        AcceptanceCriterionSpec(
-            description=shared_description,
-            verify_command="python -m pytest tests/test_second.py",
-        ),
-    ).model_copy(
+    first = AcceptanceCriterionSpec(
+        description=shared_description,
+        verify_command="python -m pytest tests/test_first.py",
+    )
+    second = AcceptanceCriterionSpec(
+        description=shared_description,
+        verify_command="python -m pytest tests/test_second.py",
+    )
+    seed = _seed(first, second).model_copy(
         update={
             "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
         }
@@ -553,13 +569,13 @@ def test_normalize_execution_acceptance_guarantees_unique_description_reachabili
 
     normalized = normalize_execution_acceptance(seed)
 
-    # No description collision survives, so the map reaches every emitted contract.
-    descriptions = [ac_text(c) for c in normalized.acceptance_criteria]
-    assert len(descriptions) == len(set(descriptions))
-    spec_map = _seed_ac_spec_map(normalized)
-    for c in normalized.acceptance_criteria:
-        if isinstance(c, AcceptanceCriterionSpec) and c.has_success_contract:
-            assert spec_map[c.description].verify_command == c.verify_command
+    # Both distinct contracts survive — cardinality and commands preserved.
+    surviving = [
+        c for c in normalized.acceptance_criteria if isinstance(c, AcceptanceCriterionSpec)
+    ]
+    commands = {c.verify_command for c in surviving}
+    assert "python -m pytest tests/test_first.py" in commands
+    assert "python -m pytest tests/test_second.py" in commands
 
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
