@@ -142,7 +142,10 @@ def _event_aggregate_type(event: object) -> str | None:
 
 
 def _event_session_anchor(event: object, data: Mapping[str, object]) -> str | None:
-    for key in ("session_id", "orchestrator_session_id"):
+    # Child runtime events may carry both their native runtime session and the
+    # parent orchestration session. Retrospective authority follows the latter;
+    # acceptance/axis events that only carry ``session_id`` remain compatible.
+    for key in ("orchestrator_session_id", "session_id"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
