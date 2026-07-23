@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
@@ -112,7 +113,11 @@ class UnitOfWork:
                     _has_live_process_local_authority_session,
                 )
 
-                if _has_live_process_local_authority_session(terminal_event.aggregate_id):
+                local_authority_live = _has_live_process_local_authority_session(
+                    terminal_event.aggregate_id
+                )
+                heartbeat_owner_live = is_holder_alive(terminal_event.aggregate_id)
+                if local_authority_live or heartbeat_owner_live:
                     raise PersistenceError(
                         "UnitOfWork cannot terminalize a live process-local session; "
                         "delegate the transition to its retained lifecycle owner.",
@@ -120,7 +125,8 @@ class UnitOfWork:
                         details={
                             "session_id": terminal_event.aggregate_id,
                             "event_type": terminal_event.type,
-                            "process_local_authority_live": True,
+                            "process_local_authority_live": local_authority_live,
+                            "heartbeat_owner_live": heartbeat_owner_live,
                         },
                     )
                 await self._event_store.append(self._pending_events[0])

@@ -39,6 +39,7 @@ from ouroboros.orchestrator.runner import (
     OrchestratorResult,
     OrchestratorRunner,
     clear_cancellation,
+    get_cancellation_request,
     get_pending_cancellations,
     is_cancellation_requested,
     request_cancellation,
@@ -1606,17 +1607,28 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
     runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
     runner._report_frugality_retrospective = AsyncMock()
 
-    async def mark_cancelled(*_: object, **__: object) -> Result[None, object]:
+    async def mark_cancelled(
+        _: str,
+        *,
+        reason: str,
+        cancelled_by: str,
+    ) -> Result[None, object]:
         assert runner._has_live_process_local_authority(
             tracker.session_id,
             tracker.execution_id,
             contract,
         )
         assert heartbeat.is_holder_alive(tracker.session_id)
+        assert reason == "CLI requested a careful stop"
+        assert cancelled_by == "user"
         return Result.ok(None)
 
     runner._session_repo.mark_cancelled = mark_cancelled
-    await request_cancellation(tracker.session_id)
+    await request_cancellation(
+        tracker.session_id,
+        reason="CLI requested a careful stop",
+        cancelled_by="user",
+    )
 
     result = await runner._handle_cancellation(
         session_id=tracker.session_id,
@@ -1632,6 +1644,65 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
         contract,
     )
     assert not heartbeat.is_holder_alive(tracker.session_id)
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_after_cancel_cas_drains_owner_cleanup() -> None:
+    """Repeated cancellation cannot interrupt post-CAS owner reconciliation."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-cancel-post-cas-shield",
+        execution_id="exec-cancel-post-cas-shield",
+    )
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+    runner._session_repo.mark_cancelled = AsyncMock(return_value=Result.ok(True))
+    runner._report_frugality_retrospective = AsyncMock()
+    clear_started = asyncio.Event()
+    allow_clear = asyncio.Event()
+    original_clear = clear_cancellation
+
+    async def _blocked_clear(session_id: str) -> None:
+        clear_started.set()
+        await allow_clear.wait()
+        await original_clear(session_id)
+
+    await request_cancellation(tracker.session_id)
+    try:
+        with patch("ouroboros.orchestrator.runner.clear_cancellation", _blocked_clear):
+            cancellation = asyncio.create_task(
+                runner._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=0,
+                    start_time=tracker.start_time,
+                )
+            )
+            await clear_started.wait()
+            cancellation.cancel()
+            cancellation.cancel()
+            allow_clear.set()
+            result = await asyncio.wait_for(cancellation, timeout=2)
+
+        assert result.is_ok
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+        assert not await is_cancellation_requested(tracker.session_id)
+    finally:
+        allow_clear.set()
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
 
 
 @pytest.mark.asyncio
@@ -2312,6 +2383,10 @@ async def test_public_running_cancellation_signals_claimed_process_local_owner(t
             contract,
         )
         assert await is_cancellation_requested(tracker.session_id)
+        request = await get_cancellation_request(tracker.session_id)
+        assert request is not None
+        assert request.reason == "public running cancellation"
+        assert request.cancelled_by == "mcp_tool"
     finally:
         await clear_cancellation(tracker.session_id)
         runner._release_process_local_authority(
@@ -2684,6 +2759,10 @@ async def test_public_cancel_signals_a_live_foreign_process_owner(tmp_path) -> N
         assert result.value.meta["new_status"] == "cancellation_requested"
         assert result.value.meta["in_flight"] is True
         assert await is_cancellation_requested(tracker.session_id)
+        request = heartbeat.read_cancellation_request(tracker.session_id)
+        assert request is not None
+        assert request.reason == "foreign owner safety"
+        assert request.cancelled_by == "mcp_tool"
         mark_cancelled.assert_not_awaited()
     finally:
         await clear_cancellation(tracker.session_id)

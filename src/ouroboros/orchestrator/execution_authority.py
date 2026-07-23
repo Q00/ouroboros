@@ -738,7 +738,11 @@ async def request_process_local_cancellation(
     if authority_claimed:
         # A local claimed runner owns the effect boundary.  It observes this
         # signal and persists cancellation before its own teardown.
-        await request_cancellation(session_id)
+        await request_cancellation(
+            session_id,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
         return ProcessLocalCancellationOutcome(
             ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
         )
@@ -750,7 +754,11 @@ async def request_process_local_cancellation(
         from ouroboros.orchestrator.heartbeat import publish_cancellation_request
 
         try:
-            publish_cancellation_request(session_id)
+            publish_cancellation_request(
+                session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
         except OSError as exc:
             return ProcessLocalCancellationOutcome(
                 ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
@@ -762,7 +770,11 @@ async def request_process_local_cancellation(
 
     cancellation_request_published = False
     try:
-        await request_cancellation(session_id)
+        await request_cancellation(
+            session_id,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
         cancellation_request_published = True
         cancel_result = await session_repo.mark_cancelled_if_active(
             session_id=session_id,
@@ -795,7 +807,11 @@ async def request_process_local_cancellation(
                     authority,
                 )
                 if claim_became_active:
-                    await request_cancellation(session_id)
+                    await request_cancellation(
+                        session_id,
+                        reason=reason,
+                        cancelled_by=cancelled_by,
+                    )
                 else:
                     await clear_cancellation(session_id)
                 _LOG.info(
@@ -847,7 +863,11 @@ async def request_process_local_cancellation(
         authority,
     )
     if claim_became_active:
-        await request_cancellation(session_id)
+        await request_cancellation(
+            session_id,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
     else:
         await clear_cancellation(session_id)
 

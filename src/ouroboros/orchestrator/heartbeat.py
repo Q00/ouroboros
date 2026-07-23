@@ -15,7 +15,9 @@ Any runtime can participate — just call acquire/release.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -35,6 +37,44 @@ CANCELLATION_DIR = Path.home() / ".ouroboros" / "cancellations"
 _LEASE_OPERATION_LOCK = RLock()
 _HELD_LEASE_FDS: dict[str, int] = {}
 _SAFE_LOCK_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_DEFAULT_CANCELLATION_REASON = "Cancellation detected during execution"
+_DEFAULT_CANCELLED_BY = "runner"
+_MAX_CANCELLATION_REASON_CHARS = 4096
+_MAX_CANCELLED_BY_CHARS = 256
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationRequest:
+    """Metadata carried by the cooperative cross-process cancel channel."""
+
+    reason: str
+    cancelled_by: str
+
+
+def _bounded_cancellation_text(value: object, *, default: str, limit: int) -> str:
+    if not isinstance(value, str) or not value:
+        return default
+    return value[:limit]
+
+
+def normalize_cancellation_request(
+    *,
+    reason: object,
+    cancelled_by: object,
+) -> CancellationRequest:
+    """Create bounded metadata shared by local and cross-process channels."""
+    return CancellationRequest(
+        reason=_bounded_cancellation_text(
+            reason,
+            default=_DEFAULT_CANCELLATION_REASON,
+            limit=_MAX_CANCELLATION_REASON_CHARS,
+        ),
+        cancelled_by=_bounded_cancellation_text(
+            cancelled_by,
+            default=_DEFAULT_CANCELLED_BY,
+            limit=_MAX_CANCELLED_BY_CHARS,
+        ),
+    )
 
 
 def _ensure_dir() -> Path:
@@ -132,20 +172,40 @@ def cancellation_path(session_id: str) -> Path:
     return _ensure_cancellation_dir() / (f"__invalid_session_id__{hashlib.sha256(raw).hexdigest()}")
 
 
-def publish_cancellation_request(session_id: str) -> None:
+def publish_cancellation_request(
+    session_id: str,
+    *,
+    reason: str = _DEFAULT_CANCELLATION_REASON,
+    cancelled_by: str = _DEFAULT_CANCELLED_BY,
+) -> None:
     """Publish a durable nonterminal cancellation signal across processes.
 
     The liveness lease intentionally cannot be used as a signal channel: an
     observer must never replace or remove another process's lease.  This
-    separate existence-only marker lets CLI/MCP processes request cooperative
-    cancellation while the owning runner keeps sole authority to persist the
-    terminal session result.
+    separate marker lets CLI/MCP processes request cooperative cancellation
+    while the owning runner keeps sole authority to persist the terminal
+    session result. The public request metadata travels with the marker so the
+    owner does not replace CLI/MCP attribution with runner defaults.
     """
     path = cancellation_path(session_id)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+        request = normalize_cancellation_request(
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+        payload = json.dumps(
+            {
+                "version": 1,
+                "requesting_pid": os.getpid(),
+                "reason": request.reason,
+                "cancelled_by": request.cancelled_by,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        os.write(fd, payload)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -158,6 +218,27 @@ def publish_cancellation_request(session_id: str) -> None:
 def has_cancellation_request(session_id: str) -> bool:
     """Return whether any process published a cooperative cancellation request."""
     return cancellation_path(session_id).is_file()
+
+
+def read_cancellation_request(session_id: str) -> CancellationRequest | None:
+    """Read bounded request metadata, accepting legacy existence-only markers."""
+    path = cancellation_path(session_id)
+    try:
+        payload = path.read_text(encoding="utf-8")
+    except OSError:
+        if path.is_file():
+            return normalize_cancellation_request(reason=None, cancelled_by=None)
+        return None
+    try:
+        parsed = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return normalize_cancellation_request(reason=None, cancelled_by=None)
+    return normalize_cancellation_request(
+        reason=parsed.get("reason"),
+        cancelled_by=parsed.get("cancelled_by"),
+    )
 
 
 def clear_cancellation_request(session_id: str) -> None:

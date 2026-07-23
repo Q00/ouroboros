@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+    from ouroboros.orchestrator.heartbeat import CancellationRequest
     from ouroboros.orchestrator.model_routing import ModelRouter
     from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
@@ -267,15 +268,20 @@ class ExecutionCancelledError(OuroborosError):
 # In-memory Cancellation Registry
 # =============================================================================
 
-# Module-level set of session IDs marked for cancellation.
-# The MCP cancel tool adds IDs here; the runner's execution loop checks it.
+# Module-level requests keyed by session ID.
+# The MCP cancel tool adds metadata here; the runner's execution loop checks it.
 # Guarded by _cancellation_lock to prevent races between MCP cancel calls
-# and the runner's message loop reading the set concurrently.
-_cancellation_registry: set[str] = set()
+# and the runner's message loop reading the mapping concurrently.
+_cancellation_registry: dict[str, CancellationRequest] = {}
 _cancellation_lock: asyncio.Lock = asyncio.Lock()
 
 
-async def request_cancellation(session_id: str) -> None:
+async def request_cancellation(
+    session_id: str,
+    *,
+    reason: str = "Cancellation detected during execution",
+    cancelled_by: str = "runner",
+) -> None:
     """Mark a session for cancellation.
 
     Called by the MCP cancel tool to signal that the runner should
@@ -284,8 +290,24 @@ async def request_cancellation(session_id: str) -> None:
     Args:
         session_id: Session to cancel.
     """
+    from ouroboros.orchestrator.heartbeat import normalize_cancellation_request
+
     async with _cancellation_lock:
-        _cancellation_registry.add(session_id)
+        _cancellation_registry[session_id] = normalize_cancellation_request(
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+
+
+async def get_cancellation_request(session_id: str) -> CancellationRequest | None:
+    """Return local or cross-process metadata for a pending cancellation."""
+    async with _cancellation_lock:
+        request = _cancellation_registry.get(session_id)
+    if request is not None:
+        return request
+    from ouroboros.orchestrator.heartbeat import read_cancellation_request
+
+    return read_cancellation_request(session_id)
 
 
 async def is_cancellation_requested(session_id: str) -> bool:
@@ -297,12 +319,7 @@ async def is_cancellation_requested(session_id: str) -> bool:
     Returns:
         True if cancellation was requested.
     """
-    async with _cancellation_lock:
-        if session_id in _cancellation_registry:
-            return True
-    from ouroboros.orchestrator.heartbeat import has_cancellation_request
-
-    return has_cancellation_request(session_id)
+    return await get_cancellation_request(session_id) is not None
 
 
 async def clear_cancellation(session_id: str) -> None:
@@ -315,7 +332,7 @@ async def clear_cancellation(session_id: str) -> None:
         session_id: Session to clear.
     """
     async with _cancellation_lock:
-        _cancellation_registry.discard(session_id)
+        _cancellation_registry.pop(session_id, None)
     from ouroboros.orchestrator.heartbeat import clear_cancellation_request
 
     clear_cancellation_request(session_id)
@@ -5039,6 +5056,15 @@ class OrchestratorRunner:
             messages_processed=messages_processed,
             duration_seconds=duration,
         )
+        cancellation_request = await get_cancellation_request(session_id)
+        cancellation_reason = (
+            cancellation_request.reason
+            if cancellation_request is not None
+            else "Cancellation detected during execution"
+        )
+        cancelled_by = (
+            cancellation_request.cancelled_by if cancellation_request is not None else "runner"
+        )
 
         # Determine and durably publish the terminal state *before* withdrawing
         # the process-local capability or its heartbeat.  A RUNNING tracker
@@ -5069,31 +5095,37 @@ class OrchestratorRunner:
                 )
             except Exception:
                 execution_terminal_events = []
-            await clear_cancellation(session_id)
-            try:
-                if not execution_terminal_events:
-                    await self._event_store.append(
-                        create_execution_terminal_event(
-                            execution_id=execution_id,
-                            session_id=session_id,
-                            status=terminal_status.value,
-                            summary=summary if terminal_status == SessionStatus.COMPLETED else None,
-                            error_message=(
-                                final_message
-                                if terminal_status != SessionStatus.COMPLETED
-                                else None
-                            ),
-                            messages_processed=messages_processed,
+
+            async def _reconcile_existing_terminal_owner() -> None:
+                try:
+                    await clear_cancellation(session_id)
+                    if not execution_terminal_events:
+                        await self._event_store.append(
+                            create_execution_terminal_event(
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                status=terminal_status.value,
+                                summary=(
+                                    summary if terminal_status == SessionStatus.COMPLETED else None
+                                ),
+                                error_message=(
+                                    final_message
+                                    if terminal_status != SessionStatus.COMPLETED
+                                    else None
+                                ),
+                                messages_processed=messages_processed,
+                            )
                         )
+                finally:
+                    self._retire_process_local_authority(
+                        session_id=session_id,
+                        execution_id=execution_id,
                     )
-            finally:
-                self._retire_process_local_authority(
-                    session_id=session_id,
-                    execution_id=execution_id,
-                )
-                self._unregister_session(execution_id, session_id)
-                if self._task_workspace is not None:
-                    release_lock(self._task_workspace.lock_path)
+                    self._unregister_session(execution_id, session_id)
+                    if self._task_workspace is not None:
+                        release_lock(self._task_workspace.lock_path)
+
+            await _await_process_local_cleanup(_reconcile_existing_terminal_owner())
             await self._report_frugality_retrospective(
                 execution_id=execution_id,
                 session_id=session_id,
@@ -5114,8 +5146,8 @@ class OrchestratorRunner:
         try:
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id,
-                reason="Cancellation detected during execution",
-                cancelled_by="runner",
+                reason=cancellation_reason,
+                cancelled_by=cancelled_by,
             )
         except Exception as exc:
             log.warning(
@@ -5160,28 +5192,32 @@ class OrchestratorRunner:
                 ),
             )
 
-        # The session is now terminal.  It is safe to clear the request and
-        # retire the live capability; the execution-stream mirror is useful to
-        # projections but no longer determines whether cleanup is safe.
-        await clear_cancellation(session_id)
-        try:
-            await self._event_store.append(
-                create_execution_terminal_event(
-                    execution_id=execution_id,
-                    session_id=session_id,
-                    status="cancelled",
-                    error_message="Execution cancelled by external request",
-                    messages_processed=messages_processed,
+        # The session is now terminal. Drain the complete reconciliation in a
+        # shielded child task: repeated caller cancellation may not interrupt
+        # marker acknowledgement, projection, or live-owner teardown after the
+        # durable CAS has committed.
+        async def _reconcile_cancelled_owner() -> None:
+            try:
+                await clear_cancellation(session_id)
+                await self._event_store.append(
+                    create_execution_terminal_event(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        status="cancelled",
+                        error_message=cancellation_reason,
+                        messages_processed=messages_processed,
+                    )
                 )
-            )
-        finally:
-            self._retire_process_local_authority(
-                session_id=session_id,
-                execution_id=execution_id,
-            )
-            self._unregister_session(execution_id, session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            finally:
+                self._retire_process_local_authority(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                self._unregister_session(execution_id, session_id)
+                if self._task_workspace is not None:
+                    release_lock(self._task_workspace.lock_path)
+
+        await _await_process_local_cleanup(_reconcile_cancelled_owner())
         await self._report_frugality_retrospective(
             execution_id=execution_id,
             session_id=session_id,
@@ -7669,6 +7705,7 @@ __all__ = [
     "build_system_prompt",
     "build_task_prompt",
     "clear_cancellation",
+    "get_cancellation_request",
     "get_pending_cancellations",
     "is_cancellation_requested",
     "request_cancellation",

@@ -5336,7 +5336,7 @@ class TestCancellationPolling:
         )
 
         # Ensure clean state
-        _cancellation_registry.discard("sess_inmem")
+        _cancellation_registry.pop("sess_inmem", None)
 
         await request_cancellation("sess_inmem")
         try:
