@@ -98,13 +98,18 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     except OSError:
         print_warning(f"{codex_config} is unreadable — skipping.")
         return False
+
     managed_profile_headers = {f"[profiles.{name}]" for name in _managed_codex_profile_names()}
+    managed_profile_prefixes = tuple(
+        f"[profiles.{name}." for name in _managed_codex_profile_names()
+    )
 
     def is_managed_header(header: str) -> bool:
         return (
             header == "[mcp_servers.ouroboros]"
             or header.startswith("[mcp_servers.ouroboros.")
             or header in managed_profile_headers
+            or header.startswith(managed_profile_prefixes)
         )
 
     if not any(is_managed_header(line.strip()) for line in raw.splitlines()):
@@ -579,16 +584,16 @@ def uninstall(
             failed.append("~/.claude/mcp.json")
 
     if not _remove_codex_mcp(dry_run=False):
-        if any("codex/config.toml" in t for t in targets):
-            failed.append("~/.codex/config.toml")
+        if any(t.startswith("Codex MCP/profile config (") for t in targets):
+            failed.append(str(codex_config))
 
     if not _remove_opencode_mcp(dry_run=False):
         if any("OpenCode MCP" in t for t in targets):
             failed.append("OpenCode MCP config")
 
     if not _remove_codex_artifacts(dry_run=False):
-        if any("Codex rules" in t for t in targets):
-            failed.append("~/.codex/ rules/skills")
+        if any(t.startswith("Codex profiles, rules, and skills (") for t in targets):
+            failed.append(f"{codex_dir} profiles/rules/skills")
 
     if not _remove_claude_md_block(cwd, dry_run=False):
         if any("CLAUDE.md" in t for t in targets):

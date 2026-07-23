@@ -122,12 +122,15 @@ class TestRemoveCodexMcp:
             'command = "uvx"\n\n'
             "[profiles.ouroboros-fast]\n"
             'model_reasoning_effort = "low"\n\n'
+            "[profiles.ouroboros-fast.model_provider]\n"
+            'name = "custom"\n\n'
             "[other]\nfoo = 1\n"
         )
 
         assert _remove_codex_mcp(dry_run=False) is True
         assert "[mcp_servers.ouroboros]" not in codex_config.read_text()
         assert "[profiles.ouroboros-fast]" not in codex_config.read_text()
+        assert "[profiles.ouroboros-fast.model_provider]" not in codex_config.read_text()
         assert "[other]" in codex_config.read_text()
 
     def test_preserves_user_comments_outside_managed_block(self, tmp_path: Path) -> None:
@@ -396,6 +399,66 @@ class TestUninstallCLI:
 
         assert result.exit_code == 0
         assert data_dir.exists()
+
+    def test_custom_codex_config_failure_reports_partial_removal(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        home_dir = tmp_path / "home"
+        project_dir = tmp_path / "project"
+        codex_home = tmp_path / "active-codex"
+        home_dir.mkdir()
+        project_dir.mkdir()
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        config_path.write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        with (
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
+            patch("ouroboros.cli.commands.uninstall._find_opencode_config", return_value=None),
+            patch(
+                "ouroboros.cli.commands.uninstall._remove_codex_mcp",
+                return_value=False,
+            ) as remove_codex_mcp,
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+
+        assert result.exit_code == 0
+        remove_codex_mcp.assert_called_once_with(dry_run=False)
+        assert config_path.exists()
+        assert "partially removed" in result.output
+        assert "Ouroboros has been removed." not in result.output
+
+    def test_custom_codex_artifact_failure_reports_partial_removal(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        home_dir = tmp_path / "home"
+        project_dir = tmp_path / "project"
+        codex_home = tmp_path / "active-codex"
+        rules_path = codex_home / "rules" / "ouroboros.md"
+        home_dir.mkdir()
+        project_dir.mkdir()
+        rules_path.parent.mkdir(parents=True)
+        rules_path.write_text("rules")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        with (
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
+            patch("ouroboros.cli.commands.uninstall._find_opencode_config", return_value=None),
+            patch(
+                "ouroboros.cli.commands.uninstall._remove_codex_artifacts",
+                return_value=False,
+            ) as remove_codex_artifacts,
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+
+        assert result.exit_code == 0
+        remove_codex_artifacts.assert_called_once_with(dry_run=False)
+        assert rules_path.exists()
+        assert "partially removed" in result.output
+        assert "Ouroboros has been removed." not in result.output
 
 
 # ── _remove_opencode_bridge_plugin ──────────────────────────────
