@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
@@ -89,18 +90,60 @@ class UnitOfWork:
             Result.err(PersistenceError) on failure.
         """
         try:
-            # Persist all pending events atomically in a single batch
-            if self._pending_events:
-                await self._event_store.append_batch(self._pending_events)
+            # Ordinary events retain atomic batch persistence. Terminal
+            # session events must pass through EventStore.append() so the
+            # one-winner CAS cannot be bypassed. A CAS loser is a successful
+            # no-op and is removed from pending just like a winning append.
+            while self._pending_events:
+                lifecycle_index = next(
+                    (
+                        index
+                        for index, event in enumerate(self._pending_events)
+                        if self._event_store.is_session_terminal_event(event)
+                        or self._event_store.is_session_start_event(event)
+                    ),
+                    len(self._pending_events),
+                )
+                if lifecycle_index:
+                    await self._event_store.append_batch(self._pending_events[:lifecycle_index])
+                    del self._pending_events[:lifecycle_index]
+                    continue
+
+                lifecycle_event = self._pending_events[0]
+                if self._event_store.is_session_start_event(lifecycle_event):
+                    await self._event_store.append(lifecycle_event)
+                    del self._pending_events[0]
+                    continue
+
+                terminal_event = lifecycle_event
+                from ouroboros.orchestrator.execution_authority import (
+                    _has_live_process_local_authority_session,
+                )
+
+                local_authority_live = _has_live_process_local_authority_session(
+                    terminal_event.aggregate_id
+                )
+                heartbeat_owner_live = is_holder_alive(terminal_event.aggregate_id)
+                if local_authority_live or heartbeat_owner_live:
+                    raise PersistenceError(
+                        "UnitOfWork cannot terminalize a live process-local session; "
+                        "delegate the transition to its retained lifecycle owner.",
+                        operation="commit",
+                        details={
+                            "session_id": terminal_event.aggregate_id,
+                            "event_type": terminal_event.type,
+                            "process_local_authority_live": local_authority_live,
+                            "heartbeat_owner_live": heartbeat_owner_live,
+                        },
+                    )
+                await self._event_store.append(self._pending_events[0])
+                del self._pending_events[0]
 
             # Save checkpoint if provided
             if checkpoint is not None:
                 checkpoint_result = self._checkpoint_store.save(checkpoint)
                 if checkpoint_result.is_err:
                     return checkpoint_result
-
-            # Clear pending events after successful commit
-            self._pending_events.clear()
 
             return Result.ok(None)
 

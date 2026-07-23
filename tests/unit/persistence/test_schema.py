@@ -1,6 +1,6 @@
 """Unit tests for ouroboros.persistence.schema module."""
 
-from ouroboros.persistence.schema import events_table, metadata
+from ouroboros.persistence.schema import events_table, metadata, session_start_guards_table
 
 
 class TestEventsTableSchema:
@@ -71,9 +71,26 @@ class TestEventsTableIndexes:
         raise AssertionError("No composite index on (aggregate_type, aggregate_id) found")
 
 
+class TestSessionStartGuardsTable:
+    """Test immutable session-start identity guard schema."""
+
+    def test_session_id_is_primary_key(self) -> None:
+        """One guard row can exist for each durable session aggregate."""
+        assert session_start_guards_table.c.session_id.primary_key is True
+
+    def test_guard_records_start_and_execution_identity(self) -> None:
+        """The guard retains both sides of the immutable start binding."""
+        column_names = {column.name for column in session_start_guards_table.columns}
+        assert {"session_id", "start_event_id", "execution_id", "created_at"} <= column_names
+
+
 class TestMetadata:
     """Test SQLAlchemy metadata configuration."""
 
     def test_metadata_contains_events_table(self) -> None:
         """Metadata contains the events table."""
         assert "events" in metadata.tables
+
+    def test_metadata_contains_session_start_guards_table(self) -> None:
+        """Metadata creates the immutable start guard with every writable store."""
+        assert "session_start_guards" in metadata.tables

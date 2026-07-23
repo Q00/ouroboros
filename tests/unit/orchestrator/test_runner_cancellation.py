@@ -17,6 +17,7 @@ from ouroboros.orchestrator.runner import (
     ExecutionCancelledError,
     OrchestratorRunner,
     clear_cancellation,
+    get_cancellation_request,
     get_pending_cancellations,
     is_cancellation_requested,
     request_cancellation,
@@ -172,6 +173,30 @@ class TestSessionRegistration:
         runner._register_session("exec_1", "sess_1")
         assert "exec_1" in runner.active_sessions
         assert runner.active_sessions["exec_1"] == "sess_1"
+
+    def test_register_session_does_not_publish_when_lease_acquisition_fails(
+        self,
+        runner: OrchestratorRunner,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """A rejected foreign lease must not leave a cancel route behind."""
+        from ouroboros.orchestrator import heartbeat
+
+        monkeypatch.setattr(heartbeat, "LOCK_DIR", tmp_path)
+        path = heartbeat.lock_path("sess_held_elsewhere")
+        path.write_text("999999:0")
+
+        if heartbeat.fcntl is None:
+            pytest.skip("requires advisory file locks")
+
+        with (
+            patch.object(heartbeat.fcntl, "flock", side_effect=BlockingIOError),
+            pytest.raises(OSError, match="liveness lease is held"),
+        ):
+            runner._register_session("exec_held_elsewhere", "sess_held_elsewhere")
+
+        assert "exec_held_elsewhere" not in runner.active_sessions
 
     def test_unregister_session(self, runner: OrchestratorRunner) -> None:
         """Test unregistering a session."""
@@ -454,7 +479,11 @@ class TestCancelExecution:
         """Test cancelling an in-flight execution signals registry."""
         runner._register_session("exec_1", "sess_1")
 
-        result = await runner.cancel_execution("exec_1", reason="Test cancel")
+        result = await runner.cancel_execution(
+            "exec_1",
+            reason="Test cancel",
+            cancelled_by="mcp_tool",
+        )
 
         assert result.is_ok
         assert result.value["status"] == "cancellation_requested"
@@ -463,6 +492,10 @@ class TestCancelExecution:
         assert result.value["session_id"] == "sess_1"
         # Registry should be populated
         assert await is_cancellation_requested("sess_1")
+        request = await get_cancellation_request("sess_1")
+        assert request is not None
+        assert request.reason == "Test cancel"
+        assert request.cancelled_by == "mcp_tool"
 
     @pytest.mark.asyncio
     async def test_cancel_not_in_flight_looks_up_session(
@@ -482,11 +515,23 @@ class TestCancelExecution:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_orphan",
+            "seed_orphan",
+            session_id="sess_orphan",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.ok(None),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.ok(None),
+            ),
         ):
             result = await runner.cancel_execution(
                 "exec_orphan",
@@ -532,11 +577,23 @@ class TestCancelExecution:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_1",
+            "seed_1",
+            session_id="sess_1",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.err(PersistenceError("DB error")),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.err(PersistenceError("DB error")),
+            ),
         ):
             result = await runner.cancel_execution("exec_1")
 
@@ -608,7 +665,11 @@ class TestInFlightCancellation:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            tracker = SessionTracker.create("exec_test", sample_seed.metadata.seed_id)
+            tracker = SessionTracker.create(
+                str(kwargs["execution_id"]),
+                str(kwargs["seed_id"]),
+                session_id=str(kwargs["session_id"]),
+            )
             return Result.ok(tracker)
 
         # Set up the cancellation to trigger at the right time
@@ -661,7 +722,13 @@ class TestInFlightCancellation:
         mock_event_store.query_events = AsyncMock(return_value=[])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_test", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def tracking_check(session_id):
             check_calls.append(session_id)
@@ -725,7 +792,13 @@ class TestSessionLifecycleTracking:
         mock_event_store.query_events = AsyncMock(return_value=[])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_test", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             with patch.object(runner._session_repo, "mark_completed", return_value=Result.ok(None)):
@@ -757,7 +830,13 @@ class TestSessionLifecycleTracking:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_crash", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             result = await runner.execute_seed(

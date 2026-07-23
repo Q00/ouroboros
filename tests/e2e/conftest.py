@@ -513,15 +513,30 @@ def mock_execution_id() -> str:
 
 @pytest.fixture
 async def persisted_session(
-    event_store: Any, mock_session_id: str, mock_execution_id: str, sample_seed: Seed
+    event_store: Any,
+    mock_claude_agent_adapter: MockClaudeAgentAdapter,
+    mock_session_id: str,
+    mock_execution_id: str,
+    sample_seed: Seed,
+    temp_dir: Path,
 ) -> dict[str, Any]:
-    """Create a persisted session in the event store for resumption testing."""
+    """Create a paused session that retains its creating-process capability."""
+    from ouroboros.orchestrator.runner import OrchestratorRunner
     from ouroboros.orchestrator.session import SessionRepository
 
+    # Resume validation requires a concrete constructor-level model pin. The
+    # real CLI adapters expose ``_model``; this minimal E2E adapter does not.
+    mock_claude_agent_adapter._model = "test-model"
+    runner = OrchestratorRunner(
+        adapter=mock_claude_agent_adapter,
+        event_store=event_store,
+        console=MagicMock(),
+        task_cwd=str(temp_dir),
+    )
     repo = SessionRepository(event_store)
-    result = await repo.create_session(
+    result = await runner.prepare_session(
+        sample_seed,
         execution_id=mock_execution_id,
-        seed_id=sample_seed.metadata.seed_id,
         session_id=mock_session_id,
     )
 
@@ -533,10 +548,14 @@ async def persisted_session(
     # Track some progress
     await repo.track_progress(mock_session_id, {"step": 1, "message": "Started"})
     await repo.track_progress(mock_session_id, {"step": 2, "message": "In progress"})
+    pause_result = await repo.mark_paused(mock_session_id, reason="Test interruption")
+    if pause_result.is_err:
+        raise RuntimeError(f"Failed to pause test session: {pause_result.error}")
 
     return {
         "session_id": mock_session_id,
         "execution_id": mock_execution_id,
         "seed_id": sample_seed.metadata.seed_id,
         "tracker": tracker,
+        "runner": runner,
     }

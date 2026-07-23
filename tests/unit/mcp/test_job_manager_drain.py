@@ -103,6 +103,46 @@ class TestJobManagerDrain:
         finally:
             await store.close()
 
+    async def test_drain_does_not_recount_terminal_job_while_task_unwinds(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        release_terminal_append = asyncio.Event()
+        terminal_persisted = asyncio.Event()
+        original_append = manager._append_terminal_event_with_fallback
+
+        async def _append_then_hold(*args, **kwargs) -> None:
+            await original_append(*args, **kwargs)
+            terminal_persisted.set()
+            release_wait = asyncio.create_task(release_terminal_append.wait())
+            while not release_wait.done():
+                try:
+                    await asyncio.shield(release_wait)
+                except asyncio.CancelledError:
+                    continue
+
+        monkeypatch.setattr(manager, "_append_terminal_event_with_fallback", _append_then_hold)
+        try:
+            snapshot = await _start_blocked_job(manager)
+
+            first_drain = asyncio.create_task(manager.drain(grace_seconds=0.05))
+            await asyncio.wait_for(terminal_persisted.wait(), timeout=2.0)
+            first = await asyncio.wait_for(first_drain, timeout=2.0)
+
+            job_task = manager._tasks[snapshot.job_id]
+            assert not job_task.done()
+            second = await manager.drain(grace_seconds=0.05)
+
+            assert first == 1
+            assert second == 0
+            assert (await manager.get_snapshot(snapshot.job_id)).status is JobStatus.INTERRUPTED
+        finally:
+            release_terminal_append.set()
+            await asyncio.gather(*manager._tasks.values(), return_exceptions=True)
+            await store.close()
+
     async def test_repeated_drain_does_not_double_terminalize_mixed_jobs(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)

@@ -9,16 +9,17 @@ This module tests the complete session lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.persistence.event_store import EventStore
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
-    from ouroboros.persistence.event_store import EventStore
     from tests.e2e.conftest import MockClaudeAgentAdapter
 
 
@@ -71,6 +72,47 @@ class TestSessionCreation:
 
         assert result1.is_ok and result2.is_ok
         assert result1.value.session_id != result2.value.session_id
+
+    async def test_concurrent_custom_session_id_has_one_start_identity(
+        self,
+        tmp_path,
+        sample_seed: Seed,
+    ) -> None:
+        """Concurrent publishers cannot create two executions for one session ID."""
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'start-identity-cas.db'}"
+        first_store = EventStore(database_url)
+        second_store = EventStore(database_url)
+        await first_store.initialize()
+        await second_store.initialize()
+        session_id = "session-concurrent-start-identity"
+        try:
+            first, second = await asyncio.gather(
+                SessionRepository(first_store).create_session(
+                    execution_id="exec-concurrent-start-a",
+                    seed_id=sample_seed.metadata.seed_id,
+                    session_id=session_id,
+                ),
+                SessionRepository(second_store).create_session(
+                    execution_id="exec-concurrent-start-b",
+                    seed_id=sample_seed.metadata.seed_id,
+                    session_id=session_id,
+                ),
+            )
+
+            assert int(first.is_ok) + int(second.is_ok) == 1
+            loser = second if first.is_ok else first
+            assert loser.is_err
+            assert loser.error.details["session_start_conflict"] is True
+            events = await first_store.replay("session", session_id)
+            starts = [event for event in events if event.type == "orchestrator.session.started"]
+            assert len(starts) == 1
+            assert starts[0].data["execution_id"] in {
+                "exec-concurrent-start-a",
+                "exec-concurrent-start-b",
+            }
+        finally:
+            await second_store.close()
+            await first_store.close()
 
     async def test_session_tracks_execution_id(
         self,
@@ -314,21 +356,17 @@ class TestSessionReconstruction:
 class TestSessionResumption:
     """Test session resumption functionality."""
 
-    async def test_resume_running_session(
+    async def test_same_process_paused_session_resumes(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test resuming a running session."""
+        """A paused session resumes only through its creating process."""
         mock_claude_agent_adapter.add_successful_execution(final_message="Resumed and completed")
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],
@@ -338,21 +376,17 @@ class TestSessionResumption:
         assert result.is_ok
         assert result.value.success
 
-    async def test_resume_preserves_session_id(
+    async def test_same_process_resume_preserves_session_id(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test that resuming preserves the original session ID."""
+        """Same-process resume preserves the original session ID."""
         mock_claude_agent_adapter.add_successful_execution()
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],
@@ -407,14 +441,43 @@ class TestSessionResumption:
 
         assert result.is_err
 
-    async def test_resume_accumulates_messages(
+    async def test_legacy_running_session_is_terminally_rejected(
+        self,
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
+    ) -> None:
+        """A persisted legacy RUNNING tracker cannot recreate local authority."""
+        repo = SessionRepository(event_store)
+        session_id = "legacy_running_session"
+        create_result = await repo.create_session(
+            execution_id="exec_legacy_running",
+            seed_id=sample_seed.metadata.seed_id,
+            session_id=session_id,
+        )
+        assert create_result.is_ok
+
+        runner = OrchestratorRunner(
+            adapter=mock_claude_agent_adapter,
+            event_store=event_store,
+            console=MagicMock(),
+        )
+        result = await runner.resume_session(session_id, sample_seed)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "process_local_resume_unavailable"
+        reconstructed = await repo.reconstruct_session(session_id)
+        assert reconstructed.is_ok
+        assert reconstructed.value.status == SessionStatus.FAILED
+
+    async def test_same_process_resume_accumulates_messages(
         self,
         persisted_session: dict[str, Any],
         event_store: EventStore,
         sample_seed: Seed,
         mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
-        """Test that resuming accumulates message count correctly."""
+        """Same-process resume accumulates its persisted message count."""
         # The persisted_session fixture tracks 2 progress events
         initial_messages = 2
 
@@ -432,11 +495,7 @@ class TestSessionResumption:
         ]
         mock_claude_agent_adapter.add_execution_sequence(messages)
 
-        runner = OrchestratorRunner(
-            adapter=mock_claude_agent_adapter,
-            event_store=event_store,
-            console=MagicMock(),
-        )
+        runner = persisted_session["runner"]
 
         result = await runner.resume_session(
             persisted_session["session_id"],

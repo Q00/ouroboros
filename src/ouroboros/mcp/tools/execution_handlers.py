@@ -74,14 +74,105 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.execution_authority import (
+    _has_live_process_local_authority_registration,
+    _register_process_local_authority_terminal_finalizer,
+    _retire_process_local_authority_after_terminal_persistence,
+    valid_process_local_authority_contract,
+)
+from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.model_routing import tier_from_model_tier_arg
-from ouroboros.orchestrator.runner import OrchestratorRunner
+from ouroboros.orchestrator.runner import (
+    OrchestratorRunner,
+    clear_cancellation,
+    request_cancellation,
+)
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+
+_PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
+    {
+        "process_local_execution_in_progress",
+        "process_local_authority_held_elsewhere",
+        "session_not_paused",
+        "typed_evidence_gate_required",
+        "investment_authority_required",
+        "cancellation_persistence_pending",
+        "pause_persistence_pending",
+        "terminal_persistence_pending",
+        # Durable reconstruction was inconclusive. The retained process-local
+        # owner remains the only safe retry path; the background wrapper must
+        # not manufacture a generic FAILED terminal event.
+        "process_local_reconstruction_pending",
+        # This error path already conditionally persisted its own terminal
+        # result (or observed a concurrent terminal winner). A background
+        # wrapper must never append a second FAILED event over that outcome.
+        "process_local_resume_unavailable",
+    }
+)
+
+
+def _is_process_local_background_owned_error(error: object) -> bool:
+    """Return whether a runner error already owns its session lifecycle result.
+
+    Most of these typed results intentionally leave a process-local owner live;
+    ``process_local_resume_unavailable`` instead conditionally persists (or
+    observes) a terminal outcome itself.  In both cases the background MCP
+    wrapper must preserve the runner-owned lifecycle rather than append an
+    unconditional ``mark_failed``.
+    """
+    details = getattr(error, "details", None)
+    return isinstance(details, Mapping) and (
+        details.get("resume_blocked") in _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS
+    )
+
+
+def _process_local_authority_is_held_elsewhere(tracker: SessionTracker) -> bool:
+    """Check non-owning handler preflight before it touches a task worktree.
+
+    A handler can only resume a process-local session through its retained exact
+    runner.  If this handler has no such owner but the registry or PID lease is
+    still live, fail with the typed ownership result before a task-worktree lock
+    can obscure the authority outcome with a generic workspace error.
+    """
+    raw_contract = tracker.progress.get("execution_contract")
+    if not isinstance(raw_contract, Mapping):
+        return False
+    authority = raw_contract.get("foundation_a_authority")
+    if not valid_process_local_authority_contract(authority):
+        return False
+    return _has_live_process_local_authority_registration(
+        tracker.session_id,
+        tracker.execution_id,
+        authority,
+    ) or is_holder_alive(tracker.session_id)
+
+
+def _process_local_resume_block_error(
+    tracker: SessionTracker,
+    *,
+    resume_blocked: str,
+) -> MCPToolError:
+    """Build a typed, retryable MCP result for a live process-local owner."""
+    if resume_blocked == "process_local_execution_in_progress":
+        message = "This process-local session is already being resumed"
+    else:
+        message = "This process-local session is held by another live owner"
+    return MCPToolError(
+        message,
+        tool_name="ouroboros_execute_seed",
+        is_retriable=True,
+        details={
+            "session_id": tracker.session_id,
+            "execution_id": tracker.execution_id,
+            "resume_blocked": resume_blocked,
+        },
+    )
 
 
 def _resolve_execution_model(runtime_backend: str | None) -> str | None:
@@ -673,6 +764,361 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     opencode_mode: str | None = field(default=None, repr=False)
     session_signal_hub: Any | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _process_local_resume_owners: dict[str, OrchestratorRunner] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _process_local_owned_event_stores: dict[str, EventStore] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _process_local_resume_handoffs: set[str] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
+
+    async def _retained_process_local_owner(
+        self,
+        tracker: SessionTracker,
+    ) -> OrchestratorRunner | None:
+        """Return the exact in-memory runner that still owns a paused session.
+
+        This is an opaque owner handoff, not authority reconstruction: the
+        original runner retains the registry-minted capability and still has to
+        claim it before doing effects. A fresh MCP request may select that
+        retained object, but can never manufacture a runner, adapter, or
+        capability from durable correlation data.
+        """
+        owner = self._process_local_resume_owners.get(tracker.session_id)
+        if owner is None:
+            return None
+        raw_contract = tracker.progress.get("execution_contract")
+        if owner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            raw_contract,
+        ):
+            return owner
+        owned_event_store: EventStore | None = None
+        if self._process_local_resume_owners.get(tracker.session_id) is owner:
+            self._process_local_resume_owners.pop(tracker.session_id, None)
+            owned_event_store = self._process_local_owned_event_stores.pop(
+                tracker.session_id,
+                None,
+            )
+        if owned_event_store is not None:
+            # The capability is already gone, so no terminal resume path can
+            # reach this handler-owned store. Close it here rather than losing
+            # the only reference while evicting the stale retained owner.
+            try:
+                close_result = owned_event_store.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception:
+                log.exception("mcp.tool.execute_seed.event_store_close_error")
+        return None
+
+    def _begin_process_local_resume_handoff(self, session_id: str) -> bool:
+        """Reserve same-handler worktree restoration for one retained owner."""
+        if session_id in self._process_local_resume_handoffs:
+            return False
+        self._process_local_resume_handoffs.add(session_id)
+        return True
+
+    def _finish_process_local_resume_handoff(self, session_id: str) -> None:
+        """Release the handler-local pre-resume gate after the runner settles."""
+        self._process_local_resume_handoffs.discard(session_id)
+
+    @staticmethod
+    def _release_runner_task_workspace(
+        runner: object,
+        workspace: TaskWorkspace,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Release through the runner lifecycle boundary when it is available.
+
+        Lightweight test/runtime doubles may not implement the private runner
+        boundary.  The fallback preserves the legacy single-owner behavior for
+        those doubles; production runners always take the idempotent,
+        identity-aware path.
+        """
+        release_workspace = getattr(runner, "_release_task_workspace_for_identity", None)
+        if callable(release_workspace):
+            release_workspace(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            return
+        release_lock(workspace.lock_path)
+
+    async def _release_terminal_process_local_owner(
+        self,
+        *,
+        session_id: str,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Drop this handler's retained references after a terminal transition."""
+        if self._process_local_resume_owners.get(session_id) is not runner:
+            return
+        self._process_local_resume_owners.pop(session_id, None)
+        owned_event_store = self._process_local_owned_event_stores.pop(session_id, None)
+        self._process_local_resume_handoffs.discard(session_id)
+        if owned_event_store is not None:
+            try:
+                close_result = owned_event_store.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception:
+                log.exception("mcp.tool.execute_seed.event_store_close_error")
+
+    async def _cleanup_unstarted_process_local_background_task(
+        self,
+        *,
+        tracker: SessionTracker,
+        runner: OrchestratorRunner,
+        workspace: TaskWorkspace | None,
+        owned_event_store: EventStore | None,
+        retained_resume_handoff: bool,
+        workspace_reservation: object | None = None,
+    ) -> None:
+        """Close a task cancelled before its coroutine can enter ``finally``.
+
+        ``asyncio`` never executes a coroutine's body when its task is
+        cancelled before the first scheduling turn.  A freshly prepared
+        process-local session has already registered its capability, lease,
+        handler owner, and possibly EventStore by that point, so the done
+        callback must create an explicit terminal cleanup task instead of only
+        discarding the cancelled task reference.
+        """
+        try:
+            try:
+                terminalization_error = await runner._mark_process_local_resume_unavailable(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            except Exception:
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_terminalization_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            if (
+                terminalization_error.details.get("resume_blocked")
+                == "terminal_persistence_pending"
+            ):
+                log.warning(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_persistence_pending",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            try:
+                reconstructed = await runner.session_repo.reconstruct_session(tracker.session_id)
+            except Exception:
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_reconstruct_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+            if reconstructed.is_err or reconstructed.value.status not in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }:
+                log.warning(
+                    "mcp.tool.execute_seed.unstarted_background_terminal_unproven",
+                    session_id=tracker.session_id,
+                )
+                return
+
+            retained_store = self._process_local_owned_event_stores.get(tracker.session_id)
+            try:
+                await self._reconcile_terminal_process_local_owner(reconstructed.value)
+            except Exception:
+                log.exception(
+                    "mcp.tool.execute_seed.unstarted_background_owner_cleanup_failed",
+                    session_id=tracker.session_id,
+                )
+                return
+            if owned_event_store is not None and owned_event_store is not retained_store:
+                try:
+                    close_result = owned_event_store.close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except Exception:
+                    log.exception("mcp.tool.execute_seed.event_store_close_error")
+        finally:
+            runner._release_task_workspace_reservation(workspace_reservation)
+            if workspace is not None:
+                self._release_runner_task_workspace(
+                    runner,
+                    workspace,
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            if retained_resume_handoff:
+                self._finish_process_local_resume_handoff(tracker.session_id)
+
+    async def _reconcile_terminal_process_local_owner(self, tracker: SessionTracker) -> None:
+        """Reconcile a terminal record through the registry-owned transition.
+
+        This is a defensive fallback for terminal records written outside this
+        handler.  The registry drains every registered runner/handler finalizer
+        together; a still-active effect claim is only signalled because it owns
+        its orderly terminal cleanup.
+        """
+        raw_contract = tracker.progress.get("execution_contract")
+        authority = (
+            raw_contract.get("foundation_a_authority")
+            if isinstance(raw_contract, Mapping)
+            else None
+        )
+        retired, claimed = await _retire_process_local_authority_after_terminal_persistence(
+            tracker.session_id,
+            tracker.execution_id,
+            authority,
+        )
+        if claimed:
+            await request_cancellation(tracker.session_id)
+            return
+        if retired:
+            await clear_cancellation(tracker.session_id)
+            return
+
+        owner = self._process_local_resume_owners.get(tracker.session_id)
+        if owner is None:
+            return
+        if owner.active_sessions.get(tracker.execution_id) == tracker.session_id:
+            await request_cancellation(tracker.session_id)
+            return
+        owner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        owner._unregister_session(tracker.execution_id, tracker.session_id)
+        if owner._task_workspace is not None:
+            self._release_runner_task_workspace(
+                owner,
+                owner._task_workspace,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        await clear_cancellation(tracker.session_id)
+        await self._release_terminal_process_local_owner(
+            session_id=tracker.session_id,
+            runner=owner,
+        )
+
+    def _remember_process_local_owner(
+        self,
+        tracker: SessionTracker,
+        runner: OrchestratorRunner,
+        *,
+        owned_event_store: EventStore | None = None,
+    ) -> None:
+        """Keep a callable owner alive while its process-local lease is live."""
+        raw_contract = tracker.progress.get("execution_contract")
+        self._remember_process_local_owner_identity(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+            raw_contract=raw_contract,
+            runner=runner,
+            owned_event_store=owned_event_store,
+        )
+
+    def _remember_process_local_owner_identity(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+        runner: OrchestratorRunner,
+        owned_event_store: EventStore | None = None,
+    ) -> bool:
+        """Retain an exact owner even when durable reconstruction is unavailable."""
+        if runner._has_live_process_local_authority(
+            session_id,
+            execution_id,
+            raw_contract,
+        ):
+            self._process_local_resume_owners[session_id] = runner
+            if owned_event_store is not None:
+                self._process_local_owned_event_stores[session_id] = owned_event_store
+            if isinstance(raw_contract, Mapping):
+                _register_process_local_authority_terminal_finalizer(
+                    session_id,
+                    execution_id,
+                    raw_contract.get("foundation_a_authority"),
+                    runner._adapter,
+                    ("execute-seed-handler", id(self), id(runner)),
+                    lambda: self._release_terminal_process_local_owner(
+                        session_id=session_id,
+                        runner=runner,
+                    ),
+                )
+            return True
+        return False
+
+    async def _reconcile_process_local_owner(
+        self,
+        *,
+        tracker: SessionTracker,
+        runner: OrchestratorRunner,
+        session_repo: SessionRepository,
+    ) -> tuple[bool, EventStore | None]:
+        """Retain a paused owner or release a terminal owner after a run.
+
+        Returns whether the runner remains retained and, only for a terminal
+        result, an internally owned store that can be closed after the caller
+        no longer needs it.
+        """
+        try:
+            result = await session_repo.reconstruct_session(tracker.session_id)
+        except Exception:
+            result = None
+        terminal_record_observed = False
+        if result is not None and result.is_ok:
+            status = result.value.status
+            if status == SessionStatus.PAUSED:
+                self._remember_process_local_owner(result.value, runner)
+                if self._process_local_resume_owners.get(tracker.session_id) is runner:
+                    return True, None
+            elif status in (
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            ):
+                # An explicit terminal record is the one durable observation
+                # that may evict a retained owner while its handler unwinds.
+                terminal_record_observed = True
+
+        raw_contract = tracker.progress.get("execution_contract")
+        # Read errors, Result.err, and RUNNING (or a future nonterminal state)
+        # are inconclusive during post-run reconciliation. Preserve the owner
+        # only while its opaque capability still proves it is live. A durable
+        # terminal record is intentionally the one exception.
+        if not terminal_record_observed and runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            raw_contract,
+        ):
+            self._remember_process_local_owner(tracker, runner)
+            return self._process_local_resume_owners.get(tracker.session_id) is runner, None
+
+        owned_event_store: EventStore | None = None
+        if self._process_local_resume_owners.get(tracker.session_id) is runner:
+            self._process_local_resume_owners.pop(tracker.session_id, None)
+            owned_event_store = self._process_local_owned_event_stores.pop(
+                tracker.session_id,
+                None,
+            )
+        return False, owned_event_store
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1001,7 +1447,16 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             workspace: TaskWorkspace | None = None
             tracker = None
             launched = False
+            retained_after_run = False
+            retained_event_store_to_close: EventStore | None = None
             use_worktree = bool(arguments.get("use_worktree", True))
+            retained_owner: OrchestratorRunner | None = None
+            retained_resume_handoff = False
+            workspace_runner: OrchestratorRunner | None = None
+            workspace_session_id = session_id
+            workspace_execution_id = execution_id
+            workspace_reservation_runner: OrchestratorRunner | None = None
+            workspace_reservation: object | None = None
 
             try:
                 if is_resume and session_id:
@@ -1014,6 +1469,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
                     tracker = tracker_result.value
+                    workspace_session_id = tracker.session_id
+                    workspace_execution_id = tracker.execution_id
                     try:
                         execution_preferences = _persisted_execution_preferences(tracker.progress)
                     except ValueError as exc:
@@ -1025,6 +1482,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         SessionStatus.CANCELLED,
                         SessionStatus.FAILED,
                     ):
+                        await self._reconcile_terminal_process_local_owner(tracker)
                         return Result.err(
                             MCPToolError(
                                 (
@@ -1034,10 +1492,43 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 tool_name="ouroboros_execute_seed",
                             )
                         )
-                    if use_worktree:
-                        persisted = TaskWorkspace.from_progress_dict(
-                            tracker.progress.get("workspace")
+                    retained_owner = await self._retained_process_local_owner(tracker)
+                    if retained_owner is not None:
+                        # Reserve this exact handler's pre-resume workspace handoff
+                        # before touching the worktree. Without this gate a second
+                        # same-handler resume can surface a generic lock error ahead
+                        # of the process-local exclusive-claim result.
+                        if not self._begin_process_local_resume_handoff(tracker.session_id):
+                            return Result.err(
+                                _process_local_resume_block_error(
+                                    tracker,
+                                    resume_blocked="process_local_execution_in_progress",
+                                )
+                            )
+                        retained_resume_handoff = True
+                    elif _process_local_authority_is_held_elsewhere(tracker):
+                        # This handler has no exact retained owner. Do not let a
+                        # foreign process-local capability fail later as a generic
+                        # worktree collision or create a fresh runtime first.
+                        return Result.err(
+                            _process_local_resume_block_error(
+                                tracker,
+                                resume_blocked="process_local_authority_held_elsewhere",
+                            )
                         )
+                    # A persisted task workspace is authoritative for resume,
+                    # even when the caller omits ``use_worktree``.  That flag
+                    # controls provisioning of a *new* workspace; it must not
+                    # bypass reacquisition of the lock for a retained runner.
+                    # Otherwise the runner keeps the workspace object, claims
+                    # process-local authority, and only flips its in-memory
+                    # ``_task_workspace_lock_held`` bit while the durable lock
+                    # remains absent.
+                    persisted = TaskWorkspace.from_progress_dict(tracker.progress.get("workspace"))
+                    if use_worktree or persisted is not None:
+                        if retained_owner is not None:
+                            workspace_reservation_runner = retained_owner
+                            workspace_reservation = retained_owner._reserve_task_workspace()
                         try:
                             workspace = maybe_restore_task_workspace(
                                 session_id,
@@ -1046,12 +1537,23 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 allow_dirty=inherited_runtime_handle is not None,
                             )
                         except WorktreeError as e:
+                            if workspace_reservation_runner is not None:
+                                workspace_reservation_runner._release_task_workspace_reservation(
+                                    workspace_reservation
+                                )
+                                workspace_reservation = None
                             return Result.err(
                                 MCPToolError(
                                     f"Task workspace error: {e.message}",
                                     tool_name="ouroboros_execute_seed",
                                 )
                             )
+                        if retained_owner is not None:
+                            # The paused run releases its worktree lock. Restore
+                            # that exact workspace before resuming through the
+                            # retained runner so its resume identity check and
+                            # its next effect use a freshly held task lock.
+                            retained_owner._task_workspace = workspace
                 elif use_worktree:
                     try:
                         workspace = maybe_prepare_task_workspace(
@@ -1067,24 +1569,82 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             )
                         )
 
-                delegated_permission_mode = (
-                    inherited_runtime_handle.approval_mode
-                    if inherited_runtime_handle and inherited_runtime_handle.approval_mode
-                    else None
-                )
-                agent_adapter = create_agent_runtime(
-                    backend=self.agent_runtime_backend,
-                    model=_resolve_execution_model(self.agent_runtime_backend),
-                    cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
-                    llm_backend=self.llm_backend,
-                    startup_output_timeout_seconds=0,
-                    stdout_idle_timeout_seconds=0,
-                    **(
-                        {"permission_mode": delegated_permission_mode}
-                        if delegated_permission_mode
-                        else {}
-                    ),
-                )
+                if retained_owner is not None:
+                    # Resume through the exact in-memory runner that owns the
+                    # opaque capability. Do not construct a fresh runtime or
+                    # create a fresh runner: either operation would turn a
+                    # same-process continuation into a foreign-adapter path.
+                    runner = retained_owner
+                    agent_adapter = runner._adapter
+                    if event_store is not runner._event_store:
+                        # A handler without an injected store opened this
+                        # short-lived observer connection solely to reconstruct
+                        # the tracker above. The retained runner's store is the
+                        # one that must survive the paused lifecycle.
+                        if owns_event_store:
+                            close_result = event_store.close()
+                            if inspect.isawaitable(close_result):
+                                await close_result
+                        event_store = runner._event_store
+                        owns_event_store = False
+                    session_repo = runner._session_repo
+                else:
+                    delegated_permission_mode = (
+                        inherited_runtime_handle.approval_mode
+                        if inherited_runtime_handle and inherited_runtime_handle.approval_mode
+                        else None
+                    )
+                    agent_adapter = create_agent_runtime(
+                        backend=self.agent_runtime_backend,
+                        model=_resolve_execution_model(self.agent_runtime_backend),
+                        cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
+                        llm_backend=self.llm_backend,
+                        startup_output_timeout_seconds=0,
+                        stdout_idle_timeout_seconds=0,
+                        **(
+                            {"permission_mode": delegated_permission_mode}
+                            if delegated_permission_mode
+                            else {}
+                        ),
+                    )
+
+                    # Create checkpoint store for execution state persistence
+                    checkpoint_store = CheckpointStore()
+                    checkpoint_store.initialize()
+                    fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
+                    if is_resume:
+                        persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
+                        if isinstance(persisted_fat_harness_mode, bool):
+                            fat_harness_mode = persisted_fat_harness_mode
+                        else:
+                            # No persisted contract (historical session): mirror the
+                            # CLI resume semantics — verify-by-default unless the
+                            # seed opts out with execution_mode='legacy'.
+                            fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
+
+                    # Create orchestrator runner
+                    runner = OrchestratorRunner(
+                        adapter=agent_adapter,
+                        event_store=event_store,
+                        console=console,
+                        mcp_manager=self.mcp_manager,
+                        mcp_tool_prefix=self.mcp_tool_prefix,
+                        debug=False,
+                        enable_decomposition=True,
+                        inherited_runtime_handle=inherited_runtime_handle,
+                        inherited_tools=inherited_effective_tools,
+                        task_workspace=workspace,
+                        checkpoint_store=checkpoint_store,
+                        max_parallel_workers=max_parallel_workers,
+                        fat_harness_mode=fat_harness_mode,
+                        # Drive model-tier routing from the MCP model_tier arg
+                        # (small/medium/large → frugal/standard/frontier top-level tier).
+                        base_model_tier=base_model_tier_override,
+                        efficiency_mode=raw_efficiency_mode,
+                        frugality_assurance=raw_frugality_assurance,
+                        session_signal_hub=self.session_signal_hub,
+                    )
+                workspace_runner = runner
                 runtime_backend_attr = getattr(agent_adapter, "runtime_backend", None)
                 if not (isinstance(runtime_backend_attr, str) and runtime_backend_attr):
                     runtime_backend_attr = getattr(agent_adapter, "_runtime_backend", None)
@@ -1092,43 +1652,6 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     runtime_backend_attr
                     if isinstance(runtime_backend_attr, str) and runtime_backend_attr
                     else runtime_backend or "unknown"
-                )
-
-                # Create checkpoint store for execution state persistence
-                checkpoint_store = CheckpointStore()
-                checkpoint_store.initialize()
-                fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
-                if is_resume:
-                    persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
-                    if isinstance(persisted_fat_harness_mode, bool):
-                        fat_harness_mode = persisted_fat_harness_mode
-                    else:
-                        # No persisted contract (historical session): mirror the
-                        # CLI resume semantics — verify-by-default unless the
-                        # seed opts out with execution_mode='legacy'.
-                        fat_harness_mode = _fresh_fat_harness_mode(execution_mode)
-
-                # Create orchestrator runner
-                runner = OrchestratorRunner(
-                    adapter=agent_adapter,
-                    event_store=event_store,
-                    console=console,
-                    mcp_manager=self.mcp_manager,
-                    mcp_tool_prefix=self.mcp_tool_prefix,
-                    debug=False,
-                    enable_decomposition=True,
-                    inherited_runtime_handle=inherited_runtime_handle,
-                    inherited_tools=inherited_effective_tools,
-                    task_workspace=workspace,
-                    checkpoint_store=checkpoint_store,
-                    max_parallel_workers=max_parallel_workers,
-                    fat_harness_mode=fat_harness_mode,
-                    # Drive model-tier routing from the MCP model_tier arg
-                    # (small/medium/large → frugal/standard/frontier top-level tier).
-                    base_model_tier=base_model_tier_override,
-                    efficiency_mode=raw_efficiency_mode,
-                    frugality_assurance=raw_frugality_assurance,
-                    session_signal_hub=self.session_signal_hub,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
@@ -1139,13 +1662,71 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         session_id=session_id,
                     )
                     if prepared.is_err:
+                        prepared_details = prepared.error.details
+                        detail_session_id = prepared_details.get("session_id")
+                        detail_execution_id = prepared_details.get("execution_id")
+                        if isinstance(detail_session_id, str):
+                            workspace_session_id = detail_session_id
+                        if isinstance(detail_execution_id, str):
+                            workspace_execution_id = detail_execution_id
+                        terminal_persistence_pending = (
+                            prepared_details.get("resume_blocked") == "terminal_persistence_pending"
+                        )
+                        if terminal_persistence_pending:
+                            retained_session_id = prepared_details.get(
+                                "session_id", session_id or ""
+                            )
+                            retained_execution_id = prepared_details.get(
+                                "execution_id", execution_id or ""
+                            )
+                            if isinstance(retained_session_id, str) and isinstance(
+                                retained_execution_id, str
+                            ):
+                                retained_after_run = self._remember_process_local_owner_identity(
+                                    session_id=retained_session_id,
+                                    execution_id=retained_execution_id,
+                                    raw_contract=runner._execution_contract,
+                                    runner=runner,
+                                    owned_event_store=(event_store if owns_event_store else None),
+                                )
+                            if not retained_after_run:
+                                retained_tracker = await session_repo.reconstruct_session(
+                                    retained_session_id
+                                    if isinstance(retained_session_id, str)
+                                    else ""
+                                )
+                            else:
+                                retained_tracker = None
+                            if retained_tracker is not None and retained_tracker.is_ok:
+                                self._remember_process_local_owner(
+                                    retained_tracker.value,
+                                    runner,
+                                    owned_event_store=(event_store if owns_event_store else None),
+                                )
+                                retained_after_run = (
+                                    self._process_local_resume_owners.get(
+                                        retained_tracker.value.session_id
+                                    )
+                                    is runner
+                                )
                         return Result.err(
                             MCPToolError(
                                 f"Execution failed: {prepared.error.message}",
                                 tool_name="ouroboros_execute_seed",
+                                is_retriable=terminal_persistence_pending,
+                                details=dict(prepared_details),
                             )
                         )
                     tracker = prepared.value
+                    workspace_session_id = tracker.session_id
+                    workspace_execution_id = tracker.execution_id
+                    self._remember_process_local_owner(
+                        tracker,
+                        runner,
+                        owned_event_store=event_store if owns_event_store else None,
+                    )
+
+                background_started = False
 
                 # Background execution coroutine — either awaited directly
                 # (synchronous=True) or wrapped in create_task (fire-and-forget).
@@ -1160,7 +1741,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     _session_repo: SessionRepository = session_repo,
                     _event_store: EventStore = event_store,
                     _owns_event_store: bool = owns_event_store,
+                    _retained_resume_handoff: bool = retained_resume_handoff,
+                    _workspace_reservation_runner: OrchestratorRunner | None = (
+                        workspace_reservation_runner
+                    ),
+                    _workspace_reservation: object | None = workspace_reservation,
                 ) -> None:
+                    nonlocal background_started, retained_after_run, retained_event_store_to_close
+                    # This must be the first coroutine action. A done callback
+                    # distinguishes cancellation before this first scheduling
+                    # turn (no ``finally`` execution) from ordinary in-body
+                    # cancellation, which reaches the cleanup below.
+                    background_started = True
                     try:
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
@@ -1176,10 +1768,28 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 session_id=_tracker.session_id,
                                 error=str(result.error),
                             )
-                            await _session_repo.mark_failed(
+                            if _is_process_local_background_owned_error(result.error):
+                                log.info(
+                                    "mcp.tool.execute_seed.background_process_local_lifecycle_owned",
+                                    session_id=_tracker.session_id,
+                                    resume_blocked=result.error.details.get("resume_blocked"),
+                                )
+                                return
+                            mark_result = await _session_repo.mark_failed(
                                 _tracker.session_id,
                                 error_message=str(result.error),
                             )
+                            if mark_result.is_err:
+                                log.error(
+                                    "mcp.tool.execute_seed.background_mark_failed_error",
+                                    session_id=_tracker.session_id,
+                                    error=str(mark_result.error),
+                                )
+                            elif mark_result.value is False:
+                                log.info(
+                                    "mcp.tool.execute_seed.background_terminal_preserved",
+                                    session_id=_tracker.session_id,
+                                )
                             return
                         if not result.value.success:
                             log.warning(
@@ -1229,22 +1839,66 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             session_id=_tracker.session_id,
                         )
                         try:
-                            await _session_repo.mark_failed(
+                            mark_result = await _session_repo.mark_failed(
                                 _tracker.session_id,
                                 error_message="Unexpected error in background execution",
                             )
+                            if mark_result.is_err:
+                                log.error(
+                                    "mcp.tool.execute_seed.mark_failed_error",
+                                    session_id=_tracker.session_id,
+                                    error=str(mark_result.error),
+                                )
+                            elif mark_result.value is False:
+                                log.info(
+                                    "mcp.tool.execute_seed.background_terminal_preserved",
+                                    session_id=_tracker.session_id,
+                                )
                         except Exception:
                             log.exception("mcp.tool.execute_seed.mark_failed_error")
                     finally:
+                        (
+                            retained_after_run,
+                            retained_event_store_to_close,
+                        ) = await self._reconcile_process_local_owner(
+                            tracker=_tracker,
+                            runner=_runner,
+                            session_repo=_session_repo,
+                        )
+                        if _workspace_reservation_runner is not None:
+                            _workspace_reservation_runner._release_task_workspace_reservation(
+                                _workspace_reservation
+                            )
                         if _workspace is not None:
-                            release_lock(_workspace.lock_path)
-                        if _owns_event_store:
+                            self._release_runner_task_workspace(
+                                _runner,
+                                _workspace,
+                                session_id=_tracker.session_id,
+                                execution_id=_tracker.execution_id,
+                            )
+                        if _owns_event_store and not retained_after_run:
                             try:
                                 close_result = _event_store.close()
                                 if inspect.isawaitable(close_result):
                                     await close_result
+                                if retained_event_store_to_close is _event_store:
+                                    retained_event_store_to_close = None
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
+                        if (
+                            retained_event_store_to_close is not None
+                            and not retained_after_run
+                            and not synchronous
+                        ):
+                            try:
+                                close_result = retained_event_store_to_close.close()
+                                if inspect.isawaitable(close_result):
+                                    await close_result
+                                retained_event_store_to_close = None
+                            except Exception:
+                                log.exception("mcp.tool.execute_seed.event_store_close_error")
+                        if _retained_resume_handoff:
+                            self._finish_process_local_resume_handoff(_tracker.session_id)
 
                 session_status: SessionStatus | None = None
                 pause_metadata: dict[str, Any] = {}
@@ -1289,7 +1943,25 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     launched = True
                     self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+
+                    def _background_done(completed: asyncio.Task[None]) -> None:
+                        self._background_tasks.discard(completed)
+                        if not completed.cancelled() or background_started:
+                            return
+                        cleanup = asyncio.create_task(
+                            self._cleanup_unstarted_process_local_background_task(
+                                tracker=tracker,
+                                runner=runner,
+                                workspace=workspace,
+                                workspace_reservation=workspace_reservation,
+                                owned_event_store=event_store if owns_event_store else None,
+                                retained_resume_handoff=retained_resume_handoff,
+                            )
+                        )
+                        self._background_tasks.add(cleanup)
+                        cleanup.add_done_callback(self._background_tasks.discard)
+
+                    task.add_done_callback(_background_done)
                     status_label = "running"
                     success = None  # unknown yet
                     is_error = False
@@ -1374,15 +2046,39 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # In synchronous mode, _run_in_background was told NOT to own
                 # cleanup (_owns_event_store=False), so the caller cleans up
                 # after reconstruct_session has finished using the store.
+                if not launched or synchronous:
+                    if workspace_reservation_runner is not None:
+                        workspace_reservation_runner._release_task_workspace_reservation(
+                            workspace_reservation
+                        )
                 if workspace is not None and (not launched or synchronous):
-                    release_lock(workspace.lock_path)
-                if owns_event_store and (not launched or synchronous):
+                    if workspace_runner is not None:
+                        self._release_runner_task_workspace(
+                            workspace_runner,
+                            workspace,
+                            session_id=workspace_session_id,
+                            execution_id=workspace_execution_id,
+                        )
+                    else:
+                        release_lock(workspace.lock_path)
+                if owns_event_store and (not launched or synchronous) and not retained_after_run:
                     try:
                         close_result = event_store.close()
                         if inspect.isawaitable(close_result):
                             await close_result
+                        if retained_event_store_to_close is event_store:
+                            retained_event_store_to_close = None
                     except Exception:
                         log.exception("mcp.tool.execute_seed.event_store_close_error")
+                if retained_event_store_to_close is not None and not retained_after_run:
+                    try:
+                        close_result = retained_event_store_to_close.close()
+                        if inspect.isawaitable(close_result):
+                            await close_result
+                    except Exception:
+                        log.exception("mcp.tool.execute_seed.event_store_close_error")
+                if retained_resume_handoff and (not launched or synchronous):
+                    self._finish_process_local_resume_handoff(tracker.session_id)
         except Exception as e:
             log.error("mcp.tool.execute_seed.error", error=str(e))
             return Result.err(

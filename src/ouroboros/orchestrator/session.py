@@ -553,6 +553,11 @@ class SessionRepository:
 
             result = await self.reconstruct_session(snapshot.session_id)
             if result.is_ok:
+                if result.value.status not in (
+                    SessionStatus.RUNNING,
+                    SessionStatus.PAUSED,
+                ):
+                    continue
                 if self._usage_limit_pause_cleanup_deferred(
                     result.value,
                     now=now,
@@ -701,6 +706,8 @@ class SessionRepository:
                 session_id=tracker.session_id,
                 error=str(e),
             )
+            if isinstance(e, PersistenceError):
+                return Result.err(e)
             return Result.err(
                 PersistenceError(
                     message=f"Failed to create session: {e}",
@@ -753,15 +760,19 @@ class SessionRepository:
         self,
         session_id: str,
         summary: dict[str, Any] | None = None,
-    ) -> Result[None, PersistenceError]:
+        *,
+        messages_processed: int = 0,
+    ) -> Result[bool, PersistenceError]:
         """Mark session as completed.
 
         Args:
             session_id: Session to complete.
             summary: Optional completion summary.
+            messages_processed: Total runtime messages observed before completion.
 
         Returns:
-            Result indicating success or failure.
+            Result whose value is ``True`` when this completion became durable,
+            or ``False`` when another terminal transition already won.
         """
         event = BaseEvent(
             type="orchestrator.session.completed",
@@ -769,17 +780,25 @@ class SessionRepository:
             aggregate_id=session_id,
             data={
                 "summary": summary or {},
+                "messages_processed": max(messages_processed, 0),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
         )
 
         try:
-            await self._event_store.append(event)
-            log.info(
-                "orchestrator.session.completed",
-                session_id=session_id,
-            )
-            return Result.ok(None)
+            persisted = await self._event_store.append(event)
+            if persisted is False:
+                log.info(
+                    "orchestrator.session.terminal_transition_preserved",
+                    session_id=session_id,
+                    requested_status=SessionStatus.COMPLETED.value,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.completed",
+                    session_id=session_id,
+                )
+            return Result.ok(persisted is not False)
         except Exception as e:
             log.exception(
                 "orchestrator.session.complete_failed",
@@ -798,16 +817,22 @@ class SessionRepository:
         session_id: str,
         error_message: str,
         error_details: dict[str, Any] | None = None,
-    ) -> Result[None, PersistenceError]:
+        *,
+        error_type: str | None = None,
+        messages_processed: int = 0,
+    ) -> Result[bool, PersistenceError]:
         """Mark session as failed.
 
         Args:
             session_id: Session that failed.
             error_message: Error description.
             error_details: Optional error details.
+            error_type: Optional stable failure class.
+            messages_processed: Total runtime messages observed before failure.
 
         Returns:
-            Result indicating success or failure.
+            Result whose value is ``True`` when this failure became durable,
+            or ``False`` when another terminal transition already won.
         """
         event = BaseEvent(
             type="orchestrator.session.failed",
@@ -816,18 +841,27 @@ class SessionRepository:
             data={
                 "error": error_message,
                 "error_details": error_details or {},
+                "error_type": error_type,
+                "messages_processed": max(messages_processed, 0),
                 "failed_at": datetime.now(UTC).isoformat(),
             },
         )
 
         try:
-            await self._event_store.append(event)
-            log.error(
-                "orchestrator.session.failed",
-                session_id=session_id,
-                error=error_message,
-            )
-            return Result.ok(None)
+            persisted = await self._event_store.append(event)
+            if persisted is False:
+                log.info(
+                    "orchestrator.session.terminal_transition_preserved",
+                    session_id=session_id,
+                    requested_status=SessionStatus.FAILED.value,
+                )
+            else:
+                log.error(
+                    "orchestrator.session.failed",
+                    session_id=session_id,
+                    error=error_message,
+                )
+            return Result.ok(persisted is not False)
         except Exception as e:
             log.exception(
                 "orchestrator.session.fail_failed",
@@ -841,6 +875,20 @@ class SessionRepository:
                 )
             )
 
+    async def mark_failed_if_active(
+        self,
+        session_id: str,
+        error_message: str,
+        error_details: dict[str, Any] | None = None,
+    ) -> Result[bool, PersistenceError]:
+        """Fail an active session without overwriting an existing terminal result.
+
+        ``False`` is a successful no-op: another terminal lifecycle event was
+        already durable. All terminal writers now use the same CAS boundary;
+        this compatibility name delegates to the canonical method.
+        """
+        return await self.mark_failed(session_id, error_message, error_details)
+
     async def mark_paused(
         self,
         session_id: str,
@@ -850,7 +898,7 @@ class SessionRepository:
         pause_seconds: int | None = None,
         resume_after: datetime | None = None,
         pause_kind: str | None = None,
-    ) -> Result[None, PersistenceError]:
+    ) -> Result[bool, PersistenceError]:
         """Mark session as paused and resumable.
 
         Args:
@@ -859,7 +907,8 @@ class SessionRepository:
             resume_hint: Optional retry guidance.
 
         Returns:
-            Result indicating success or failure.
+            Result whose value is ``True`` when PAUSED became durable, or
+            ``False`` when an explicit terminal session event already won.
         """
         data: dict[str, Any] = {
             "reason": reason,
@@ -881,13 +930,19 @@ class SessionRepository:
         )
 
         try:
-            await self._event_store.append(event)
-            log.info(
-                "orchestrator.session.paused",
-                session_id=session_id,
-                reason=reason,
-            )
-            return Result.ok(None)
+            persisted = await self._event_store.append_session_pause_if_active(event)
+            if persisted:
+                log.info(
+                    "orchestrator.session.paused",
+                    session_id=session_id,
+                    reason=reason,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.pause_terminal_preserved",
+                    session_id=session_id,
+                )
+            return Result.ok(persisted)
         except Exception as e:
             log.exception(
                 "orchestrator.session.pause_failed",
@@ -906,7 +961,7 @@ class SessionRepository:
         session_id: str,
         reason: str,
         cancelled_by: str = "user",
-    ) -> Result[None, PersistenceError]:
+    ) -> Result[bool, PersistenceError]:
         """Mark session as cancelled.
 
         Args:
@@ -915,7 +970,8 @@ class SessionRepository:
             cancelled_by: Who/what initiated cancellation ("user", "auto_cleanup").
 
         Returns:
-            Result indicating success or failure.
+            Result whose value is ``True`` when this cancellation became
+            durable, or ``False`` when another terminal transition already won.
         """
         event = BaseEvent(
             type="orchestrator.session.cancelled",
@@ -929,14 +985,21 @@ class SessionRepository:
         )
 
         try:
-            await self._event_store.append(event)
-            log.info(
-                "orchestrator.session.cancelled",
-                session_id=session_id,
-                reason=reason,
-                cancelled_by=cancelled_by,
-            )
-            return Result.ok(None)
+            persisted = await self._event_store.append(event)
+            if persisted is False:
+                log.info(
+                    "orchestrator.session.terminal_transition_preserved",
+                    session_id=session_id,
+                    requested_status=SessionStatus.CANCELLED.value,
+                )
+            else:
+                log.info(
+                    "orchestrator.session.cancelled",
+                    session_id=session_id,
+                    reason=reason,
+                    cancelled_by=cancelled_by,
+                )
+            return Result.ok(persisted is not False)
         except Exception as e:
             log.exception(
                 "orchestrator.session.cancel_failed",
@@ -949,6 +1012,20 @@ class SessionRepository:
                     details={"session_id": session_id},
                 )
             )
+
+    async def mark_cancelled_if_active(
+        self,
+        session_id: str,
+        reason: str,
+        cancelled_by: str = "user",
+    ) -> Result[bool, PersistenceError]:
+        """Cancel an active session without overwriting another terminal result.
+
+        ``False`` means the durable session was already terminal.  It is not a
+        persistence failure. All terminal writers now use the same CAS boundary;
+        this compatibility name delegates to the canonical method.
+        """
+        return await self.mark_cancelled(session_id, reason, cancelled_by)
 
     async def reconstruct_session(
         self,
@@ -1110,6 +1187,17 @@ class SessionRepository:
                     messages_processed += 1
                 status_update = self._status_from_event(event.type, event.data)
                 if status_update is not None:
+                    # A durable terminal lifecycle event is authoritative. A
+                    # delayed runtime/progress observation must not revive a
+                    # cancelled, failed, or completed session during replay.
+                    # ``PAUSED`` deliberately remains resumable: a subsequent
+                    # running progress checkpoint is the existing resume signal.
+                    if explicit_terminal_status in {
+                        SessionStatus.COMPLETED,
+                        SessionStatus.FAILED,
+                        SessionStatus.CANCELLED,
+                    }:
+                        continue
                     tracker = tracker.with_status(status_update)
                     if status_update == SessionStatus.RUNNING:
                         explicit_terminal_status = None
@@ -1263,6 +1351,12 @@ class SessionRepository:
                 for event in events:
                     status_update = self._status_from_event(event.type, event.data)
                     if status_update is not None:
+                        if status in {
+                            SessionStatus.COMPLETED,
+                            SessionStatus.FAILED,
+                            SessionStatus.CANCELLED,
+                        }:
+                            continue
                         status = status_update
 
                 # Only consider active sessions (RUNNING or PAUSED)
@@ -1298,6 +1392,11 @@ class SessionRepository:
                     # Reconstruct full tracker for the orphaned session
                     result = await self.reconstruct_session(session_id)
                     if result.is_ok:
+                        if result.value.status not in (
+                            SessionStatus.RUNNING,
+                            SessionStatus.PAUSED,
+                        ):
+                            continue
                         if self._usage_limit_pause_cleanup_deferred(
                             result.value,
                             now=now,
@@ -1359,7 +1458,7 @@ class SessionRepository:
                 cancelled_by="auto_cleanup",
             )
 
-            if result.is_ok:
+            if result.is_ok and result.value is not False:
                 cancelled.append(tracker)
                 # Log to stderr so it's visible in MCP stdio mode
                 print(
@@ -1367,6 +1466,11 @@ class SessionRepository:
                     f"{tracker.session_id} (execution={tracker.execution_id}, "
                     f"previous_status={tracker.status.value})",
                     file=sys.stderr,
+                )
+            elif result.is_ok:
+                log.info(
+                    "orchestrator.auto_cleanup.terminal_transition_preserved",
+                    session_id=tracker.session_id,
                 )
                 log.info(
                     "orchestrator.auto_cleanup.cancelled",

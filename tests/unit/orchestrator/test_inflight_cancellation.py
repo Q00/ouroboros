@@ -23,6 +23,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import (
     CANCELLATION_CHECK_INTERVAL,
+    EXECUTION_CONTRACT_PROGRESS_KEY,
     ExecutionCancelledError,
     OrchestratorRunner,
     clear_cancellation,
@@ -100,6 +101,27 @@ def sample_seed():
         ontology_schema=OntologySchema(name="Test", description="Test"),
         metadata=SeedMetadata(ambiguity_score=0.1),
     )
+
+
+def _attach_live_process_local_contract(
+    runner: OrchestratorRunner,
+    tracker: SessionTracker,
+    seed: Any,
+) -> SessionTracker:
+    """Give direct precreated-session tests their creating-process capability."""
+    if not isinstance(getattr(runner._adapter, "llm_backend", None), str):
+        runner._adapter.llm_backend = "test-llm"
+    if not isinstance(getattr(runner._adapter, "_model", None), str):
+        runner._adapter._model = "test-model"
+    generation = runner._begin_process_local_authority_generation()
+    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    runner._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=contract,
+        generation=generation,
+    )
+    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 
 # =============================================================================
@@ -421,16 +443,12 @@ class TestCancellationErrorScenarios:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_handle_cancellation_mark_failed_still_returns_result(
+    async def test_handle_cancellation_mark_failed_keeps_retryable_owner_without_route(
         self,
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
     ) -> None:
-        """If mark_cancelled fails during handling, the result is still returned.
-
-        The _handle_cancellation method logs a warning but still returns an
-        OrchestratorResult. This ensures the execution stops even if persistence fails.
-        """
+        """A failed terminal write keeps liveness but releases the exiting worker route."""
         runner._register_session("exec_fail", "sess_fail")
         await request_cancellation("sess_fail")
         self._mock_running_session(runner, "sess_fail")
@@ -457,26 +475,27 @@ class TestCancellationErrorScenarios:
                 error=str(PersistenceError("DB write failed")),
             )
 
-        # Should still return a valid cancellation result
-        assert result.is_ok
-        assert result.value.success is False
-        assert result.value.messages_processed == 7
-        # Cleanup should still happen even if persistence failed
-        assert not await is_cancellation_requested("sess_fail")
+        # Reporting cancellation while the durable tracker is still RUNNING
+        # would let another process misclassify it as a crashed owner. Keep
+        # liveness and the request for retry, but the exiting coroutine must
+        # not leave a routable active-session entry behind.
+        assert result.is_err
+        assert result.error.message == (
+            "Failed to persist cancellation; process-local authority remains live"
+        )
+        assert await is_cancellation_requested("sess_fail")
         assert "exec_fail" not in runner.active_sessions
+        assert result.error.details["resume_blocked"] == "cancellation_persistence_pending"
+        await clear_cancellation("sess_fail")
+        runner._unregister_session("exec_fail", "sess_fail")
 
     @pytest.mark.asyncio
-    async def test_handle_cancellation_mark_raises_still_propagates(
+    async def test_handle_cancellation_mark_raises_keeps_retryable_owner_without_route(
         self,
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
     ) -> None:
-        """If mark_cancelled raises an exception, it propagates (not swallowed).
-
-        Unlike _check_cancellation which degrades gracefully, _handle_cancellation
-        does NOT catch exceptions from mark_cancelled because the execution is
-        already stopping.
-        """
+        """An exception during terminal persistence releases the dead active route."""
         runner._register_session("exec_raise", "sess_raise")
         self._mock_running_session(runner, "sess_raise")
 
@@ -485,18 +504,18 @@ class TestCancellationErrorScenarios:
             "mark_cancelled",
             side_effect=RuntimeError("Unexpected DB crash"),
         ):
-            with pytest.raises(RuntimeError, match="Unexpected DB crash"):
-                await runner._handle_cancellation(
-                    session_id="sess_raise",
-                    execution_id="exec_raise",
-                    messages_processed=3,
-                    start_time=datetime.now(UTC),
-                )
+            result = await runner._handle_cancellation(
+                session_id="sess_raise",
+                execution_id="exec_raise",
+                messages_processed=3,
+                start_time=datetime.now(UTC),
+            )
 
-        # Despite the exception, registry and session should have been
-        # cleaned up before mark_cancelled was called
-        assert not await is_cancellation_requested("sess_raise")
+        assert result.is_err
+        assert result.error.details["cause"] == "Unexpected DB crash"
         assert "exec_raise" not in runner.active_sessions
+        assert result.error.details["resume_blocked"] == "cancellation_persistence_pending"
+        runner._unregister_session("exec_raise", "sess_raise")
 
     @pytest.mark.asyncio
     async def test_cancel_session_directly_event_store_replay_error(
@@ -528,11 +547,23 @@ class TestCancellationErrorScenarios:
                 )
             ]
         )
+        legacy_tracker = SessionTracker.create(
+            "exec_dfail",
+            "seed_dfail",
+            session_id="sess_dfail",
+        )
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.err(PersistenceError("Write failed")),
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(legacy_tracker),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.err(PersistenceError("Write failed")),
+            ),
         ):
             result = await runner.cancel_execution("exec_dfail")
 
@@ -565,7 +596,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_boundary", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         call_count = 0
 
@@ -605,7 +642,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_full", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         with patch.object(runner._session_repo, "create_session", mock_create_session):
             with patch.object(runner._session_repo, "mark_completed", return_value=Result.ok(None)):
@@ -637,7 +680,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_int", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def tracking_check(session_id):
             check_points.append(len(check_points) + 1)
@@ -670,7 +719,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_unreg", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         async def mock_check(session_id):
             return True  # Always cancel
@@ -699,6 +754,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_task_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             stream_started.set()
@@ -777,6 +833,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_terminal_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
         completed_tracker = tracker.with_status(SessionStatus.COMPLETED)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -839,6 +896,7 @@ class TestInFlightCancellationGraceful:
             sample_seed.metadata.seed_id,
             session_id="sess_unrequested_cancel",
         )
+        tracker = _attach_live_process_local_contract(runner, tracker, sample_seed)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             stream_started.set()
@@ -898,7 +956,13 @@ class TestInFlightCancellationGraceful:
         mock_adapter.execute_task = mock_execute
 
         async def mock_create_session(*args: Any, **kwargs: Any):
-            return Result.ok(SessionTracker.create("exec_partial", sample_seed.metadata.seed_id))
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
 
         call_count = 0
 

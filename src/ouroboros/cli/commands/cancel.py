@@ -31,6 +31,10 @@ from ouroboros.events.hitl import (
     create_hitl_cancelled_event,
     create_hitl_requested_event,
 )
+from ouroboros.orchestrator.execution_authority import (
+    ProcessLocalCancellationDisposition,
+    request_process_local_cancellation,
+)
 
 app = typer.Typer(
     name="cancel",
@@ -118,7 +122,7 @@ async def _cancel_session(
     event_store,
     session_id: str,
     reason: str = "Cancelled by user via CLI",
-) -> bool:
+) -> ProcessLocalCancellationDisposition | None:
     """Cancel a single session by ID.
 
     Args:
@@ -127,7 +131,8 @@ async def _cancel_session(
         reason: Reason for cancellation.
 
     Returns:
-        True if session was cancelled, False if it was not in a cancellable state.
+        The exact cancellation disposition, or ``None`` when no cancellation
+        action was accepted.
     """
     from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
@@ -137,21 +142,46 @@ async def _cancel_session(
     result = await repo.reconstruct_session(session_id)
     if result.is_err:
         print_error(f"Session not found: {session_id}")
-        return False
+        return None
 
     tracker = result.value
     if tracker.status == SessionStatus.CANCELLED:
         print_warning(f"Session {session_id} is already cancelled.")
-        return False
+        return None
 
     if tracker.status in (SessionStatus.COMPLETED, SessionStatus.FAILED):
         print_warning(
             f"Session {session_id} is already {tracker.status.value}. "
             "Only running or paused sessions can be cancelled."
         )
-        return False
+        return None
 
-    # Cancel the session
+    process_local = await request_process_local_cancellation(
+        tracker,
+        repo,
+        reason=reason,
+        cancelled_by="user",
+    )
+    if process_local is not None:
+        if process_local.disposition in {
+            ProcessLocalCancellationDisposition.CANCELLED,
+            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED,
+        }:
+            return process_local.disposition
+        if process_local.disposition == ProcessLocalCancellationDisposition.HELD_ELSEWHERE:
+            print_warning(
+                f"Session {session_id} is held by another live process-local owner; "
+                "cancel it through that owner."
+            )
+        elif process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING:
+            print_warning(
+                f"Cancellation for session {session_id} is pending durable persistence; retry it."
+            )
+        else:
+            print_warning(f"Session {session_id} became terminal before cancellation completed.")
+        return None
+
+    # Historical sessions have no live Foundation A capability to coordinate.
     cancel_result = await repo.mark_cancelled(
         session_id=session_id,
         reason=reason,
@@ -160,9 +190,12 @@ async def _cancel_session(
 
     if cancel_result.is_err:
         print_error(f"Failed to cancel session {session_id}: {cancel_result.error}")
-        return False
+        return None
+    if cancel_result.value is False:
+        print_warning(f"Session {session_id} became terminal before cancellation completed.")
+        return None
 
-    return True
+    return ProcessLocalCancellationDisposition.CANCELLED
 
 
 async def _list_active_sessions(event_store) -> list:
@@ -198,7 +231,7 @@ async def _list_active_sessions(event_store) -> list:
 async def _cancel_all_running(
     event_store,
     reason: str = "Cancelled all running sessions via CLI",
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     """Cancel all running/paused sessions.
 
     Args:
@@ -206,7 +239,8 @@ async def _cancel_all_running(
         reason: Reason for cancellation.
 
     Returns:
-        Tuple of (cancelled_count, skipped_count).
+        Tuple of (cancelled_count, requested_count,
+        retryable_failed_count, skipped_count).
     """
     from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
@@ -216,9 +250,11 @@ async def _cancel_all_running(
     session_events = await event_store.get_all_sessions()
 
     if not session_events:
-        return (0, 0)
+        return (0, 0, 0, 0)
 
     cancelled = 0
+    requested = 0
+    retryable_failed = 0
     skipped = 0
 
     for event in session_events:
@@ -227,7 +263,8 @@ async def _cancel_all_running(
         # Reconstruct to get current status
         result = await repo.reconstruct_session(session_id)
         if result.is_err:
-            skipped += 1
+            retryable_failed += 1
+            console.print(f"  [yellow]Retry required:[/] {session_id} (session read failed)")
             continue
 
         tracker = result.value
@@ -235,20 +272,50 @@ async def _cancel_all_running(
             skipped += 1
             continue
 
-        # Cancel this session
+        process_local = await request_process_local_cancellation(
+            tracker,
+            repo,
+            reason=reason,
+            cancelled_by="user",
+        )
+        if process_local is not None:
+            if process_local.disposition == ProcessLocalCancellationDisposition.CANCELLED:
+                cancelled += 1
+                console.print(f"  [dim]Cancelled:[/] {session_id}")
+            elif (
+                process_local.disposition
+                == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+            ):
+                requested += 1
+                console.print(f"  [dim]Cancellation requested:[/] {session_id}")
+            elif (
+                process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING
+            ):
+                retryable_failed += 1
+                console.print(
+                    f"  [yellow]Retry required:[/] {session_id} (cancellation persistence pending)"
+                )
+            else:
+                skipped += 1
+            continue
+
+        # Historical sessions have no live Foundation A capability to coordinate.
         cancel_result = await repo.mark_cancelled(
             session_id=session_id,
             reason=reason,
             cancelled_by="user",
         )
 
-        if cancel_result.is_ok:
+        if cancel_result.is_ok and cancel_result.value is not False:
             cancelled += 1
             console.print(f"  [dim]Cancelled:[/] {session_id}")
+        elif cancel_result.is_err:
+            retryable_failed += 1
+            console.print(f"  [yellow]Retry required:[/] {session_id} (terminal write failed)")
         else:
             skipped += 1
 
-    return (cancelled, skipped)
+    return (cancelled, requested, retryable_failed, skipped)
 
 
 def _display_active_sessions(sessions: list) -> None:
@@ -335,9 +402,11 @@ async def _interactive_cancel(reason: str) -> None:
             print_info("Cancelled. No executions were modified.")
             return
 
-        success = await _cancel_session(event_store, session_id, reason)
-        if success:
+        disposition = await _cancel_session(event_store, session_id, reason)
+        if disposition == ProcessLocalCancellationDisposition.CANCELLED:
             print_success(f"Cancelled execution: {session_id}")
+        elif disposition == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED:
+            print_info(f"Cancellation requested for execution: {session_id}")
     finally:
         await event_store.close()
 
@@ -409,17 +478,28 @@ async def _cancel_execution_async(
     try:
         if all_:
             print_info("Cancelling all running executions...")
-            cancelled, skipped = await _cancel_all_running(event_store, reason)
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(
+                event_store, reason
+            )
 
-            if cancelled == 0:
+            if cancelled == 0 and requested == 0 and retryable_failed == 0:
                 print_info("No running executions found to cancel.")
             else:
-                print_success(f"Cancelled {cancelled} execution(s).")
+                if cancelled:
+                    print_success(f"Cancelled {cancelled} execution(s).")
+                if requested:
+                    print_info(f"Cancellation requested for {requested} execution(s).")
+                if retryable_failed:
+                    print_warning(
+                        f"Cancellation failed for {retryable_failed} execution(s); retry required."
+                    )
         else:
             assert execution_id is not None
-            success = await _cancel_session(event_store, execution_id, reason)
-            if success:
+            disposition = await _cancel_session(event_store, execution_id, reason)
+            if disposition == ProcessLocalCancellationDisposition.CANCELLED:
                 print_success(f"Cancelled execution: {execution_id}")
+            elif disposition == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED:
+                print_info(f"Cancellation requested for execution: {execution_id}")
     finally:
         await event_store.close()
 

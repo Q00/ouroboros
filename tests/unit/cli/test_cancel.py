@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
+from ouroboros.cli.commands.cancel import _cancel_session
 from ouroboros.cli.main import app
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
-from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.orchestrator import heartbeat
+from ouroboros.orchestrator.execution_authority import ProcessLocalCancellationDisposition
+from ouroboros.orchestrator.runner import clear_cancellation
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 
 runner = CliRunner()
 
@@ -56,6 +61,91 @@ class TestCancelExecutionValidation:
         result = runner.invoke(app, ["cancel", "execution", "orch_test123", "--all"])
         assert result.exit_code == 1
         assert "Cannot specify both" in result.output
+
+    @pytest.mark.asyncio
+    async def test_cli_process_publishes_request_for_live_foreign_owner(self) -> None:
+        """A separate CLI process can signal without writing terminal state."""
+        tracker = _make_tracker(session_id="orch_foreign_cli").with_progress(
+            {
+                "execution_contract": {
+                    "foundation_a_authority": {
+                        "version": 1,
+                        "scope": "process_local",
+                        "correlation_id": "a" * 32,
+                    }
+                }
+            }
+        )
+        event_store = AsyncMock()
+        mark_cancelled = AsyncMock(return_value=Result.ok(True))
+        try:
+            with (
+                patch.object(
+                    SessionRepository,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch.object(
+                    SessionRepository,
+                    "mark_cancelled_if_active",
+                    mark_cancelled,
+                ),
+                patch(
+                    "ouroboros.orchestrator.heartbeat.is_holder_alive",
+                    return_value=True,
+                ),
+            ):
+                cancelled = await _cancel_session(
+                    event_store,
+                    tracker.session_id,
+                    "cross-process CLI cancellation",
+                )
+
+            assert cancelled == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+            assert heartbeat.has_cancellation_request(tracker.session_id)
+            mark_cancelled.assert_not_awaited()
+        finally:
+            await clear_cancellation(tracker.session_id)
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_specific_cli_reports_live_owner_request_without_terminal_claim(
+        self,
+        mock_get_es: AsyncMock,
+    ) -> None:
+        """A nonterminal foreign-owner request is not printed as cancelled."""
+        tracker = _make_tracker(session_id="orch_foreign_cli_output").with_progress(
+            {
+                "execution_contract": {
+                    "foundation_a_authority": {
+                        "version": 1,
+                        "scope": "process_local",
+                        "correlation_id": "b" * 32,
+                    }
+                }
+            }
+        )
+        mock_es = AsyncMock()
+        mock_get_es.return_value = mock_es
+
+        try:
+            with (
+                patch.object(
+                    SessionRepository,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch("ouroboros.orchestrator.heartbeat.is_holder_alive", return_value=True),
+            ):
+                result = runner.invoke(
+                    app,
+                    ["cancel", "execution", tracker.session_id],
+                )
+
+            assert result.exit_code == 0
+            assert f"Cancellation requested for execution: {tracker.session_id}" in result.output
+            assert f"Cancelled execution: {tracker.session_id}" not in result.output
+        finally:
+            asyncio.run(clear_cancellation(tracker.session_id))
 
 
 class TestBareMode:
@@ -583,6 +673,55 @@ class TestCancelAllExecutions:
         assert "No running executions" in result.output
 
     @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_cancel_all_counts_live_owner_requests_separately(
+        self,
+        mock_get_es: AsyncMock,
+    ) -> None:
+        """--all reports requested delivery separately from durable cancellation."""
+        from ouroboros.events.base import BaseEvent
+
+        tracker = _make_tracker(session_id="orch_foreign_all").with_progress(
+            {
+                "execution_contract": {
+                    "foundation_a_authority": {
+                        "version": 1,
+                        "scope": "process_local",
+                        "correlation_id": "c" * 32,
+                    }
+                }
+            }
+        )
+        mock_es = AsyncMock()
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id=tracker.session_id,
+                    data={},
+                )
+            ]
+        )
+        mock_get_es.return_value = mock_es
+
+        try:
+            with (
+                patch.object(
+                    SessionRepository,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch("ouroboros.orchestrator.heartbeat.is_holder_alive", return_value=True),
+            ):
+                result = runner.invoke(app, ["cancel", "execution", "--all"])
+
+            assert result.exit_code == 0
+            assert "Cancellation requested for 1 execution(s)." in result.output
+            assert "Cancelled 1 execution(s)." not in result.output
+        finally:
+            asyncio.run(clear_cancellation(tracker.session_id))
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
     def test_cancel_all_multiple_running(self, mock_get_es: AsyncMock) -> None:
         """Test --all cancels multiple running sessions."""
         from ouroboros.events.base import BaseEvent
@@ -697,8 +836,8 @@ class TestCancelHelperFunctions:
     """Tests for internal helper functions."""
 
     @pytest.mark.asyncio
-    async def test_cancel_session_returns_false_on_not_found(self) -> None:
-        """Test _cancel_session returns False when session doesn't exist."""
+    async def test_cancel_session_returns_none_on_not_found(self) -> None:
+        """Test _cancel_session returns no disposition when the session does not exist."""
         from ouroboros.cli.commands.cancel import _cancel_session
 
         mock_es = AsyncMock()
@@ -711,11 +850,11 @@ class TestCancelHelperFunctions:
 
             result = await _cancel_session(mock_es, "orch_missing")
 
-        assert result is False
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_cancel_session_returns_true_on_success(self) -> None:
-        """Test _cancel_session returns True when cancellation succeeds."""
+    async def test_cancel_session_returns_cancelled_on_success(self) -> None:
+        """Test _cancel_session preserves the terminal cancellation disposition."""
         from ouroboros.cli.commands.cancel import _cancel_session
 
         mock_es = AsyncMock()
@@ -728,7 +867,7 @@ class TestCancelHelperFunctions:
 
             result = await _cancel_session(mock_es, "orch_test123")
 
-        assert result is True
+        assert result == ProcessLocalCancellationDisposition.CANCELLED
 
     @pytest.mark.asyncio
     async def test_cancel_all_running_returns_counts(self) -> None:
@@ -767,9 +906,11 @@ class TestCancelHelperFunctions:
             )
             mock_repo.mark_cancelled = AsyncMock(return_value=Result.ok(None))
 
-            cancelled, skipped = await _cancel_all_running(mock_es)
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
 
         assert cancelled == 1
+        assert requested == 0
+        assert retryable_failed == 0
         assert skipped == 1
 
     @pytest.mark.asyncio
@@ -780,10 +921,88 @@ class TestCancelHelperFunctions:
         mock_es = AsyncMock()
         mock_es.get_all_sessions = AsyncMock(return_value=[])
 
-        cancelled, skipped = await _cancel_all_running(mock_es)
+        cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
 
         assert cancelled == 0
+        assert requested == 0
+        assert retryable_failed == 0
         assert skipped == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_counts_process_local_persistence_pending_as_retryable(self) -> None:
+        """Marker/terminal persistence failure must not disappear into skipped."""
+        from ouroboros.cli.commands.cancel import _cancel_all_running
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.execution_authority import (
+            ProcessLocalCancellationOutcome,
+        )
+
+        mock_es = AsyncMock()
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_pending",
+                    data={},
+                )
+            ]
+        )
+        tracker = _make_tracker(session_id="orch_pending", status=SessionStatus.RUNNING)
+
+        with (
+            patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo,
+            patch(
+                "ouroboros.cli.commands.cancel.request_process_local_cancellation",
+                AsyncMock(
+                    return_value=ProcessLocalCancellationOutcome(
+                        ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
+                        error=PersistenceError("marker unavailable"),
+                    )
+                ),
+            ),
+        ):
+            MockRepo.return_value.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            cancelled, requested, retryable_failed, skipped = await _cancel_all_running(mock_es)
+
+        assert (cancelled, requested, retryable_failed, skipped) == (0, 0, 1, 0)
+
+    @patch("ouroboros.cli.commands.cancel._get_event_store")
+    def test_cancel_all_reports_retryable_terminal_write_failure(
+        self,
+        mock_get_es: AsyncMock,
+    ) -> None:
+        """An all-failed batch prints retry guidance, never 'no running'."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_es = AsyncMock()
+        mock_es.get_all_sessions = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="orch_write_failure",
+                    data={},
+                )
+            ]
+        )
+        mock_get_es.return_value = mock_es
+        tracker = _make_tracker(
+            session_id="orch_write_failure",
+            status=SessionStatus.RUNNING,
+        )
+
+        with patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            mock_repo.mark_cancelled = AsyncMock(
+                return_value=Result.err(PersistenceError("terminal write failed"))
+            )
+            result = runner.invoke(app, ["cancel", "execution", "--all"])
+
+        assert result.exit_code == 0
+        assert "retry required" in result.output.lower()
+        assert "No running executions" not in result.output
 
     @pytest.mark.asyncio
     async def test_cancel_session_handles_mark_cancelled_error(self) -> None:
@@ -802,4 +1021,21 @@ class TestCancelHelperFunctions:
 
             result = await _cancel_session(mock_es, "orch_test123")
 
-        assert result is False
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_session_returns_false_when_terminal_cas_loses(self) -> None:
+        """A race winner must not be reported as a successful CLI cancellation."""
+        from ouroboros.cli.commands.cancel import _cancel_session
+
+        mock_es = AsyncMock()
+        tracker = _make_tracker(status=SessionStatus.RUNNING)
+
+        with patch("ouroboros.orchestrator.session.SessionRepository") as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
+            mock_repo.mark_cancelled = AsyncMock(return_value=Result.ok(False))
+
+            result = await _cancel_session(mock_es, "orch_test123")
+
+        assert result is None

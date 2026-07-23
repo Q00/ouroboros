@@ -41,7 +41,7 @@ from rich.text import Text
 from ouroboros.backends import backend_supports_tool_envelope
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
-from ouroboros.core.errors import ConfigError, OuroborosError
+from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
@@ -83,10 +83,30 @@ from ouroboros.orchestrator.events import (
     create_mcp_tools_loaded_event,
     create_policy_capabilities_evaluated_event,
     create_progress_event,
-    create_session_completed_event,
-    create_session_failed_event,
     create_tool_called_event,
     create_workflow_progress_event,
+)
+from ouroboros.orchestrator.execution_authority import (
+    ProcessLocalCancellationDisposition,
+    _await_process_local_cleanup,
+    _claim_process_local_authority_generation,
+    _discard_process_local_authority_generation,
+    _has_live_process_local_authority_registration,
+    _has_live_process_local_authority_session,
+    _live_process_local_authority_generation,
+    _mint_process_local_authority_generation,
+    _process_local_authority_contract,
+    _ProcessLocalAuthorityGeneration,
+    _register_process_local_authority_generation,
+    _register_process_local_authority_terminal_finalizer,
+    _release_process_local_authority_generation,
+    _retire_process_local_authority_generation,
+    constructor_model_contract,
+    request_process_local_cancellation,
+    runtime_execution_proves_effective_model,
+    valid_constructor_model_contract,
+    valid_process_local_authority_contract,
+    valid_runtime_execution_identity_contract,
 )
 from ouroboros.orchestrator.execution_guidance import (
     ExecutionGuidanceBundle,
@@ -146,8 +166,10 @@ from ouroboros.resilience.recovery import (
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.events.base import BaseEvent
     from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+    from ouroboros.orchestrator.heartbeat import CancellationRequest
     from ouroboros.orchestrator.model_routing import ModelRouter
     from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
@@ -208,6 +230,21 @@ class RecoverableFailurePause:
     resume_after: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingLifecycleIntent:
+    """Process-local lifecycle transition retained for exact-owner replay."""
+
+    execution_id: str
+    status: SessionStatus
+    summary: dict[str, Any] | None = None
+    error_message: str | None = None
+    error_details: dict[str, Any] | None = None
+    error_type: str | None = None
+    messages_processed: int = 0
+    cancelled_by: str = "runner"
+    pause: RecoverableFailurePause | None = None
+
+
 # =============================================================================
 # Errors
 # =============================================================================
@@ -232,15 +269,20 @@ class ExecutionCancelledError(OuroborosError):
 # In-memory Cancellation Registry
 # =============================================================================
 
-# Module-level set of session IDs marked for cancellation.
-# The MCP cancel tool adds IDs here; the runner's execution loop checks it.
+# Module-level requests keyed by session ID.
+# The MCP cancel tool adds metadata here; the runner's execution loop checks it.
 # Guarded by _cancellation_lock to prevent races between MCP cancel calls
-# and the runner's message loop reading the set concurrently.
-_cancellation_registry: set[str] = set()
+# and the runner's message loop reading the mapping concurrently.
+_cancellation_registry: dict[str, CancellationRequest] = {}
 _cancellation_lock: asyncio.Lock = asyncio.Lock()
 
 
-async def request_cancellation(session_id: str) -> None:
+async def request_cancellation(
+    session_id: str,
+    *,
+    reason: str = "Cancellation detected during execution",
+    cancelled_by: str = "runner",
+) -> None:
     """Mark a session for cancellation.
 
     Called by the MCP cancel tool to signal that the runner should
@@ -249,8 +291,24 @@ async def request_cancellation(session_id: str) -> None:
     Args:
         session_id: Session to cancel.
     """
+    from ouroboros.orchestrator.heartbeat import normalize_cancellation_request
+
     async with _cancellation_lock:
-        _cancellation_registry.add(session_id)
+        _cancellation_registry[session_id] = normalize_cancellation_request(
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+
+
+async def get_cancellation_request(session_id: str) -> CancellationRequest | None:
+    """Return local or cross-process metadata for a pending cancellation."""
+    async with _cancellation_lock:
+        request = _cancellation_registry.get(session_id)
+    if request is not None:
+        return request
+    from ouroboros.orchestrator.heartbeat import read_cancellation_request
+
+    return read_cancellation_request(session_id)
 
 
 async def is_cancellation_requested(session_id: str) -> bool:
@@ -262,8 +320,7 @@ async def is_cancellation_requested(session_id: str) -> bool:
     Returns:
         True if cancellation was requested.
     """
-    async with _cancellation_lock:
-        return session_id in _cancellation_registry
+    return await get_cancellation_request(session_id) is not None
 
 
 async def clear_cancellation(session_id: str) -> None:
@@ -276,7 +333,10 @@ async def clear_cancellation(session_id: str) -> None:
         session_id: Session to clear.
     """
     async with _cancellation_lock:
-        _cancellation_registry.discard(session_id)
+        _cancellation_registry.pop(session_id, None)
+    from ouroboros.orchestrator.heartbeat import clear_cancellation_request
+
+    clear_cancellation_request(session_id)
 
 
 async def get_pending_cancellations() -> frozenset[str]:
@@ -543,7 +603,7 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 1
+EXECUTION_CONTRACT_VERSION = 2
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -693,6 +753,8 @@ class OrchestratorRunner:
         )
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
         self._task_cwd = task_cwd
+        self._task_workspace_value: TaskWorkspace | None = None
+        self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
@@ -784,6 +846,12 @@ class OrchestratorRunner:
             )
         self._apply_efficiency_mode_to_router()
         self._execution_contract: dict[str, Any] | None = None
+        self._process_local_authorities: dict[
+            tuple[str, str], _ProcessLocalAuthorityGeneration
+        ] = {}
+        self._task_workspace_users: set[tuple[str, str]] = set()
+        self._task_workspace_reservations: set[object] = set()
+        self._pending_lifecycle_intents: dict[str, _PendingLifecycleIntent] = {}
         self._execution_guidance: ExecutionGuidanceBundle | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
@@ -1254,6 +1322,17 @@ class OrchestratorRunner:
         """
         return dict(self._active_sessions)
 
+    @property
+    def _task_workspace(self) -> TaskWorkspace | None:
+        """Return the workspace whose lock backs this runner's current effects."""
+        return self._task_workspace_value
+
+    @_task_workspace.setter
+    def _task_workspace(self, workspace: TaskWorkspace | None) -> None:
+        """Bind a freshly acquired workspace and reset release idempotence."""
+        self._task_workspace_value = workspace
+        self._task_workspace_lock_held = workspace is not None
+
     def _register_session(self, execution_id: str, session_id: str) -> None:
         """Register an active session for cancellation tracking.
 
@@ -1267,25 +1346,40 @@ class OrchestratorRunner:
         """
         from ouroboros.orchestrator.heartbeat import acquire as acquire_lock
 
-        self._active_sessions[execution_id] = session_id
         acquire_lock(session_id)
+        # Do not publish an in-memory cancellation route before its liveness
+        # lease exists. A failed claim must not leave a routable, unowned
+        # session behind.
+        self._active_sessions[execution_id] = session_id
 
-    def _unregister_session(self, execution_id: str, session_id: str) -> None:
+    def _unregister_session(
+        self,
+        execution_id: str,
+        session_id: str,
+        *,
+        release_liveness_lease: bool = True,
+    ) -> None:
         """Unregister a session after execution completes.
 
         Called at the end of execution (success, failure, or cancellation)
-        to clean up tracking state and remove the heartbeat file.
+        to clean up tracking state and normally remove the heartbeat file. A
+        deliberately paused process-local session keeps its liveness lease:
+        the claim is released so its original owner can resume it, while other
+        runners must still recognize that the live capability has not crashed.
 
         Args:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
+            release_liveness_lease: Whether this lifecycle path is terminal and
+                may remove the PID liveness lease.
         """
         from ouroboros.orchestrator.heartbeat import (
             release_if_owned_by_current_process as release_lock,
         )
 
         self._active_sessions.pop(execution_id, None)
-        release_lock(session_id)
+        if release_liveness_lease:
+            release_lock(session_id)
 
     def _cleanup_pre_execution_state(
         self,
@@ -1293,12 +1387,496 @@ class OrchestratorRunner:
         session_id: str | None,
         *,
         session_registered: bool,
+        retire_authority: bool = True,
     ) -> None:
-        """Release pre-loop runner state after setup fails."""
+        """Release pre-loop runner state after an aborted execution path.
+
+        Use this only when the caller has either observed a durable terminal
+        result or proved that no usable authority exists. Retryable persistence
+        and raw-cancellation paths use
+        :meth:`_preserve_process_local_owner_for_retry` instead.
+        """
+        if retire_authority and execution_id is not None and session_id is not None:
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
         if session_registered and execution_id is not None and session_id is not None:
             self._unregister_session(execution_id, session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+    async def _cleanup_terminal_process_local_state(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Retire all live state, then acknowledge cancellation last."""
+
+        async def _cleanup() -> None:
+            retired = self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if not retired:
+                # A different live adapter/runner may still own this exact
+                # session. Never unregister its route or release its PID
+                # heartbeat merely because this cleanup observer saw a
+                # terminal record. If this runner has a stale local route,
+                # remove only that route while preserving the shared lease.
+                if self._active_sessions.get(execution_id) == session_id:
+                    self._unregister_session(
+                        execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                from ouroboros.orchestrator.heartbeat import (
+                    is_holder_alive,
+                    is_owned_by_current_process,
+                )
+
+                if not _has_live_process_local_authority_session(session_id) and not (
+                    is_holder_alive(session_id) and not is_owned_by_current_process(session_id)
+                ):
+                    await clear_cancellation(session_id)
+                log.warning(
+                    "orchestrator.runner.terminal_cleanup_authority_not_retired",
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                return
+            self._unregister_session(execution_id, session_id)
+            self._release_task_workspace_for_identity(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await clear_cancellation(session_id)
+
+        await _await_process_local_cleanup(_cleanup())
+
+    def _release_task_workspace_for_identity(
+        self,
+        *,
+        session_id: str | None,
+        execution_id: str | None,
+    ) -> bool:
+        """Release the shared workspace lock only after its last local owner exits.
+
+        A runner may prepare more than one process-local session, while the
+        managed workspace lock is runner-wide.  The lifecycle path named by
+        ``session_id``/``execution_id`` is relinquishing its workspace use even
+        when its authority remains registered for retry.  Any other live
+        runner-local authority keeps the lock.  If the named identity was never
+        registered here, a global live registration for the same session means
+        this is a collision cleanup and must not release the real owner's lock.
+        """
+        identity = (
+            (session_id, execution_id)
+            if session_id is not None and execution_id is not None
+            else None
+        )
+        owns_named_workspace = identity in self._task_workspace_users
+        if identity is not None:
+            self._task_workspace_users.discard(identity)
+        if self._task_workspace is None or not self._task_workspace_lock_held:
+            return False
+        if self._task_workspace_users or self._task_workspace_reservations:
+            return False
+        if (
+            identity is not None
+            and not owns_named_workspace
+            and session_id is not None
+            and _has_live_process_local_authority_session(session_id)
+        ):
+            return False
+
+        release_lock(self._task_workspace.lock_path)
+        self._task_workspace_lock_held = False
+        return True
+
+    def _reserve_task_workspace(self, token: object | None = None) -> object | None:
+        """Keep a held runner workspace alive across a pre-identity handoff."""
+        if self._task_workspace is None:
+            return None
+        reservation = token if token is not None else object()
+        self._task_workspace_reservations.add(reservation)
+        return reservation
+
+    def _release_task_workspace_reservation(self, token: object | None) -> bool:
+        """Release one pre-identity reservation and the lock if it was last."""
+        if token is None:
+            return False
+        self._task_workspace_reservations.discard(token)
+        if (
+            self._task_workspace is None
+            or not self._task_workspace_lock_held
+            or self._task_workspace_users
+            or self._task_workspace_reservations
+        ):
+            return False
+        release_lock(self._task_workspace.lock_path)
+        self._task_workspace_lock_held = False
+        return True
+
+    def _preserve_process_local_owner_for_retry(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Release an exiting coroutine's effects without retiring authority.
+
+        A durable RUNNING session remains truthful only while its exact local
+        generation and liveness lease remain available.  Persistence failures
+        and raw task cancellation therefore release the exclusive claim,
+        active route, and worktree lock, but keep the registration resumable by
+        the same retained owner.
+        """
+        self._release_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        self._unregister_session(
+            execution_id,
+            session_id,
+            release_liveness_lease=False,
+        )
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+    def _terminal_persistence_pending_result(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        requested_status: SessionStatus,
+        cause: object,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Return a typed retryable result while preserving the live owner."""
+        self._preserve_process_local_owner_for_retry(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        return Result.err(
+            OrchestratorError(
+                message=(
+                    f"Failed to persist terminal status {requested_status.value}; "
+                    "process-local authority remains live"
+                ),
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "requested_status": requested_status.value,
+                    "cause": str(cause),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
+                },
+            )
+        )
+
+    def _pause_persistence_pending_result(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        cause: object,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Return a typed pause failure without publishing a false PAUSED state."""
+        self._preserve_process_local_owner_for_retry(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        return Result.err(
+            OrchestratorError(
+                message="Failed to persist paused session state; process-local authority remains live",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "requested_status": SessionStatus.PAUSED.value,
+                    "cause": str(cause),
+                    "resume_blocked": "pause_persistence_pending",
+                    "pause_persistence_pending": True,
+                },
+            )
+        )
+
+    async def _resolve_pause_publication(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        pause_result: Result[bool, PersistenceError],
+        pause: RecoverableFailurePause,
+    ) -> tuple[
+        SessionStatus | None,
+        Result[OrchestratorResult, OrchestratorError] | None,
+    ]:
+        """Resolve conditional PAUSED publication against a terminal winner.
+
+        ``PAUSED`` means the pause append won. An explicit terminal status
+        means the pause lost and callers must project/clean up that durable
+        winner. An unreadable winner is retryable and preserves the exact
+        process-local owner rather than guessing at lifecycle state.
+        """
+        if pause_result.is_err:
+            self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                execution_id=execution_id,
+                status=SessionStatus.PAUSED,
+                error_message=pause.reason,
+                pause=pause,
+            )
+            return None, self._pause_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=pause_result.error,
+            )
+        if pause_result.value:
+            self._pending_lifecycle_intents.pop(session_id, None)
+            return SessionStatus.PAUSED, None
+
+        try:
+            reconstructed = await self._session_repo.reconstruct_session(session_id)
+        except Exception as exc:
+            return None, self._pause_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+            )
+        if reconstructed.is_ok and reconstructed.value.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            self._pending_lifecycle_intents.pop(session_id, None)
+            return reconstructed.value.status, None
+
+        cause: object = (
+            reconstructed.error
+            if reconstructed.is_err
+            else PersistenceError(
+                "Conditional pause lost but no durable terminal winner could be reconstructed",
+                details={"session_id": session_id},
+            )
+        )
+        self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=SessionStatus.PAUSED,
+            error_message=pause.reason,
+            pause=pause,
+        )
+        return None, self._pause_persistence_pending_result(
+            session_id=session_id,
+            execution_id=execution_id,
+            cause=cause,
+        )
+
+    async def _project_execution_outcome(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        terminal_status: str,
+        terminal_event: BaseEvent,
+    ) -> None:
+        """Run auxiliary outcome projections without invalidating durable PAUSED."""
+        try:
+            await self._event_store.append(terminal_event)
+            await self._evaluate_frugality_proof(execution_id)
+            if terminal_status in {"completed", "failed", "cancelled"}:
+                await self._report_frugality_retrospective(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    terminal_status=terminal_status,
+                )
+        except Exception:
+            if terminal_status != SessionStatus.PAUSED.value:
+                raise
+            log.exception(
+                "orchestrator.runner.paused_auxiliary_projection_failed",
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+    @staticmethod
+    def _requested_terminal_status_from_error(error: BaseException) -> SessionStatus | None:
+        """Recover the original terminal intent from a typed persistence error."""
+        if not isinstance(error, OrchestratorError):
+            return None
+        details = error.details
+        if details.get("terminal_persistence_pending") is not True:
+            return None
+        requested_status = details.get("requested_status")
+        try:
+            status = SessionStatus(requested_status)
+        except (TypeError, ValueError):
+            return None
+        if status not in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            return None
+        return status
+
+    def _terminal_persistence_pending_from_error(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        error: BaseException,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Preserve ownership instead of changing a failed terminal intent."""
+        requested_status = self._requested_terminal_status_from_error(error)
+        if requested_status is None:
+            return None
+        return self._terminal_persistence_pending_result(
+            session_id=session_id,
+            execution_id=execution_id,
+            requested_status=requested_status,
+            cause=error,
+        )
+
+    async def _reconcile_durable_terminal_and_cleanup(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> SessionStatus | None:
+        """Return and fully reconcile a reconstructed durable terminal winner.
+
+        Cancellation can arrive after the session CAS commits but before the
+        execution-stream projection or ordinary cleanup finishes.  In that
+        window preserving the live generation would contradict the durable
+        terminal source of truth, so interruption paths reconcile first.
+        """
+
+        async def _reconcile() -> SessionStatus | None:
+            try:
+                reconstructed = await self._session_repo.reconstruct_session(session_id)
+            except Exception:
+                return None
+            if reconstructed.is_err or reconstructed.value.status not in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }:
+                return None
+            durable_status = reconstructed.value.status
+            self._pending_lifecycle_intents.pop(session_id, None)
+            await self._cleanup_terminal_process_local_state(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            return durable_status
+
+        return await _await_process_local_cleanup(_reconcile())
+
+    async def _cleanup_if_durable_terminal(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Retire a claimed owner only after reconstructing a terminal winner."""
+        return (
+            await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            is not None
+        )
+
+    async def _persist_failure_and_cleanup(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        error: BaseException,
+        messages_processed: int = 0,
+    ) -> tuple[SessionStatus | None, Result[OrchestratorResult, OrchestratorError] | None]:
+        """Persist one durable failure winner before withdrawing ownership."""
+        reconciled_during_exception = False
+        try:
+            durable_status = await self._persist_session_terminal_status(
+                session_id=session_id,
+                execution_id=execution_id,
+                requested_status=SessionStatus.FAILED,
+                error_message=str(error),
+                error_type=type(error).__name__,
+                messages_processed=messages_processed,
+            )
+        except (Exception, asyncio.CancelledError) as persistence_error:
+            durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if durable_status is not None:
+                reconciled_during_exception = True
+                if isinstance(persistence_error, asyncio.CancelledError):
+                    raise
+            else:
+                self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                    execution_id=execution_id,
+                    status=SessionStatus.FAILED,
+                    error_message=str(error),
+                    error_type=type(error).__name__,
+                    messages_processed=messages_processed,
+                )
+                if isinstance(persistence_error, asyncio.CancelledError):
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    raise
+                return None, self._terminal_persistence_pending_result(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    requested_status=SessionStatus.FAILED,
+                    cause=persistence_error,
+                )
+
+        if durable_status is None:
+            return None, self._terminal_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                requested_status=SessionStatus.FAILED,
+                cause=error,
+            )
+
+        if not reconciled_during_exception:
+            await self._cleanup_terminal_process_local_state(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+        try:
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    status=durable_status.value,
+                    error_message=(
+                        str(error) if durable_status is not SessionStatus.COMPLETED else None
+                    ),
+                    messages_processed=messages_processed,
+                )
+            )
+        except Exception:
+            log.warning(
+                "orchestrator.runner.failure_projection_failed",
+                session_id=session_id,
+                execution_id=execution_id,
+                durable_status=durable_status.value,
+            )
+        return durable_status, None
 
     def _deserialize_runtime_handle(self, progress: dict[str, Any]) -> RuntimeHandle | None:
         """Deserialize runtime resume state from session progress."""
@@ -1584,145 +2162,944 @@ class OrchestratorRunner:
         runtimes that expose no constructor model at all; current-format resume
         then fails closed because the effective pin cannot be verified.
         """
-        try:
-            raw_model = inspect.getattr_static(self._adapter, "_model")
-        except AttributeError:
-            return {"observed": False}
-        if raw_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(raw_model, str):
-            return {"observed": False}
-
-        normalized_model: object = raw_model.strip() or None
-        normalizer_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "_normalize_model",
-            None,
-        )
-        if normalizer_descriptor is not None:
-            try:
-                normalizer = object.__getattribute__(self._adapter, "_normalize_model")
-                normalized_model = normalizer(raw_model)
-            except Exception:
-                return {"observed": False}
-        if normalized_model is None:
-            return {"observed": True, "model": None}
-        if not isinstance(normalized_model, str) or not normalized_model.strip():
-            return {"observed": False}
-        return {"observed": True, "model": normalized_model.strip()}
+        return constructor_model_contract(self._adapter)
 
     @staticmethod
     def _valid_constructor_model_contract(value: object) -> bool:
         """Return whether a persisted constructor-model contract is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        observed = value.get("observed")
-        if observed is not True:
-            return False
-        model = value.get("model")
-        return set(value) == {"observed", "model"} and (
-            model is None or isinstance(model, str) and bool(model.strip())
-        )
+        return valid_constructor_model_contract(value)
 
     def _runtime_execution_identity_contract(self) -> dict[str, Any]:
-        """Return backend-specific resolved execution inputs, when observable.
+        """Return no cross-process identity for a legacy dynamic runtime.
 
-        The generic constructor-model pin is sufficient for runtimes whose
-        model is fully selected by ``_model``. Some runtimes have an additional
-        resolved execution profile, though: Codex can choose a provider/model
-        through ``runtime_profile`` / ``--profile`` while ``_model`` remains
-        ``None``. Bundled runtimes may expose ``execution_identity_contract`` to
-        persist those command-relevant inputs without teaching the runner every
-        backend's private configuration model.
+        Foundation A intentionally does not execute a runtime-owned identity
+        provider here.  That provider may itself resolve mutable helpers,
+        profile files, handler caches, or launcher state.  A live
+        process-local generation below controls same-process resume instead.
         """
-
-        provider_descriptor = inspect.getattr_static(
-            type(self._adapter),
-            "execution_identity_contract",
-            None,
-        )
-        if provider_descriptor is None:
-            return {"version": 1, "observed": False}
-
-        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
-        identity = provider()
-        if not isinstance(identity, Mapping):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
-        try:
-            encoded = json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            normalized_identity = json.loads(encoded)
-        except (TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={
-                    "adapter_type": type(self._adapter).__name__,
-                    "cause": str(exc),
-                },
-            ) from exc
-        if not isinstance(normalized_identity, dict):
-            raise OrchestratorError(
-                message="Runtime returned an invalid execution identity contract",
-                details={"adapter_type": type(self._adapter).__name__},
-            )
-        return {
-            "version": 1,
-            "observed": True,
-            "identity": normalized_identity,
-        }
+        return {"version": 1, "observed": False}
 
     @staticmethod
     def _valid_runtime_execution_identity_contract(value: object) -> bool:
         """Return whether a persisted backend execution identity is canonical."""
-        if not isinstance(value, Mapping):
-            return False
-        version = value.get("version")
-        observed = value.get("observed")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != 1
-            or not isinstance(observed, bool)
-        ):
-            return False
-        if not observed:
-            return set(value) == {"version", "observed"}
-        identity = value.get("identity")
-        if (
-            set(value) != {"version", "observed", "identity"}
-            or not isinstance(identity, Mapping)
-            or not identity
-        ):
-            return False
-        try:
-            json.dumps(
-                dict(identity),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            return False
-        return True
+        return valid_runtime_execution_identity_contract(value)
 
     @staticmethod
     def _runtime_execution_proves_effective_model(value: object) -> bool:
         """Return whether a backend identity observed a concrete model/profile."""
-        if not OrchestratorRunner._valid_runtime_execution_identity_contract(value):
+        return runtime_execution_proves_effective_model(value)
+
+    @staticmethod
+    def _begin_process_local_authority_generation() -> _ProcessLocalAuthorityGeneration:
+        """Mint one fresh live-only authority generation for a new session.
+
+        The generation is deliberately returned to the caller rather than kept
+        in a mutable runner-wide slot.  A single runner can prepare several
+        sessions concurrently, and each preparation must retain its exact
+        generation through contract creation and registry binding.
+        """
+        return _mint_process_local_authority_generation()
+
+    @staticmethod
+    def _process_local_authority_contract(
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> dict[str, object]:
+        """Build evidence-only scope data for one issued live generation."""
+        return _process_local_authority_contract(generation)
+
+    def _has_live_process_local_authority(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """Check live authority before restoring runtime-controlled state."""
+        if not isinstance(raw_contract, Mapping):
             return False
-        if not isinstance(value, Mapping) or value.get("observed") is not True:
+        authority = raw_contract.get("foundation_a_authority")
+        return (
+            _live_process_local_authority_generation(
+                session_id,
+                execution_id,
+                authority,
+                self._adapter,
+            )
+            is not None
+        )
+
+    def _has_live_process_local_authority_registration(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """See a local capability without granting another adapter its use.
+
+        This distinction lets an observer reject safely when another live
+        adapter owns the generation, instead of turning a valid paused or
+        transitioning session into a false crash recovery.
+        """
+        if not isinstance(raw_contract, Mapping):
             return False
-        identity = value.get("identity")
-        return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
+        return _has_live_process_local_authority_registration(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+        )
+
+    def _process_local_authority_held_elsewhere(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> bool:
+        """Return whether another live owner retains this process-local session.
+
+        A different adapter must never receive the opaque capability, but it
+        must also never turn a valid owner into a false crash-recovery path.
+        The in-process registration covers a foreign adapter in this PID; the
+        PID lease covers a holder in another process.  The exact adapter's own
+        capability is intentionally excluded so normal non-paused validation
+        continues to report the session state rather than an ownership error.
+        """
+        if self._has_live_process_local_authority(session_id, execution_id, raw_contract):
+            return False
+        if self._has_live_process_local_authority_registration(
+            session_id,
+            execution_id,
+            raw_contract,
+        ):
+            return True
+        from ouroboros.orchestrator.heartbeat import is_holder_alive
+
+        return is_holder_alive(session_id)
+
+    def _live_process_local_authority_generation(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> _ProcessLocalAuthorityGeneration | None:
+        """Return the registry-issued generation for an already-live session."""
+        if not isinstance(raw_contract, Mapping):
+            return None
+        return _live_process_local_authority_generation(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+            self._adapter,
+        )
+
+    def _claim_process_local_authority_generation(
+        self,
+        session_id: str,
+        execution_id: str,
+        raw_contract: object,
+    ) -> tuple[_ProcessLocalAuthorityGeneration | None, bool]:
+        """Claim a live capability before any effectful session work begins."""
+        if not isinstance(raw_contract, Mapping):
+            return None, False
+        generation, already_claimed = _claim_process_local_authority_generation(
+            session_id,
+            execution_id,
+            raw_contract.get("foundation_a_authority"),
+            self._adapter,
+        )
+        if generation is not None and self._task_workspace is not None:
+            self._task_workspace_users.add((session_id, execution_id))
+            self._task_workspace_lock_held = True
+        return generation, already_claimed
+
+    def _release_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Make a deliberately paused session resumable in this process again."""
+        _release_process_local_authority_generation(
+            session_id,
+            execution_id,
+            self._adapter,
+        )
+
+    def _cleanup_process_local_authority_after_external_terminal(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Drop runner-local references after another surface wrote terminal state.
+
+        The registry has already invalidated the opaque capability.  This
+        callback intentionally cleans only runner-local bookkeeping; the
+        registry owns the liveness-lease release so it remains one operation.
+        """
+        self._process_local_authorities.pop((session_id, execution_id), None)
+        self._active_sessions.pop(execution_id, None)
+        self._release_task_workspace_for_identity(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+    def _register_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        execution_contract: Mapping[str, object],
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> None:
+        """Bind the persisted correlation record to its live process capability."""
+        authority = execution_contract.get("foundation_a_authority")
+        if (
+            not valid_process_local_authority_contract(authority)
+            or authority.get("correlation_id") != generation.correlation_id
+        ):
+            raise OrchestratorError(
+                message="Cannot create an invalid process-local execution authority",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "invalid": "foundation_a_authority",
+                },
+            )
+        from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
+
+        try:
+            _register_process_local_authority_generation(
+                session_id,
+                execution_id,
+                generation,
+                self._adapter,
+            )
+        except ValueError as exc:
+            raise OrchestratorError(
+                message="Cannot register process-local execution authority",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(exc),
+                },
+            ) from exc
+        self._process_local_authorities[(session_id, execution_id)] = generation
+        if not _register_process_local_authority_terminal_finalizer(
+            session_id,
+            execution_id,
+            authority,
+            self._adapter,
+            ("runner", id(self)),
+            lambda: self._cleanup_process_local_authority_after_external_terminal(
+                session_id=session_id,
+                execution_id=execution_id,
+            ),
+        ):
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            raise OrchestratorError(
+                message="Cannot register process-local terminal cleanup",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                },
+            )
+        # Establish the cross-process liveness record as soon as a session owns
+        # a live capability, before a detached caller can observe its persisted
+        # RUNNING tracker.  It is a lease/liveness marker, never authority.
+        try:
+            acquire_session_lock(session_id)
+        except OSError as exc:
+            # A registry entry without its liveness lease would let another
+            # process misclassify a durable RUNNING tracker as crashed. Undo
+            # the exact binding before returning the setup failure.
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            raise OrchestratorError(
+                message="Cannot establish process-local execution liveness lease",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(exc),
+                },
+            ) from exc
+        if self._task_workspace is not None:
+            self._task_workspace_users.add((session_id, execution_id))
+            self._task_workspace_lock_held = True
+
+    def _retire_process_local_authority(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Discard a terminal session's capability only when this adapter owns it."""
+        retired = _retire_process_local_authority_generation(
+            session_id,
+            execution_id,
+            self._adapter,
+        )
+        if retired:
+            from ouroboros.orchestrator.heartbeat import (
+                release_if_owned_by_current_process as release_session_lock,
+            )
+
+            release_session_lock(session_id)
+        self._process_local_authorities.pop((session_id, execution_id), None)
+        self._task_workspace_users.discard((session_id, execution_id))
+        return retired
+
+    def _discard_process_local_authority(
+        self,
+        generation: _ProcessLocalAuthorityGeneration,
+    ) -> None:
+        """Discard an unregistered capability after failed preparation."""
+        _discard_process_local_authority_generation(generation)
+
+    @staticmethod
+    def _process_local_resume_unavailable_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Return the explicit non-fallback outcome for a lost live generation."""
+        return OrchestratorError(
+            message=(
+                "Cannot resume this process-local execution after its live authority "
+                "generation is unavailable; start a new attempt."
+            ),
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_resume_unavailable",
+            },
+        )
+
+    @staticmethod
+    def _process_local_execution_in_progress_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Return the non-terminal outcome for a concurrent same-process claim."""
+        return OrchestratorError(
+            message="This process-local execution is already active in this process.",
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_execution_in_progress",
+            },
+        )
+
+    @staticmethod
+    def _process_local_authority_held_elsewhere_error(
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Reject an observer without revoking another adapter's live binding."""
+        return OrchestratorError(
+            message=(
+                "This process-local execution is retained by another live runtime "
+                "adapter or process."
+            ),
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "resume_blocked": "process_local_authority_held_elsewhere",
+            },
+        )
+
+    async def _mark_process_local_resume_unavailable(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> OrchestratorError:
+        """Terminally record a lost local capability without trying a fallback."""
+        error = self._process_local_resume_unavailable_error(session_id, execution_id)
+        last_error: object | None = None
+        for attempt in range(3):
+            try:
+                result = await self._session_repo.mark_failed_if_active(
+                    session_id,
+                    error.message,
+                    error.details,
+                )
+            except (Exception, asyncio.CancelledError) as exc:
+                durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                if durable_status is not None:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return error
+                if isinstance(exc, asyncio.CancelledError):
+                    self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                        execution_id=execution_id,
+                        status=SessionStatus.FAILED,
+                        error_message=error.message,
+                        error_details=dict(error.details),
+                    )
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    raise
+                last_error = exc
+            else:
+                if result.is_ok:
+                    if not result.value:
+                        log.info(
+                            "orchestrator.runner.process_local_resume_terminal_already_persisted",
+                            session_id=session_id,
+                            execution_id=execution_id,
+                        )
+                    self._retire_process_local_authority(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    return error
+                last_error = result.error
+            log.warning(
+                "orchestrator.runner.process_local_resume_terminal_mark_retry",
+                session_id=session_id,
+                execution_id=execution_id,
+                attempt=attempt + 1,
+                error=str(last_error),
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.05 * (2**attempt))
+        self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=SessionStatus.FAILED,
+            error_message=error.message,
+            error_details=dict(error.details),
+        )
+        return OrchestratorError(
+            message="Failed to persist lost process-local authority terminal state",
+            details={
+                "session_id": session_id,
+                "execution_id": execution_id,
+                "requested_status": SessionStatus.FAILED.value,
+                "cause": str(last_error),
+                "resume_blocked": "terminal_persistence_pending",
+                "terminal_persistence_pending": True,
+            },
+        )
+
+    async def _mark_preparation_failed_best_effort(
+        self,
+        *,
+        tracker: SessionTracker,
+        message: str,
+        details: Mapping[str, Any],
+    ) -> str | None:
+        """Record a post-start preparation failure without masking cleanup.
+
+        ``create_session`` has already written a RUNNING durable tracker by
+        the time initial progress is persisted.  If that second write fails,
+        retry the terminal write briefly. If persistence remains unavailable,
+        the caller preserves the process-local capability and lease instead of
+        manufacturing an unowned durable RUNNING session.
+        """
+        last_error: object | None = None
+        for attempt in range(3):
+            try:
+                result = await self._session_repo.mark_failed(
+                    tracker.session_id,
+                    message,
+                    dict(details),
+                )
+            except (Exception, asyncio.CancelledError) as exc:
+                durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                if durable_status is not None:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return None
+                if isinstance(exc, asyncio.CancelledError):
+                    self._pending_lifecycle_intents[tracker.session_id] = _PendingLifecycleIntent(
+                        execution_id=tracker.execution_id,
+                        status=SessionStatus.FAILED,
+                        error_message=message,
+                        error_details=dict(details),
+                        messages_processed=tracker.messages_processed,
+                    )
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    raise
+                last_error = exc
+            else:
+                if result.is_ok:
+                    self._pending_lifecycle_intents.pop(tracker.session_id, None)
+                    return None
+                last_error = result.error
+            log.warning(
+                "orchestrator.runner.prepare_terminal_mark_retry",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                attempt=attempt + 1,
+                error=str(last_error),
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.05 * (2**attempt))
+        self._pending_lifecycle_intents[tracker.session_id] = _PendingLifecycleIntent(
+            execution_id=tracker.execution_id,
+            status=SessionStatus.FAILED,
+            error_message=message,
+            error_details=dict(details),
+            messages_processed=tracker.messages_processed,
+        )
+        return str(last_error)
+
+    async def _reconcile_session_publication_interruption(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Resolve an interrupted or failed durable session-start append.
+
+        ``create_session`` may commit ``session.started`` and still be
+        interrupted before returning its tracker.  Never retire the early
+        process-local owner from the exception alone: reconstruct under
+        shielding, terminalize a proven active publication, or retain the
+        exact owner when persistence cannot be established.
+        """
+
+        async def _reconcile() -> bool:
+            terminal_cleanup_completed = False
+            try:
+                reconstructed = await self._session_repo.reconstruct_session(session_id)
+            except Exception:
+                reconstructed = None
+
+            if reconstructed is not None and reconstructed.is_err:
+                reconstruction_message = getattr(
+                    reconstructed.error,
+                    "message",
+                    str(reconstructed.error),
+                )
+                if reconstruction_message.startswith(("No events found", "No start event found")):
+                    self._retire_process_local_authority(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+            elif reconstructed is not None and reconstructed.is_ok:
+                tracker = reconstructed.value
+                if tracker.session_id == session_id and tracker.execution_id == execution_id:
+                    if tracker.status in {
+                        SessionStatus.COMPLETED,
+                        SessionStatus.FAILED,
+                        SessionStatus.CANCELLED,
+                    }:
+                        await self._cleanup_terminal_process_local_state(
+                            session_id=session_id,
+                            execution_id=execution_id,
+                        )
+                        terminal_cleanup_completed = True
+                    else:
+                        terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                            tracker=tracker,
+                            message="Session preparation was cancelled after durable publication",
+                            details={
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "cause": "CancelledError",
+                            },
+                        )
+                        if terminal_mark_error is None:
+                            await self._cleanup_terminal_process_local_state(
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
+                            terminal_cleanup_completed = True
+                        else:
+                            log.warning(
+                                "orchestrator.runner.create_session_cancel_terminal_pending",
+                                session_id=session_id,
+                                execution_id=execution_id,
+                                error=terminal_mark_error,
+                            )
+            if not terminal_cleanup_completed:
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+            return (session_id, execution_id) in self._process_local_authorities
+
+        return bool(await _await_process_local_cleanup(_reconcile()))
+
+    async def _persist_session_terminal_status(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        requested_status: SessionStatus,
+        summary: dict[str, Any] | None = None,
+        error_message: str | None = None,
+        error_details: dict[str, Any] | None = None,
+        error_type: str | None = None,
+        messages_processed: int = 0,
+        cancelled_by: str = "runner",
+    ) -> SessionStatus:
+        """Persist one terminal winner and return the authoritative status.
+
+        Session lifecycle is the durable source of truth. Execution-terminal
+        events are projections and must be emitted only after this CAS has a
+        winner, otherwise completion and public cancellation can produce
+        contradictory terminal streams.
+        """
+        intent = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=requested_status,
+            summary=summary,
+            error_message=error_message,
+            error_details=error_details,
+            error_type=error_type,
+            messages_processed=messages_processed,
+            cancelled_by=cancelled_by,
+        )
+        result: Any = None
+        last_error: object | None = None
+        for attempt in range(3):
+            try:
+                if requested_status is SessionStatus.COMPLETED:
+                    result = await self._session_repo.mark_completed(
+                        session_id,
+                        summary,
+                        messages_processed=messages_processed,
+                    )
+                elif requested_status is SessionStatus.FAILED:
+                    result = await self._session_repo.mark_failed(
+                        session_id,
+                        error_message or "Execution failed",
+                        error_details,
+                        error_type=error_type,
+                        messages_processed=messages_processed,
+                    )
+                elif requested_status is SessionStatus.CANCELLED:
+                    result = await self._session_repo.mark_cancelled(
+                        session_id,
+                        reason=error_message or "Execution cancelled",
+                        cancelled_by=cancelled_by,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported terminal session status: {requested_status.value}"
+                    )
+            except Exception as exc:
+                last_error = exc
+            else:
+                if result.is_ok:
+                    break
+                last_error = result.error
+            log.warning(
+                "orchestrator.runner.terminal_persistence_retry",
+                session_id=session_id,
+                requested_status=requested_status.value,
+                attempt=attempt + 1,
+                error=str(last_error),
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.05 * (2**attempt))
+        else:
+            self._pending_lifecycle_intents[session_id] = intent
+            raise OrchestratorError(
+                message=f"Failed to persist terminal session status: {requested_status.value}",
+                details={
+                    "session_id": session_id,
+                    "requested_status": requested_status.value,
+                    "cause": str(last_error),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
+                },
+            )
+
+        if result.value is not False:
+            self._pending_lifecycle_intents.pop(session_id, None)
+            return requested_status
+
+        try:
+            winner = await self._session_repo.reconstruct_session(session_id)
+        except Exception as exc:
+            self._pending_lifecycle_intents[session_id] = intent
+            raise OrchestratorError(
+                message="Terminal session transition lost its CAS without a readable winner",
+                details={
+                    "session_id": session_id,
+                    "requested_status": requested_status.value,
+                    "cause": str(exc),
+                    "resume_blocked": "terminal_persistence_pending",
+                    "terminal_persistence_pending": True,
+                },
+            ) from exc
+        terminal_statuses = {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }
+        if winner.is_ok and winner.value.status in terminal_statuses:
+            self._pending_lifecycle_intents.pop(session_id, None)
+            log.info(
+                "orchestrator.runner.terminal_transition_preserved",
+                session_id=session_id,
+                requested_status=requested_status.value,
+                durable_status=winner.value.status.value,
+            )
+            return winner.value.status
+        self._pending_lifecycle_intents[session_id] = intent
+        raise OrchestratorError(
+            message="Terminal session transition lost its CAS without a readable winner",
+            details={
+                "session_id": session_id,
+                "requested_status": requested_status.value,
+                **({"cause": str(winner.error)} if winner.is_err else {}),
+                "resume_blocked": "terminal_persistence_pending",
+                "terminal_persistence_pending": True,
+            },
+        )
+
+    async def _retry_pending_lifecycle_intent(
+        self,
+        tracker: SessionTracker,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Replay an exact owner's retained terminal or pause transition.
+
+        Persistence-pending is not a normal RUNNING resume. The retained
+        process-local runner must first reclaim its generation and retry the
+        original transition with its original payload. Only after that intent
+        is durably resolved may ownership be released or retired.
+        """
+        intent = self._pending_lifecycle_intents.get(tracker.session_id)
+        if intent is None:
+            return None
+        if intent.execution_id != tracker.execution_id:
+            return Result.err(
+                OrchestratorError(
+                    message="Pending lifecycle intent does not match the durable execution",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "pending_execution_id": intent.execution_id,
+                        "resume_blocked": "pending_lifecycle_identity_mismatch",
+                    },
+                )
+            )
+
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        generation, already_claimed = self._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            raw_contract,
+        )
+        if already_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        if generation is None:
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
+                    )
+                )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+
+        try:
+            self._register_session(tracker.execution_id, tracker.session_id)
+        except Exception as exc:
+            if intent.status is SessionStatus.PAUSED:
+                return self._pause_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    cause=exc,
+                )
+            return self._terminal_persistence_pending_result(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                requested_status=intent.status,
+                cause=exc,
+            )
+
+        resolved_status: SessionStatus
+        try:
+            if intent.status is SessionStatus.PAUSED:
+                pause = intent.pause
+                if pause is None:
+                    raise OrchestratorError(
+                        message="Pending PAUSED intent is missing its replay payload",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                            "resume_blocked": "pending_lifecycle_payload_missing",
+                        },
+                    )
+                pause_result = await self._session_repo.mark_paused(
+                    tracker.session_id,
+                    reason=pause.reason,
+                    resume_hint=pause.resume_hint,
+                    pause_seconds=pause.pause_seconds,
+                    resume_after=pause.resume_after,
+                    pause_kind=pause.pause_kind,
+                )
+                resolved, pending = await self._resolve_pause_publication(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    pause_result=pause_result,
+                    pause=pause,
+                )
+                if pending is not None:
+                    return pending
+                assert resolved is not None
+                resolved_status = resolved
+            else:
+                resolved_status = await self._persist_session_terminal_status(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    requested_status=intent.status,
+                    summary=intent.summary,
+                    error_message=intent.error_message,
+                    error_details=intent.error_details,
+                    error_type=intent.error_type,
+                    messages_processed=intent.messages_processed,
+                    cancelled_by=intent.cancelled_by,
+                )
+        except asyncio.CancelledError:
+            if (
+                await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                is None
+            ):
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            raise
+        except BaseException as exc:
+            pending = self._terminal_persistence_pending_from_error(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=exc,
+            )
+            if pending is not None:
+                return pending
+            if intent.status is SessionStatus.PAUSED:
+                return self._pause_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    cause=exc,
+                )
+            return self._terminal_persistence_pending_result(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                requested_status=intent.status,
+                cause=exc,
+            )
+
+        pause = intent.pause if resolved_status is SessionStatus.PAUSED else None
+        final_message = (
+            pause.reason
+            if pause is not None
+            else (
+                intent.error_message
+                or f"Pending {resolved_status.value} lifecycle transition persisted"
+            )
+        )
+        terminal_event = create_execution_terminal_event(
+            execution_id=tracker.execution_id,
+            session_id=tracker.session_id,
+            status=resolved_status.value,
+            summary=intent.summary if resolved_status is SessionStatus.COMPLETED else None,
+            error_message=(
+                final_message
+                if resolved_status not in {SessionStatus.COMPLETED, SessionStatus.PAUSED}
+                else None
+            ),
+            messages_processed=intent.messages_processed,
+            pause_seconds=pause.pause_seconds if pause is not None else None,
+            resume_after=pause.resume_after if pause is not None else None,
+            pause_kind=pause.pause_kind if pause is not None else None,
+            resume_hint=pause.resume_hint if pause is not None else None,
+        )
+        try:
+            await self._project_execution_outcome(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+                terminal_status=resolved_status.value,
+                terminal_event=terminal_event,
+            )
+        except Exception:
+            log.exception(
+                "orchestrator.runner.pending_lifecycle_projection_failed",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                durable_status=resolved_status.value,
+            )
+        finally:
+            if resolved_status is SessionStatus.PAUSED:
+                self._release_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    tracker.session_id,
+                    release_liveness_lease=False,
+                )
+                self._release_task_workspace_for_identity(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            else:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+
+        self._pending_lifecycle_intents.pop(tracker.session_id, None)
+        return Result.ok(
+            OrchestratorResult(
+                success=resolved_status is SessionStatus.COMPLETED,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                summary={
+                    **(intent.summary or {}),
+                    "replayed_pending_lifecycle": resolved_status.value,
+                },
+                messages_processed=intent.messages_processed,
+                final_message=final_message,
+                duration_seconds=0.0,
+            )
+        )
 
     def _validate_resume_handle_execution_identity(
         self,
@@ -2003,6 +3380,7 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         seed_fingerprint: str | None = None,
+        authority_generation: _ProcessLocalAuthorityGeneration | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -2026,8 +3404,22 @@ class OrchestratorRunner:
             resolved_seed_fingerprint = self._seed_semantics_fingerprint(seed)
         if resolved_seed_fingerprint is not None:
             proof_contract["seed_fingerprint"] = resolved_seed_fingerprint
+        if authority_generation is None:
+            # Diagnostics and contract-validation callers need attribution
+            # shape, not a live capability. Do not mint a registry issuance
+            # here: there is no session lifecycle that could register and
+            # retire it. The random correlation remains evidence-only, and
+            # cannot be claimed or registered without an explicit generation.
+            authority_contract: dict[str, object] = {
+                "version": 1,
+                "scope": "process_local",
+                "correlation_id": uuid4().hex,
+            }
+        else:
+            authority_contract = self._process_local_authority_contract(authority_generation)
         return {
             "version": EXECUTION_CONTRACT_VERSION,
+            "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
@@ -2274,6 +3666,7 @@ class OrchestratorRunner:
         progress: Mapping[str, Any],
         *,
         seed: Seed | None = None,
+        authority_generation: _ProcessLocalAuthorityGeneration | None = None,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
@@ -2285,7 +3678,10 @@ class OrchestratorRunner:
         if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
             self._validate_legacy_resume_identity(progress, seed=seed)
             self._execution_guidance = self._resolve_guidance_bundle(())
-            self._execution_contract = self._build_execution_contract(seed=seed)
+            self._execution_contract = self._build_execution_contract(
+                seed=seed,
+                authority_generation=authority_generation,
+            )
             # One unavoidable recomputation migrates a legacy session. Persist the
             # resolved contract now so every later resume restores this exact policy
             # instead of drifting again with each environment/config change.
@@ -2308,14 +3704,18 @@ class OrchestratorRunner:
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        raw_authority = raw_contract.get("foundation_a_authority")
         if (
             not isinstance(raw_proof, Mapping)
             or not isinstance(raw_routing, Mapping)
             or not isinstance(raw_resume, Mapping)
+            or not valid_process_local_authority_contract(raw_authority)
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
-                details={"missing": "frugality_proof, model_routing, or resume"},
+                details={
+                    "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
+                },
             )
 
         self._restore_guidance_contract(raw_contract)
@@ -2504,6 +3904,9 @@ class OrchestratorRunner:
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
         )
+        process_local_authority = valid_process_local_authority_contract(
+            raw_contract.get("foundation_a_authority")
+        )
         model_override_support = getattr(
             getattr(self._adapter, "capabilities", None),
             "model_override_support",
@@ -2513,6 +3916,7 @@ class OrchestratorRunner:
             constructor_model_value is None
             and not effective_model_observed
             and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
+            and not process_local_authority
         ):
             raise OrchestratorError(
                 message="Cannot resume because the effective runtime model is unverifiable",
@@ -2530,10 +3934,18 @@ class OrchestratorRunner:
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
         if self._model_routing_override_explicit:
-            self._execution_contract = self._build_execution_contract(
+            replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+                authority_generation=authority_generation,
             )
+            # Only the public resume path reaches this branch with a live,
+            # registry-issued generation.  Preserve the persisted diagnostics
+            # in direct contract-validation calls so those calls cannot mint a
+            # replacement correlation id by accident.
+            if authority_generation is None:
+                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
+            self._execution_contract = replacement
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
@@ -2552,11 +3964,8 @@ class OrchestratorRunner:
     def _proof_cohort_identity(
         event_data: Mapping[str, Any],
     ) -> tuple[str, str, str, int, str, str, str] | None:
-        """Extract the exact fail-closed identity tuple from a session start."""
-        raw_seed_id = event_data.get("seed_id")
+        """Reject cross-run proof cohorts for Foundation A process-local runs."""
         raw_contract = event_data.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-        if not isinstance(raw_seed_id, str) or not raw_seed_id.strip():
-            return None
         if not isinstance(raw_contract, Mapping):
             return None
         raw_version = raw_contract.get("version")
@@ -2566,79 +3975,11 @@ class OrchestratorRunner:
             or raw_version != EXECUTION_CONTRACT_VERSION
         ):
             return None
-        proof_contract = raw_contract.get("frugality_proof")
-        if not isinstance(proof_contract, Mapping):
-            return None
-        routing_contract = raw_contract.get("model_routing")
-        if not isinstance(routing_contract, Mapping):
-            return None
-        guidance_contract = raw_contract.get("guidance")
-        if guidance_contract is None:
-            guidance_fingerprint = "legacy:no-declared-guidance"
-        elif isinstance(guidance_contract, Mapping):
-            guidance_fingerprint = guidance_contract.get("rendered_fragment_hash")
-            if (
-                guidance_contract.get("provenance_scope") != "ouroboros_declared_guidance_only"
-                or not isinstance(guidance_fingerprint, str)
-                or not guidance_fingerprint.startswith("sha256:")
-                or len(guidance_fingerprint) != 71
-            ):
-                return None
-        else:
-            return None
-        runtime_backend = routing_contract.get("runtime_backend")
-        llm_backend = routing_contract.get("llm_backend")
-        permission_mode = routing_contract.get("permission_mode")
-        constructor_model = routing_contract.get("constructor_model")
-        runtime_execution = routing_contract.get("runtime_execution")
-        if (
-            not isinstance(runtime_backend, str)
-            or not runtime_backend.strip()
-            or not isinstance(llm_backend, str)
-            or not llm_backend.strip()
-            or not OrchestratorRunner._valid_permission_mode_contract(permission_mode)
-            or not OrchestratorRunner._valid_constructor_model_contract(constructor_model)
-            or not OrchestratorRunner._valid_runtime_execution_identity_contract(runtime_execution)
-        ):
-            return None
-        protocol_version = proof_contract.get("protocol_version")
-        project_root = proof_contract.get("project_root")
-        workspace_path = proof_contract.get("workspace_path")
-        routing_fingerprint = proof_contract.get("routing_fingerprint")
-        seed_fingerprint = proof_contract.get("seed_fingerprint")
-        if (
-            isinstance(protocol_version, bool)
-            or not isinstance(protocol_version, int)
-            or protocol_version < 1
-        ):
-            return None
-        if not isinstance(project_root, str) or not project_root.strip():
-            return None
-        if not isinstance(workspace_path, str) or not workspace_path.strip():
-            return None
-        if (
-            not isinstance(routing_fingerprint, str)
-            or len(routing_fingerprint) != 64
-            or any(char not in "0123456789abcdef" for char in routing_fingerprint)
-        ):
-            return None
-        if routing_fingerprint != OrchestratorRunner._routing_fingerprint(routing_contract):
-            return None
-        if (
-            not isinstance(seed_fingerprint, str)
-            or len(seed_fingerprint) != 64
-            or any(char not in "0123456789abcdef" for char in seed_fingerprint)
-        ):
-            return None
-        return (
-            raw_seed_id.strip(),
-            project_root.strip(),
-            workspace_path.strip(),
-            protocol_version,
-            routing_fingerprint,
-            seed_fingerprint,
-            guidance_fingerprint,
-        )
+        # Foundation A's current correlation record is diagnostic attribution
+        # only.  It must not form a replay, idempotency, trust, or cross-run
+        # proof cohort key.  A future portable authority needs its own reviewed
+        # consumer rule rather than falling through this legacy proof path.
+        return None
 
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
         """Create a dependency analyzer wired to the active LLM backend when available.
@@ -3393,7 +4734,11 @@ class OrchestratorRunner:
 
         if session_id is not None:
             # In-flight cancellation: signal via the cancellation registry
-            await request_cancellation(session_id)
+            await request_cancellation(
+                session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
             log.info(
                 "orchestrator.runner.cancellation_requested",
                 execution_id=execution_id,
@@ -3466,45 +4811,96 @@ class OrchestratorRunner:
                 )
             )
 
-        # Guard: do not overwrite a terminal state (completed/failed/cancelled)
-        _terminal_event_types = frozenset(
-            {
-                "orchestrator.session.completed",
-                "orchestrator.session.failed",
-                "orchestrator.session.cancelled",
-            }
-        )
-        try:
-            session_events = await self._event_store.query_events(
-                aggregate_id=session_id,
-                limit=100,
+        tracker_result = await self._session_repo.reconstruct_session(session_id)
+        if tracker_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message=f"Failed to reconstruct session for cancellation: {tracker_result.error}",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
             )
-            for ev in session_events:
-                if ev.type in _terminal_event_types:
-                    log.info(
-                        "orchestrator.runner.cancel_skipped_terminal",
-                        execution_id=execution_id,
-                        session_id=session_id,
-                        terminal_event=ev.type,
-                    )
-                    return Result.ok(
-                        {
-                            "execution_id": execution_id,
-                            "session_id": session_id,
-                            "status": "already_terminal",
-                            "terminal_event": ev.type,
-                            "reason": reason,
-                        }
-                    )
-        except Exception as e:
-            log.warning(
-                "orchestrator.runner.terminal_check_failed",
-                execution_id=execution_id,
+        tracker = tracker_result.value
+        if tracker.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.FAILED,
+            SessionStatus.CANCELLED,
+        }:
+            await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
-                error=str(e),
+                execution_id=execution_id,
+            )
+            return Result.ok(
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "status": "already_terminal",
+                    "terminal_status": tracker.status.value,
+                    "reason": reason,
+                }
             )
 
-        # Mark as cancelled via repository
+        process_local = await request_process_local_cancellation(
+            tracker,
+            self._session_repo,
+            reason=reason,
+            cancelled_by=cancelled_by,
+        )
+        if process_local is not None:
+            if (
+                process_local.disposition
+                == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+            ):
+                return Result.ok(
+                    {
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "status": "cancellation_requested",
+                        "in_flight": True,
+                        "reason": reason,
+                    }
+                )
+            if process_local.disposition == ProcessLocalCancellationDisposition.HELD_ELSEWHERE:
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(session_id, execution_id)
+                )
+            if process_local.disposition == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING:
+                return Result.err(
+                    OrchestratorError(
+                        message="Failed to persist cancellation; retained process-local owner must retry",
+                        details={
+                            "execution_id": execution_id,
+                            "session_id": session_id,
+                            "resume_blocked": "cancellation_persistence_pending",
+                            "cause": str(process_local.error),
+                        },
+                    )
+                )
+            if process_local.disposition == ProcessLocalCancellationDisposition.ALREADY_TERMINAL:
+                return Result.ok(
+                    {
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "status": "already_terminal",
+                        "reason": reason,
+                    }
+                )
+
+            await self._report_frugality_retrospective(
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status="cancelled",
+            )
+            return Result.ok(
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "status": "cancelled",
+                    "in_flight": False,
+                    "reason": reason,
+                }
+            )
+
+        # Historical sessions have no live Foundation A capability to coordinate.
         cancel_result = await self._session_repo.mark_cancelled(
             session_id=session_id,
             reason=reason,
@@ -3520,6 +4916,28 @@ class OrchestratorRunner:
                         "session_id": session_id,
                     },
                 )
+            )
+        if cancel_result.value is False:
+            terminal_result = await self._session_repo.reconstruct_session(session_id)
+            terminal_status = (
+                terminal_result.value.status
+                if terminal_result.is_ok
+                and terminal_result.value.status
+                in {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
+                else None
+            )
+            return Result.ok(
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "status": "already_terminal",
+                    **(
+                        {"terminal_status": terminal_status.value}
+                        if terminal_status is not None
+                        else {}
+                    ),
+                    "reason": reason,
+                }
             )
 
         await self._report_frugality_retrospective(
@@ -3756,6 +5174,103 @@ class OrchestratorRunner:
             )
             return False
 
+    def _cancellation_persistence_pending_result(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        cause: object,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Leave a failed cancellation write retryable without stranding a claim.
+
+        The live registration and heartbeat remain as a truthful same-process
+        owner, and the cancellation request remains set.  The effectful claim,
+        active route, and worktree lock belong to the coroutine that is now
+        exiting, so they must be released for a retained owner to retry the
+        durable terminal write on a later resume request.
+        """
+        self._preserve_process_local_owner_for_retry(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        return Result.err(
+            OrchestratorError(
+                message="Failed to persist cancellation; process-local authority remains live",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "cause": str(cause),
+                    "resume_blocked": "cancellation_persistence_pending",
+                    "cancellation_persistence_pending": True,
+                },
+            )
+        )
+
+    async def _drain_requested_cancellation_before_pre_execution_cleanup(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        messages_processed: int,
+        start_time: datetime,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Persist a published cancellation before abandoning a claimed setup.
+
+        A public cancellation can arrive after a resume/new-run claims the
+        generation but before the runner has registered its normal active
+        route.  Raw task cancellation in that window must not retire the
+        capability and leave a durable ``PAUSED`` tracker that a later resume
+        reclassifies as lost authority.  Run the normal cancellation lifecycle
+        in a shielded child task so a repeat caller cancellation cannot skip
+        the durable write or its retryable-pending cleanup.
+
+        Returns ``None`` when no cooperative cancellation is pending; otherwise
+        it returns the normal cancellation result.  A second raw cancellation
+        is re-raised after the child has drained its lifecycle work.
+        """
+        if not await is_cancellation_requested(session_id):
+            return None
+
+        task = asyncio.create_task(
+            self._handle_cancellation(
+                session_id=session_id,
+                execution_id=execution_id,
+                messages_processed=messages_processed,
+                start_time=start_time,
+            )
+        )
+        repeated_cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                repeated_cancellation = repeated_cancellation or exc
+
+        try:
+            result = task.result()
+        except asyncio.CancelledError as exc:
+            repeated_cancellation = repeated_cancellation or exc
+            result = self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause="cancellation lifecycle task cancelled",
+            )
+        except Exception as exc:  # pragma: no cover - defensive task boundary
+            log.exception(
+                "orchestrator.runner.pre_execution_cancellation_drain_failed",
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            result = self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+            )
+
+        if repeated_cancellation is not None:
+            raise repeated_cancellation
+        return result
+
     async def _handle_cancellation(
         self,
         session_id: str,
@@ -3783,18 +5298,30 @@ class OrchestratorRunner:
             messages_processed=messages_processed,
             duration_seconds=duration,
         )
+        cancellation_request = await get_cancellation_request(session_id)
+        cancellation_reason = (
+            cancellation_request.reason
+            if cancellation_request is not None
+            else "Cancellation detected during execution"
+        )
+        cancelled_by = (
+            cancellation_request.cancelled_by if cancellation_request is not None else "runner"
+        )
 
-        # Clear the in-memory cancellation flag so it doesn't linger
-        await clear_cancellation(session_id)
-
-        # Clean up session tracking
-        self._unregister_session(execution_id, session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
-
-        # Only mark cancelled if not already in a terminal state
+        # Determine and durably publish the terminal state *before* withdrawing
+        # the process-local capability or its heartbeat.  A RUNNING tracker
+        # with neither liveness signal is indistinguishable from a crashed
+        # owner to another process, so releasing first can cause a concurrent
+        # observer to terminalize this deliberate cancellation as lost
+        # authority.  It would also make a persistence failure report a
+        # cancellation that the durable session never recorded.
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
+        # An unreadable snapshot cannot prove that a terminal state already
+        # exists.  Continue through ``mark_cancelled`` while retaining the live
+        # owner; that append is the authoritative terminal write and preserves
+        # the legacy best-effort reconstruction posture without ever releasing
+        # a RUNNING session first.
         session_already_terminal = session_result.is_ok and session_result.value.status in _terminal
         if session_already_terminal:
             terminal_status = session_result.value.status
@@ -3810,19 +5337,33 @@ class OrchestratorRunner:
                 )
             except Exception:
                 execution_terminal_events = []
-            if not execution_terminal_events:
-                await self._event_store.append(
-                    create_execution_terminal_event(
-                        execution_id=execution_id,
+
+            async def _reconcile_existing_terminal_owner() -> None:
+                try:
+                    if not execution_terminal_events:
+                        await self._event_store.append(
+                            create_execution_terminal_event(
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                status=terminal_status.value,
+                                summary=(
+                                    summary if terminal_status == SessionStatus.COMPLETED else None
+                                ),
+                                error_message=(
+                                    final_message
+                                    if terminal_status != SessionStatus.COMPLETED
+                                    else None
+                                ),
+                                messages_processed=messages_processed,
+                            )
+                        )
+                finally:
+                    await self._cleanup_terminal_process_local_state(
                         session_id=session_id,
-                        status=terminal_status.value,
-                        summary=summary if terminal_status == SessionStatus.COMPLETED else None,
-                        error_message=(
-                            final_message if terminal_status != SessionStatus.COMPLETED else None
-                        ),
-                        messages_processed=messages_processed,
+                        execution_id=execution_id,
                     )
-                )
+
+            await _await_process_local_cleanup(_reconcile_existing_terminal_owner())
             await self._report_frugality_retrospective(
                 execution_id=execution_id,
                 session_id=session_id,
@@ -3840,28 +5381,101 @@ class OrchestratorRunner:
                 )
             )
 
-        cancel_result = await self._session_repo.mark_cancelled(
-            session_id,
-            reason="Cancellation detected during execution",
-            cancelled_by="runner",
-        )
+        try:
+            cancel_result = await self._session_repo.mark_cancelled(
+                session_id,
+                reason=cancellation_reason,
+                cancelled_by=cancelled_by,
+            )
+        except asyncio.CancelledError:
+            if (
+                await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                is None
+            ):
+                self._preserve_process_local_owner_for_retry(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+            raise
+        except Exception as exc:
+            durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if durable_status is not None:
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            log.warning(
+                "orchestrator.runner.mark_cancelled_raised",
+                session_id=session_id,
+                error=str(exc),
+            )
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=exc,
+            )
         if cancel_result is not None and cancel_result.is_err:
             log.warning(
                 "orchestrator.runner.mark_cancelled_failed",
                 session_id=session_id,
                 error=str(cancel_result.error),
             )
-
-        # Mirror cancellation into execution stream for TUI.
-        await self._event_store.append(
-            create_execution_terminal_event(
-                execution_id=execution_id,
+            return self._cancellation_persistence_pending_result(
                 session_id=session_id,
-                status="cancelled",
-                error_message="Execution cancelled by external request",
-                messages_processed=messages_processed,
+                execution_id=execution_id,
+                cause=cancel_result.error,
             )
-        )
+        if cancel_result is not None and cancel_result.value is False:
+            # The session became terminal after the initial reconstruction but
+            # before this owner won its cancellation transition. Re-enter once
+            # so the authoritative terminal branch mirrors the real winner and
+            # tears down this process-local owner without reporting cancellation.
+            winner = await self._session_repo.reconstruct_session(session_id)
+            if winner.is_ok and winner.value.status in _terminal:
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            return self._cancellation_persistence_pending_result(
+                session_id=session_id,
+                execution_id=execution_id,
+                cause=PersistenceError(
+                    "Terminal cancellation lost its CAS but the durable winner could not be read"
+                ),
+            )
+
+        # The session is now terminal. Drain the complete reconciliation in a
+        # shielded child task: repeated caller cancellation may not interrupt
+        # marker acknowledgement, projection, or live-owner teardown after the
+        # durable CAS has committed.
+        async def _reconcile_cancelled_owner() -> None:
+            try:
+                await self._event_store.append(
+                    create_execution_terminal_event(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        status="cancelled",
+                        error_message=cancellation_reason,
+                        messages_processed=messages_processed,
+                    )
+                )
+            finally:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+
+        await _await_process_local_cleanup(_reconcile_cancelled_owner())
         await self._report_frugality_retrospective(
             execution_id=execution_id,
             session_id=session_id,
@@ -3918,7 +5532,11 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
-        session_result = await self.prepare_session(seed, execution_id=execution_id)
+        session_result = await self.prepare_session(
+            seed,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
         if session_result.is_err:
             return Result.err(session_result.error)
 
@@ -3946,39 +5564,206 @@ class OrchestratorRunner:
         immediately and then start the actual runtime work asynchronously.
         """
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
+        resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
+        # A generation belongs to this one preparation call.  Do not store it
+        # in a runner-wide mutable slot: concurrent preparations must not share
+        # a capability or correlation id.
+        authority_generation = self._begin_process_local_authority_generation()
+        if self._task_workspace is not None:
+            # Reserve the runner-wide lock before the first await.  Otherwise a
+            # different session can finish while contract construction is in a
+            # worker thread and release the lock before this preparation has a
+            # registered identity.
+            self._reserve_task_workspace(authority_generation)
+            self._task_workspace_lock_held = True
+
+        def abort_process_local_preparation() -> None:
+            """Dispose every authority state reachable from an aborted prepare.
+
+            The registration may have completed before a later setup step
+            raises, while an earlier failure has only an unregistered issuance.
+            Both cleanup operations are idempotent and together leave no
+            capability or lease behind.
+            """
+            identity = (resolved_session_id, exec_id)
+            owns_registered_generation = (
+                self._process_local_authorities.get(identity) is authority_generation
+            )
+            if owns_registered_generation:
+                self._retire_process_local_authority(
+                    session_id=resolved_session_id,
+                    execution_id=exec_id,
+                )
+            self._discard_process_local_authority(authority_generation)
+            self._task_workspace_reservations.discard(authority_generation)
+            # A duplicate exact identity can fail registration while an older
+            # generation still owns the same runner slot.  That failed
+            # preparation acquired no authority or workspace ownership of its
+            # own, so it must not retire or release the existing generation.
+            if owns_registered_generation or identity not in self._task_workspace_users:
+                self._release_task_workspace_for_identity(
+                    session_id=resolved_session_id,
+                    execution_id=exec_id,
+                )
+
         try:
             execution_contract = await asyncio.to_thread(
                 self._build_execution_contract,
                 seed=seed,
+                authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
+            # Establish the exact capability and PID liveness lease before any
+            # durable RUNNING tracker can be reconstructed by an observer. The
+            # resolved session id is allocated locally for that purpose rather
+            # than delegated to SessionRepository after its start event is written.
+            self._register_process_local_authority(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+                execution_contract=execution_contract,
+                generation=authority_generation,
+            )
         except OrchestratorError as exc:
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            abort_process_local_preparation()
             return Result.err(exc)
+        except asyncio.CancelledError:
+            abort_process_local_preparation()
+            raise
+        except Exception as exc:
+            abort_process_local_preparation()
+            log.exception(
+                "orchestrator.runner.prepare_authority_failed",
+                execution_id=exec_id,
+                session_id=resolved_session_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to prepare process-local execution authority",
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        "cause": type(exc).__name__,
+                    },
+                )
+            )
+        except BaseException:
+            abort_process_local_preparation()
+            raise
+        self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
-        session_result = await self._session_repo.create_session(
-            execution_id=exec_id,
-            seed_id=seed.metadata.seed_id,
-            session_id=session_id,
-            seed_goal=seed.goal,
-            runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            llm_backend=getattr(self._adapter, "llm_backend", None),
-            execution_contract=execution_contract,
-        )
+
+        try:
+            session_result = await self._session_repo.create_session(
+                execution_id=exec_id,
+                seed_id=seed.metadata.seed_id,
+                session_id=resolved_session_id,
+                seed_goal=seed.goal,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                llm_backend=getattr(self._adapter, "llm_backend", None),
+                execution_contract=execution_contract,
+            )
+        except asyncio.CancelledError:
+            await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            raise
+        except Exception as exc:
+            retained_owner = await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=f"Failed to create session: {exc}",
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
+                    },
+                )
+            )
 
         if session_result.is_err:
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            persistence_details = getattr(session_result.error, "details", {})
+            if (
+                isinstance(persistence_details, Mapping)
+                and persistence_details.get("session_start_conflict") is True
+            ):
+                abort_process_local_preparation()
+                return Result.err(
+                    OrchestratorError(
+                        message="Session ID already belongs to an immutable execution",
+                        details={
+                            "execution_id": exec_id,
+                            "session_id": resolved_session_id,
+                            "resume_blocked": "session_id_conflict",
+                            "session_id_conflict": True,
+                        },
+                    )
+                )
+            retained_owner = await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to create session: {session_result.error}",
-                    details={"execution_id": exec_id, "session_id": session_id},
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
+                    },
                 )
             )
 
         tracker = session_result.value
+        if tracker.session_id != resolved_session_id or tracker.execution_id != exec_id:
+            # The registration and its early lease were established for the
+            # caller-supplied durable identity before ``create_session`` wrote
+            # ``session.started``.  Accepting a repository response for a
+            # different identity would attach that capability to a tracker that
+            # was never protected during publication.  This is a repository
+            # contract violation, not a reason to mutate or terminalize the
+            # unrelated returned tracker.
+            retained_owner = await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message="Session repository returned an unexpected session identity",
+                    details={
+                        "expected_session_id": resolved_session_id,
+                        "expected_execution_id": exec_id,
+                        "returned_session_id": tracker.session_id,
+                        "returned_execution_id": tracker.execution_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
+                    },
+                )
+            )
         initial_progress: dict[str, Any] = {
             "fat_harness_mode": self._fat_harness_mode,
             "messages_processed": 0,
@@ -3986,35 +5771,70 @@ class OrchestratorRunner:
         }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
-        progress_result = await self._session_repo.track_progress(
-            tracker.session_id,
-            initial_progress,
-        )
-        if progress_result.is_err:
-            fail_result = await self._session_repo.mark_failed(
+        try:
+            progress_result = await self._session_repo.track_progress(
                 tracker.session_id,
-                "Failed to persist initial session contract",
-                {
-                    "execution_id": tracker.execution_id,
-                    "fat_harness_mode": self._fat_harness_mode,
-                    "cause": str(progress_result.error),
-                },
+                initial_progress,
             )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
-
-            details: dict[str, Any] = {
+        except asyncio.CancelledError:
+            await self._reconcile_session_publication_interruption(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            raise
+        except Exception as exc:
+            progress_exception_details: dict[str, Any] = {
+                "session_id": tracker.session_id,
+                "execution_id": tracker.execution_id,
+                "fat_harness_mode": self._fat_harness_mode,
+                "cause": str(exc),
+            }
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to persist initial session contract",
+                details=progress_exception_details,
+            )
+            if terminal_mark_error is None:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            if terminal_mark_error is not None:
+                progress_exception_details["terminal_mark_error"] = terminal_mark_error
+                progress_exception_details["resume_blocked"] = "terminal_persistence_pending"
+                progress_exception_details["terminal_persistence_pending"] = True
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to persist initial session contract",
+                    details=progress_exception_details,
+                )
+            )
+        if progress_result.is_err:
+            progress_result_details: dict[str, Any] = {
                 "session_id": tracker.session_id,
                 "execution_id": tracker.execution_id,
                 "fat_harness_mode": self._fat_harness_mode,
                 "cause": str(progress_result.error),
             }
-            if fail_result.is_err:
-                details["terminal_mark_error"] = str(fail_result.error)
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to persist initial session contract",
+                details=progress_result_details,
+            )
+            if terminal_mark_error is None:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+
+            if terminal_mark_error is not None:
+                progress_result_details["terminal_mark_error"] = terminal_mark_error
+                progress_result_details["resume_blocked"] = "terminal_persistence_pending"
+                progress_result_details["terminal_persistence_pending"] = True
             return Result.err(
                 OrchestratorError(
                     message="Failed to persist initial session contract",
-                    details=details,
+                    details=progress_result_details,
                 )
             )
 
@@ -4037,31 +5857,144 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
-        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
-        if raw_contract is not None:
-            if not isinstance(raw_contract, Mapping):
-                self._cleanup_pre_execution_state(
-                    tracker.execution_id,
-                    tracker.session_id,
-                    session_registered=False,
+        if tracker.status in (
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        ):
+            durable_tracker_result = await self._session_repo.reconstruct_session(
+                tracker.session_id
+            )
+            if durable_tracker_result.is_err:
+                return Result.err(
+                    OrchestratorError(
+                        message="Cannot verify caller-supplied terminal session state",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                            "cause": str(durable_tracker_result.error),
+                            "resume_blocked": "terminal_state_unverified",
+                        },
+                    )
+                )
+            durable_tracker = durable_tracker_result.value
+            if (
+                durable_tracker.session_id != tracker.session_id
+                or durable_tracker.execution_id != tracker.execution_id
+            ):
+                return Result.err(
+                    OrchestratorError(
+                        message="Durable session identity does not match the supplied tracker",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                )
+            if durable_tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=durable_tracker.session_id,
+                    execution_id=durable_tracker.execution_id,
                 )
                 return Result.err(
                     OrchestratorError(
-                        message="Cannot execute with an invalid execution contract",
-                        details={"invalid": "execution_contract"},
+                        message=(
+                            "Session is in terminal state "
+                            f"{durable_tracker.status.value}, cannot execute"
+                        ),
+                        details={
+                            "session_id": durable_tracker.session_id,
+                            "status": durable_tracker.status.value,
+                        },
                     )
                 )
-            try:
-                await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
-                self._execution_guidance_delivery_mode()
-            except OrchestratorError as exc:
-                self._cleanup_pre_execution_state(
-                    tracker.execution_id,
+            tracker = durable_tracker
+            exec_id = tracker.execution_id
+
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+
+        # This API may execute only the tracker returned by ``prepare_session``.
+        # A legacy/reconstructed tracker with no contract is not a new-session
+        # shortcut: it has no Foundation A generation and must fail closed before
+        # prompts, tool setup, or any runtime-owned provider are consulted.
+        authority_generation, authority_claimed = self._claim_process_local_authority_generation(
+            tracker.session_id,
+            exec_id,
+            raw_contract,
+        )
+        if authority_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
                     tracker.session_id,
-                    session_registered=False,
+                    tracker.execution_id,
                 )
-                return Result.err(exc)
-            self._execution_contract = dict(raw_contract)
+            )
+        if authority_generation is None:
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
+                    )
+                )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        try:
+            await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
+            self._execution_guidance_delivery_mode()
+        except asyncio.CancelledError:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+            raise
+        except OrchestratorError as exc:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
+            _, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=exc,
+            )
+            if persistence_pending is not None:
+                return persistence_pending
+            return Result.err(exc)
+        self._execution_contract = dict(raw_contract)
 
         log.info(
             "orchestrator.runner.execute_started",
@@ -4070,12 +6003,9 @@ class OrchestratorRunner:
             seed_id=seed.metadata.seed_id,
             goal=seed.goal[:100],
         )
-        session_registered = False
-
         try:
             # Register session for cancellation tracking
             self._register_session(exec_id, tracker.session_id)
-            session_registered = True
             if await self._check_startup_cancellation(tracker.session_id):
                 return await self._handle_cancellation(
                     session_id=tracker.session_id,
@@ -4178,30 +6108,56 @@ class OrchestratorRunner:
                 execution_plan=direct_graph.to_execution_plan(),
             )
         except asyncio.CancelledError:
-            if session_registered and await is_cancellation_requested(tracker.session_id):
-                return await self._handle_cancellation(
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
                 )
-            self._cleanup_pre_execution_state(
-                exec_id,
-                tracker.session_id,
-                session_registered=session_registered,
+            )
+            if cancellation_result is not None:
+                return cancellation_result
+            if await self._cleanup_if_durable_terminal(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            ):
+                raise
+            self._preserve_process_local_owner_for_retry(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
             )
             raise
         except Exception as e:
-            self._cleanup_pre_execution_state(
-                exec_id,
-                tracker.session_id,
-                session_registered=session_registered,
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
             )
+            if cancellation_result is not None:
+                return cancellation_result
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             log.exception(
                 "orchestrator.runner.execute_setup_failed",
                 execution_id=exec_id,
                 error=str(e),
             )
+            _, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                error=e,
+            )
+            if persistence_pending is not None:
+                return persistence_pending
             return Result.err(
                 OrchestratorError(
                     message=f"Orchestrator execution failed: {e}",
@@ -4479,34 +6435,41 @@ class OrchestratorRunner:
             # Calculate duration
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # Emit completion event
+            durable_terminal_status: SessionStatus | None = None
+            completion_summary: dict[str, Any] | None = None
             if success:
                 completion_summary = {
                     "final_message": final_message[:500],
                     "messages_processed": messages_processed,
                     **self._task_summary(),
                 }
-                completed_event = create_session_completed_event(
+                durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    requested_status=SessionStatus.COMPLETED,
                     summary=completion_summary,
                     messages_processed=messages_processed,
                 )
-                await self._event_store.append(completed_event)
-                await self._session_repo.mark_completed(
-                    tracker.session_id,
-                    completion_summary,
-                )
+                success = durable_terminal_status is SessionStatus.COMPLETED
+                if not success:
+                    final_message = (
+                        "Execution result was not persisted because the session was already "
+                        f"{durable_terminal_status.value}."
+                    )
 
-                # Display success
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="green"),
-                        title="[green]Execution Completed[/green]",
-                        border_style="green",
+                        Text(final_message[:1000], style="green" if success else "yellow"),
+                        title=(
+                            "[green]Execution Completed[/green]"
+                            if success
+                            else f"[yellow]Execution {durable_terminal_status.value.title()}[/yellow]"
+                        ),
+                        border_style="green" if success else "yellow",
                     )
                 )
             elif recoverable_failure_pause is not None:
-                await self._session_repo.mark_paused(
+                pause_result = await self._session_repo.mark_paused(
                     tracker.session_id,
                     reason=recoverable_failure_pause.reason,
                     resume_hint=recoverable_failure_pause.resume_hint,
@@ -4514,32 +6477,55 @@ class OrchestratorRunner:
                     resume_after=recoverable_failure_pause.resume_after,
                     pause_kind=recoverable_failure_pause.pause_kind,
                 )
-
-                self._console.print(
-                    Panel(
-                        Text(final_message[:1000], style="yellow"),
-                        title="[yellow]Execution Paused[/yellow]",
-                        border_style="yellow",
-                    )
-                )
-            else:
-                failed_event = create_session_failed_event(
+                pause_status, pause_pending = await self._resolve_pause_publication(
                     session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    pause_result=pause_result,
+                    pause=recoverable_failure_pause,
+                )
+                if pause_pending is not None:
+                    return pause_pending
+                assert pause_status is not None
+                if pause_status is SessionStatus.PAUSED:
+                    self._console.print(
+                        Panel(
+                            Text(final_message[:1000], style="yellow"),
+                            title="[yellow]Execution Paused[/yellow]",
+                            border_style="yellow",
+                        )
+                    )
+                else:
+                    durable_terminal_status = pause_status
+                    recoverable_failure_pause = None
+                    success = pause_status is SessionStatus.COMPLETED
+                    final_message = (
+                        "Execution pause was not persisted because the session was already "
+                        f"{pause_status.value}."
+                    )
+            else:
+                durable_terminal_status = await self._persist_session_terminal_status(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    requested_status=SessionStatus.FAILED,
                     error_message=final_message,
                     messages_processed=messages_processed,
                 )
-                await self._event_store.append(failed_event)
-                await self._session_repo.mark_failed(
-                    tracker.session_id,
-                    final_message,
-                )
+                success = durable_terminal_status is SessionStatus.COMPLETED
+                if durable_terminal_status is not SessionStatus.FAILED:
+                    final_message = (
+                        "Execution failure was not persisted because the session was already "
+                        f"{durable_terminal_status.value}."
+                    )
 
-                # Display failure
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="red"),
-                        title="[red]Execution Failed[/red]",
-                        border_style="red",
+                        Text(final_message[:1000], style="green" if success else "red"),
+                        title=(
+                            "[green]Execution Completed[/green]"
+                            if success
+                            else f"[red]Execution {durable_terminal_status.value.title()}[/red]"
+                        ),
+                        border_style="green" if success else "red",
                     )
                 )
 
@@ -4547,14 +6533,27 @@ class OrchestratorRunner:
             # single-stream consumers (TUI) detect completion without
             # polling the separate session aggregate.
             terminal_status = (
-                "completed" if success else ("paused" if recoverable_failure_pause else "failed")
+                "paused"
+                if recoverable_failure_pause is not None
+                else (
+                    durable_terminal_status.value
+                    if durable_terminal_status is not None
+                    else SessionStatus.FAILED.value
+                )
             )
             terminal_event = create_execution_terminal_event(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
                 status=terminal_status,
-                summary=completion_summary if success else None,
-                error_message=final_message if not success else None,
+                summary=completion_summary
+                if terminal_status == SessionStatus.COMPLETED.value
+                else None,
+                error_message=(
+                    final_message
+                    if terminal_status
+                    not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
+                    else None
+                ),
                 messages_processed=messages_processed,
                 pause_seconds=(
                     recoverable_failure_pause.pause_seconds
@@ -4577,17 +6576,12 @@ class OrchestratorRunner:
                     else None
                 ),
             )
-            await self._event_store.append(terminal_event)
-
-            # Deterministic frugality proof over this execution's per-AC triads.
-            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-            await self._evaluate_frugality_proof(exec_id)
-            if terminal_status in {"completed", "failed", "cancelled"}:
-                await self._report_frugality_retrospective(
-                    execution_id=exec_id,
-                    session_id=tracker.session_id,
-                    terminal_status=terminal_status,
-                )
+            await self._project_execution_outcome(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=terminal_status,
+                terminal_event=terminal_event,
+            )
 
             log.info(
                 "orchestrator.runner.execute_completed",
@@ -4598,10 +6592,25 @@ class OrchestratorRunner:
                 duration_seconds=duration,
             )
 
-            # Clean up session tracking
-            self._unregister_session(exec_id, tracker.session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            if terminal_status != "paused":
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                )
+            else:
+                self._release_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                )
+                self._unregister_session(
+                    exec_id,
+                    tracker.session_id,
+                    release_liveness_lease=False,
+                )
+                self._release_task_workspace_for_identity(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
 
             return Result.ok(
                 OrchestratorResult(
@@ -4627,9 +6636,15 @@ class OrchestratorRunner:
                     messages_processed=messages_processed,
                     start_time=start_time,
                 )
-            self._unregister_session(exec_id, tracker.session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            if await self._cleanup_if_durable_terminal(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            ):
+                raise
+            self._preserve_process_local_owner_for_retry(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
             raise
         except Exception as e:
             log.exception(
@@ -4638,36 +6653,26 @@ class OrchestratorRunner:
                 error=str(e),
             )
 
-            # Clean up session tracking
-            self._unregister_session(exec_id, tracker.session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
-
-            # Emit failure event
-            failed_event = create_session_failed_event(
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
                 session_id=tracker.session_id,
-                error_message=str(e),
-                error_type=type(e).__name__,
+                execution_id=exec_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
+            durable_terminal_status, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                error=e,
                 messages_processed=messages_processed,
             )
-            await self._event_store.append(failed_event)
-            await self._session_repo.mark_failed(
-                tracker.session_id,
-                str(e),
-            )
-            await self._event_store.append(
-                create_execution_terminal_event(
-                    execution_id=exec_id,
-                    session_id=tracker.session_id,
-                    status="failed",
-                    error_message=str(e),
-                    messages_processed=messages_processed,
-                )
-            )
+            if persistence_pending is not None:
+                return persistence_pending
+            assert durable_terminal_status is not None
             await self._report_frugality_retrospective(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
-                terminal_status="failed",
+                terminal_status=durable_terminal_status.value,
             )
 
             return Result.err(
@@ -4920,28 +6925,35 @@ class OrchestratorRunner:
             **self._task_summary(),
         }
 
-        # Emit completion event
+        durable_terminal_status: SessionStatus | None = None
         if success:
-            completed_event = create_session_completed_event(
+            durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
+                execution_id=exec_id,
+                requested_status=SessionStatus.COMPLETED,
                 summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
             )
-            await self._event_store.append(completed_event)
-            await self._session_repo.mark_completed(
-                tracker.session_id,
-                execution_summary,
-            )
+            success = durable_terminal_status is SessionStatus.COMPLETED
+            if not success:
+                final_message = (
+                    "Parallel result was not persisted because the session was already "
+                    f"{durable_terminal_status.value}."
+                )
 
             self._console.print(
                 Panel(
-                    Text(final_message, style="green"),
-                    title="[green]Parallel Execution Completed[/green]",
-                    border_style="green",
+                    Text(final_message, style="green" if success else "yellow"),
+                    title=(
+                        "[green]Parallel Execution Completed[/green]"
+                        if success
+                        else f"[yellow]Parallel Execution {durable_terminal_status.value.title()}[/yellow]"
+                    ),
+                    border_style="green" if success else "yellow",
                 )
             )
         elif recoverable_failure_pause is not None:
-            await self._session_repo.mark_paused(
+            pause_result = await self._session_repo.mark_paused(
                 tracker.session_id,
                 reason=recoverable_failure_pause.reason,
                 resume_hint=recoverable_failure_pause.resume_hint,
@@ -4949,17 +6961,36 @@ class OrchestratorRunner:
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
             )
-
-            self._console.print(
-                Panel(
-                    Text(final_message, style="yellow"),
-                    title="[yellow]Parallel Execution Paused[/yellow]",
-                    border_style="yellow",
-                )
-            )
-        else:
-            failed_event = create_session_failed_event(
+            pause_status, pause_pending = await self._resolve_pause_publication(
                 session_id=tracker.session_id,
+                execution_id=exec_id,
+                pause_result=pause_result,
+                pause=recoverable_failure_pause,
+            )
+            if pause_pending is not None:
+                return pause_pending
+            assert pause_status is not None
+            if pause_status is SessionStatus.PAUSED:
+                self._console.print(
+                    Panel(
+                        Text(final_message, style="yellow"),
+                        title="[yellow]Parallel Execution Paused[/yellow]",
+                        border_style="yellow",
+                    )
+                )
+            else:
+                durable_terminal_status = pause_status
+                recoverable_failure_pause = None
+                success = pause_status is SessionStatus.COMPLETED
+                final_message = (
+                    "Parallel pause was not persisted because the session was already "
+                    f"{pause_status.value}."
+                )
+        else:
+            durable_terminal_status = await self._persist_session_terminal_status(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                requested_status=SessionStatus.FAILED,
                 error_message=(
                     "Partial failure: "
                     f"{parallel_result.failure_count} failed, "
@@ -4968,63 +6999,75 @@ class OrchestratorRunner:
                 ),
                 messages_processed=parallel_result.total_messages,
             )
-            await self._event_store.append(failed_event)
-            await self._session_repo.mark_failed(
-                tracker.session_id,
-                final_message,
-            )
+            success = durable_terminal_status is SessionStatus.COMPLETED
+            if durable_terminal_status is not SessionStatus.FAILED:
+                final_message = (
+                    "Parallel failure was not persisted because the session was already "
+                    f"{durable_terminal_status.value}."
+                )
 
             self._console.print(
                 Panel(
-                    Text(final_message, style="yellow"),
-                    title="[yellow]Partial Success[/yellow]",
-                    border_style="yellow",
+                    Text(final_message, style="green" if success else "yellow"),
+                    title=(
+                        "[green]Parallel Execution Completed[/green]"
+                        if success
+                        else f"[yellow]Parallel Execution {durable_terminal_status.value.title()}[/yellow]"
+                    ),
+                    border_style="green" if success else "yellow",
                 )
             )
 
         terminal_status = (
-            "completed" if success else ("paused" if recoverable_failure_pause else "failed")
-        )
-        await self._event_store.append(
-            create_execution_terminal_event(
-                execution_id=exec_id,
-                session_id=tracker.session_id,
-                status=terminal_status,
-                summary=execution_summary if success else None,
-                error_message=final_message if not success else None,
-                messages_processed=parallel_result.total_messages,
-                pause_seconds=(
-                    recoverable_failure_pause.pause_seconds
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                resume_after=(
-                    recoverable_failure_pause.resume_after
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                pause_kind=(
-                    recoverable_failure_pause.pause_kind
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
-                resume_hint=(
-                    recoverable_failure_pause.resume_hint
-                    if recoverable_failure_pause is not None
-                    else None
-                ),
+            "paused"
+            if recoverable_failure_pause is not None
+            else (
+                durable_terminal_status.value
+                if durable_terminal_status is not None
+                else SessionStatus.FAILED.value
             )
         )
-
-        # Deterministic frugality proof over this execution's per-AC triads.
-        # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-        await self._evaluate_frugality_proof(exec_id)
-        if terminal_status in {"completed", "failed", "cancelled"}:
-            await self._report_frugality_retrospective(
-                execution_id=exec_id,
-                session_id=tracker.session_id,
-                terminal_status=terminal_status,
-            )
+        terminal_event = create_execution_terminal_event(
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            status=terminal_status,
+            summary=(
+                execution_summary if terminal_status == SessionStatus.COMPLETED.value else None
+            ),
+            error_message=(
+                final_message
+                if terminal_status
+                not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
+                else None
+            ),
+            messages_processed=parallel_result.total_messages,
+            pause_seconds=(
+                recoverable_failure_pause.pause_seconds
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            resume_after=(
+                recoverable_failure_pause.resume_after
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            pause_kind=(
+                recoverable_failure_pause.pause_kind
+                if recoverable_failure_pause is not None
+                else None
+            ),
+            resume_hint=(
+                recoverable_failure_pause.resume_hint
+                if recoverable_failure_pause is not None
+                else None
+            ),
+        )
+        await self._project_execution_outcome(
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            terminal_status=terminal_status,
+            terminal_event=terminal_event,
+        )
 
         log.info(
             "orchestrator.runner.parallel_completed",
@@ -5040,11 +7083,25 @@ class OrchestratorRunner:
             duration_seconds=duration,
         )
 
-        # Clean up session tracking
-        self._unregister_session(exec_id, tracker.session_id)
-        await clear_cancellation(tracker.session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        if terminal_status != "paused":
+            await self._cleanup_terminal_process_local_state(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+        else:
+            self._release_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+            self._unregister_session(
+                exec_id,
+                tracker.session_id,
+                release_liveness_lease=False,
+            )
+            self._release_task_workspace_for_identity(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
         return Result.ok(
             OrchestratorResult(
@@ -5084,14 +7141,37 @@ class OrchestratorRunner:
             session_id=session_id,
         )
 
-        # Reconstruct session
-        session_result = await self._session_repo.reconstruct_session(session_id)
+        # Reconstruct session. A transient read failure is not evidence that
+        # the retained process-local owner is lost; preserve it as a typed,
+        # retryable lifecycle result so a background wrapper cannot append a
+        # generic FAILED event or evict the owner/store.
+        try:
+            session_result = await self._session_repo.reconstruct_session(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return Result.err(
+                OrchestratorError(
+                    message=f"Failed to reconstruct session: {exc}",
+                    details={
+                        "session_id": session_id,
+                        "cause": str(exc),
+                        "resume_blocked": "process_local_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
 
         if session_result.is_err:
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to reconstruct session: {session_result.error}",
-                    details={"session_id": session_id},
+                    details={
+                        "session_id": session_id,
+                        "cause": str(session_result.error),
+                        "resume_blocked": "process_local_reconstruction_pending",
+                        "retryable": True,
+                    },
                 )
             )
 
@@ -5103,10 +7183,10 @@ class OrchestratorRunner:
             SessionStatus.CANCELLED,
             SessionStatus.FAILED,
         ):
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
+            self._pending_lifecycle_intents.pop(session_id, None)
+            await self._cleanup_terminal_process_local_state(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
             )
             return Result.err(
                 OrchestratorError(
@@ -5115,11 +7195,147 @@ class OrchestratorRunner:
                 )
             )
 
-        if self._fat_harness_mode:
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
+
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            error = await self._mark_process_local_resume_unavailable(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
                 session_registered=False,
+                retire_authority=False,
+            )
+            if error.details.get("terminal_persistence_pending") is not True:
+                await clear_cancellation(session_id)
+            return Result.err(error)
+
+        # Persisted process-local authority is arbitrated before any policy
+        # derived from the current runner or seed. A current policy gate must
+        # never mask that the exact paused owner has disappeared.
+        authority_generation, authority_claimed = self._claim_process_local_authority_generation(
+            session_id,
+            tracker.execution_id,
+            raw_contract,
+        )
+        if authority_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
+                    session_id,
+                    tracker.execution_id,
+                )
+            )
+        if authority_generation is None:
+            if self._process_local_authority_held_elsewhere(
+                session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        session_id,
+                        tracker.execution_id,
+                    )
+                )
+            error = await self._mark_process_local_resume_unavailable(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                session_id,
+                session_registered=False,
+                retire_authority=False,
+            )
+            if error.details.get("terminal_persistence_pending") is not True:
+                await clear_cancellation(session_id)
+            return Result.err(error)
+
+        # A RUNNING tracker with a current Foundation A contract belongs to an
+        # active process while its early liveness lease is held.  If the lease
+        # is gone and this process has no live registry capability, the prior
+        # owner has crashed or exited and Foundation A must terminally reject it
+        # rather than leave a restartable-looking RUNNING session stranded.
+        if tracker.status != SessionStatus.PAUSED:
+            # A previous cancellation attempt may have failed its durable
+            # write after the worker stopped. Its request remains live so this
+            # exact owner can retry terminalization before rejecting RUNNING.
+            try:
+                self._register_session(tracker.execution_id, session_id)
+                if await self._check_startup_cancellation(session_id):
+                    return await self._handle_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=tracker.messages_processed,
+                        start_time=datetime.now(UTC),
+                    )
+            except asyncio.CancelledError:
+                self._release_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    session_id,
+                    release_liveness_lease=False,
+                )
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                raise
+            except Exception as exc:
+                self._release_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    session_id,
+                    release_liveness_lease=False,
+                )
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                return Result.err(
+                    OrchestratorError(
+                        message=f"Failed to inspect live process-local session: {exc}",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                )
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._unregister_session(
+                tracker.execution_id,
+                session_id,
+                release_liveness_lease=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=f"Session is not paused and cannot resume ({tracker.status.value})",
+                    details={
+                        "session_id": session_id,
+                        "status": tracker.status.value,
+                        "resume_blocked": "session_not_paused",
+                    },
+                )
+            )
+
+        if self._fat_harness_mode:
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
             )
             return Result.err(
                 OrchestratorError(
@@ -5138,10 +7354,9 @@ class OrchestratorRunner:
             )
 
         if _seed_has_investment_metadata(seed):
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
             )
             return Result.err(
                 OrchestratorError(
@@ -5164,21 +7379,64 @@ class OrchestratorRunner:
                 self._restore_execution_contract,
                 tracker.progress,
                 seed=seed,
+                authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
-        except OrchestratorError as exc:
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
+        except asyncio.CancelledError:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
             )
+            if cancellation_result is not None:
+                return cancellation_result
+            if await self._cleanup_if_durable_terminal(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            ):
+                raise
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+            )
+            raise
+        except OrchestratorError as exc:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
+            _, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=exc,
+            )
+            if persistence_pending is not None:
+                return persistence_pending
             return Result.err(exc)
-        session_registered = False
-
         try:
             # Register session for cancellation tracking
             self._register_session(tracker.execution_id, session_id)
-            session_registered = True
+
+            # A public cancellation may have reserved this previously-paused
+            # owner between resume arbitration and registration.  Honor that
+            # request before restoring handles, assembling tools, or invoking
+            # any runtime effect.
+            if await self._check_startup_cancellation(session_id):
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=datetime.now(UTC),
+                )
 
             if execution_contract_changed and self._execution_contract is not None:
                 contract_progress = {
@@ -5257,17 +7515,53 @@ Note: This is a resumed session. Please continue from where execution was interr
                 activity_map=resume_strategy.get_activity_map(),
             )
             await self._replay_workflow_state(session_id, state_tracker)
-        except Exception as e:
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=session_registered,
+        except asyncio.CancelledError:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
             )
+            if cancellation_result is not None:
+                return cancellation_result
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+            )
+            raise
+        except Exception as e:
+            cancellation_result = (
+                await self._drain_requested_cancellation_before_pre_execution_cleanup(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=tracker.messages_processed,
+                    start_time=tracker.start_time,
+                )
+            )
+            if cancellation_result is not None:
+                return cancellation_result
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
+            )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
             log.exception(
                 "orchestrator.runner.resume_setup_failed",
                 session_id=session_id,
                 error=str(e),
             )
+            _, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
+                messages_processed=tracker.messages_processed,
+            )
+            if persistence_pending is not None:
+                return persistence_pending
             return Result.err(
                 OrchestratorError(
                     message=f"Session resume failed: {e}",
@@ -5419,23 +7713,37 @@ Note: This is a resumed session. Please continue from where execution was interr
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
+            durable_terminal_status: SessionStatus | None = None
             if success:
-                await self._session_repo.mark_completed(
-                    session_id,
-                    {
+                durable_terminal_status = await self._persist_session_terminal_status(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    requested_status=SessionStatus.COMPLETED,
+                    summary={
                         "messages_processed": messages_processed,
                         **self._task_summary(),
                     },
+                    messages_processed=messages_processed,
                 )
+                success = durable_terminal_status is SessionStatus.COMPLETED
+                if not success:
+                    final_message = (
+                        "Resumed execution result was not persisted because the session was already "
+                        f"{durable_terminal_status.value}."
+                    )
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="green"),
-                        title="[green]Resumed Execution Completed[/green]",
-                        border_style="green",
+                        Text(final_message[:1000], style="green" if success else "yellow"),
+                        title=(
+                            "[green]Resumed Execution Completed[/green]"
+                            if success
+                            else f"[yellow]Resumed Execution {durable_terminal_status.value.title()}[/yellow]"
+                        ),
+                        border_style="green" if success else "yellow",
                     )
                 )
             elif recoverable_resume_failure is not None:
-                await self._session_repo.mark_paused(
+                pause_result = await self._session_repo.mark_paused(
                     session_id,
                     reason=recoverable_resume_failure.reason,
                     resume_hint=recoverable_resume_failure.resume_hint,
@@ -5443,66 +7751,105 @@ Note: This is a resumed session. Please continue from where execution was interr
                     resume_after=recoverable_resume_failure.resume_after,
                     pause_kind=recoverable_resume_failure.pause_kind,
                 )
-                self._console.print(
-                    Panel(
-                        Text(final_message[:1000], style="yellow"),
-                        title="[yellow]Resumed Execution Paused[/yellow]",
-                        border_style="yellow",
-                    )
+                pause_status, pause_pending = await self._resolve_pause_publication(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    pause_result=pause_result,
+                    pause=recoverable_resume_failure,
                 )
+                if pause_pending is not None:
+                    return pause_pending
+                assert pause_status is not None
+                if pause_status is SessionStatus.PAUSED:
+                    self._console.print(
+                        Panel(
+                            Text(final_message[:1000], style="yellow"),
+                            title="[yellow]Resumed Execution Paused[/yellow]",
+                            border_style="yellow",
+                        )
+                    )
+                else:
+                    durable_terminal_status = pause_status
+                    recoverable_resume_failure = None
+                    success = pause_status is SessionStatus.COMPLETED
+                    final_message = (
+                        "Resumed execution pause was not persisted because the session was already "
+                        f"{pause_status.value}."
+                    )
             else:
-                await self._session_repo.mark_failed(session_id, final_message)
+                durable_terminal_status = await self._persist_session_terminal_status(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    requested_status=SessionStatus.FAILED,
+                    error_message=final_message,
+                    messages_processed=messages_processed,
+                )
+                success = durable_terminal_status is SessionStatus.COMPLETED
+                if durable_terminal_status is not SessionStatus.FAILED:
+                    final_message = (
+                        "Resumed execution failure was not persisted because the session was already "
+                        f"{durable_terminal_status.value}."
+                    )
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="red"),
-                        title="[red]Resumed Execution Failed[/red]",
-                        border_style="red",
+                        Text(final_message[:1000], style="green" if success else "red"),
+                        title=(
+                            "[green]Resumed Execution Completed[/green]"
+                            if success
+                            else f"[red]Resumed Execution {durable_terminal_status.value.title()}[/red]"
+                        ),
+                        border_style="green" if success else "red",
                     )
                 )
 
             # Mirror terminal state into execution stream for TUI.
             terminal_status = (
-                "completed" if success else ("paused" if recoverable_resume_failure else "failed")
-            )
-            await self._event_store.append(
-                create_execution_terminal_event(
-                    execution_id=tracker.execution_id,
-                    session_id=session_id,
-                    status=terminal_status,
-                    error_message=final_message if not success else None,
-                    messages_processed=messages_processed,
-                    pause_seconds=(
-                        recoverable_resume_failure.pause_seconds
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    resume_after=(
-                        recoverable_resume_failure.resume_after
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    pause_kind=(
-                        recoverable_resume_failure.pause_kind
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
-                    resume_hint=(
-                        recoverable_resume_failure.resume_hint
-                        if recoverable_resume_failure is not None
-                        else None
-                    ),
+                "paused"
+                if recoverable_resume_failure is not None
+                else (
+                    durable_terminal_status.value
+                    if durable_terminal_status is not None
+                    else SessionStatus.FAILED.value
                 )
             )
-
-            # Deterministic frugality proof over this execution's per-AC triads.
-            # Honestly INSUFFICIENT_DATA until the shadow-replay baseline exists.
-            await self._evaluate_frugality_proof(tracker.execution_id)
-            if terminal_status in {"completed", "failed", "cancelled"}:
-                await self._report_frugality_retrospective(
-                    execution_id=tracker.execution_id,
-                    session_id=session_id,
-                    terminal_status=terminal_status,
-                )
+            terminal_event = create_execution_terminal_event(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                status=terminal_status,
+                error_message=(
+                    final_message
+                    if terminal_status
+                    not in {SessionStatus.COMPLETED.value, SessionStatus.PAUSED.value}
+                    else None
+                ),
+                messages_processed=messages_processed,
+                pause_seconds=(
+                    recoverable_resume_failure.pause_seconds
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                resume_after=(
+                    recoverable_resume_failure.resume_after
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                pause_kind=(
+                    recoverable_resume_failure.pause_kind
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+                resume_hint=(
+                    recoverable_resume_failure.resume_hint
+                    if recoverable_resume_failure is not None
+                    else None
+                ),
+            )
+            await self._project_execution_outcome(
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status,
+                terminal_event=terminal_event,
+            )
 
             log.info(
                 "orchestrator.runner.resume_completed",
@@ -5512,13 +7859,31 @@ Note: This is a resumed session. Please continue from where execution was interr
                 duration_seconds=duration,
             )
 
-            # Clear the in-memory cancellation flag so it doesn't linger
-            await clear_cancellation(session_id)
+            async def _cleanup_resumed_owner() -> None:
+                # A paused owner has not acknowledged a cancellation that may
+                # have arrived after its final execution checkpoint. Preserve
+                # that marker so the next resume terminalizes before effects.
+                if terminal_status != "paused":
+                    await self._cleanup_terminal_process_local_state(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                else:
+                    self._release_process_local_authority(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    self._unregister_session(
+                        tracker.execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                    self._release_task_workspace_for_identity(
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                    )
 
-            # Clean up session tracking
-            self._unregister_session(tracker.execution_id, session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
+            await _await_process_local_cleanup(_cleanup_resumed_owner())
 
             return Result.ok(
                 OrchestratorResult(
@@ -5532,6 +7897,24 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
             )
 
+        except asyncio.CancelledError:
+            if await is_cancellation_requested(session_id):
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            if await self._cleanup_if_durable_terminal(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            ):
+                raise
+            self._preserve_process_local_owner_for_retry(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            raise
         except Exception as e:
             log.exception(
                 "orchestrator.runner.resume_failed",
@@ -5539,22 +7922,26 @@ Note: This is a resumed session. Please continue from where execution was interr
                 error=str(e),
             )
 
-            # Clean up session tracking
-            self._unregister_session(tracker.execution_id, session_id)
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
-            await self._event_store.append(
-                create_execution_terminal_event(
-                    execution_id=tracker.execution_id,
-                    session_id=session_id,
-                    status="failed",
-                    error_message=str(e),
-                )
+            terminal_persistence_pending = self._terminal_persistence_pending_from_error(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
             )
+            if terminal_persistence_pending is not None:
+                return terminal_persistence_pending
+            durable_terminal_status, persistence_pending = await self._persist_failure_and_cleanup(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                error=e,
+                messages_processed=messages_processed,
+            )
+            if persistence_pending is not None:
+                return persistence_pending
+            assert durable_terminal_status is not None
             await self._report_frugality_retrospective(
                 execution_id=tracker.execution_id,
                 session_id=session_id,
-                terminal_status="failed",
+                terminal_status=durable_terminal_status.value,
             )
 
             return Result.err(
@@ -5579,6 +7966,7 @@ __all__ = [
     "build_system_prompt",
     "build_task_prompt",
     "clear_cancellation",
+    "get_cancellation_request",
     "get_pending_cancellations",
     "is_cancellation_requested",
     "request_cancellation",

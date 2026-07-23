@@ -19,6 +19,10 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
+from ouroboros.orchestrator.execution_authority import (
+    ProcessLocalCancellationDisposition,
+    request_process_local_cancellation,
+)
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_holder_alive,
@@ -377,6 +381,7 @@ class JobManager:
         self._backstops: dict[str, asyncio.Task[None]] = {}
         self._started_job_ids: set[str] = set()
         self._monitor_terminalized_jobs: set[str] = set()
+        self._drained_job_ids: set[str] = set()
         self._recovery_locks: dict[str, asyncio.Lock] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
@@ -2040,12 +2045,40 @@ class JobManager:
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
         should_persist_linked_cancel = False
+        process_local_cancellation = None
         if snapshot.links.session_id:
             if not linked_session_terminal:
-                await request_cancellation(snapshot.links.session_id)
-                should_persist_linked_cancel = linked_session_reconstructed and (
-                    not linked_session_started or not linked_session_owned_by_current_process
-                )
+                if linked_session_reconstructed:
+                    process_local_cancellation = await request_process_local_cancellation(
+                        session_result.value,
+                        linked_session_repo,
+                        reason="Background job cancelled",
+                        cancelled_by="mcp_job_manager",
+                    )
+                if process_local_cancellation is None:
+                    # Historical sessions retain the established cooperative
+                    # signal/direct-persistence split because they have no
+                    # Foundation A capability to reserve.
+                    await request_cancellation(snapshot.links.session_id)
+                    should_persist_linked_cancel = linked_session_reconstructed and (
+                        not linked_session_started or not linked_session_owned_by_current_process
+                    )
+                elif (
+                    process_local_cancellation.disposition
+                    == ProcessLocalCancellationDisposition.HELD_ELSEWHERE
+                ):
+                    logger.info(
+                        "job_manager.cancel_job: process-local session held elsewhere",
+                        extra={"job_id": job_id, "session_id": snapshot.links.session_id},
+                    )
+                elif (
+                    process_local_cancellation.disposition
+                    == ProcessLocalCancellationDisposition.PERSISTENCE_PENDING
+                ):
+                    logger.warning(
+                        "job_manager.cancel_job: process-local cancellation persistence pending",
+                        extra={"job_id": job_id, "session_id": snapshot.links.session_id},
+                    )
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
@@ -2053,11 +2086,35 @@ class JobManager:
             task.cancel()
             cancelled_tasks.append(task)
         runner_task = self._runner_tasks.get(job_id)
-        if runner_task is not None and not runner_task.done():
+        if (
+            runner_task is not None
+            and not runner_task.done()
+            and (
+                snapshot.links.session_id is None
+                or process_local_cancellation is None
+                or process_local_cancellation.disposition
+                == ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+            )
+        ):
             runner_task.cancel()
             cancelled_tasks.append(runner_task)
         if cancelled_tasks:
             await asyncio.wait(cancelled_tasks, timeout=5)
+        if (
+            snapshot.links.session_id
+            and snapshot.links.execution_id
+            and process_local_cancellation is not None
+            and process_local_cancellation.disposition
+            == ProcessLocalCancellationDisposition.CANCELLED
+        ):
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=snapshot.links.execution_id,
+                    session_id=snapshot.links.session_id,
+                    status="cancelled",
+                    error_message="Background job cancelled",
+                )
+            )
         if snapshot.links.session_id and should_persist_linked_cancel:
             repo = linked_session_repo or SessionRepository(self._event_store)
             latest_session = await repo.reconstruct_session(snapshot.links.session_id)
@@ -2081,7 +2138,12 @@ class JobManager:
                     raise ValueError(
                         f"Failed to mark linked session cancelled: {cancel_result.error.message}"
                     )
-                if snapshot.links.execution_id:
+                if cancel_result.value is False:
+                    logger.info(
+                        "job_manager.cancel_job: linked session became terminal before cancellation",
+                        extra={"job_id": job_id, "session_id": snapshot.links.session_id},
+                    )
+                elif snapshot.links.execution_id:
                     await self._event_store.append(
                         create_execution_terminal_event(
                             execution_id=snapshot.links.execution_id,
@@ -2259,7 +2321,11 @@ class JobManager:
         Returns the number of jobs whose tasks finished within the grace.
         """
         self._draining = True
-        live_job_ids = [job_id for job_id, task in self._tasks.items() if not task.done()]
+        live_job_ids = [
+            job_id
+            for job_id, task in self._tasks.items()
+            if not task.done() and job_id not in self._drained_job_ids
+        ]
         log.info(
             "mcp.job.drain_start",
             live_job_count=len(live_job_ids),
@@ -2369,6 +2435,11 @@ class JobManager:
                 continue
             if snapshot.is_terminal:
                 drained += 1
+                # The terminal event can become durable just before
+                # ``_run_job`` removes its still-live task from ``_tasks``.
+                # Remember that this invocation already counted the job so a
+                # repeated drain in that scheduling window remains idempotent.
+                self._drained_job_ids.add(job_id)
         log.info(
             "mcp.job.drain_complete",
             drained=drained,
@@ -2425,6 +2496,7 @@ class JobManager:
             self._monitors.pop(job_id, None)
             self._recovery_locks.pop(job_id, None)
             self._monitor_terminalized_jobs.discard(job_id)
+            self._drained_job_ids.discard(job_id)
             self._started_job_ids.discard(job_id)
         return len(expired)
 

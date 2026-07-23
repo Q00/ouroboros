@@ -12,6 +12,7 @@ from ouroboros.bigbang.interview import InterviewRound, InterviewState, Intervie
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
 from ouroboros.mcp.tools.definitions import (
@@ -57,6 +58,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.schema import events_table
 from ouroboros.resilience.lateral import ThinkingPersona
 
 
@@ -69,6 +71,13 @@ async def memory_event_store() -> AsyncIterator[EventStore]:
         yield store
     finally:
         await store.close()
+
+
+async def _append_legacy_event_unchecked(store: EventStore, event: BaseEvent) -> None:
+    """Seed malformed legacy history that current public append guards reject."""
+    assert store._engine is not None
+    async with store._engine.begin() as conn:
+        await conn.execute(events_table.insert().values(**event.to_db_dict()))
 
 
 class TestExecuteSeedHandler:
@@ -167,6 +176,9 @@ class TestExecuteSeedHandler:
         class FakeRunner:
             def __init__(self, *args: object, fat_harness_mode: bool, **kwargs: object) -> None:
                 captured_modes.append(fat_harness_mode)
+
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
 
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(fresh_tracker)
@@ -295,6 +307,9 @@ class TestExecuteSeedHandler:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
 
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
+
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(tracker)
 
@@ -379,6 +394,9 @@ class TestExecuteSeedHandler:
         class FakeRunner:
             def __init__(self, *args: object, **kwargs: object) -> None:
                 pass
+
+            def _has_live_process_local_authority(self, *args: object, **kwargs: object) -> bool:
+                return False
 
             async def prepare_session(self, *args: object, **kwargs: object) -> Result:
                 return Result.ok(running_tracker)
@@ -1399,7 +1417,8 @@ class TestProjectionQueryHandler:
                 },
             )
         )
-        await memory_event_store.append(
+        await _append_legacy_event_unchecked(
+            memory_event_store,
             BaseEvent(
                 id="evt_session_exec_b",
                 type="orchestrator.session.started",
@@ -1410,7 +1429,7 @@ class TestProjectionQueryHandler:
                     "seed_id": "seed_projection_b",
                     "seed_goal": "Requested execution",
                 },
-            )
+            ),
         )
         await memory_event_store.append(
             BaseEvent(
@@ -1484,14 +1503,15 @@ class TestProjectionQueryHandler:
                 data={"execution_id": "exec_reused_a", "seed_id": "seed_reused_a"},
             )
         )
-        await memory_event_store.append(
+        await _append_legacy_event_unchecked(
+            memory_event_store,
             BaseEvent(
                 id="evt_reused_session_b",
                 type="orchestrator.session.started",
                 aggregate_type="session",
                 aggregate_id="orch_projection_reused",
                 data={"execution_id": "exec_reused_b", "seed_id": "seed_reused_b"},
-            )
+            ),
         )
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
