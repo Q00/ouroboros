@@ -95,6 +95,53 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     assert should_dispatch_via_plugin(runtime, None) is False
 
 
+def test_run_auto_wires_answer_refiner_factory_result_into_driver() -> None:
+    """The CLI ``_run_auto`` consumer must pass ``build_answer_refiner()``'s
+    result into the driver — symmetric to the MCP path.
+
+    The suite-wide conftest guard stubs ``build_answer_refiner`` to ``None``; this
+    re-patches it to a sentinel and proves the CLI consumer→driver wiring so the
+    guard cannot silently mask a dropped factory result on this path either.
+    """
+    sentinel_refiner = object()
+    handlers = _capture_handler_construction()
+    captured: dict[str, object] = {}
+
+    async def _capture_run(self, state):  # noqa: ANN001
+        captured["pipeline"] = self
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch(
+            "ouroboros.cli.commands.auto.build_answer_refiner",
+            return_value=sentinel_refiner,
+        ),
+        patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
+        patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
+        patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_capture_run),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="wire the answer refiner",
+                resume=None,
+                runtime="claude",
+                max_interview_rounds=2,
+                max_repair_rounds=1,
+                skip_run=True,
+            )
+        )
+
+    pipeline = captured["pipeline"]
+    assert pipeline.interview_driver.answer_refiner is sentinel_refiner
+
+
 def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> None:
     """`ooo auto` resume with persisted opencode-plugin mode must demote to subprocess.
 

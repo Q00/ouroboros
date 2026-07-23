@@ -27,21 +27,30 @@ os.environ["OUROBOROS_DASHBOARD"] = "0"
 
 
 # ── Hermetic home isolation (before collection) ──────────────────────────────
-# Ouroboros derives its state root from ``Path.home()`` (``~/.ouroboros`` for
-# config, the default ``EventStore`` DB, logs, ...). Isolate it at conftest
-# import — i.e. *before* collection — so it also covers effects the per-test
-# fixture below cannot reach: module-level constants captured at import
-# (handlers binding ``Path.home() / ".ouroboros" / ...``), a logging handler
-# opening ``~/.ouroboros/logs/ouroboros.log``, and ``config.loader`` reading
-# ``~/.ouroboros/.env`` at import time. Everything now lands in a throwaway dir.
+# Ouroboros resolves its state root two ways: ``Path.home()`` AND
+# ``os.path.expanduser("~")`` (e.g. cli/commands/{cancel,run,job,resume,tui}.py
+# build the default ``EventStore`` DB path via ``expanduser``). ``$HOME`` is the
+# single chokepoint both go through — ``Path.home()`` calls ``expanduser("~")``
+# internally — so redirecting ``$HOME`` isolates config, the default DB, logs,
+# and import-time constants (e.g. ``tui.DEFAULT_DB_PATH``) in one move, and
+# subprocesses spawned by tests inherit the isolated home instead of the real
+# one. We set it at conftest import — *before* collection — so it also covers
+# effects the per-test fixture cannot reach (module-level constants, a logging
+# handler opening ``~/.ouroboros/logs/ouroboros.log``, ``config.loader`` reading
+# ``~/.ouroboros/.env`` at import).
 #
-# We patch ``Path.home`` rather than ``$HOME`` on purpose: ``$HOME`` drives
-# external tools spawned by tests (e.g. ``uv build``'s cache), so leaving it
-# untouched keeps those hermetic against the real environment, and the ~dozens
-# of tests that ``patch("pathlib.Path.home", ...)`` in their body still win.
+# External tools that legitimately need the real home get an explicit location:
+# ``uv build`` (exercised by the wheel-packaging test) keeps its real cache via
+# ``UV_CACHE_DIR``. git fixtures set per-repo identity, so no global git config
+# is required under the isolated home.
+_REAL_HOME = Path(os.path.expanduser("~"))
 _SESSION_HOME = Path(tempfile.mkdtemp(prefix="ouroboros-test-home-"))
 atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
-Path.home = classmethod(lambda _cls: _SESSION_HOME)  # type: ignore[method-assign]
+os.environ.setdefault("UV_CACHE_DIR", str(_REAL_HOME / ".cache" / "uv"))
+os.environ["HOME"] = str(_SESSION_HOME)
+# Exposed so tests can assert import-time constants were captured under the
+# isolated home rather than the developer's real ``~``.
+os.environ["_OUROBOROS_TEST_SESSION_HOME"] = str(_SESSION_HOME)
 
 
 @pytest.fixture(autouse=True)
@@ -50,8 +59,8 @@ def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
     above, so per-test runtime state does not bleed across tests.
 
     Runtime-backend resolution and the default ``EventStore`` DB path resolve
-    through ``get_config_dir()`` → ``Path.home()``. Two concrete failure modes
-    this prevents:
+    through ``get_config_dir()`` / ``expanduser`` → ``$HOME``. Two concrete
+    failure modes this prevents:
 
     * Runtime-inference tests read the developer's real ``config.yaml``
       ``runtime_profile`` (e.g. ``interview: codex``) and fail locally with
@@ -60,11 +69,12 @@ def isolate_ouroboros_home(tmp_path_factory, monkeypatch):
     * A no-arg ``EventStore()`` writes into a single shared ``ouroboros.db``;
       under ``pytest -n`` a per-test home keeps that off any shared file.
 
-    Tests that need a specific dir still win: their own
-    ``patch("pathlib.Path.home", ...)`` is applied after this fixture.
+    Tests that need a specific home still win: their own
+    ``monkeypatch.setenv("HOME", ...)`` / ``patch("pathlib.Path.home", ...)`` is
+    applied after this fixture.
     """
     home = tmp_path_factory.mktemp("home")
-    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture(autouse=True)
