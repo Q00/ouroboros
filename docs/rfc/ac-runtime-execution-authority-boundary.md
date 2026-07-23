@@ -580,6 +580,25 @@ The Foundation A implementation must demonstrate all of the following:
     reconstruction drains the probe, preserves the nonterminal owner's request
     marker, and then re-propagates `CancelledError`; it cannot return the normal
     `cancellation_requested` disposition to a cancelled caller.
+80. a retained process-local resume whose initial durable reconstruction is
+    transiently unreadable returns typed retryable
+    `process_local_reconstruction_pending`; the MCP background wrapper does not
+    append a generic `FAILED` event or close the handler-owned EventStore.
+81. terminal cleanup that cannot retire the exact adapter-bound authority does
+    not unregister another live route or release its heartbeat; a stale local
+    route may be removed without clearing a marker while a same-process owner
+    or foreign heartbeat remains live.
+82. when public cancellation persistence fails and the caller is cancelled
+    during shielded durable reconstruction, reconciliation drains to completion
+    and re-propagates the caller `CancelledError` with the original persistence
+    failure retained as context.
+83. both initial preparation-progress failure forms (raised exception and
+    `Result.err`) route a successfully persisted `FAILED` winner through full
+    terminal cleanup, including authority, heartbeat, workspace, route, and
+    cancellation-marker acknowledgement.
+84. cancellation-marker acknowledgement retries a transient unlink failure up
+    to the bounded retry limit and surfaces the final `OSError`; a terminal
+    caller cannot report successful cleanup while the file-backed marker remains.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
