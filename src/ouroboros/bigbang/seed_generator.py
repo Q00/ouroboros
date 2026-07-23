@@ -55,6 +55,7 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
+_JSON_ARRAY_INTENT_RE = re.compile(r"^\[\s*['\"]")
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -65,7 +66,14 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
     characters inside one constraint survive as data (#1696). Legacy
     pipe-delimited responses keep the historical split, including
     bracket-prefixed prose such as ``[P0] Must work offline`` that merely
-    starts with ``[`` without being valid JSON.
+    starts with ``[`` without signalling JSON intent.
+
+    Raises:
+        ValueError: If the value signals JSON-array intent (``[`` followed by
+            a quote) but is not a valid JSON array — e.g. a trailing comma or
+            a truncated array. Raising here lets extraction-time callers route
+            malformed structured output through the existing retry path
+            instead of silently pipe-splitting it.
     """
     if isinstance(raw_value, list | tuple):
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
@@ -77,10 +85,20 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
     if text.startswith("[") and text.endswith("]"):
         try:
             decoded = json.loads(text)
-        except json.JSONDecodeError:
-            decoded = None
-        if isinstance(decoded, list):
-            return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
+        except json.JSONDecodeError as e:
+            if _JSON_ARRAY_INTENT_RE.match(text):
+                raise ValueError(
+                    f"CONSTRAINTS looks like a JSON array but is not valid JSON: {e}. "
+                    f"Value: {text[:200]}"
+                ) from e
+        else:
+            if isinstance(decoded, list):
+                return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
+    elif _JSON_ARRAY_INTENT_RE.match(text):
+        raise ValueError(
+            "CONSTRAINTS looks like a truncated JSON array (no closing bracket). "
+            f"Value: {text[:200]}"
+        )
     return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
@@ -818,6 +836,12 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                     f"Found: {list(requirements.keys())}. "
                     f"Response preview: {response[:200]}"
                 )
+
+        # Validate constraints at parse time so malformed JSON-intent output
+        # (e.g. a trailing-comma array) triggers the extraction retry path
+        # instead of being silently pipe-split downstream (#1696).
+        if "constraints" in requirements:
+            requirements["constraints"] = _parse_constraint_values(requirements["constraints"])
 
         return requirements
 

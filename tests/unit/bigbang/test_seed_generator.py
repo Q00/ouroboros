@@ -21,6 +21,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _parse_constraint_values,
     load_seed,
     save_seed_sync,
 )
@@ -528,6 +529,52 @@ class TestSeedGeneratorExtraction:
                 "[P0] Must work offline",
                 "[P1] Fast startup",
             )
+
+    def test_parse_constraint_values_rejects_malformed_json_intent(self) -> None:
+        """JSON-looking but invalid CONSTRAINTS raise instead of silently splitting."""
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_constraint_values('["--lang ko|en",]')
+
+    def test_parse_constraint_values_coerces_non_string_json_entries(self) -> None:
+        """Valid JSON arrays with non-string entries are coerced to strings."""
+        assert _parse_constraint_values('[1, "x"]') == ("1", "x")
+
+    def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
+        """A quote-led array missing its closing bracket raises for retry."""
+        with pytest.raises(ValueError, match="truncated JSON array"):
+            _parse_constraint_values('["--lang ko|en"')
+
+    @pytest.mark.asyncio
+    async def test_generate_retries_on_malformed_json_constraints(self) -> None:
+        """Malformed JSON-intent CONSTRAINTS trigger the extraction retry path."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        malformed_response = create_valid_extraction_response(
+            constraints='["--lang ko|en", "keep exact flag",]'
+        )
+        valid_response = create_valid_extraction_response(
+            constraints='["--lang ko|en", "keep exact flag"]'
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed_response)),
+                Result.ok(create_mock_completion_response(valid_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.constraints == ("--lang ko|en", "keep exact flag")
+            assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_generate_extracts_acceptance_criteria(self) -> None:
