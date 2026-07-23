@@ -5112,6 +5112,30 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [{**executed["evidence"][0], "observed_at": "2026-07-22"}],
     }
     validator.validate(date_only)
+    # Digit-shaped garbage is not a timestamp: month 99 / hour 99 previously
+    # matched the digits-only pattern (bot-review round-3 probe).
+    out_of_range_timestamp = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "2026-99-99T99:::"}],
+    }
+    assert list(validator.iter_errors(out_of_range_timestamp))
+    # The evidence boundary is part of the contract: email-shaped (PII) and
+    # credential-shaped values are raw evidence, never an aggregate.
+    pii_value = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "alice@example.com token=sk-live-123"}],
+    }
+    assert list(validator.iter_errors(pii_value))
+    # An unexecuted proposal with empty tool/query/decision fields is not a
+    # proposal the parent session can run and judge.
+    empty_proposal = {
+        **noop,
+        "data_needed": True,
+        "proposed_queries": [
+            {"tool_name": "", "query": "", "expected_decision": "", "source_class": "external"}
+        ],
+    }
+    assert list(validator.iter_errors(empty_proposal))
 
 
 def test_question_advisory_v1_schema_accepts_unknown_lanes_and_capabilities() -> None:

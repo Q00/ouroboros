@@ -2707,6 +2707,10 @@ class FanoutRecord:
     required_keys: tuple[str, ...] = ()
     received_results: dict[str, Any] = field(default_factory=dict)
     completed: bool = False
+    # The full completion response, persisted with the terminal record so a
+    # replay can return the immutable outcome instead of an unrecoverable
+    # "already_complete" error when the first response was lost in transit.
+    terminal_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2719,6 +2723,7 @@ class FanoutRecord:
             "synthesizer_input": self.synthesizer_input,
             "received_results": self.received_results,
             "completed": self.completed,
+            "terminal_response": self.terminal_response,
         }
 
     @classmethod
@@ -2735,6 +2740,7 @@ class FanoutRecord:
             else expected_keys
         )
         raw_received = data.get("received_results")
+        raw_terminal = data.get("terminal_response")
         return cls(
             fanout_id=str(data["fanout_id"]),
             kind=str(data["kind"]),
@@ -2745,6 +2751,7 @@ class FanoutRecord:
             required_keys=required_keys,
             received_results=dict(raw_received) if isinstance(raw_received, Mapping) else {},
             completed=bool(data.get("completed")),
+            terminal_response=dict(raw_terminal) if isinstance(raw_terminal, Mapping) else None,
         )
 
 
@@ -2867,6 +2874,47 @@ class FanoutRegistry:
             return None
 
 
+@lru_cache(maxsize=1)
+def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    # Function-level import: subagent.py is imported by orchestrator-side
+    # modules, so the canonical pattern strings are pulled lazily.
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_EVIDENCE_EMAIL_PATTERN,
+        DATA_EVIDENCE_SECRET_PATTERN,
+    )
+
+    return (
+        ("email-shaped (PII)", re.compile(DATA_EVIDENCE_EMAIL_PATTERN, re.IGNORECASE)),
+        ("credential-shaped (secret)", re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)),
+    )
+
+
+def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
+    """Scan a data-lane output for raw-evidence shapes the policy forbids.
+
+    The evidence policy (aggregates only, no raw rows, PII-scrubbed) is
+    enforced at re-entry — the point the engine owns — not just declared in
+    the schema: the WHOLE serialized output is scanned so PII/credential
+    content cannot hide in any field, including outputs validated against a
+    contract persisted before the schema carried the boundary patterns. The
+    matched content is deliberately NOT echoed into the error message: the
+    violation report flows back to the host and must not re-leak the data.
+    """
+    try:
+        serialized = json.dumps(output, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return ["data evidence output is not JSON-serializable"]
+    return [
+        f"data evidence boundary: {label} content is raw evidence; the "
+        "evidence policy requires aggregates only, PII-scrubbed"
+        for label, pattern in _data_evidence_boundary_patterns()
+        if pattern.search(serialized)
+    ]
+
+
+_DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
+
+
 def _lane_answer_contract_violations(
     contracts: Mapping[str, Any],
     provided: Mapping[str, Any],
@@ -2877,6 +2925,8 @@ def _lane_answer_contract_violations(
     lane. Lanes without a registered contract are not checked; a submitted
     output that is not a JSON object is itself a violation when a contract
     exists (the contract's response_model_schema describes an object form).
+    Data-evidence lanes additionally get the semantic boundary scan, keyed on
+    the contract id so records persisted with an older schema still get it.
     """
     violations: list[dict[str, Any]] = []
     for lane_id, contract in contracts.items():
@@ -2896,9 +2946,19 @@ def _lane_answer_contract_violations(
                 }
             )
             continue
-        errors = sorted(
-            error.message for error in Draft202012Validator(dict(schema)).iter_errors(dict(output))
-        )
+        validator = Draft202012Validator(dict(schema))
+        if contract_id == _DATA_EVIDENCE_CONTRACT_ID:
+            # Redacted messages: jsonschema echoes the offending instance value
+            # into ``error.message``, and for a data lane that instance can BE
+            # the leak (PII/credential-shaped evidence). Report the location
+            # and the violated keyword, never the content.
+            errors = sorted(
+                f"{error.json_path}: violates {error.validator!r}"
+                for error in validator.iter_errors(dict(output))
+            )
+            errors.extend(_data_evidence_boundary_violations(output))
+        else:
+            errors = sorted(error.message for error in validator.iter_errors(dict(output)))
         if errors:
             violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
     return violations
@@ -3060,6 +3120,11 @@ def submit_fanout_results(
       record → ``status="correlation_mismatch"`` (clean error).
     * A fan-out that already completed → ``status="already_complete"``: the
       record is terminal, so a replay cannot mutate the synthesized outcome.
+      The persisted terminal outcome is replayed on the response, so a caller
+      that lost the first completion response can still recover the synthesis.
+    * Submitted keys that are not in the record's ``expected_keys`` are
+      rejected at the door and reported under ``unexpected_keys`` — an
+      unregistered key is arbitrary content and never enters durable state.
     * Missing required keys → ``status="partial"`` + ``missing_keys`` (the host
       may resubmit with the remaining lanes). Lanes with a registered answer
       contract are validated BEFORE anything is persisted — a violating
@@ -3069,11 +3134,20 @@ def submit_fanout_results(
       means the received keys could NOT be saved (I/O failure): resubmit
       them together with the remaining lanes.
     * All required keys present → route to the revived synthesizer for the
-      record ``kind`` and return its structured outcome under
-      ``status="complete"``. Optional keys that never arrived are reported as
-      ``missing_optional_keys`` instead of pinning the fan-out at ``partial``
-      (Q00/ouroboros#1671); records persisted without a required/optional
-      split treat every expected key as required.
+      record ``kind``. The synthesizer's own content validation gates
+      terminalization: outputs it rejects (e.g. a ``code_facts`` result bound
+      to a different session) come back as ``status="partial"`` with
+      ``synthesis_rejected_keys`` so a corrected retry stays possible, instead
+      of freezing an unusable outcome behind ``already_complete``.
+    * A synthesizable outcome is persisted as the terminal record BEFORE
+      completion is claimed: if that write fails the response is
+      ``status="completion_not_persisted"`` (the fan-out stays open — retry
+      the submission), never a claimed-durable ``complete``. On success the
+      structured outcome returns under ``status="complete"``; optional keys
+      that never arrived are reported as ``missing_optional_keys`` instead of
+      pinning the fan-out at ``partial`` (Q00/ouroboros#1671); records
+      persisted without a required/optional split treat every expected key as
+      required.
     """
     record = registry.load(fanout_id)
     if record is None:
@@ -3083,15 +3157,26 @@ def submit_fanout_results(
             "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
         }
     if record.completed:
-        return {
-            "status": "already_complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "error": (
-                "This fan-out already completed; its record is terminal and "
-                "late results cannot mutate the synthesized outcome."
-            ),
-        }
+        replay: dict[str, Any] = (
+            dict(record.terminal_response) if record.terminal_response is not None else {}
+        )
+        replay.update(
+            {
+                "status": "already_complete",
+                "fanout_id": fanout_id,
+                "kind": record.kind,
+                "error": (
+                    "This fan-out already completed; its record is terminal and "
+                    "late results cannot mutate the synthesized outcome."
+                    + (
+                        " The persisted terminal outcome is replayed on this response."
+                        if record.terminal_response is not None
+                        else ""
+                    )
+                ),
+            }
+        )
+        return replay
     if record.session_id and session_id and record.session_id != session_id:
         return {
             "status": "correlation_mismatch",
@@ -3107,12 +3192,22 @@ def submit_fanout_results(
             "expected_correlation_key": record.correlation_key,
         }
 
+    # Unknown keys are rejected at the door, BEFORE any merge or write: a key
+    # the record never registered is arbitrary content with no lane contract,
+    # so accepting it would smuggle unvalidated data into durable state.
     submitted: dict[str, Any] = {}
+    unexpected_keys: list[str] = []
     for result in results:
         key = result.get("key")
         if key is None:
             continue
-        submitted[str(key)] = result.get("content")
+        resolved_key = str(key)
+        if resolved_key not in record.expected_keys:
+            if resolved_key not in unexpected_keys:
+                unexpected_keys.append(resolved_key)
+            continue
+        submitted[resolved_key] = result.get("content")
+    unexpected_keys.sort()
 
     # Contract validation happens at the door, BEFORE anything is merged or
     # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
@@ -3142,48 +3237,44 @@ def submit_fanout_results(
             "received_keys": sorted(provided),
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
             "accumulation_persisted": persisted,
         }
     # Every remaining missing key is optional: proceed to synthesis without it
     # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
     missing_optional = missing_keys
-    # Mark the record terminal so a later replay cannot mutate the outcome.
-    registry.save(replace(record, received_results=provided, completed=True))
 
+    # Run the kind's synthesizer BEFORE terminalizing: key presence alone is
+    # not completion. A synthesizer that rejects submitted content (e.g. a
+    # code_facts output bound to a different session) must leave the record
+    # open so a corrected retry can still land, and the rejected content must
+    # never persist as an accepted result.
+    completion_extra: dict[str, Any] = {}
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
-        outcome = continue_interview_after_lateral_persona_synthesis(
+        outcome: dict[str, Any] = continue_interview_after_lateral_persona_synthesis(
             entries,
             provided,
             _fanout_identity_synthesis,
             _fanout_identity_continuation,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "missing_optional_keys": missing_optional,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
+        ready = bool(outcome.get("ready_for_synthesis"))
+        rejected_keys = [str(key) for key in outcome.get("missing_personas") or ()]
+    elif record.kind == FANOUT_KIND_CODE_INVESTIGATION:
         request = record.synthesizer_input.get("request") or {}
         outcome = synthesize_code_investigation_when_complete(
             request,
             provided,
             _fanout_identity_synthesis,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "missing_optional_keys": missing_optional,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
+        kind_violation_ids = [
+            str(item.get("result_id")) for item in outcome.get("contract_violations") or ()
+        ]
+        ready = bool(outcome.get("ready_for_synthesis")) and not kind_violation_ids
+        rejected_keys = [
+            str(key) for key in outcome.get("missing_result_ids") or ()
+        ] + kind_violation_ids
+    elif record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
         # order and hand them back for the host to synthesize. This batch was
@@ -3204,22 +3295,72 @@ def submit_fanout_results(
             if lane_id in provided and lane_id not in excluded_lanes
         ]
         outcome = _fanout_identity_synthesis(aggregated)
+        ready = True
+        rejected_keys = []
+        completion_extra["contract_violations"] = contract_violations
+    else:
         return {
-            "status": "complete",
+            "status": "unknown_kind",
             "fanout_id": fanout_id,
             "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "missing_optional_keys": missing_optional,
-            "contract_violations": contract_violations,
-            "result": outcome,
+            "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
         }
 
-    return {
-        "status": "unknown_kind",
+    if not ready:
+        rejected_present = sorted(key for key in rejected_keys if key in provided)
+        retained = {
+            key: value for key, value in provided.items() if key not in set(rejected_present)
+        }
+        persisted = registry.save(replace(record, received_results=retained))
+        return {
+            "status": "partial",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": [key for key in record.expected_keys if key not in retained],
+            "missing_required_keys": [key for key in record.required_keys if key not in retained],
+            "received_keys": sorted(retained),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "synthesis_rejected_keys": rejected_present,
+            "result": outcome,
+            "accumulation_persisted": persisted,
+        }
+
+    completion = {
+        "status": "complete",
         "fanout_id": fanout_id,
         "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+        "correlation_key": record.correlation_key,
+        "missing_optional_keys": missing_optional,
+        "unexpected_keys": unexpected_keys,
+        **completion_extra,
+        "result": outcome,
     }
+    # Persist the terminal record (with its outcome, for replay recovery)
+    # BEFORE claiming completion: a failed terminal write means the fan-out is
+    # NOT durably complete and a later submission could still replace the
+    # outcome, so the caller must be told to retry, never handed "complete".
+    terminal_persisted = registry.save(
+        replace(
+            record,
+            received_results=provided,
+            completed=True,
+            terminal_response=completion,
+        )
+    )
+    if not terminal_persisted:
+        return {
+            **completion,
+            "status": "completion_not_persisted",
+            "error": (
+                "All required results were accepted and synthesized, but the "
+                "terminal fan-out record could not be persisted; completion is "
+                "not durable and the fan-out remains open. Resubmit the same "
+                "results to complete durably."
+            ),
+        }
+    return completion
 
 
 # ---------------------------------------------------------------------------

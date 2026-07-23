@@ -850,6 +850,246 @@ def test_partial_reports_failed_accumulation_persistence(tmp_path: Any) -> None:
     assert out["accumulation_persisted"] is False
 
 
+def test_unexpected_key_is_rejected_before_persistence(tmp_path: Any) -> None:
+    """A key absent from ``expected_keys`` never enters durable state.
+
+    Bot-review round-3 probe (PR #1703): arbitrary email/token content
+    submitted under an unregistered key was accepted and persisted with no
+    violation. Unknown keys are now rejected at the door and reported under
+    ``unexpected_keys``.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-unexpected",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-unexpected",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+            {"key": "unexpected", "content": "carol@example.com token=sk-live-999"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["unexpected_keys"] == ["unexpected"]
+    aggregated = [item["lane_id"] for item in out["result"]["aggregated_outputs"]]
+    assert "unexpected" not in aggregated
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "carol@example.com" not in persisted
+    assert "sk-live-999" not in persisted
+
+
+def test_code_investigation_wrong_session_does_not_terminalize(tmp_path: Any) -> None:
+    """Synthesis readiness gates terminalization, not key presence.
+
+    Bot-review round-3 probe (PR #1703): a ``code_facts`` output bound to a
+    different session returned outer ``status="complete"`` while its result
+    said ``ready_for_synthesis=false``, then the record was permanently
+    terminal and the corrected retry bounced off ``already_complete``. The
+    rejected content is now reported as ``synthesis_rejected_keys``, never
+    persisted, and the record stays open for the corrected retry.
+    """
+    registry = FanoutRegistry(tmp_path)
+    question = "Which manifest declares the package?"
+    session_id = "sess-code-readiness"
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id=session_id,
+        question=question,
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    fanout_id = register_code_investigation_fanout(
+        registry,
+        session_id=session_id,
+        request=meta["code_investigation_request"],
+    )
+    wrong = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key="code_facts",
+        results=[
+            {"key": "code_facts", "content": _code_fact_output("some-other-session", question)}
+        ],
+        fanout_id=fanout_id,
+    )
+    assert wrong["status"] == "partial"
+    assert wrong["synthesis_rejected_keys"] == ["code_facts"]
+    assert wrong["missing_required_keys"] == ["code_facts"]
+    assert wrong["result"]["ready_for_synthesis"] is False
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.completed is False
+    assert "code_facts" not in record.received_results
+
+    corrected = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key="code_facts",
+        results=[{"key": "code_facts", "content": _code_fact_output(session_id, question)}],
+        fanout_id=fanout_id,
+    )
+    assert corrected["status"] == "complete"
+    assert corrected["result"]["ready_for_synthesis"] is True
+
+
+def test_completion_is_not_claimed_when_terminal_write_fails(tmp_path: Any) -> None:
+    """A failed terminal write must never masquerade as durable completion.
+
+    Bot-review round-3 probe (PR #1703): with ``save()`` returning ``False``
+    the call still reported ``complete``, and a later submission could replace
+    the outcome. The response is now ``completion_not_persisted``, the record
+    stays open, and a retry completes durably.
+    """
+    from unittest.mock import patch
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-terminal-io",
+        payloads=_mixed_advisory_payloads(),
+    )
+    results = [
+        {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        {"key": "answer_simplifier", "content": "simplifier-advice"},
+    ]
+    with patch.object(FanoutRegistry, "save", return_value=False):
+        out = submit_fanout_results(
+            registry,
+            session_id="sess-terminal-io",
+            correlation_key="context.lane_id",
+            results=results,
+            fanout_id=fanout_id,
+        )
+    assert out["status"] == "completion_not_persisted"
+    assert out["result"]["aggregated_outputs"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.completed is False
+
+    retry = submit_fanout_results(
+        registry,
+        session_id="sess-terminal-io",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert retry["status"] == "complete"
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.completed is True
+
+
+def test_replay_returns_persisted_terminal_outcome(tmp_path: Any) -> None:
+    """A caller that lost the completion response can recover the synthesis.
+
+    Bot-review round-3 probe (PR #1703): replaying a completed fan-out
+    returned only an ``already_complete`` error, so the terminal outcome was
+    unrecoverable. The completion response is persisted on the terminal
+    record and replayed.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-replay",
+        payloads=_mixed_advisory_payloads(),
+    )
+    results = [
+        {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        {"key": "answer_simplifier", "content": "simplifier-advice"},
+    ]
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-replay",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert first["status"] == "complete"
+
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-replay",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "already_complete"
+    assert replay["result"] == first["result"]
+    assert replay["missing_optional_keys"] == first["missing_optional_keys"]
+
+
+def test_data_evidence_pii_shaped_value_is_rejected_at_reentry(tmp_path: Any) -> None:
+    """The evidence boundary is enforced at re-entry, without re-leaking.
+
+    Bot-review round-3 probe (PR #1703): a schema-shaped evidence item whose
+    value was ``alice@example.com token=sk-live-123`` durably accumulated.
+    The boundary scan (aggregates only, PII-scrubbed) now rejects it, and the
+    violation report itself never echoes the offending content.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-boundary",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-boundary", payloads=payloads
+    )
+
+    pii_evidence_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Aggregate finding text.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "count users by plan tier",
+                "value": "alice@example.com token=sk-live-123",
+                "observed_at": "2026-07-23T09:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time aggregate."],
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-boundary",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": pii_evidence_output},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    violations = out["contract_violations"]
+    assert [item["lane_id"] for item in violations] == ["data_context"]
+    assert violations[0]["errors"]
+    joined = " ".join(violations[0]["errors"])
+    assert "alice@example.com" not in joined
+    assert "sk-live-123" not in joined
+    aggregated = [item["lane_id"] for item in out["result"]["aggregated_outputs"]]
+    assert "data_context" not in aggregated
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-123" not in persisted
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

@@ -244,8 +244,16 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    set returns `status="partial"` with `missing_keys` so you can resubmit the
    remaining lanes (partial submissions accumulate server-side; if the
    response carries `accumulation_persisted: false`, resubmit those lanes
-   again together with the remainder). A completed fanout is terminal —
-   late submissions return `status="already_complete"`. Only
+   again together with the remainder). Keys not registered on the fan-out are
+   rejected and echoed back as `unexpected_keys`; keys whose content the
+   synthesizer rejects (e.g. a `code_facts` output bound to the wrong
+   session) come back as `synthesis_rejected_keys` on a `partial` response —
+   fix and resubmit them. `status="completion_not_persisted"` means the
+   synthesis succeeded but the terminal record could not be saved: completion
+   is not durable yet, so resubmit the same results. A completed fanout is
+   terminal — late submissions return `status="already_complete"` carrying
+   the persisted terminal outcome, so a lost completion response is
+   recoverable by resubmitting. Only
    `required: true` lanes gate completion: once every required lane is
    submitted the fanout completes, and optional lanes that never arrived are
    listed as `missing_optional_keys` on the complete outcome — proceed to

@@ -5,6 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+# Raw-evidence shapes the data_context evidence policy forbids (aggregates
+# only, PII-scrubbed): an email-shaped substring is PII, and a credential
+# prefix glued to an opaque suffix is a leaked secret, never an aggregate.
+# Written without inline regex flags so the same strings are valid in both
+# Python `re` and the ECMA dialect JSON Schema validators use; the re-entry
+# enforcement point recompiles them case-insensitively.
+DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+DATA_EVIDENCE_SECRET_PATTERN = (
+    r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)[-_=:][A-Za-z0-9_-]{4,}"
+)
+
 
 def _builtin_semantics_for(tool_name: str):  # noqa: ANN202
     from ouroboros.orchestrator.capabilities import _BUILTIN_SEMANTICS
@@ -522,16 +533,31 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "properties": {
                         "source": {"type": "string", "minLength": 1, "maxLength": 120},
                         "query_summary": {"type": "string", "minLength": 1, "maxLength": 300},
-                        "value": {"type": "string", "minLength": 1, "maxLength": 400},
+                        "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 400,
+                            # The evidence policy (aggregates only, PII-scrubbed)
+                            # is part of the contract, not just the prompt:
+                            # email-shaped and credential-shaped substrings are
+                            # raw evidence and never validate.
+                            "allOf": [
+                                {"not": {"pattern": DATA_EVIDENCE_EMAIL_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
+                            ],
+                        },
                         "observed_at": {
                             "type": "string",
                             "maxLength": 40,
-                            # ISO-8601-shaped: a date, optionally followed by a
-                            # time and zone offset. Draft 2020-12 validators do
-                            # not enforce "format", so the shape is a pattern.
+                            # ISO-8601-shaped WITH calendar/clock ranges: a real
+                            # date, optionally followed by a real time and zone
+                            # offset. Draft 2020-12 validators do not enforce
+                            # "format", and a digits-only shape accepted
+                            # month 99 / hour 99 (bot-review round-3 probe).
                             "pattern": (
-                                r"^\d{4}-\d{2}-\d{2}"
-                                r"([T ][0-9:.]+([Zz]|[+-]\d{2}:?\d{2})?)?$"
+                                r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+                                r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d{1,6})?)?"
+                                r"([Zz]|[+-]([01]\d|2[0-3]):?[0-5]\d)?)?$"
                             ),
                         },
                     },
@@ -544,10 +570,13 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["tool_name", "query", "expected_decision", "source_class"],
+                    # An unexecuted proposal is only useful if the parent
+                    # session can actually run and judge it: empty tool, query,
+                    # or decision fields are not a proposal.
                     "properties": {
-                        "tool_name": {"type": "string", "maxLength": 120},
-                        "query": {"type": "string", "maxLength": 400},
-                        "expected_decision": {"type": "string", "maxLength": 300},
+                        "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 400},
+                        "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
                         "source_class": {
                             "enum": [
                                 "metered",
