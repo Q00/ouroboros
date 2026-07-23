@@ -534,6 +534,7 @@ async def test_terminal_precreated_tracker_retires_a_stale_live_authority() -> N
     terminal = prepared.with_status(SessionStatus.COMPLETED)
     get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
     runner._get_merged_tools = get_tools
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(terminal))
 
     result = await runner.execute_precreated_session(_seed(), terminal, parallel=False)
 
@@ -686,6 +687,63 @@ async def test_resume_setup_cancellation_releases_its_authority_claim() -> None:
         session_id=tracker.session_id,
         execution_id=tracker.execution_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_tracker_copy_cannot_retire_durable_running_owner(tmp_path) -> None:
+    """Caller status is not durable proof for authority retirement."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'stale-terminal-copy.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(
+        _CountingRuntime(),
+        event_store,
+        MagicMock(),
+        fat_harness_mode=False,
+    )
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-stale-terminal-copy",
+        session_id="session-stale-terminal-copy",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    generation, already_claimed = runner._claim_process_local_authority_generation(
+        tracker.session_id,
+        tracker.execution_id,
+        contract,
+    )
+    assert generation is not None
+    assert already_claimed is False
+
+    try:
+        result = await runner.execute_precreated_session(
+            _seed(),
+            tracker.with_status(SessionStatus.COMPLETED),
+            parallel=False,
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "process_local_execution_in_progress"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.RUNNING
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._release_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
 
 
 @pytest.mark.asyncio
@@ -950,6 +1008,77 @@ async def test_post_cas_task_cancellation_retires_durable_terminal_owner(tmp_pat
         assert not heartbeat.is_holder_alive(tracker.session_id)
         assert tracker.execution_id not in runner.active_sessions
     finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_post_cas_cancellation_drains_terminal_cleanup(tmp_path) -> None:
+    """A second task cancellation cannot interrupt terminal reconciliation."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'post-cas-double-cancel.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(
+        _SuccessfulRuntime(),
+        event_store,
+        MagicMock(),
+        fat_harness_mode=False,
+    )
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-post-cas-double-cancel",
+        session_id="session-post-cas-double-cancel",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_append = event_store.append
+    original_reconstruct = runner._session_repo.reconstruct_session
+    reconciliation_started = asyncio.Event()
+    allow_reconciliation = asyncio.Event()
+
+    async def _cancel_terminal_projection(event: object):
+        if getattr(event, "type", None) == "execution.terminal":
+            raise asyncio.CancelledError
+        return await original_append(event)  # type: ignore[arg-type]
+
+    async def _delayed_reconstruct(session_id: str):
+        reconciliation_started.set()
+        await allow_reconciliation.wait()
+        return await original_reconstruct(session_id)
+
+    try:
+        with (
+            patch.object(event_store, "append", AsyncMock(side_effect=_cancel_terminal_projection)),
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(side_effect=_delayed_reconstruct),
+            ),
+        ):
+            execution = asyncio.create_task(
+                runner.execute_precreated_session(_seed(), tracker, parallel=False)
+            )
+            await reconciliation_started.wait()
+            execution.cancel()
+            allow_reconciliation.set()
+            with pytest.raises(asyncio.CancelledError):
+                await execution
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.COMPLETED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+    finally:
+        allow_reconciliation.set()
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
@@ -1257,6 +1386,81 @@ async def test_unstarted_background_terminal_failure_retains_owner_and_store(tmp
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
         )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_terminal_pending_keeps_handler_owned_store_open(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer MCP finally cannot close a store retained for exact-owner retry."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepare-owned-store.db'}")
+    await event_store.initialize()
+    handler = ExecuteSeedHandler(agent_runtime_backend="process-local-test")
+    original_prepare = OrchestratorRunner.prepare_session
+    close_mock = AsyncMock()
+
+    async def _prepare_with_terminal_failure(
+        runner: OrchestratorRunner,
+        *args: object,
+        **kwargs: object,
+    ):
+        runner._session_repo.track_progress = AsyncMock(
+            return_value=Result.err(PersistenceError("initial progress unavailable"))
+        )
+        runner._session_repo.mark_failed = AsyncMock(
+            return_value=Result.err(PersistenceError("terminal store unavailable"))
+        )
+        return await original_prepare(runner, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+        lambda **_kwargs: _CountingRuntime(),
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.execution_handlers.EventStore",
+        lambda: event_store,
+    )
+
+    retained_runner: OrchestratorRunner | None = None
+    session_id: str | None = None
+    try:
+        with (
+            patch.object(OrchestratorRunner, "prepare_session", _prepare_with_terminal_failure),
+            patch.object(event_store, "close", close_mock),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": yaml.safe_dump(_seed().to_dict()),
+                    "skip_qa": True,
+                    "use_worktree": False,
+                }
+            )
+
+            assert result.is_err
+            assert result.error.details["resume_blocked"] == "terminal_persistence_pending"
+            session_id = result.error.details["session_id"]
+            retained_runner = handler._process_local_resume_owners[session_id]
+            assert handler._process_local_owned_event_stores[session_id] is event_store
+            close_mock.assert_not_awaited()
+            durable = await SessionRepository(event_store).reconstruct_session(session_id)
+            assert durable.is_ok
+            assert durable.value.status == SessionStatus.RUNNING
+            assert heartbeat.is_holder_alive(session_id)
+    finally:
+        if retained_runner is not None and session_id is not None:
+            retained_runner._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=next(
+                    execution_id
+                    for stored_session_id, execution_id in retained_runner._process_local_authorities
+                    if stored_session_id == session_id
+                ),
+            )
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
+        handler._process_local_resume_handoffs.clear()
         await event_store.close()
 
 
@@ -2059,6 +2263,60 @@ async def test_public_cancel_interruption_reconciles_committed_terminal_state() 
 
 
 @pytest.mark.asyncio
+async def test_repeated_public_cancel_interruption_drains_terminal_cleanup() -> None:
+    """A second cancellation cannot restore a committed public reservation."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-public-double-cancel",
+        execution_id="exec-public-double-cancel",
+    )
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    cancelled_tracker = tracker.with_status(SessionStatus.CANCELLED)
+    reconciliation_started = asyncio.Event()
+    allow_reconciliation = asyncio.Event()
+    session_repo = MagicMock()
+    session_repo.mark_cancelled_if_active = AsyncMock(side_effect=asyncio.CancelledError)
+
+    async def _delayed_reconstruct(_: str):
+        reconciliation_started.set()
+        await allow_reconciliation.wait()
+        return Result.ok(cancelled_tracker)
+
+    session_repo.reconstruct_session = AsyncMock(side_effect=_delayed_reconstruct)
+
+    try:
+        cancellation = asyncio.create_task(
+            request_process_local_cancellation(
+                tracker,
+                session_repo,
+                reason="cancel after committed write",
+                cancelled_by="test",
+            )
+        )
+        await reconciliation_started.wait()
+        cancellation.cancel()
+        allow_reconciliation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancellation
+
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert not await is_cancellation_requested(tracker.session_id)
+    finally:
+        allow_reconciliation.set()
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_durable_cancellation_request_crosses_process_boundary() -> None:
     """The file-backed request is visible without sharing Python memory."""
     session_id = "session-cross-process-cancel"
@@ -2380,18 +2638,22 @@ async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -
 
 
 @pytest.mark.asyncio
-async def test_prepare_cancellation_after_registration_retires_lease() -> None:
-    """Cancellation in ``create_session`` cannot strand its early lease."""
+async def test_prepare_cancellation_with_unknown_publication_retains_lease() -> None:
+    """An ambiguous create-session cancellation preserves the exact owner."""
     runner = _runner()
     session_id = "session-prepare-create-cancel"
     execution_id = "exec-prepare-create-cancel"
-    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
 
     with (
         patch.object(
             runner._session_repo,
             "create_session",
             AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.err(PersistenceError("publication unknown"))),
         ),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -2401,9 +2663,92 @@ async def test_prepare_cancellation_after_registration_retires_lease() -> None:
             session_id=session_id,
         )
 
-    assert (session_id, execution_id) not in runner._process_local_authorities
-    assert not heartbeat.is_holder_alive(session_id)
-    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+    try:
+        assert (session_id, execution_id) in runner._process_local_authorities
+        assert heartbeat.is_holder_alive(session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_cancellation_after_committed_start_terminalizes_then_retires(
+    tmp_path,
+) -> None:
+    """A committed start event is reconciled even when create_session raises cancellation."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'create-cancel-commit.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    session_id = "session-create-cancel-committed"
+    execution_id = "exec-create-cancel-committed"
+    original_create_session = runner._session_repo.create_session
+
+    async def _commit_then_cancel(**kwargs: object):
+        created = await original_create_session(**kwargs)
+        assert created.is_ok
+        raise asyncio.CancelledError
+
+    try:
+        with (
+            patch.object(runner._session_repo, "create_session", _commit_then_cancel),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await runner.prepare_session(
+                _seed(),
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+        durable = await SessionRepository(event_store).reconstruct_session(session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.FAILED
+        assert (session_id, execution_id) not in runner._process_local_authorities
+        assert not heartbeat.is_holder_alive(session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_exception_after_committed_start_terminalizes_then_retires(tmp_path) -> None:
+    """A post-commit repository exception uses the same publication reconciliation."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'create-error-commit.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    session_id = "session-create-error-committed"
+    execution_id = "exec-create-error-committed"
+    original_create_session = runner._session_repo.create_session
+
+    async def _commit_then_raise(**kwargs: object):
+        created = await original_create_session(**kwargs)
+        assert created.is_ok
+        raise RuntimeError("repository response interrupted after commit")
+
+    try:
+        with patch.object(runner._session_repo, "create_session", _commit_then_raise):
+            result = await runner.prepare_session(
+                _seed(),
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+        assert result.is_err
+        durable = await SessionRepository(event_store).reconstruct_session(session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.FAILED
+        assert (session_id, execution_id) not in runner._process_local_authorities
+        assert not heartbeat.is_holder_alive(session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await event_store.close()
 
 
 @pytest.mark.asyncio
@@ -2429,6 +2774,11 @@ async def test_prepare_cancellation_after_publication_terminalizes_then_retires(
             runner._session_repo,
             "track_progress",
             AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(tracker)),
         ),
         patch.object(runner._session_repo, "mark_failed", mark_failed),
         pytest.raises(asyncio.CancelledError),
@@ -2518,10 +2868,21 @@ async def test_prepare_rejects_mismatched_repository_tracker_and_retires_lease()
     session_id = "session-expected"
     execution_id = "exec-expected"
 
-    with patch.object(
-        runner._session_repo,
-        "create_session",
-        AsyncMock(return_value=Result.ok(returned)),
+    with (
+        patch.object(
+            runner._session_repo,
+            "create_session",
+            AsyncMock(return_value=Result.ok(returned)),
+        ),
+        patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(
+                return_value=Result.err(
+                    PersistenceError(f"No events found for session: {session_id}")
+                )
+            ),
+        ),
     ):
         result = await runner.prepare_session(
             _seed(),

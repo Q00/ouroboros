@@ -415,6 +415,22 @@ The Foundation A implementation must demonstrate all of the following:
 31. an MCP background task cancelled before its first coroutine turn retains
     its exact owner and owned EventStore when lost-authority terminalization
     cannot persist, and reconciles cleanup only after reading a terminal record.
+32. cancellation racing `create_session` reconstructs the allocated durable
+    identity under shielding; a committed `RUNNING` start is terminalized before
+    retirement, while an unreadable publication retains its exact owner/lease.
+33. a caller-supplied terminal tracker is never authority for cleanup; the
+    durable session must independently prove a terminal status before the
+    process-local registration or heartbeat can be retired.
+34. an MCP preparation error that retains `terminal_persistence_pending` also
+    retains its handler-owned EventStore through the enclosing handler cleanup,
+    so the exact owner remains genuinely callable for retry.
+35. post-CAS reconciliation drains under shielding across repeated task
+    cancellation for both owning-runner and public-cancellation paths; only
+    after cleanup completes does the original cancellation propagate.
+36. every failed `create_session` return, raised exception, cancellation, and
+    identity-mismatch response crosses the same durable-publication boundary:
+    definite absence retires, a committed start terminalizes, and ambiguous
+    persistence retains the exact owner instead of guessing.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

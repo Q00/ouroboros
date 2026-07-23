@@ -88,6 +88,7 @@ from ouroboros.orchestrator.events import (
 )
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
+    _await_process_local_cleanup,
     _claim_process_local_authority_generation,
     _discard_process_local_authority_generation,
     _has_live_process_local_authority_registration,
@@ -1463,25 +1464,29 @@ class OrchestratorRunner:
         window preserving the live generation would contradict the durable
         terminal source of truth, so interruption paths reconcile first.
         """
-        try:
-            reconstructed = await self._session_repo.reconstruct_session(session_id)
-        except Exception:
-            return False
-        if reconstructed.is_err or reconstructed.value.status not in {
-            SessionStatus.COMPLETED,
-            SessionStatus.FAILED,
-            SessionStatus.CANCELLED,
-        }:
-            return False
-        self._retire_process_local_authority(
-            session_id=session_id,
-            execution_id=execution_id,
-        )
-        self._unregister_session(execution_id, session_id)
-        await clear_cancellation(session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
-        return True
+
+        async def _reconcile() -> bool:
+            try:
+                reconstructed = await self._session_repo.reconstruct_session(session_id)
+            except Exception:
+                return False
+            if reconstructed.is_err or reconstructed.value.status not in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }:
+                return False
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            self._unregister_session(execution_id, session_id)
+            await clear_cancellation(session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return True
+
+        return bool(await _await_process_local_cleanup(_reconcile()))
 
     async def _persist_failure_and_cleanup(
         self,
@@ -2252,6 +2257,80 @@ class OrchestratorRunner:
             if attempt < 2:
                 await asyncio.sleep(0.05 * (2**attempt))
         return str(last_error)
+
+    async def _reconcile_session_publication_interruption(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Resolve an interrupted or failed durable session-start append.
+
+        ``create_session`` may commit ``session.started`` and still be
+        interrupted before returning its tracker.  Never retire the early
+        process-local owner from the exception alone: reconstruct under
+        shielding, terminalize a proven active publication, or retain the
+        exact owner when persistence cannot be established.
+        """
+
+        async def _reconcile() -> bool:
+            try:
+                reconstructed = await self._session_repo.reconstruct_session(session_id)
+            except Exception:
+                reconstructed = None
+
+            if reconstructed is not None and reconstructed.is_err:
+                reconstruction_message = getattr(
+                    reconstructed.error,
+                    "message",
+                    str(reconstructed.error),
+                )
+                if reconstruction_message.startswith(("No events found", "No start event found")):
+                    self._retire_process_local_authority(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+            elif reconstructed is not None and reconstructed.is_ok:
+                tracker = reconstructed.value
+                if tracker.session_id == session_id and tracker.execution_id == execution_id:
+                    if tracker.status in {
+                        SessionStatus.COMPLETED,
+                        SessionStatus.FAILED,
+                        SessionStatus.CANCELLED,
+                    }:
+                        self._retire_process_local_authority(
+                            session_id=session_id,
+                            execution_id=execution_id,
+                        )
+                        await clear_cancellation(session_id)
+                    else:
+                        terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                            tracker=tracker,
+                            message="Session preparation was cancelled after durable publication",
+                            details={
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "cause": "CancelledError",
+                            },
+                        )
+                        if terminal_mark_error is None:
+                            self._retire_process_local_authority(
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
+                            await clear_cancellation(session_id)
+                        else:
+                            log.warning(
+                                "orchestrator.runner.create_session_cancel_terminal_pending",
+                                session_id=session_id,
+                                execution_id=execution_id,
+                                error=terminal_mark_error,
+                            )
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            return (session_id, execution_id) in self._process_local_authorities
+
+        return bool(await _await_process_local_cleanup(_reconcile()))
 
     async def _persist_session_terminal_status(
         self,
@@ -4871,31 +4950,54 @@ class OrchestratorRunner:
                 execution_contract=execution_contract,
             )
         except asyncio.CancelledError:
-            # Registration and its liveness lease precede durable publication.
-            # A caller cancelling this await must not strand that live
-            # generation even when the repository did not return a tracker.
-            abort_process_local_preparation()
+            await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
             raise
         except Exception as exc:
-            abort_process_local_preparation()
+            retained_owner = await self._reconcile_session_publication_interruption(
+                session_id=resolved_session_id,
+                execution_id=exec_id,
+            )
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to create session: {exc}",
-                    details={"execution_id": exec_id, "session_id": resolved_session_id},
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
+                    },
                 )
             )
 
         if session_result.is_err:
-            self._retire_process_local_authority(
+            retained_owner = await self._reconcile_session_publication_interruption(
                 session_id=resolved_session_id,
                 execution_id=exec_id,
             )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to create session: {session_result.error}",
-                    details={"execution_id": exec_id, "session_id": resolved_session_id},
+                    details={
+                        "execution_id": exec_id,
+                        "session_id": resolved_session_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
+                    },
                 )
             )
 
@@ -4908,12 +5010,10 @@ class OrchestratorRunner:
             # was never protected during publication.  This is a repository
             # contract violation, not a reason to mutate or terminalize the
             # unrelated returned tracker.
-            self._retire_process_local_authority(
+            retained_owner = await self._reconcile_session_publication_interruption(
                 session_id=resolved_session_id,
                 execution_id=exec_id,
             )
-            if self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
             return Result.err(
                 OrchestratorError(
                     message="Session repository returned an unexpected session identity",
@@ -4922,6 +5022,14 @@ class OrchestratorRunner:
                         "expected_execution_id": exec_id,
                         "returned_session_id": tracker.session_id,
                         "returned_execution_id": tracker.execution_id,
+                        **(
+                            {
+                                "resume_blocked": "terminal_persistence_pending",
+                                "terminal_persistence_pending": True,
+                            }
+                            if retained_owner
+                            else {}
+                        ),
                     },
                 )
             )
@@ -4938,23 +5046,10 @@ class OrchestratorRunner:
                 initial_progress,
             )
         except asyncio.CancelledError:
-            # ``create_session`` has already made a RUNNING tracker durable.
-            # Record its terminal preparation failure before withdrawing the
-            # process-local lease, then re-raise the caller's cancellation.
-            terminal_mark_error = await self._mark_preparation_failed_best_effort(
-                tracker=tracker,
-                message="Session preparation cancelled before initial contract was persisted",
-                details={
-                    "session_id": tracker.session_id,
-                    "execution_id": tracker.execution_id,
-                    "fat_harness_mode": self._fat_harness_mode,
-                    "cause": "CancelledError",
-                },
+            await self._reconcile_session_publication_interruption(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
             )
-            if terminal_mark_error is None:
-                abort_process_local_preparation()
-            elif self._task_workspace is not None:
-                release_lock(self._task_workspace.lock_path)
             raise
         except Exception as exc:
             progress_exception_details: dict[str, Any] = {
@@ -5035,24 +5130,67 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
-        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
         if tracker.status in (
             SessionStatus.COMPLETED,
             SessionStatus.CANCELLED,
             SessionStatus.FAILED,
         ):
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                tracker.session_id,
-                session_registered=False,
+            durable_tracker_result = await self._session_repo.reconstruct_session(
+                tracker.session_id
             )
-            await clear_cancellation(tracker.session_id)
-            return Result.err(
-                OrchestratorError(
-                    message=f"Session is in terminal state {tracker.status.value}, cannot execute",
-                    details={"session_id": tracker.session_id, "status": tracker.status.value},
+            if durable_tracker_result.is_err:
+                return Result.err(
+                    OrchestratorError(
+                        message="Cannot verify caller-supplied terminal session state",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                            "cause": str(durable_tracker_result.error),
+                            "resume_blocked": "terminal_state_unverified",
+                        },
+                    )
                 )
-            )
+            durable_tracker = durable_tracker_result.value
+            if (
+                durable_tracker.session_id != tracker.session_id
+                or durable_tracker.execution_id != tracker.execution_id
+            ):
+                return Result.err(
+                    OrchestratorError(
+                        message="Durable session identity does not match the supplied tracker",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                )
+            if durable_tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                self._cleanup_pre_execution_state(
+                    durable_tracker.execution_id,
+                    durable_tracker.session_id,
+                    session_registered=False,
+                )
+                await clear_cancellation(durable_tracker.session_id)
+                return Result.err(
+                    OrchestratorError(
+                        message=(
+                            "Session is in terminal state "
+                            f"{durable_tracker.status.value}, cannot execute"
+                        ),
+                        details={
+                            "session_id": durable_tracker.session_id,
+                            "status": durable_tracker.status.value,
+                        },
+                    )
+                )
+            tracker = durable_tracker
+            exec_id = tracker.execution_id
+
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
 
         # This API may execute only the tracker returned by ``prepare_session``.
         # A legacy/reconstructed tracker with no contract is not a new-session

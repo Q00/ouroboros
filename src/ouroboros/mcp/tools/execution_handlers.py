@@ -1593,6 +1593,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     runner,
                                     owned_event_store=(event_store if owns_event_store else None),
                                 )
+                                retained_after_run = (
+                                    self._process_local_resume_owners.get(
+                                        retained_tracker.value.session_id
+                                    )
+                                    is runner
+                                )
                         return Result.err(
                             MCPToolError(
                                 f"Execution failed: {prepared.error.message}",

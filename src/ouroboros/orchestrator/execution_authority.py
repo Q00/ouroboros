@@ -10,7 +10,7 @@ exact live object for this process; it is never made portable by introspection.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -69,6 +69,23 @@ _RATE_GATE_BUCKET_HELPER_NAMES = (
 _PROCESS_LOCAL_AUTHORITY_CONSTRUCTION_TOKEN = object()
 _SAFE_PROCESS_LOCAL_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _LOG = logging.getLogger(__name__)
+
+
+async def _await_process_local_cleanup(awaitable: Awaitable[Any]) -> Any:
+    """Drain lifecycle reconciliation despite repeated caller cancellation.
+
+    Once durable terminal persistence may have committed, cancellation is no
+    longer allowed to interrupt the read/retire reconciliation window.  The
+    caller still propagates its original cancellation after this helper
+    returns; only cleanup receives shielding.
+    """
+    task = asyncio.ensure_future(awaitable)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 class _ProcessLocalAuthorityGeneration:
@@ -738,8 +755,8 @@ async def request_process_local_cancellation(
         )
     except BaseException:
         if terminalization_started:
-            terminal_winner = False
-            try:
+
+            async def _reconcile_interrupted_terminalization() -> bool:
                 reconstructed = await session_repo.reconstruct_session(session_id)
                 reconstructed_status = (
                     getattr(reconstructed.value.status, "value", reconstructed.value.status)
@@ -751,28 +768,36 @@ async def request_process_local_cancellation(
                     "failed",
                     "cancelled",
                 }
-                if terminal_winner:
-                    (
-                        retired,
-                        claim_became_active,
-                    ) = await _retire_process_local_authority_after_terminal_persistence(
-                        session_id,
-                        execution_id,
-                        authority,
-                    )
-                    if claim_became_active:
-                        await request_cancellation(session_id)
-                    else:
-                        await clear_cancellation(session_id)
-                    _LOG.info(
-                        "process_local_authority.interrupted_terminal_reconciled",
-                        extra={
-                            "session_id": session_id,
-                            "execution_id": execution_id,
-                            "durable_status": reconstructed_status,
-                            "retired": retired,
-                        },
-                    )
+                if not terminal_winner:
+                    return False
+                (
+                    retired,
+                    claim_became_active,
+                ) = await _retire_process_local_authority_after_terminal_persistence(
+                    session_id,
+                    execution_id,
+                    authority,
+                )
+                if claim_became_active:
+                    await request_cancellation(session_id)
+                else:
+                    await clear_cancellation(session_id)
+                _LOG.info(
+                    "process_local_authority.interrupted_terminal_reconciled",
+                    extra={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "durable_status": reconstructed_status,
+                        "retired": retired,
+                    },
+                )
+                return True
+
+            terminal_winner = False
+            try:
+                terminal_winner = await _await_process_local_cleanup(
+                    _reconcile_interrupted_terminalization()
+                )
             except BaseException:
                 _LOG.warning(
                     "process_local_authority.interrupted_terminal_reconcile_failed",
