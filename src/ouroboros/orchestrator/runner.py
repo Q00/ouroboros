@@ -1417,10 +1417,41 @@ class OrchestratorRunner:
         """Retire all live state, then acknowledge cancellation last."""
 
         async def _cleanup() -> None:
-            self._retire_process_local_authority(
+            retired = self._retire_process_local_authority(
                 session_id=session_id,
                 execution_id=execution_id,
             )
+            if not retired:
+                # A different live adapter/runner may still own this exact
+                # session. Never unregister its route or release its PID
+                # heartbeat merely because this cleanup observer saw a
+                # terminal record. If this runner has a stale local route,
+                # remove only that route while preserving the shared lease.
+                if self._active_sessions.get(execution_id) == session_id:
+                    self._unregister_session(
+                        execution_id,
+                        session_id,
+                        release_liveness_lease=False,
+                    )
+                self._release_task_workspace_for_identity(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                from ouroboros.orchestrator.heartbeat import (
+                    is_holder_alive,
+                    is_owned_by_current_process,
+                )
+
+                if not _has_live_process_local_authority_session(session_id) and not (
+                    is_holder_alive(session_id) and not is_owned_by_current_process(session_id)
+                ):
+                    await clear_cancellation(session_id)
+                log.warning(
+                    "orchestrator.runner.terminal_cleanup_authority_not_retired",
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                return
             self._unregister_session(execution_id, session_id)
             self._release_task_workspace_for_identity(
                 session_id=session_id,
@@ -5764,14 +5795,10 @@ class OrchestratorRunner:
                 details=progress_exception_details,
             )
             if terminal_mark_error is None:
-                self._retire_process_local_authority(
+                await self._cleanup_terminal_process_local_state(
                     session_id=tracker.session_id,
                     execution_id=tracker.execution_id,
                 )
-            self._release_task_workspace_for_identity(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
             if terminal_mark_error is not None:
                 progress_exception_details["terminal_mark_error"] = terminal_mark_error
                 progress_exception_details["resume_blocked"] = "terminal_persistence_pending"
@@ -5795,14 +5822,10 @@ class OrchestratorRunner:
                 details=progress_result_details,
             )
             if terminal_mark_error is None:
-                self._retire_process_local_authority(
+                await self._cleanup_terminal_process_local_state(
                     session_id=tracker.session_id,
                     execution_id=tracker.execution_id,
                 )
-            self._release_task_workspace_for_identity(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
 
             if terminal_mark_error is not None:
                 progress_result_details["terminal_mark_error"] = terminal_mark_error
@@ -7118,14 +7141,37 @@ class OrchestratorRunner:
             session_id=session_id,
         )
 
-        # Reconstruct session
-        session_result = await self._session_repo.reconstruct_session(session_id)
+        # Reconstruct session. A transient read failure is not evidence that
+        # the retained process-local owner is lost; preserve it as a typed,
+        # retryable lifecycle result so a background wrapper cannot append a
+        # generic FAILED event or evict the owner/store.
+        try:
+            session_result = await self._session_repo.reconstruct_session(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return Result.err(
+                OrchestratorError(
+                    message=f"Failed to reconstruct session: {exc}",
+                    details={
+                        "session_id": session_id,
+                        "cause": str(exc),
+                        "resume_blocked": "process_local_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
 
         if session_result.is_err:
             return Result.err(
                 OrchestratorError(
                     message=f"Failed to reconstruct session: {session_result.error}",
-                    details={"session_id": session_id},
+                    details={
+                        "session_id": session_id,
+                        "cause": str(session_result.error),
+                        "resume_blocked": "process_local_reconstruction_pending",
+                        "retryable": True,
+                    },
                 )
             )
 

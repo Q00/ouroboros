@@ -243,13 +243,19 @@ def read_cancellation_request(session_id: str) -> CancellationRequest | None:
 
 def clear_cancellation_request(session_id: str) -> None:
     """Remove a cooperative request after the owning lifecycle acknowledges it."""
-    try:
-        cancellation_path(session_id).unlink(missing_ok=True)
-    except OSError:
-        log.warning(
-            "session_cancellation.clear_failed",
-            extra={"session_id": session_id},
-        )
+    last_error: OSError | None = None
+    for attempt in range(3):
+        try:
+            cancellation_path(session_id).unlink(missing_ok=True)
+            return
+        except OSError as exc:
+            last_error = exc
+            log.warning(
+                "session_cancellation.clear_failed",
+                extra={"session_id": session_id, "attempt": attempt + 1},
+            )
+    assert last_error is not None
+    raise last_error
 
 
 def acquire(session_id: str) -> None:

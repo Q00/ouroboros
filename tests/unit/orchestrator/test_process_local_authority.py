@@ -4456,6 +4456,208 @@ async def test_public_terminal_finalizer_cancellation_acknowledges_marker() -> N
         )
 
 
+@pytest.mark.asyncio
+async def test_resume_reconstruction_failure_is_typed_and_retains_handler_owner() -> None:
+    """A transient resume read failure cannot become a generic FAILED result."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-resume-reconstruction-pending",
+        execution_id="exec-resume-reconstruction-pending",
+    )
+    handler = ExecuteSeedHandler(event_store=_HandlerEventStore())
+    handler._remember_process_local_owner(
+        tracker,
+        runner,
+        owned_event_store=runner._event_store,
+    )
+    session_repo = runner._session_repo
+    session_repo.reconstruct_session = AsyncMock(side_effect=OSError("temporary read failure"))
+
+    try:
+        result = await runner.resume_session(tracker.session_id, _seed())
+
+        assert result.is_err
+        assert result.error.details == {
+            "session_id": tracker.session_id,
+            "cause": "temporary read failure",
+            "resume_blocked": "process_local_reconstruction_pending",
+            "retryable": True,
+        }
+        retained, event_store_to_close = await handler._reconcile_process_local_owner(
+            tracker=tracker,
+            runner=runner,
+            session_repo=session_repo,
+        )
+        assert retained is True
+        assert event_store_to_close is None
+        assert handler._process_local_resume_owners[tracker.session_id] is runner
+        assert handler._process_local_owned_event_stores[tracker.session_id] is runner._event_store
+        runner._event_store.close.assert_not_awaited()
+    finally:
+        handler._process_local_resume_owners.clear()
+        handler._process_local_owned_event_stores.clear()
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_does_not_release_foreign_adapter_heartbeat() -> None:
+    """An observer that cannot retire the owner must preserve its lease."""
+    owner = _runner()
+    tracker = await _prepare(
+        owner,
+        session_id="session-foreign-terminal-cleanup",
+        execution_id="exec-foreign-terminal-cleanup",
+    )
+    observer = _runner()
+
+    try:
+        assert heartbeat.is_holder_alive(tracker.session_id)
+        await observer._cleanup_terminal_process_local_state(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        assert owner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        owner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_public_cancel_repropagates_caller_cancellation_after_reconcile() -> None:
+    """Cancellation during shielded recovery wins over the original write error."""
+    runner = _runner()
+    tracker = await _prepare(
+        runner,
+        session_id="session-cancel-reconcile-cancelled",
+        execution_id="exec-cancel-reconcile-cancelled",
+    )
+    terminal_tracker = tracker.with_status(SessionStatus.COMPLETED)
+    reconstruct_entered = asyncio.Event()
+    release_reconstruct = asyncio.Event()
+
+    async def _blocked_reconstruct(_: str) -> Result[SessionTracker, PersistenceError]:
+        reconstruct_entered.set()
+        await release_reconstruct.wait()
+        return Result.ok(terminal_tracker)
+
+    session_repo = MagicMock()
+    session_repo.mark_cancelled_if_active = AsyncMock(side_effect=RuntimeError("write failed"))
+    session_repo.reconstruct_session = _blocked_reconstruct
+    task = asyncio.create_task(
+        request_process_local_cancellation(
+            tracker,
+            session_repo,
+            reason="cancel during recovery",
+            cancelled_by="test",
+        )
+    )
+
+    try:
+        await reconstruct_entered.wait()
+        task.cancel()
+        release_reconstruct.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not ownerless_cancellation_marker(tracker.session_id)
+    finally:
+        release_reconstruct.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await clear_cancellation(tracker.session_id)
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ("raises", "result"))
+async def test_preparation_terminal_failure_clears_cancellation_marker(
+    failure_mode: str,
+) -> None:
+    """Both initial-progress failure branches use complete terminal cleanup."""
+    runner = _runner()
+    session_id = f"session-prepare-marker-{failure_mode}"
+    execution_id = f"exec-prepare-marker-{failure_mode}"
+    tracker = SessionTracker.create(
+        execution_id,
+        _seed().metadata.seed_id,
+        session_id=session_id,
+    )
+    track_progress = (
+        AsyncMock(side_effect=OSError("progress unavailable"))
+        if failure_mode == "raises"
+        else AsyncMock(return_value=Result.err(PersistenceError("progress unavailable")))
+    )
+
+    await request_cancellation(session_id, reason="preparation marker", cancelled_by="test")
+    try:
+        with (
+            patch.object(
+                runner._session_repo, "create_session", AsyncMock(return_value=Result.ok(tracker))
+            ),
+            patch.object(runner._session_repo, "track_progress", track_progress),
+            patch.object(
+                runner._session_repo, "mark_failed", AsyncMock(return_value=Result.ok(None))
+            ),
+        ):
+            result = await runner.prepare_session(
+                _seed(),
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+        assert result.is_err
+        assert not await is_cancellation_requested(session_id)
+        assert not heartbeat.is_holder_alive(session_id)
+        assert (session_id, execution_id) not in runner._process_local_authorities
+    finally:
+        await clear_cancellation(session_id)
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+
+def ownerless_cancellation_marker(session_id: str) -> bool:
+    """Return whether the file-backed request marker remains after cleanup."""
+    return heartbeat.cancellation_path(session_id).exists()
+
+
+@pytest.mark.parametrize("unlink_failures", (1, 3))
+def test_clear_cancellation_request_retries_and_surfaces_final_failure(
+    unlink_failures: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient unlink errors retry; a persistent error is visible to callers."""
+    path = MagicMock()
+    outcomes: list[object] = [OSError("unlink failed") for _ in range(unlink_failures)]
+    if unlink_failures < 3:
+        outcomes.append(None)
+    path.unlink.side_effect = outcomes
+    monkeypatch.setattr(heartbeat, "cancellation_path", lambda _: path)
+
+    if unlink_failures == 3:
+        with pytest.raises(OSError, match="unlink failed"):
+            heartbeat.clear_cancellation_request("session-marker-retry")
+    else:
+        heartbeat.clear_cancellation_request("session-marker-retry")
+    assert path.unlink.call_count == min(unlink_failures + 1, 3)
+
+
 def test_process_local_contract_is_not_a_cross_run_proof_cohort_key() -> None:
     runner = _runner()
     contract = runner._build_execution_contract(seed=_seed())
