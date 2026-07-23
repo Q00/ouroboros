@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
+BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
 
 
 def get_version() -> str:
@@ -178,19 +179,22 @@ def main() -> None:
             print(f"  DRIFT {path.relative_to(ROOT)} ({old} != {version})")
             changed = True
 
-    # Sync setup SKILL.md template version marker
-    if SETUP_SKILL_MD.exists():
-        text = SETUP_SKILL_MD.read_text()
+    for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
+        if not path.exists():
+            print(f"  SKIP  {path.relative_to(ROOT)} (not found)")
+            continue
+
+        text = path.read_text()
         marker_match = re.search(r"<!-- ooo:VERSION:([\d\w.]+) -->", text)
         old_marker = marker_match.group(1) if marker_match else "?"
         if old_marker == version:
-            print(f"  OK    {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker})")
+            print(f"  OK    {path.relative_to(ROOT)} ({old_marker})")
         elif write:
-            update_version_marker(SETUP_SKILL_MD, version)
-            print(f"  WRITE {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker} -> {version})")
+            update_version_marker(path, version)
+            print(f"  WRITE {path.relative_to(ROOT)} ({old_marker} -> {version})")
             changed = True
         else:
-            print(f"  DRIFT {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker} != {version})")
+            print(f"  DRIFT {path.relative_to(ROOT)} ({old_marker} != {version})")
             changed = True
 
     if changed and not write:
