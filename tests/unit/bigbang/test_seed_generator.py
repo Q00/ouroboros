@@ -552,6 +552,23 @@ class TestSeedGeneratorExtraction:
             with pytest.raises(ValueError, match="JSON array"):
                 _parse_constraint_values(malformed)
 
+    def test_parse_constraint_values_rejects_non_tag_bracket_group_with_trailing_text(self) -> None:
+        """Only word-like [tag] tokens are prose; other bracket groups retry."""
+        for malformed in (
+            "[--lang ko|en, keep exact flag] trailing note",
+            "[--lang ko|en] trailing note",
+            "[a, b] trailing note",
+        ):
+            with pytest.raises(ValueError, match="JSON array"):
+                _parse_constraint_values(malformed)
+
+    def test_parse_constraint_values_keeps_word_tag_prose(self) -> None:
+        """Word-like tags including dots and dashes stay on the legacy split."""
+        assert _parse_constraint_values("[v2.1-rc] Must ship | [2026-01] Later") == (
+            "[v2.1-rc] Must ship",
+            "[2026-01] Later",
+        )
+
     def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
         """Any malformed array missing its closing bracket raises for retry."""
         for malformed in ('["--lang ko|en"', "[--lang ko|en"):
@@ -567,6 +584,7 @@ class TestSeedGeneratorExtraction:
             '["--lang ko|en"] stray text',
             "[null]",
             '[null, "x"] stray text',
+            "[--lang ko|en, keep exact flag] trailing note",
         ),
     )
     async def test_generate_retries_on_malformed_json_constraints(

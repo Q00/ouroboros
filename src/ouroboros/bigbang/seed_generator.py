@@ -55,16 +55,18 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
-_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[\s*[^\s\"'\[\]][^\[\]\r\n]*\]\s+\S")
+_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[[A-Za-z0-9][\w .:-]{0,31}\]\s+\S")
 
 
 def _is_legacy_bracket_prose(text: str) -> bool:
-    """True for ``[tag] prose`` where the leading group is not itself JSON.
+    """True for ``[tag] prose`` where the leading group is a plain tag token.
 
-    A leading bracket group that parses as a JSON array on its own (e.g.
-    ``[null]``, ``[123, "x"]``) signals JSON intent with trailing garbage,
-    not a legacy ``[P0]``-style tag, so it must not fall back to pipe
-    splitting.
+    Legacy prose tags are short word-like tokens such as ``[P0]``, ``[HIGH]``
+    or ``[v2.1]``. Anything else — commas, pipes, quotes, or other JSON
+    punctuation inside the bracket group — signals JSON-array intent and must
+    not fall back to pipe splitting. A tag-shaped group that nevertheless
+    parses as a JSON array on its own (e.g. ``[null]``, ``[123]``) is also
+    treated as JSON intent with trailing garbage.
     """
     if not _LEGACY_BRACKET_PREFIX_RE.match(text):
         return False
