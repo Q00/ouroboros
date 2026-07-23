@@ -3382,6 +3382,26 @@ class ParallelACExecutor:
                         error=str(exc),
                     )
 
+        # All ACs have now finished (including any coordinator reconciliation).
+        # Reconcile verify evidence against the settled shared workspace before
+        # the runner constructs the terminal acceptance plan.
+        all_results = await self._settle_verify_gate_results(
+            seed=seed,
+            results=all_results,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        settled_by_index = {result.ac_index: result for result in all_results}
+        stage_results = [
+            replace(
+                stage,
+                results=tuple(
+                    settled_by_index.get(result.ac_index, result) for result in stage.results
+                ),
+            )
+            for stage in stage_results
+        ]
+
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -3638,6 +3658,111 @@ class ParallelACExecutor:
                 for result in revalidated
             ]
         return revalidated
+
+    async def _settle_verify_gate_results(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> list[ACExecutionResult]:
+        """Fail closed when final shared-workspace evidence is no longer valid.
+
+        Verify gates run as each AC completes, while later ACs can still touch
+        the same workspace.  Before terminal acceptance, re-check every
+        successful contract's artifact leg and invalidate the complete success
+        set when any verify command was observed mutating the workspace.
+        """
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        successful_contracts: dict[int, AcceptanceCriterionSpec] = {}
+        verify_mutated_workspace = False
+        for result in results:
+            outcome = result.verify_gate_outcome
+            verify_mutated_workspace = verify_mutated_workspace or bool(
+                isinstance(outcome, _VerifyGateOutcome) and outcome.workspace_mutated
+            )
+            if not result.success or not (0 <= result.ac_index < len(seed.acceptance_criteria)):
+                continue
+            spec = seed.acceptance_criteria[result.ac_index]
+            if isinstance(spec, AcceptanceCriterionSpec) and (
+                spec.verify_command or spec.expected_artifacts
+            ):
+                successful_contracts[id(result)] = spec
+
+        if not successful_contracts and not verify_mutated_workspace:
+            return results
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        final_digest = self._workspace_content_digest(cwd)
+        settled: list[ACExecutionResult] = []
+        for result in results:
+            if not result.success:
+                settled.append(result)
+                continue
+            spec = successful_contracts.get(id(result))
+            should_invalidate = verify_mutated_workspace or spec is not None
+            if not should_invalidate:
+                settled.append(result)
+                continue
+            missing_artifacts = (
+                _missing_expected_artifacts(spec.expected_artifacts, cwd)
+                if spec is not None
+                else ()
+            )
+            reason: str | None = None
+            if verify_mutated_workspace:
+                reason = (
+                    "Final acceptance rejected because a verify_command mutated the "
+                    "workspace or its digest could not be revalidated."
+                )
+            elif final_digest is None:
+                reason = "Final workspace digest unavailable for acceptance evidence."
+            elif missing_artifacts:
+                reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+
+            if reason is None:
+                settled.append(result)
+                continue
+
+            await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.verify.failed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "ac_index": result.ac_index,
+                        "ac_content": result.ac_content,
+                        "verify_command": spec.verify_command if spec is not None else None,
+                        "expected_artifacts": (
+                            list(spec.expected_artifacts) if spec is not None else []
+                        ),
+                        "missing_artifacts": list(missing_artifacts),
+                        "reason": reason,
+                        "failure_class": FailureClass.EVIDENCE_MISSING.value,
+                        "final_workspace_revalidation": True,
+                    },
+                )
+            )
+            settled.append(
+                replace(
+                    result,
+                    success=False,
+                    error=reason,
+                    final_message=reason,
+                    outcome=ACExecutionOutcome.FAILED,
+                    atomic_verifier_verdict=VerifierVerdict(
+                        passed=False,
+                        reasons=(reason,),
+                        failure_class=FailureClass.EVIDENCE_MISSING.value,
+                    ),
+                )
+            )
+        return settled
 
     def _coerce_decomposition_decision(
         self,
@@ -6600,6 +6725,26 @@ Respond with either ATOMIC or the structured JSON object only.
         command = spec.verify_command
         if not command:
             return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+        workspace_before = self._workspace_content_digest(cwd)
+
+        def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
+            workspace_after = self._workspace_content_digest(cwd)
+            if (
+                workspace_before is None
+                or workspace_after is None
+                or workspace_before != workspace_after
+            ):
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason=(
+                        "verify_command mutated the workspace or its digest could not be "
+                        "revalidated"
+                    ),
+                    output_tail=output_tail,
+                    workspace_mutated=True,
+                )
+            return None
+
         subprocess_kwargs: dict[str, Any] = {}
         if os.name != "nt":
             subprocess_kwargs["start_new_session"] = True
@@ -6633,6 +6778,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
+            mutated = workspace_mutation_outcome("")
+            if mutated is not None:
+                return mutated
             return _VerifyGateOutcome(
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
@@ -6641,6 +6789,9 @@ Respond with either ATOMIC or the structured JSON object only.
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
         tail = combined[-_VERIFY_OUTPUT_TAIL_CHARS:]
+        mutated = workspace_mutation_outcome(tail)
+        if mutated is not None:
+            return mutated
         returncode = proc.returncode
         if returncode != 0:
             return _VerifyGateOutcome(

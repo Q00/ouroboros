@@ -209,6 +209,46 @@ def _event_order(events: Iterable[BaseEvent]) -> list[BaseEvent]:
     return sorted(events, key=lambda event: (event.timestamp, event.id))
 
 
+def _execution_event_session_id(event: BaseEvent) -> str | None:
+    """Return the authoritative orchestration session carried by an event.
+
+    Execution aggregates are shared by multiple orchestration sessions.  New
+    runtime events carry the explicit ``orchestrator_session_id`` field; older
+    parent projections used ``session_id``.  An explicit field always wins so
+    a stale fallback cannot make a foreign event look local.
+    """
+    if not event.type.startswith("execution."):
+        return None
+    data = event.data
+    explicit = data.get("orchestrator_session_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    legacy = data.get("session_id")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
+def _history_for_session(
+    history_events: Iterable[BaseEvent], *, session_id: str | None
+) -> list[BaseEvent]:
+    """Drop unscoped/foreign execution evidence before any relay correlation.
+
+    Job and lineage events remain available because those aggregates are the
+    relay's own scope.  Execution events, however, may be interleaved for
+    several sessions under one execution id and must be fail-closed when a
+    linked session is known.
+    """
+    if session_id is None:
+        return list(history_events)
+    return [
+        event
+        for event in history_events
+        if not event.type.startswith("execution.")
+        or _execution_event_session_id(event) == session_id
+    ]
+
+
 def _latest_configuration_before(
     history: Sequence[BaseEvent],
     target: BaseEvent,
@@ -460,7 +500,10 @@ def classify_relay_events(
     ``new_event_ids`` limits emission to the current cursor page; omitting it
     performs the terminal full-history scan.
     """
-    history = _event_order(history_events)
+    # A linked execution aggregate can contain evidence from more than one
+    # orchestration session.  Filter before building route/recovery streaks so
+    # foreign events cannot create actionable or progress relays for this job.
+    history = _event_order(_history_for_session(history_events, session_id=session_id))
     registered = available_tools or frozenset()
     new_ids = new_event_ids if new_event_ids is not None else {event.id for event in history}
     relays = _proactive_relays(

@@ -120,6 +120,20 @@ async def test_verify_gate_output_assertion_match_and_mismatch(tmp_path: Any) ->
 
 
 @pytest.mark.asyncio
+async def test_verify_gate_rejects_commands_that_mutate_the_workspace(tmp_path: Any) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="read-only", verify_command="rm target.txt")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.workspace_mutated is True
+    assert "mutated the workspace" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_verify_gate_ignores_normalized_exit_code_output_assertion(
     tmp_path: Any,
 ) -> None:
@@ -161,14 +175,8 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) -> None:
-    counter = tmp_path / "verify-count.txt"
-    command = (
-        "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
-        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
-        'raise SystemExit(0 if n == 0 else 7)"'
-    )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
     result = ACExecutionResult(
         ac_index=0,
@@ -176,14 +184,12 @@ async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) ->
         success=True,
         verify_gate_outcome=cached,
     )
-    assert counter.read_text(encoding="utf-8") == "1"
 
     gated = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
 
     assert gated is result
-    assert counter.read_text(encoding="utf-8") == "1"
 
 
 @pytest.mark.asyncio
@@ -192,17 +198,11 @@ async def test_apply_verify_gate_rechecks_artifacts_without_replaying_cached_com
 ) -> None:
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("ready", encoding="utf-8")
-    counter = tmp_path / "verify-count.txt"
-    command = (
-        "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
-        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
-        'raise SystemExit(0 if n == 0 else 7)"'
-    )
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(
         AcceptanceCriterionSpec(
             description="ac",
-            verify_command=command,
+            verify_command="exit 0",
             expected_artifacts=("artifact.txt",),
         )
     )
@@ -222,7 +222,56 @@ async def test_apply_verify_gate_rechecks_artifacts_without_replaying_cached_com
     assert gated.success is False
     assert gated.verify_gate_outcome is not None
     assert gated.verify_gate_outcome.missing_artifacts == ("artifact.txt",)
-    assert counter.read_text(encoding="utf-8") == "1"
+
+
+@pytest.mark.asyncio
+async def test_final_verify_settlement_invalidates_prior_success_after_mutation(
+    tmp_path: Any,
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",)),
+        AcceptanceCriterionSpec(description="mutator", verify_command="rm target.txt"),
+        "contractless",
+    )
+    first_outcome = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    mutating_outcome = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[1], cwd=str(tmp_path)
+    )
+    results = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=first_outcome,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="mutator",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=mutating_outcome,
+            ),
+            ACExecutionResult(
+                ac_index=2,
+                ac_content="contractless",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            ),
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert [result.success for result in results] == [False, False, False]
+    assert all(result.outcome is ACExecutionOutcome.FAILED for result in results)
 
 
 @pytest.mark.asyncio

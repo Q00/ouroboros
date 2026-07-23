@@ -242,6 +242,69 @@ def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
     assert [relay["source_event_id"] for relay in accepted] == [acceptance_a.id]
 
 
+def test_foreign_execution_attention_evidence_is_not_relayed() -> None:
+    foreign_routed = _event(
+        1,
+        "execution.ac.model_routed",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "model_tier": "frontier",
+            "model": "gpt-5.5",
+            "model_escalated": True,
+        },
+    )
+    foreign_exhausted = _event(
+        2,
+        "execution.ac.recovery_exhausted",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "last_failure_class": "verify_command_failed",
+        },
+    )
+    foreign_attempt = _event(
+        3,
+        "execution.ac.attempt_judged",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "root_ac_index": 0,
+            "attempt_number": 1,
+            "outcome": "failed",
+        },
+    )
+
+    relays = classify_relay_events(
+        [foreign_routed, foreign_exhausted, foreign_attempt],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    assert relays == []
+
+
+def test_execution_event_without_session_identity_fails_closed_for_linked_job() -> None:
+    unscoped = _event(
+        1,
+        "execution.ac.recovery_exhausted",
+        {
+            "session_id": None,
+            "semantic_ac_key": "ac_unscoped",
+            "last_failure_class": "verify_command_failed",
+        },
+    )
+
+    assert (
+        classify_relay_events(
+            [unscoped],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
+
+
 def test_synapse_completed_relay_carries_only_bounded_reply_summary() -> None:
     completed = _event(
         1,
