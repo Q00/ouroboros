@@ -1,10 +1,12 @@
 """Unit tests for ouroboros.persistence.uow module."""
 
+import os
 from pathlib import Path
 
 import pytest
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.events import (
     create_session_cancelled_event,
     create_session_completed_event,
@@ -232,6 +234,58 @@ class TestUnitOfWork:
         assert uow.pending_event_count == 0
         events = await event_store.replay("session", session_id)
         assert [event.type for event in events] == ["orchestrator.session.cancelled"]
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires a forked lease owner")
+    async def test_commit_rejects_terminal_event_while_foreign_heartbeat_is_live(
+        self,
+        uow: UnitOfWork,
+        event_store: EventStore,
+    ) -> None:
+        """A foreign process cannot bypass live process-local ownership."""
+        session_id = "sess-uow-foreign-owner"
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        child_pid = os.fork()
+        if child_pid == 0:  # pragma: no cover - assertions run in parent
+            os.close(ready_read)
+            os.close(release_write)
+            try:
+                heartbeat.acquire(session_id)
+                os.write(ready_write, b"1")
+                os.read(release_read, 1)
+            finally:
+                heartbeat.release_if_owned_by_current_process(session_id)
+                os.close(ready_write)
+                os.close(release_read)
+            os._exit(0)
+
+        os.close(ready_write)
+        os.close(release_read)
+        try:
+            assert os.read(ready_read, 1) == b"1"
+            assert heartbeat.is_holder_alive(session_id)
+            uow.add_event(
+                create_session_completed_event(
+                    session_id,
+                    summary={"result": "must be rejected"},
+                    messages_processed=1,
+                )
+            )
+
+            result = await uow.commit()
+
+            assert result.is_err
+            assert result.error.details["heartbeat_owner_live"] is True
+            assert uow.pending_event_count == 1
+            assert await event_store.replay("session", session_id) == []
+        finally:
+            os.write(release_write, b"1")
+            os.close(release_write)
+            os.close(ready_read)
+            waited_pid, status = os.waitpid(child_pid, 0)
+            assert waited_pid == child_pid
+            assert os.WIFEXITED(status)
+            assert os.WEXITSTATUS(status) == 0
 
 
 class TestPhaseTransaction:

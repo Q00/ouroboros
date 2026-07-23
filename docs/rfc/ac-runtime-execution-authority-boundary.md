@@ -308,6 +308,8 @@ the durable winner and projects that status instead; it never publishes a
 | A stale paused/running snapshot observes authority retirement after a public terminal write | conditional terminal append finds the existing terminal event and does not append `FAILED` | no generation is recreated or retired a second time | fail-closed resume error while the durable terminal status remains unchanged |
 | A concurrent same-owner resume occurs during a claim or terminalization reservation | no competing terminal write | `claim` fails without releasing the live owner or its worktree state | `process_local_execution_in_progress` |
 | A foreign live process holds the heartbeat lease and public cancel arrives | publish a file-backed nonterminal request; do not write terminal state beneath its effects | no local registration is manufactured or retired; the owner observes the request at its normal checkpoints | successful `cancellation_requested`; an unavailable signal path returns a retryable persistence error |
+| A local or foreign claimed owner receives a public cancellation reason/actor | preserve `reason` and `cancelled_by` in the in-memory or file-backed request metadata | the exact owner consumes the metadata when it wins `CANCELLED`; no controller writes terminal state beneath it | durable session cancellation retains CLI/MCP/JobManager attribution instead of runner defaults |
+| The owning runner commits `CANCELLED` and is repeatedly cancelled during acknowledgement/projection | the durable winner remains `CANCELLED` | marker clearing, execution projection, authority/heartbeat retirement, route removal, and workspace release drain in one shielded child task | no terminal/live-owner coexistence window remains |
 | A terminal record is written through a public paused-owner cancellation | call `retire_after_terminal_persistence` only after the write | registry atomically detaches the opaque binding, then finalizers evict runner/cache/store and lease resources | later resume sees terminal state and cannot leak a retained owner |
 | A raw caller cancellation interrupts pre-effect contract/tool setup after a claim | first drain any published cooperative cancellation in a shielded task | successful cancellation retires normally; failed persistence releases only the claim/route/lock and preserves retryable authority | cancellation result or `cancellation_persistence_pending`, never `PAUSED → FAILED` through lost authority |
 | Setup or execution raises and the `FAILED` transition cannot persist | no false terminal result is reported | release only claim/route/worktree; retain registration and heartbeat for the same owner | typed `terminal_persistence_pending`; wrapper must retain rather than manufacture another failure |
@@ -468,6 +470,17 @@ The Foundation A implementation must demonstrate all of the following:
 48. `UnitOfWork` is not lifecycle authority: it rejects a terminal event for
     any session with a live process-local registry entry, leaving both the
     pending event and resumable owner intact for owner-mediated terminalization.
+49. `UnitOfWork` also rejects terminal events when a different live process
+    holds the session heartbeat lease; a foreign writer cannot bypass the
+    owning process merely because its local registry is empty.
+50. after the owning runner commits `CANCELLED`, cooperative request clearing,
+    execution-terminal projection, authority and heartbeat retirement, active
+    route removal, and workspace release drain under shielding across repeated
+    caller cancellation.
+51. cooperative cancellation preserves the caller's bounded `reason` and
+    `cancelled_by` metadata through both the same-process registry and the
+    atomic file-backed cross-process channel; the owning runner uses that
+    metadata for the durable session cancellation event.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim
