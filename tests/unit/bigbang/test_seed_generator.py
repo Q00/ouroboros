@@ -540,20 +540,25 @@ class TestSeedGeneratorExtraction:
         assert _parse_constraint_values('[1, "x"]') == ("1", "x")
 
     def test_parse_constraint_values_rejects_truncated_json_intent(self) -> None:
-        """A quote-led array missing its closing bracket raises for retry."""
-        with pytest.raises(ValueError, match="truncated JSON array"):
-            _parse_constraint_values('["--lang ko|en"')
+        """Any malformed array missing its closing bracket raises for retry."""
+        for malformed in ('["--lang ko|en"', "[--lang ko|en"):
+            with pytest.raises(ValueError, match="JSON array"):
+                _parse_constraint_values(malformed)
 
     @pytest.mark.asyncio
-    async def test_generate_retries_on_malformed_json_constraints(self) -> None:
+    @pytest.mark.parametrize(
+        "malformed_constraints",
+        ('["--lang ko|en", "keep exact flag",]', "[--lang ko|en | keep exact flag"),
+    )
+    async def test_generate_retries_on_malformed_json_constraints(
+        self, malformed_constraints: str
+    ) -> None:
         """Malformed JSON-intent CONSTRAINTS trigger the extraction retry path."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
-        malformed_response = create_valid_extraction_response(
-            constraints='["--lang ko|en", "keep exact flag",]'
-        )
+        malformed_response = create_valid_extraction_response(constraints=malformed_constraints)
         valid_response = create_valid_extraction_response(
             constraints='["--lang ko|en", "keep exact flag"]'
         )

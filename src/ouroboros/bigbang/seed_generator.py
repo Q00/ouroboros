@@ -55,7 +55,7 @@ log = structlog.get_logger()
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
-_JSON_ARRAY_INTENT_RE = re.compile(r"^\[\s*['\"]")
+_LEGACY_BRACKET_PREFIX_RE = re.compile(r"^\[[^\[\]\r\n]+\]\s+\S")
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -69,11 +69,10 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
     starts with ``[`` without signalling JSON intent.
 
     Raises:
-        ValueError: If the value signals JSON-array intent (``[`` followed by
-            a quote) but is not a valid JSON array — e.g. a trailing comma or
-            a truncated array. Raising here lets extraction-time callers route
-            malformed structured output through the existing retry path
-            instead of silently pipe-splitting it.
+        ValueError: If the value starts with ``[`` but is neither a valid JSON
+            array nor legacy bracket-prefixed prose such as ``[P0] ...``.
+            Raising here routes malformed structured output through the
+            existing extraction retry path.
     """
     if isinstance(raw_value, list | tuple):
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
@@ -82,11 +81,11 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
     text = raw_value.strip()
     if not text:
         return ()
-    if text.startswith("[") and text.endswith("]"):
+    if text.startswith("["):
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError as e:
-            if _JSON_ARRAY_INTENT_RE.match(text):
+            if not _LEGACY_BRACKET_PREFIX_RE.match(text):
                 raise ValueError(
                     f"CONSTRAINTS looks like a JSON array but is not valid JSON: {e}. "
                     f"Value: {text[:200]}"
@@ -94,11 +93,6 @@ def _parse_constraint_values(raw_value: object) -> tuple[str, ...]:
         else:
             if isinstance(decoded, list):
                 return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
-    elif _JSON_ARRAY_INTENT_RE.match(text):
-        raise ValueError(
-            "CONSTRAINTS looks like a truncated JSON array (no closing bracket). "
-            f"Value: {text[:200]}"
-        )
     return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
