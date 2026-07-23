@@ -36,6 +36,7 @@ import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1152,6 +1153,60 @@ Return ONLY the JSON verdict object. No other text."""
     )
 
 
+def _plugin_advisory_contract_section(
+    advisory_fanout_id: str | None,
+    advisory_fanout_contract: Mapping[str, Any] | None,
+) -> str:
+    """Render the ACTUAL advisory re-entry contract into the child prompt.
+
+    The OpenCode bridge dispatches only ``_subagent.prompt`` to the child —
+    parent response meta never reaches it — so the concrete fan-out id, the
+    lane table, the data policy, and the COMPLETE ``data_evidence_answer.v1``
+    contract must ride the prompt itself (PR #1703 round 5 B1). The data
+    contract is rendered whole: a torn form defeats informed consent.
+    """
+    if not advisory_fanout_contract:
+        return ""
+    lane_lines = []
+    data_policy: Any = None
+    data_contract: Any = None
+    for lane in advisory_fanout_contract.get("lanes") or ():
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        lane_lines.append(
+            f"- {lane_id} (capability={lane.get('capability')}, "
+            f"required={bool(lane.get('required'))})"
+        )
+        if lane_id == "data_context":
+            data_policy = lane.get("data_policy")
+            data_contract = lane.get("answer_contract")
+    fanout_line = (
+        f"fanout_id: {advisory_fanout_id}"
+        if advisory_fanout_id
+        else "fanout_id: (registration unavailable — skip re-entry this turn)"
+    )
+    policy_json = json.dumps(data_policy, ensure_ascii=False) if data_policy else "{}"
+    contract_json = json.dumps(data_contract, ensure_ascii=False) if data_contract else "{}"
+    return f"""
+### Advisory Re-entry Contract (actual values)
+{fanout_line}
+result_correlation_key: context.lane_id
+lanes:
+{chr(10).join(lane_lines)}
+
+data_context data_policy (enforce, do not just read):
+{policy_json}
+
+data_context answer contract (data_evidence_answer.v1, complete — fill this
+form exactly; it is validated server-side at re-entry):
+{contract_json}
+
+After the advisory lanes run, submit one {{"key": <lane_id>, "content":
+<lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`
+with the fanout_id above and correlation_key `context.lane_id`."""
+
+
 def build_interview_subagent(
     *,
     session_id: str,
@@ -1162,6 +1217,8 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    advisory_fanout_id: str | None = None,
+    advisory_fanout_contract: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
@@ -1171,6 +1228,12 @@ def build_interview_subagent(
     Args:
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
+        advisory_fanout_id: Registered advisory fan-out id for this turn;
+            embedded VERBATIM in the child prompt so the plugin child can
+            perform re-entry (the bridge dispatches only the prompt).
+        advisory_fanout_contract: The versioned ``question_advisory_fanout``
+            block; its lane table, data policy, and complete data answer
+            contract are rendered into the prompt.
     """
     from ouroboros.agents.loader import load_agent_prompt
 
@@ -1182,13 +1245,11 @@ def build_interview_subagent(
 2. Then add a compact helper from: code_context, web_context, data_context,
    ambiguity_contrarian, answer_simplifier, architecture_implications.
 3. Offer options, a draft, or unresolved ambiguities; preserve user agency.
-4. The dispatching response meta carries the versioned lane contract
-   (`question_advisory_fanout`: per-lane purpose, `data_policy`, and
-   `answer_contract`) plus a `question_advisory_fanout_id`. Follow each
-   lane's contract — `data_context` is a read-only proposer whose answers
-   always require user confirmation — and submit lane outputs back via
-   `ouroboros_submit_fanout_results` keyed by `context.lane_id` with that
-   fanout id."""
+4. Follow each lane's contract below — `data_context` is a read-only
+   proposer whose answers always require user confirmation — and submit
+   lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
+        advisory_fanout_id, advisory_fanout_contract
+    )
 
     transcript_section = ""
     if transcript:
@@ -2805,6 +2866,28 @@ class FanoutRegistry:
     # escape the configured fan-out root.
     _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+    # Completed and orphaned records are retained for a bounded replay window,
+    # then swept opportunistically on the next registration — the directory
+    # never grows without bound, and replay of a recently completed fan-out
+    # keeps working.
+    _RECORD_RETENTION_SECONDS = 7 * 24 * 3600
+
+    def _gc_stale_records(self) -> None:
+        """Best-effort retention sweep; never fails the registration path."""
+        import time
+
+        cutoff = time.time() - self._RECORD_RETENTION_SECONDS
+        try:
+            entries = list(self._dir.glob("*.json"))
+        except OSError:
+            return
+        for path in entries:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     @classmethod
     def _valid_id(cls, fanout_id: str) -> bool:
         return bool(cls._ID_PATTERN.match(fanout_id))
@@ -2836,6 +2919,7 @@ class FanoutRegistry:
         completion; when omitted every expected key is required (the original
         all-keys gate).
         """
+        self._gc_stale_records()
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
         record = FanoutRecord(
             fanout_id=resolved_id,
@@ -2886,7 +2970,11 @@ class FanoutRegistry:
                 encoding="utf-8",
             )
             os.replace(tmp_path, target)
-        except OSError as exc:
+        # UnicodeError: json.dumps happily escapes a lone surrogate, but
+        # utf-8 encoding at write time raises UnicodeEncodeError — that is a
+        # persistence failure to report (accumulation_persisted=false /
+        # completion_not_persisted), never an uncaught crash.
+        except (OSError, UnicodeError, ValueError) as exc:
             log.warning(
                 "fanout.registry.persist_failed",
                 fanout_id=record.fanout_id,
@@ -2962,7 +3050,9 @@ def _is_row_shaped_value(value: str) -> bool:
         return True
     if "},{" in stripped.replace(" ", "") or '",["' in stripped:
         return True
-    return stripped.count("\n") >= 2
+    # An aggregate is a SINGLE-LINE scalar statement: two customer rows
+    # separated by one newline are raw data (bot-review round-5 probe).
+    return "\n" in stripped or "\r" in stripped
 
 
 def _parseable_timestamp(value: str) -> bool:
@@ -3003,6 +3093,7 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         for label, pattern in _data_evidence_boundary_patterns()
         if pattern.search(serialized)
     ]
+    forbidden = _data_forbidden_operation_pattern()
     evidence = output.get("evidence")
     for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
         if not isinstance(item, Mapping):
@@ -3018,8 +3109,18 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"evidence[{index}].observed_at: not a real ISO-8601 calendar date(-time)"
             )
+        # The read-only boundary binds EXECUTED evidence too, not only
+        # proposals: evidence whose provenance claims a mutating operation
+        # (e.g. query_summary "DELETE FROM customers") is a policy violation
+        # regardless of whether the mutation already happened elsewhere.
+        for field_name in ("source", "query_summary"):
+            field_value = item.get(field_name)
+            if isinstance(field_value, str) and (match := forbidden.search(field_value)):
+                errors.append(
+                    f"evidence[{index}].{field_name}: claims forbidden operation "
+                    f"{match.group(1).lower()!r}; the data lane is read-only"
+                )
     proposals = output.get("proposed_queries")
-    forbidden = _data_forbidden_operation_pattern()
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
         if not isinstance(item, Mapping):
             continue
@@ -3035,6 +3136,23 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
 
 
 _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
+
+# Lane ids (and correlation values generally) are short identifiers; an
+# unexpected key that does not look like one is untrusted freeform content.
+_LANE_KEY_SHAPE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _reportable_unexpected_key(key: str) -> str:
+    """Return a safe-to-echo form of a rejected submission key.
+
+    Lane-id shaped keys are echoed verbatim (they are plain identifiers the
+    host needs to recognize its own mistake); anything else could be PII or a
+    secret masquerading as a key, so only a digest is reported.
+    """
+    if _LANE_KEY_SHAPE.match(key):
+        return key
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"<redacted-key sha256:{digest}>"
 
 
 def _lane_answer_contract_violations(
@@ -3319,22 +3437,29 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
         }
-    # Correlation is validated BEFORE terminal replay: the stored synthesis is
-    # only handed back across the same session/correlation boundary it was
-    # registered under — a caller outside that boundary gets the same
-    # correlation_mismatch a live submission would.
-    if record.session_id and session_id and record.session_id != session_id:
+    # Correlation is validated BEFORE terminal replay, and STRICTLY: when the
+    # record was registered with a session/correlation identity, the caller
+    # must present it — omitting the parameters does not skip the boundary
+    # (bot-review round-5 probe). Only records registered WITHOUT an identity
+    # (legacy/empty) accept an omitted value.
+    if record.session_id and session_id != record.session_id:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
-            "error": "session_id does not match the registered fan-out.",
+            "error": (
+                "session_id does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
             "expected_session_id": record.session_id,
         }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
+    if record.correlation_key and correlation_key != record.correlation_key:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
-            "error": "correlation_key does not match the registered fan-out.",
+            "error": (
+                "correlation_key does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
             "expected_correlation_key": record.correlation_key,
         }
     if record.completed:
@@ -3361,7 +3486,11 @@ def submit_fanout_results(
 
     # Unknown keys are rejected at the door, BEFORE any merge or write: a key
     # the record never registered is arbitrary content with no lane contract,
-    # so accepting it would smuggle unvalidated data into durable state.
+    # so accepting it would smuggle unvalidated data into durable state. The
+    # rejected key VALUES are themselves untrusted content: only lane-id
+    # shaped keys are echoed back verbatim; anything else (an email, a token,
+    # freeform text) is reported as a redacted digest so the report and the
+    # terminal record never carry it.
     submitted: dict[str, Any] = {}
     unexpected_keys: list[str] = []
     for result in results:
@@ -3370,8 +3499,9 @@ def submit_fanout_results(
             continue
         resolved_key = str(key)
         if resolved_key not in record.expected_keys:
-            if resolved_key not in unexpected_keys:
-                unexpected_keys.append(resolved_key)
+            reportable = _reportable_unexpected_key(resolved_key)
+            if reportable not in unexpected_keys:
+                unexpected_keys.append(reportable)
             continue
         submitted[resolved_key] = result.get("content")
     unexpected_keys.sort()
@@ -3508,12 +3638,18 @@ def submit_fanout_results(
     # BEFORE claiming completion: a failed terminal write means the fan-out is
     # NOT durably complete and a later submission could still replace the
     # outcome, so the caller must be told to retry, never handed "complete".
+    # ``unexpected_keys`` is per-call rejection feedback, not part of the
+    # outcome: it is stripped from the persisted terminal response so even a
+    # redacted trace of rejected keys never enters durable state.
+    terminal_snapshot = {
+        key: value for key, value in completion.items() if key != "unexpected_keys"
+    }
     terminal_persisted = registry.save(
         replace(
             record,
             received_results=provided,
             completed=True,
-            terminal_response=completion,
+            terminal_response=terminal_snapshot,
         )
     )
     if not terminal_persisted:

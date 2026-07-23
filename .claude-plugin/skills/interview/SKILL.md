@@ -240,6 +240,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - `results`: one `{ "key": <correlation value>, "content": <child output> }`
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).
+   Always pass the stamped `session_id` and `correlation_key` — when the
+   fan-out was registered with them, omitting them is a
+   `correlation_mismatch`, not a skipped check. Submissions are bounded
+   (at most 32 results / 256 KB serialized per call): submit findings, not
+   raw child transcripts.
    A complete set returns the correlated synthesis to continue with; a partial
    set returns `status="partial"` with `missing_keys` so you can resubmit the
    remaining lanes (partial submissions accumulate server-side; if the

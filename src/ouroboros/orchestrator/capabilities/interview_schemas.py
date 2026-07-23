@@ -28,6 +28,9 @@ DATA_EVIDENCE_PHONE_PATTERN = r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b"
 # A value that opens as a JSON list/object is serialized rows, not an
 # aggregate.
 DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"
+# An aggregate is a single-line scalar statement: any embedded newline means
+# a record list (two customer rows separated by one newline are raw data).
+DATA_EVIDENCE_MULTILINE_PATTERN = r"[\r\n]"
 
 
 def _builtin_semantics_for(tool_name: str):  # noqa: ANN202
@@ -561,6 +564,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                                 {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
                                 {"not": {"pattern": DATA_EVIDENCE_PHONE_PATTERN}},
                                 {"not": {"pattern": DATA_EVIDENCE_ROW_SHAPE_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_MULTILINE_PATTERN}},
                             ],
                         },
                         "observed_at": {
@@ -708,6 +712,12 @@ def _data_context_lane_policy() -> dict[str, Any]:
             "save",
             "upload",
             "publish",
+            "upsert",
+            "replace",
+            "merge",
+            "call",
+            "exec",
+            "execute",
         ],
         "evidence_policy": {
             "max_evidence_items": 5,

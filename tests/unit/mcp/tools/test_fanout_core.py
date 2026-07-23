@@ -1434,6 +1434,214 @@ def test_fanout_id_is_confined_to_registry_root(tmp_path: Any) -> None:
     )
 
 
+def test_executed_evidence_claiming_mutation_is_rejected(tmp_path: Any) -> None:
+    """The read-only boundary binds executed evidence, not only proposals.
+
+    Bot-review round-5 probe (PR #1703): evidence whose provenance claimed
+    ``DELETE FROM customers`` completed and aggregated without violations,
+    and ``UPSERT``/``REPLACE``/``CALL`` proposals evaded the forbidden list.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    deleted_evidence = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Customer count after cleanup.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "external metered warehouse",
+                "query_summary": "DELETE FROM customers WHERE stale = 1",
+                "value": "1,204 rows affected",
+                "observed_at": "2026-07-23T09:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    errors = _data_evidence_boundary_violations(deleted_evidence)
+    assert any("delete" in error and "read-only" in error for error in errors)
+
+    for operation in ("UPSERT INTO t VALUES (1)", "REPLACE INTO t VALUES (1)", "CALL cleanup()"):
+        proposal = {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": operation,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+        assert any(
+            "read-only" in error for error in _data_evidence_boundary_violations(proposal)
+        ), operation
+
+
+def test_single_newline_two_row_value_is_rejected(tmp_path: Any) -> None:
+    """An aggregate is a single-line scalar statement.
+
+    Bot-review round-5 probe (PR #1703): two customer rows separated by ONE
+    newline passed the multi-newline blacklist and persisted as valid data
+    evidence.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    two_rows = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Top customers.",
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "warehouse",
+                "query_summary": "top customers by revenue",
+                "value": "Kim Minsu, premium tier\nLee Jiwoo, premium tier",
+                "observed_at": "2026-07-23T09:00:00Z",
+            }
+        ],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["Point-in-time."],
+    }
+    errors = _data_evidence_boundary_violations(two_rows)
+    assert any("row-shaped" in error for error in errors)
+
+
+def test_unexpected_key_values_are_redacted_and_not_terminal(tmp_path: Any) -> None:
+    """Rejected key VALUES are untrusted content, not identifiers to echo.
+
+    Bot-review round-5 probe (PR #1703): an unexpected key containing an
+    email and a token-shaped secret was echoed into ``unexpected_keys`` and
+    persisted inside the terminal response. Non-lane-shaped keys are now
+    reported as redacted digests, and ``unexpected_keys`` never persists on
+    the terminal record.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-redact",
+        payloads=_mixed_advisory_payloads(),
+    )
+    evil_key = "alice@example.com token=sk-live-777"
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-redact",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+            {"key": evil_key, "content": "irrelevant"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert len(out["unexpected_keys"]) == 1
+    assert out["unexpected_keys"][0].startswith("<redacted-key sha256:")
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-777" not in persisted
+    assert "unexpected_keys" not in persisted
+
+
+def test_omitted_correlation_does_not_bypass_the_boundary(tmp_path: Any) -> None:
+    """Optional parameters are not an escape hatch (round-5 probe).
+
+    A record registered with a session/correlation identity requires the
+    caller to present it — omitting both must not allow completion or
+    terminal replay.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-strict",
+        payloads=_mixed_advisory_payloads(),
+    )
+    results = [
+        {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        {"key": "answer_simplifier", "content": "simplifier-advice"},
+    ]
+    omitted = submit_fanout_results(
+        registry,
+        session_id="",
+        correlation_key="",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert omitted["status"] == "correlation_mismatch"
+
+    complete = submit_fanout_results(
+        registry,
+        session_id="sess-strict",
+        correlation_key="context.lane_id",
+        results=results,
+        fanout_id=fanout_id,
+    )
+    assert complete["status"] == "complete"
+
+    replay_omitted = submit_fanout_results(
+        registry,
+        session_id="",
+        correlation_key="",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay_omitted["status"] == "correlation_mismatch"
+    assert "result" not in replay_omitted
+
+
+def test_surrogate_content_reports_persistence_failure(tmp_path: Any) -> None:
+    """A lone surrogate must degrade honestly, not crash re-entry (round-5)."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-surrogate",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-surrogate",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "bad \ud800 surrogate"}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["accumulation_persisted"] is False
+
+
+def test_stale_records_are_swept_on_register(tmp_path: Any) -> None:
+    """Completed/orphaned records are retained for a bounded replay window."""
+    import os as os_module
+    import time
+
+    registry = FanoutRegistry(tmp_path)
+    stale_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-old",
+        payloads=_mixed_advisory_payloads(),
+    )
+    assert stale_id is not None
+    stale_path = tmp_path / f"{stale_id}.json"
+    ancient = time.time() - FanoutRegistry._RECORD_RETENTION_SECONDS - 3600
+    os_module.utime(stale_path, (ancient, ancient))
+
+    fresh_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-new",
+        payloads=_mixed_advisory_payloads(),
+    )
+    assert fresh_id is not None
+    assert not stale_path.exists()
+    assert (tmp_path / f"{fresh_id}.json").exists()
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
@@ -1534,3 +1742,50 @@ async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_bounds_input_size(tmp_path: Any) -> None:
+    """Re-entry input is bounded before validation or persistence.
+
+    Bot-review round-5 probe (PR #1703): two 200 KB results produced an
+    804 KB terminal file; repeated submissions could exhaust memory or disk.
+    """
+    submit = SubmitFanoutResultsHandler(fanout_registry=FanoutRegistry(tmp_path))
+
+    too_many = await submit.handle(
+        {
+            "fanout_id": "fanout_bounds",
+            "results": [{"key": f"k{i}", "content": "x"} for i in range(33)],
+        }
+    )
+    assert too_many.is_err
+
+    too_big = await submit.handle(
+        {
+            "fanout_id": "fanout_bounds",
+            "results": [{"key": "a", "content": "y" * 300_000}],
+        }
+    )
+    assert too_big.is_err
+
+
+def test_known_data_tools_env_reaches_the_data_lane(monkeypatch: Any) -> None:
+    """OUROBOROS_KNOWN_DATA_TOOLS is the public source for known_data_tools.
+
+    Round-5 suggestion: previously only manually constructed lane metadata
+    could exercise the contract field's prompt/context propagation.
+    """
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "clickhouse_query, metabase_card")
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-known-tools",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    assert lanes["data_context"]["known_data_tools"] == ["clickhouse_query", "metabase_card"]

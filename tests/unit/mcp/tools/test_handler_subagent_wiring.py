@@ -296,8 +296,14 @@ class TestInterviewHandlerSubagentDispatch:
         contracts = record.synthesizer_input["lane_answer_contracts"]
         assert contracts["data_context"]["contract_id"] == "data_evidence_answer.v1"
 
-        # The child prompt points at the structured contract, not just prose.
-        assert "question_advisory_fanout" in result.value.meta["_subagent"]["prompt"]
+        # Round-5 B1: the bridge dispatches ONLY the child prompt, so the
+        # ACTUAL fan-out id and the complete data contract ride the prompt
+        # itself — field names alone are not a contract.
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert meta["question_advisory_fanout_id"] in prompt
+        assert "data_evidence_answer.v1" in prompt
+        assert '"read_only": true' in prompt
+        assert "requires_user_confirmation" in prompt
 
 
 # ---------------------------------------------------------------------------

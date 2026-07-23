@@ -6,6 +6,7 @@ Contains handlers for interview and seed generation tools:
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -716,7 +717,7 @@ def _build_question_advisory_request(
             "run_lateral_review",
             "call_mcp",
         ],
-        "lanes": list(advisory["lanes"]),
+        "lanes": _advisory_lanes_with_known_data_tools(advisory),
         "synthesis_contract": dict(advisory["synthesis_contract"]),
         "mcp_tool_capability": mcp_tool_capability,
     }
@@ -725,6 +726,28 @@ def _build_question_advisory_request(
     if code_investigation_request is not None:
         request["code_investigation_request"] = code_investigation_request
     return request
+
+
+def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Copy advisory lanes, injecting configured ``known_data_tools``.
+
+    ``OUROBOROS_KNOWN_DATA_TOOLS`` (comma-separated MCP tool names) is the
+    public configuration source for the data lane's known tools — without it
+    only manually constructed lane metadata could exercise the contract
+    field. Lane dicts are copied so the cached capability metadata is never
+    mutated.
+    """
+    lanes = [dict(lane) for lane in advisory.get("lanes") or ()]
+    known_tools = [
+        item.strip()
+        for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
+        if item.strip()
+    ]
+    if known_tools:
+        for lane in lanes:
+            if lane.get("lane_id") == "data_context" and "known_data_tools" not in lane:
+                lane["known_data_tools"] = known_tools
+    return lanes
 
 
 def _attach_question_assist_requests(
@@ -2458,6 +2481,38 @@ class InterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
 
+        # Transport parity (PR #1703 bot review rounds 4-5): the plugin child
+        # generates the question itself, so per-question lane payloads cannot
+        # be pre-built here — but the plugin transport must still receive the
+        # SAME machine-readable advisory contract as host-driven mode. The
+        # bridge dispatches ONLY ``_subagent.prompt`` to the child, so the
+        # ACTUAL fan-out id and the data lane's answer contract are embedded
+        # in the child prompt itself (round 5 B1: parent response meta alone
+        # never reaches the child); the parent meta carries them too for the
+        # host side of re-entry.
+        plugin_advisory_meta: dict[str, Any] = {}
+        plugin_fanout_id: str | None = None
+        plugin_advisory_contract: dict[str, Any] | None = None
+        plugin_registry = self._resolved_fanout_registry()
+        if plugin_registry is not None:
+            advisory_metadata = ouroboros_tool_capability_metadata("ouroboros_interview")[
+                "orchestration"
+            ]["question_advisory_fanout"]
+            plugin_advisory_contract = {
+                **advisory_metadata,
+                "lanes": _advisory_lanes_with_known_data_tools(advisory_metadata),
+            }
+            plugin_fanout_id = register_question_advisory_fanout_from_lanes(
+                plugin_registry,
+                session_id=real_session_id or "new",
+                lanes=plugin_advisory_contract["lanes"],
+            )
+            plugin_advisory_meta["question_advisory_fanout"] = plugin_advisory_contract
+            plugin_advisory_meta["question_advisory_result_correlation_key"] = "context.lane_id"
+            # None means the record could not be persisted: never advertise a
+            # fan-out id that cannot be redeemed at re-entry.
+            if plugin_fanout_id is not None:
+                plugin_advisory_meta["question_advisory_fanout_id"] = plugin_fanout_id
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
@@ -2467,32 +2522,9 @@ class InterviewHandler:
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            advisory_fanout_id=plugin_fanout_id,
+            advisory_fanout_contract=plugin_advisory_contract,
         )
-        # Transport parity (PR #1703 bot review round 4): the plugin child
-        # generates the question itself, so per-question lane payloads cannot
-        # be pre-built here — but the plugin transport must still receive the
-        # SAME machine-readable advisory contract as host-driven mode: the
-        # versioned lane metadata (data_policy + answer contracts included)
-        # and a registered fan-out id so re-entry validation applies. The
-        # child builds lane prompts from the contract once it has the
-        # question.
-        plugin_advisory_meta: dict[str, Any] = {}
-        plugin_registry = self._resolved_fanout_registry()
-        if plugin_registry is not None:
-            advisory_contract = ouroboros_tool_capability_metadata("ouroboros_interview")[
-                "orchestration"
-            ]["question_advisory_fanout"]
-            plugin_fanout_id = register_question_advisory_fanout_from_lanes(
-                plugin_registry,
-                session_id=real_session_id or "new",
-                lanes=list(advisory_contract.get("lanes") or ()),
-            )
-            plugin_advisory_meta["question_advisory_fanout"] = advisory_contract
-            plugin_advisory_meta["question_advisory_result_correlation_key"] = "context.lane_id"
-            # None means the record could not be persisted: never advertise a
-            # fan-out id that cannot be redeemed at re-entry.
-            if plugin_fanout_id is not None:
-                plugin_advisory_meta["question_advisory_fanout_id"] = plugin_fanout_id
         return await dispatch_plugin_terminal(
             self.event_store,
             session_id=real_session_id,

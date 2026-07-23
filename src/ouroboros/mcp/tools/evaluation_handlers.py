@@ -1915,6 +1915,14 @@ class LateralThinkHandler(BridgeAwareMixin):
             )
 
 
+# Re-entry input bounds: fan-out results become durable state (received
+# results AND the terminal outcome), so an unbounded submission is a direct
+# disk/memory amplification vector. Both caps are generous multiples of the
+# largest legitimate lane set.
+_MAX_FANOUT_RESULT_ITEMS = 32
+_MAX_FANOUT_RESULTS_BYTES = 262_144  # 256 KB serialized per submission
+
+
 @dataclass
 class SubmitFanoutResultsHandler:
     """Handler for the ``ouroboros_submit_fanout_results`` re-entry tool.
@@ -1944,9 +1952,19 @@ class SubmitFanoutResultsHandler:
                 "subagents declared by a prior tool's `meta` (which stamped a "
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A complete set returns the "
-                "synthesis to continue with; a partial set returns "
-                "`status=partial` with the missing keys so you can resubmit."
+                "correlation field for that child. Statuses: `complete` returns "
+                "the synthesis (with `missing_optional_keys`, rejected "
+                "`unexpected_keys`, and any `contract_violations`); `partial` "
+                "lists `missing_keys`/`missing_required_keys` (and "
+                "`synthesis_rejected_keys` for content the synthesizer refused) "
+                "so you can resubmit the remainder — `accumulation_persisted: "
+                "false` means resubmit those lanes too; "
+                "`completion_not_persisted` means the synthesis succeeded but "
+                "the terminal write failed, so resubmit; `already_complete` "
+                "replays the immutable terminal outcome; `correlation_mismatch` "
+                "/ `unknown_fanout_id` are clean errors. Submissions are "
+                f"bounded: at most {_MAX_FANOUT_RESULT_ITEMS} results and "
+                f"{_MAX_FANOUT_RESULTS_BYTES // 1024} KB serialized per call."
             ),
             parameters=(
                 MCPToolParameter(
@@ -2006,6 +2024,39 @@ class SubmitFanoutResultsHandler:
                 )
             )
         results = [item for item in raw_results if isinstance(item, dict)]
+        # Bound the submission BEFORE validation or persistence: results are
+        # written into durable fan-out state twice (received results + the
+        # terminal outcome), so unbounded input is a disk/memory exhaustion
+        # vector.
+        if len(results) > _MAX_FANOUT_RESULT_ITEMS:
+            return Result.err(
+                MCPToolError(
+                    f"results carries {len(results)} items; at most "
+                    f"{_MAX_FANOUT_RESULT_ITEMS} results are accepted per "
+                    "submission",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+        try:
+            serialized_size = len(
+                json.dumps(results, ensure_ascii=False).encode("utf-8", "replace")
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "results must be JSON-serializable",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+        if serialized_size > _MAX_FANOUT_RESULTS_BYTES:
+            return Result.err(
+                MCPToolError(
+                    f"results serializes to {serialized_size} bytes; at most "
+                    f"{_MAX_FANOUT_RESULTS_BYTES} bytes are accepted per "
+                    "submission — trim child outputs to their findings",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
 
         outcome = submit_fanout_results(
             self._registry,
