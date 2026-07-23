@@ -118,7 +118,7 @@ def _low_ambiguity() -> AmbiguityScore:
 def _extraction_response() -> CompletionResponse:
     return CompletionResponse(
         content="""GOAL: Build an issue tool
-CONSTRAINTS: Python
+CONSTRAINTS: ["Python"]
 ACCEPTANCE_CRITERIA:
 AC: Keyboard-first command menu | verify: NONE | artifacts: NONE | expect: NONE
 AC: Queue navigation | verify: NONE | artifacts: NONE | expect: NONE

@@ -64,17 +64,19 @@ def _parse_constraint_values(raw_value: object, *, strict: bool = False) -> tupl
     The extraction format requests a single-line JSON array so literal pipe
     characters inside one constraint survive as data (#1696).
 
-    In strict mode (extraction time) any value starting with ``[`` must be a
-    valid JSON array of strings; anything else raises so the extraction retry
-    path can ask the LLM to reformat — the extraction prompt already demands
-    a JSON array. In lenient mode (stored legacy requirements consumed at
-    seed-build time) invalid JSON falls back to the historical pipe split,
-    including bracket-prefixed prose such as ``[P0] Must work offline``, and
-    never raises: stored data has no retry path.
+    In strict mode (extraction time) the value must be a valid JSON array of
+    strings regardless of shape — plain pipe lists, bracket prose, and any
+    other non-array text raise so the extraction retry path can ask the LLM
+    to reformat into the JSON array the extraction prompt already demands.
+    The strict boundary therefore has no fallback surface at all. In lenient
+    mode (stored legacy requirements consumed at seed-build time) invalid
+    JSON falls back to the historical pipe split, including bracket-prefixed
+    prose such as ``[P0] Must work offline``, and never raises: stored data
+    has no retry path.
 
     Raises:
-        ValueError: Only in strict mode, when a ``[``-led value is not a
-            valid JSON array of strings.
+        ValueError: Only in strict mode, when the value is not a valid JSON
+            array of strings.
     """
     if isinstance(raw_value, list | tuple):
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
@@ -83,26 +85,32 @@ def _parse_constraint_values(raw_value: object, *, strict: bool = False) -> tupl
     text = raw_value.strip()
     if not text:
         return ()
-    if text.startswith("["):
+    if strict:
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError as e:
-            if strict:
-                raise ValueError(
-                    f"CONSTRAINTS must be a single-line JSON array of strings: {e}. "
-                    f"Value: {text[:200]}"
-                ) from e
+            raise ValueError(
+                f"CONSTRAINTS must be a single-line JSON array of strings: {e}. Value: {text[:200]}"
+            ) from e
+        if not isinstance(decoded, list):
+            raise ValueError(
+                "CONSTRAINTS must be a JSON array of strings, got "
+                f"{type(decoded).__name__}. Value: {text[:200]}"
+            )
+        non_strings = tuple(type(entry).__name__ for entry in decoded if not isinstance(entry, str))
+        if non_strings:
+            raise ValueError(
+                "CONSTRAINTS JSON array must contain only strings; got "
+                f"{', '.join(non_strings)}. Value: {text[:200]}"
+            )
+        return tuple(item for item in (entry.strip() for entry in decoded) if item)
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            pass
         else:
             if isinstance(decoded, list):
-                if strict:
-                    non_strings = tuple(
-                        type(entry).__name__ for entry in decoded if not isinstance(entry, str)
-                    )
-                    if non_strings:
-                        raise ValueError(
-                            "CONSTRAINTS JSON array must contain only strings; got "
-                            f"{', '.join(non_strings)}. Value: {text[:200]}"
-                        )
                 return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
 

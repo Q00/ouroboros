@@ -56,7 +56,7 @@ def create_mock_completion_response(
 
 def create_valid_extraction_response(
     goal: str = "Build a CLI task manager with project grouping",
-    constraints: str = "Python 3.14+ | No external database | Single-file storage",
+    constraints: str = '["Python 3.14+", "No external database", "Single-file storage"]',
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
     ontology_description: str = "Task management domain model",
@@ -458,7 +458,7 @@ class TestSeedGeneratorExtraction:
         low_ambiguity = create_low_ambiguity_score()
 
         extraction_response = create_valid_extraction_response(
-            constraints="Python 3.14+ | No external database | Must be cross-platform"
+            constraints='["Python 3.14+", "No external database", "Must be cross-platform"]'
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -548,6 +548,9 @@ class TestSeedGeneratorExtraction:
             "[--lang ko|en, keep exact flag] trailing note",  # unquoted array shape
             "[ko] preserve ko|en flag",  # word-tag shape from malformed array output
             "[P0] Must work offline | [P1] Fast startup",  # prose retries at extraction
+            "--lang ko|en | keep exact flag",  # plain pipe list, no brackets
+            "Must work offline",  # plain prose, not an array
+            '"just a JSON string"',  # valid JSON but not an array
         )
         for malformed in malformed_cases:
             with pytest.raises(ValueError, match="JSON array"):
@@ -577,6 +580,10 @@ class TestSeedGeneratorExtraction:
             'en",]',
         )
         assert _parse_constraint_values("[null]") == ("None",)
+        assert _parse_constraint_values("Python 3.14+ | No external database") == (
+            "Python 3.14+",
+            "No external database",
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -589,6 +596,7 @@ class TestSeedGeneratorExtraction:
             '[null, "x"] stray text',
             "[--lang ko|en, keep exact flag] trailing note",
             "[ko] preserve ko|en flag",
+            "--lang ko|en | keep exact flag",
         ),
     )
     async def test_generate_retries_on_malformed_json_constraints(
