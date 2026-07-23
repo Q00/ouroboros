@@ -949,12 +949,75 @@ def test_normalize_execution_acceptance_generic_removal_is_exact_only() -> None:
     assert any("stderr log" in text for text in ac_texts(normalized.acceptance_criteria))
 
 
-def test_normalize_execution_acceptance_transfer_preserves_source_order() -> None:
-    """Follow-up regression: a transferred contract keeps its source position.
+def test_normalize_execution_acceptance_collapse_refreshes_auto_derived_key() -> None:
+    """Blocker regression: a canonical rewrite re-derives a non-explicit key.
 
-    Sequential execution reads tuple order, so a covered baseline contract must
-    stay after an earlier distinct source rather than jumping ahead with the
-    injected canonical block.
+    A contracted hello criterion collapsed onto the canonical description must
+    carry a key derived from that description, not the source's derived key —
+    otherwise downstream code mistakes a stale source key for explicit identity.
+    """
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            verify_command="uv run pytest tests/test_hello_auto.py",
+        )
+    ).model_copy(
+        update={
+            "goal": (
+                "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+                "hello_auto returns exactly hello from ooo auto and "
+                "uv run pytest tests/test_hello_auto.py passes."
+            )
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    collapsed = normalized.acceptance_criteria[0]
+    assert isinstance(collapsed, AcceptanceCriterionSpec)
+    assert collapsed.description == _SINGLE_HELLO_AUTO_OBSERVATION_AC
+    assert collapsed.semantic_ac_key == derive_semantic_ac_key(collapsed)
+
+
+def test_normalize_execution_acceptance_equivalent_contracts_collapse_once() -> None:
+    """Blocker regression: equivalent contracts dispatch a command once.
+
+    A source whose description is already the canonical baseline and a known
+    restatement that carry the SAME contract must collapse to one AC — a
+    materialized derived key on one and ``None`` on the other is not a real
+    identity difference, so the command must not be dispatched twice.
+    """
+    baseline_canonical = (
+        "The experiment ledger artifact contains a baseline entry written before any edit; "
+        "it includes measured command `/usr/bin/time -l uv run train.py`, inner command, "
+        "exit status, val_bpb, maximum resident set size bytes, and baseline status."
+    )
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="uv run train.py"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert len(normalized.acceptance_criteria) == 6
+    baseline_commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "uv run train.py"
+    ]
+    assert baseline_commands == ["uv run train.py"]
+
+
+def test_normalize_execution_acceptance_transfer_keeps_canonical_sequence() -> None:
+    """Blocker regression: a transferred contract never reorders the canonical block.
+
+    The autoresearch canonical ACs are a fixed sequence (baseline before
+    experiments before …).  Transferring a covered baseline contract must keep
+    the canonical baseline ahead of the experiments AC, not re-anchor it into the
+    source coordinate space and invert the sequence.
     """
     baseline = (
         "Seed requires execution to record a baseline uv run train.py result "
@@ -967,12 +1030,26 @@ def test_normalize_execution_acceptance_transfer_preserves_source_order() -> Non
         ),
     )
 
-    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
-    device_index = next(i for i, t in enumerate(texts) if "--device" in t)
+    normalized = normalize_execution_acceptance(seed)
+    texts = ac_texts(normalized.acceptance_criteria)
     baseline_index = next(
         i for i, t in enumerate(texts) if "baseline entry written before any edit" in t
     )
-    assert device_index < baseline_index
+    experiments_index = next(
+        i for i, t in enumerate(texts) if "at most two train.py-only experiment entries" in t
+    )
+    # Canonical sequence intact: baseline precedes experiments.
+    assert baseline_index < experiments_index
+    # The transferred contract still landed on the canonical baseline AC.
+    baseline_spec = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "baseline entry written before any edit" in c.description
+    )
+    assert baseline_spec.verify_command == "/usr/bin/time -l uv run train.py"
+    # The distinct source requirement survives (as a source-tier criterion).
+    assert any("--device" in text for text in texts)
 
 
 def test_normalize_execution_acceptance_transfer_preserves_explicit_key() -> None:

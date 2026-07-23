@@ -294,14 +294,22 @@ def _restore_surviving_acceptance_specs(
         remaining_indices.remove(index)
         return original[index]
 
-    # (anchor, item): anchor orders emissions by originating source position.
-    # Normalizer-injected texts (no source, e.g. autoresearch canonical ACs)
-    # anchor to their filtered position so they keep the normalizer's order.
-    emissions: list[tuple[float, AcceptanceCriterionInput]] = []
+    # Emissions carry a ``(tier, position)`` sort key drawn from ONE coordinate
+    # system so injected and sourced anchors never mix:
+    #   tier 0 = normalizer-injected criteria (e.g. the fixed autoresearch
+    #            canonical ACs), ordered by their filtered position so the
+    #            canonical baseline/experiment sequence is never reordered;
+    #   tier 1 = source-derived criteria, ordered by their originating source
+    #            index so caller order is preserved.
+    # Injected criteria therefore always precede source-only criteria, and a
+    # contract transferred onto an injected canonical AC keeps that AC's tier-0
+    # position rather than jumping into the source coordinate space.
+    _SortKey = tuple[int, float]
+    emissions: list[tuple[_SortKey, AcceptanceCriterionInput]] = []
     emitted_source_texts: set[str] = set()
 
-    def _emit(anchor: float, item: AcceptanceCriterionInput) -> None:
-        emissions.append((anchor, item))
+    def _emit(key: _SortKey, item: AcceptanceCriterionInput) -> None:
+        emissions.append((key, item))
         emitted_source_texts.add(ac_text(item).strip())
 
     for filtered_pos, text in enumerate(filtered):
@@ -330,12 +338,12 @@ def _restore_surviving_acceptance_specs(
                 # sibling here silently deletes a caller-authorized requirement.
                 for index in list(canonical_indices):
                     criterion, _text = _pop(index)
-                    _emit(float(index), criterion)
+                    _emit((1, float(index)), criterion)
                 continue
             anchor = float(min(canonical_indices))
             specs = [_pop(index)[0] for index in canonical_indices]
             _emit(
-                anchor,
+                (1, anchor),
                 _collapse_canonical_acceptance_specs(
                     specs,  # type: ignore[arg-type]
                     description=text,
@@ -349,7 +357,7 @@ def _restore_surviving_acceptance_specs(
         )
         if exact_index is not None:
             criterion, _text = _pop(exact_index)
-            _emit(float(exact_index), criterion)
+            _emit((1, float(exact_index)), criterion)
             continue
 
         # A filtered text with no remaining source.  Either the normalizer
@@ -359,7 +367,7 @@ def _restore_surviving_acceptance_specs(
         # manufacture a phantom contractless duplicate for the same requirement.
         if text.strip() in emitted_source_texts:
             continue
-        _emit(filtered_pos - 0.5, text)
+        _emit((0, float(filtered_pos)), text)
 
     # Never let a canonicalization path drop an explicit contract/identity: any
     # source a normalizer replaced or dropped (e.g. the autoresearch rewrite the
@@ -374,20 +382,20 @@ def _restore_surviving_acceptance_specs(
             covered, canonical_index = _autoresearch_coverage(subject)
             if covered and canonical_index is not None:
                 # A structured source truly subsumed by a canonical AC: transfer
-                # its contract ONTO that canonical criterion instead of emitting
-                # a verbatim duplicate.  Otherwise execution/evaluation would
-                # enumerate both the contractless canonical AC and the source.
+                # its contract ONTO that canonical criterion (keeping the
+                # canonical's tier-0 position) instead of emitting a verbatim
+                # duplicate.  Otherwise execution/evaluation would enumerate both
+                # the contractless canonical AC and the source.
                 canonical_text = _AUTORESEARCH_CANONICAL_AC[canonical_index]
                 if _transfer_contract_to_emitted_canonical(
                     emissions,
                     canonical_text,
                     criterion,  # type: ignore[arg-type]
-                    float(index),
                 ):
                     _pop(index)
                     continue
         _pop(index)
-        emissions.append((float(index), criterion))
+        emissions.append(((1, float(index)), criterion))
 
     emissions.sort(key=lambda item: item[0])
     # Normalization is loss-free: it never deletes a distinct caller-authorized
@@ -395,29 +403,30 @@ def _restore_surviving_acceptance_specs(
     # a description keep both contracts; the description-keyed evaluation map is
     # a pre-existing boundary limitation for such inputs, not something to fix by
     # discarding a valid Seed contract here.
-    return tuple(emission for _anchor, emission in emissions)
+    return tuple(emission for _key, emission in emissions)
 
 
 def _transfer_contract_to_emitted_canonical(
-    emissions: list[tuple[float, AcceptanceCriterionInput]],
+    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
     canonical_text: str,
     source: AcceptanceCriterionSpec,
-    source_anchor: float,
 ) -> bool:
     """Attach a covered source's contract to its canonical AC, in place.
 
     Returns whether the source is fully represented by the canonical AC (so the
-    caller may drop it).  The canonical criterion keeps its description and gains
-    the source's complete identity — verification evidence, investment authority,
-    and an explicitly-supplied ``semantic_ac_key`` that runtime routing/recovery
-    correlate on — and is re-anchored to the source's position so sequential
-    execution order follows the source, not the injected canonical block.
+    caller may drop it).  The canonical criterion keeps its description and
+    tier-0 position and gains the source's complete identity — verification
+    evidence, investment authority, and an explicitly-supplied ``semantic_ac_key``
+    that runtime routing/recovery correlate on — so the executor/evaluator sees
+    exactly one contracted AC.
 
     A canonical AC that already carries any explicit authority is only treated as
-    representing this source when their full identities are identical; a
-    *different* identity (distinct command, key, or investment) returns False so
-    the caller preserves the source as its own criterion rather than silently
-    overwriting authority.
+    representing this source when their identities are equivalent; a *different*
+    identity (distinct command, artifacts, assertion, investment, or explicit
+    key) returns False so the caller preserves the source as its own criterion
+    rather than silently overwriting authority.  Comparison is on explicit
+    identity — an auto-derived key is not an intended identity, so two equivalent
+    contracts that differ only in a derived key still collapse once.
     """
     target = canonical_text.strip()
     explicit_key = (
@@ -434,29 +443,40 @@ def _transfer_contract_to_emitted_canonical(
         output_assertion=source.output_assertion,
         investment=source.investment,
     )
-    for position, (_anchor, item) in enumerate(emissions):
+    for position, (key, item) in enumerate(emissions):
         if ac_text(item).strip() != target:
             continue
         if isinstance(item, AcceptanceCriterionSpec) and _carries_explicit_contract(item):
-            # Occupied by explicit authority: only an identical full identity is
-            # safe to collapse onto; anything distinct must survive on its own.
+            # Occupied by explicit authority: only an equivalent identity is safe
+            # to collapse onto; anything distinct must survive on its own.
             return _autoresearch_identity_matches(item, transferred)
-        emissions[position] = (source_anchor, transferred)
+        emissions[position] = (key, transferred)
         return True
     return False
+
+
+def _explicit_semantic_key(criterion: AcceptanceCriterionSpec) -> str | None:
+    """Return the criterion's key only when it is an explicit (non-derived) one."""
+    return criterion.semantic_ac_key if _has_explicit_semantic_key(criterion) else None
 
 
 def _autoresearch_identity_matches(
     existing: AcceptanceCriterionSpec,
     candidate: AcceptanceCriterionSpec,
 ) -> bool:
-    """Return whether two canonical-AC criteria carry the same full identity."""
+    """Return whether two canonical-AC criteria carry an equivalent identity.
+
+    Compares the verification contract plus the *explicit* semantic identity; a
+    materialized auto-derived key is not intended identity, so two equivalent
+    contracts that differ only in a derived key are still equivalent and collapse
+    once rather than dispatching the same command twice.
+    """
     return (
         existing.verify_command == candidate.verify_command
         and existing.expected_artifacts == candidate.expected_artifacts
         and existing.output_assertion == candidate.output_assertion
         and existing.investment == candidate.investment
-        and existing.semantic_ac_key == candidate.semantic_ac_key
+        and _explicit_semantic_key(existing) == _explicit_semantic_key(candidate)
     )
 
 
@@ -479,6 +499,10 @@ def _collapse_canonical_acceptance_specs(
     original identity, not the rewritten copy: changing the description would
     otherwise make an auto-derived key diverge from its derived value and be
     mistaken for an explicit identity, persisting a stale key.
+
+    When a contract IS kept under the canonical description, an auto-derived key
+    is re-derived from that description (an explicitly-supplied key is preserved),
+    so canonical identity never depends on the collapsed source's wording.
     """
     identity = next(
         (spec for spec in specs if _carries_explicit_contract(spec)),
@@ -491,9 +515,12 @@ def _collapse_canonical_acceptance_specs(
         for artifact in spec.expected_artifacts:
             if artifact not in artifacts:
                 artifacts.append(artifact)
-    return identity.model_copy(
+    rewritten = identity.model_copy(
         update={"description": description, "expected_artifacts": tuple(artifacts)}
     )
+    if _has_explicit_semantic_key(identity):
+        return rewritten
+    return rewritten.model_copy(update={"semantic_ac_key": derive_semantic_ac_key(rewritten)})
 
 
 def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:
