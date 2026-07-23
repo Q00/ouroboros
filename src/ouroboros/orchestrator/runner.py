@@ -228,6 +228,21 @@ class RecoverableFailurePause:
     resume_after: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingLifecycleIntent:
+    """Process-local lifecycle transition retained for exact-owner replay."""
+
+    execution_id: str
+    status: SessionStatus
+    summary: dict[str, Any] | None = None
+    error_message: str | None = None
+    error_details: dict[str, Any] | None = None
+    error_type: str | None = None
+    messages_processed: int = 0
+    cancelled_by: str = "runner"
+    pause: RecoverableFailurePause | None = None
+
+
 # =============================================================================
 # Errors
 # =============================================================================
@@ -814,6 +829,7 @@ class OrchestratorRunner:
         self._process_local_authorities: dict[
             tuple[str, str], _ProcessLocalAuthorityGeneration
         ] = {}
+        self._pending_lifecycle_intents: dict[str, _PendingLifecycleIntent] = {}
         self._execution_guidance: ExecutionGuidanceBundle | None = None
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Read ONCE
         # here next to the router build and threaded to the parallel executor.
@@ -1445,6 +1461,7 @@ class OrchestratorRunner:
         session_id: str,
         execution_id: str,
         pause_result: Result[bool, PersistenceError],
+        pause: RecoverableFailurePause,
     ) -> tuple[
         SessionStatus | None,
         Result[OrchestratorResult, OrchestratorError] | None,
@@ -1457,12 +1474,19 @@ class OrchestratorRunner:
         process-local owner rather than guessing at lifecycle state.
         """
         if pause_result.is_err:
+            self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                execution_id=execution_id,
+                status=SessionStatus.PAUSED,
+                error_message=pause.reason,
+                pause=pause,
+            )
             return None, self._pause_persistence_pending_result(
                 session_id=session_id,
                 execution_id=execution_id,
                 cause=pause_result.error,
             )
         if pause_result.value:
+            self._pending_lifecycle_intents.pop(session_id, None)
             return SessionStatus.PAUSED, None
 
         try:
@@ -1478,6 +1502,7 @@ class OrchestratorRunner:
             SessionStatus.FAILED,
             SessionStatus.CANCELLED,
         }:
+            self._pending_lifecycle_intents.pop(session_id, None)
             return reconstructed.value.status, None
 
         cause: object = (
@@ -1487,6 +1512,12 @@ class OrchestratorRunner:
                 "Conditional pause lost but no durable terminal winner could be reconstructed",
                 details={"session_id": session_id},
             )
+        )
+        self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=SessionStatus.PAUSED,
+            error_message=pause.reason,
+            pause=pause,
         )
         return None, self._pause_persistence_pending_result(
             session_id=session_id,
@@ -1609,6 +1640,7 @@ class OrchestratorRunner:
         try:
             durable_status = await self._persist_session_terminal_status(
                 session_id=session_id,
+                execution_id=execution_id,
                 requested_status=SessionStatus.FAILED,
                 error_message=str(error),
                 error_type=type(error).__name__,
@@ -2315,6 +2347,12 @@ class OrchestratorRunner:
             )
             if attempt < 2:
                 await asyncio.sleep(0.05 * (2**attempt))
+        self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=SessionStatus.FAILED,
+            error_message=error.message,
+            error_details=dict(error.details),
+        )
         return OrchestratorError(
             message="Failed to persist lost process-local authority terminal state",
             details={
@@ -2354,6 +2392,7 @@ class OrchestratorRunner:
                 last_error = exc
             else:
                 if result.is_ok:
+                    self._pending_lifecycle_intents.pop(tracker.session_id, None)
                     return None
                 last_error = result.error
             log.warning(
@@ -2365,6 +2404,13 @@ class OrchestratorRunner:
             )
             if attempt < 2:
                 await asyncio.sleep(0.05 * (2**attempt))
+        self._pending_lifecycle_intents[tracker.session_id] = _PendingLifecycleIntent(
+            execution_id=tracker.execution_id,
+            status=SessionStatus.FAILED,
+            error_message=message,
+            error_details=dict(details),
+            messages_processed=tracker.messages_processed,
+        )
         return str(last_error)
 
     async def _reconcile_session_publication_interruption(
@@ -2445,6 +2491,7 @@ class OrchestratorRunner:
         self,
         *,
         session_id: str,
+        execution_id: str,
         requested_status: SessionStatus,
         summary: dict[str, Any] | None = None,
         error_message: str | None = None,
@@ -2460,6 +2507,16 @@ class OrchestratorRunner:
         winner, otherwise completion and public cancellation can produce
         contradictory terminal streams.
         """
+        intent = _PendingLifecycleIntent(
+            execution_id=execution_id,
+            status=requested_status,
+            summary=summary,
+            error_message=error_message,
+            error_details=error_details,
+            error_type=error_type,
+            messages_processed=messages_processed,
+            cancelled_by=cancelled_by,
+        )
         result: Any = None
         last_error: object | None = None
         for attempt in range(3):
@@ -2504,6 +2561,7 @@ class OrchestratorRunner:
             if attempt < 2:
                 await asyncio.sleep(0.05 * (2**attempt))
         else:
+            self._pending_lifecycle_intents[session_id] = intent
             raise OrchestratorError(
                 message=f"Failed to persist terminal session status: {requested_status.value}",
                 details={
@@ -2516,11 +2574,13 @@ class OrchestratorRunner:
             )
 
         if result.value is not False:
+            self._pending_lifecycle_intents.pop(session_id, None)
             return requested_status
 
         try:
             winner = await self._session_repo.reconstruct_session(session_id)
         except Exception as exc:
+            self._pending_lifecycle_intents[session_id] = intent
             raise OrchestratorError(
                 message="Terminal session transition lost its CAS without a readable winner",
                 details={
@@ -2537,6 +2597,7 @@ class OrchestratorRunner:
             SessionStatus.CANCELLED,
         }
         if winner.is_ok and winner.value.status in terminal_statuses:
+            self._pending_lifecycle_intents.pop(session_id, None)
             log.info(
                 "orchestrator.runner.terminal_transition_preserved",
                 session_id=session_id,
@@ -2544,6 +2605,7 @@ class OrchestratorRunner:
                 durable_status=winner.value.status.value,
             )
             return winner.value.status
+        self._pending_lifecycle_intents[session_id] = intent
         raise OrchestratorError(
             message="Terminal session transition lost its CAS without a readable winner",
             details={
@@ -2553,6 +2615,234 @@ class OrchestratorRunner:
                 "resume_blocked": "terminal_persistence_pending",
                 "terminal_persistence_pending": True,
             },
+        )
+
+    async def _retry_pending_lifecycle_intent(
+        self,
+        tracker: SessionTracker,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Replay an exact owner's retained terminal or pause transition.
+
+        Persistence-pending is not a normal RUNNING resume. The retained
+        process-local runner must first reclaim its generation and retry the
+        original transition with its original payload. Only after that intent
+        is durably resolved may ownership be released or retired.
+        """
+        intent = self._pending_lifecycle_intents.get(tracker.session_id)
+        if intent is None:
+            return None
+        if intent.execution_id != tracker.execution_id:
+            return Result.err(
+                OrchestratorError(
+                    message="Pending lifecycle intent does not match the durable execution",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "pending_execution_id": intent.execution_id,
+                        "resume_blocked": "pending_lifecycle_identity_mismatch",
+                    },
+                )
+            )
+
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        generation, already_claimed = self._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            raw_contract,
+        )
+        if already_claimed:
+            return Result.err(
+                self._process_local_execution_in_progress_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+        if generation is None:
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
+                    )
+                )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+
+        try:
+            self._register_session(tracker.execution_id, tracker.session_id)
+        except Exception as exc:
+            if intent.status is SessionStatus.PAUSED:
+                return self._pause_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    cause=exc,
+                )
+            return self._terminal_persistence_pending_result(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                requested_status=intent.status,
+                cause=exc,
+            )
+
+        resolved_status: SessionStatus
+        try:
+            if intent.status is SessionStatus.PAUSED:
+                pause = intent.pause
+                if pause is None:
+                    raise OrchestratorError(
+                        message="Pending PAUSED intent is missing its replay payload",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": tracker.execution_id,
+                            "resume_blocked": "pending_lifecycle_payload_missing",
+                        },
+                    )
+                pause_result = await self._session_repo.mark_paused(
+                    tracker.session_id,
+                    reason=pause.reason,
+                    resume_hint=pause.resume_hint,
+                    pause_seconds=pause.pause_seconds,
+                    resume_after=pause.resume_after,
+                    pause_kind=pause.pause_kind,
+                )
+                resolved, pending = await self._resolve_pause_publication(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    pause_result=pause_result,
+                    pause=pause,
+                )
+                if pending is not None:
+                    return pending
+                assert resolved is not None
+                resolved_status = resolved
+            else:
+                resolved_status = await self._persist_session_terminal_status(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    requested_status=intent.status,
+                    summary=intent.summary,
+                    error_message=intent.error_message,
+                    error_details=intent.error_details,
+                    error_type=intent.error_type,
+                    messages_processed=intent.messages_processed,
+                    cancelled_by=intent.cancelled_by,
+                )
+        except asyncio.CancelledError:
+            self._preserve_process_local_owner_for_retry(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+            raise
+        except BaseException as exc:
+            pending = self._terminal_persistence_pending_from_error(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=exc,
+            )
+            if pending is not None:
+                return pending
+            if intent.status is SessionStatus.PAUSED:
+                return self._pause_persistence_pending_result(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    cause=exc,
+                )
+            return self._terminal_persistence_pending_result(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                requested_status=intent.status,
+                cause=exc,
+            )
+
+        pause = intent.pause if resolved_status is SessionStatus.PAUSED else None
+        final_message = (
+            pause.reason
+            if pause is not None
+            else (
+                intent.error_message
+                or f"Pending {resolved_status.value} lifecycle transition persisted"
+            )
+        )
+        terminal_event = create_execution_terminal_event(
+            execution_id=tracker.execution_id,
+            session_id=tracker.session_id,
+            status=resolved_status.value,
+            summary=intent.summary if resolved_status is SessionStatus.COMPLETED else None,
+            error_message=(
+                final_message
+                if resolved_status not in {SessionStatus.COMPLETED, SessionStatus.PAUSED}
+                else None
+            ),
+            messages_processed=intent.messages_processed,
+            pause_seconds=pause.pause_seconds if pause is not None else None,
+            resume_after=pause.resume_after if pause is not None else None,
+            pause_kind=pause.pause_kind if pause is not None else None,
+            resume_hint=pause.resume_hint if pause is not None else None,
+        )
+        try:
+            await self._project_execution_outcome(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+                terminal_status=resolved_status.value,
+                terminal_event=terminal_event,
+            )
+        except Exception:
+            log.exception(
+                "orchestrator.runner.pending_lifecycle_projection_failed",
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                durable_status=resolved_status.value,
+            )
+        finally:
+            if resolved_status is SessionStatus.PAUSED:
+                self._release_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    tracker.session_id,
+                    release_liveness_lease=False,
+                )
+            else:
+                self._retire_process_local_authority(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(tracker.execution_id, tracker.session_id)
+                await clear_cancellation(tracker.session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+
+        self._pending_lifecycle_intents.pop(tracker.session_id, None)
+        return Result.ok(
+            OrchestratorResult(
+                success=resolved_status is SessionStatus.COMPLETED,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                summary={
+                    **(intent.summary or {}),
+                    "replayed_pending_lifecycle": resolved_status.value,
+                },
+                messages_processed=intent.messages_processed,
+                final_message=final_message,
+                duration_seconds=0.0,
+            )
         )
 
     def _validate_resume_handle_execution_identity(
@@ -5829,6 +6119,7 @@ class OrchestratorRunner:
                 }
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
+                    execution_id=exec_id,
                     requested_status=SessionStatus.COMPLETED,
                     summary=completion_summary,
                     messages_processed=messages_processed,
@@ -5864,6 +6155,7 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     pause_result=pause_result,
+                    pause=recoverable_failure_pause,
                 )
                 if pause_pending is not None:
                     return pause_pending
@@ -5887,6 +6179,7 @@ class OrchestratorRunner:
             else:
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
+                    execution_id=exec_id,
                     requested_status=SessionStatus.FAILED,
                     error_message=final_message,
                     messages_processed=messages_processed,
@@ -6311,6 +6604,7 @@ class OrchestratorRunner:
         if success:
             durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
+                execution_id=exec_id,
                 requested_status=SessionStatus.COMPLETED,
                 summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
@@ -6346,6 +6640,7 @@ class OrchestratorRunner:
                 session_id=tracker.session_id,
                 execution_id=exec_id,
                 pause_result=pause_result,
+                pause=recoverable_failure_pause,
             )
             if pause_pending is not None:
                 return pause_pending
@@ -6369,6 +6664,7 @@ class OrchestratorRunner:
         else:
             durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
+                execution_id=exec_id,
                 requested_status=SessionStatus.FAILED,
                 error_message=(
                     "Partial failure: "
@@ -6540,6 +6836,7 @@ class OrchestratorRunner:
             SessionStatus.CANCELLED,
             SessionStatus.FAILED,
         ):
+            self._pending_lifecycle_intents.pop(session_id, None)
             self._cleanup_pre_execution_state(
                 tracker.execution_id,
                 session_id,
@@ -6552,6 +6849,10 @@ class OrchestratorRunner:
                     details={"session_id": session_id, "status": tracker.status.value},
                 )
             )
+
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
 
         if self._fat_harness_mode:
             self._cleanup_pre_execution_state(
@@ -7120,6 +7421,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             if success:
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=session_id,
+                    execution_id=tracker.execution_id,
                     requested_status=SessionStatus.COMPLETED,
                     summary={
                         "messages_processed": messages_processed,
@@ -7157,6 +7459,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     session_id=session_id,
                     execution_id=tracker.execution_id,
                     pause_result=pause_result,
+                    pause=recoverable_resume_failure,
                 )
                 if pause_pending is not None:
                     return pause_pending
@@ -7180,6 +7483,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             else:
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=session_id,
+                    execution_id=tracker.execution_id,
                     requested_status=SessionStatus.FAILED,
                     error_message=final_message,
                     messages_processed=messages_processed,

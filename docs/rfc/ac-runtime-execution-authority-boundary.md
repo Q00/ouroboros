@@ -454,12 +454,20 @@ The Foundation A implementation must demonstrate all of the following:
     winner in the same persistence transaction; sequential, parallel, and
     resumed runners reconstruct a losing terminal winner, project it, and
     retire authority, heartbeat, routing, and workspace ownership.
-45. `UnitOfWork` routes exported terminal session events through the same
-    one-winner EventStore append instead of `append_batch`; both a CAS winner
-    and loser are successful commits and leave no permanently pending event.
+45. for sessions without a live process-local owner, `UnitOfWork` routes
+    exported terminal session events through the same one-winner EventStore
+    append instead of `append_batch`; both a CAS winner and loser are
+    successful commits and leave no permanently pending event.
 46. `cancel --all` counts marker/session persistence failures separately from
     skipped or requested sessions, prints retry guidance, and never reports
     "No running executions" when an active cancellation attempt failed.
+47. a retained owner preserves the full pending `COMPLETED`, `FAILED`, or
+    `PAUSED` transition payload in process-local state; the next exact-owner
+    resume retries that transition before runtime arbitration or effects, then
+    reconciles projection and ownership from the durable result.
+48. `UnitOfWork` is not lifecycle authority: it rejects a terminal event for
+    any session with a live process-local registry entry, leaving both the
+    pending event and resumable owner intact for owner-mediated terminalization.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

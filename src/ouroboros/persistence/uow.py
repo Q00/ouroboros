@@ -107,6 +107,22 @@ class UnitOfWork:
                     del self._pending_events[:terminal_index]
                     continue
 
+                terminal_event = self._pending_events[0]
+                from ouroboros.orchestrator.execution_authority import (
+                    _has_live_process_local_authority_session,
+                )
+
+                if _has_live_process_local_authority_session(terminal_event.aggregate_id):
+                    raise PersistenceError(
+                        "UnitOfWork cannot terminalize a live process-local session; "
+                        "delegate the transition to its retained lifecycle owner.",
+                        operation="commit",
+                        details={
+                            "session_id": terminal_event.aggregate_id,
+                            "event_type": terminal_event.type,
+                            "process_local_authority_live": True,
+                        },
+                    )
                 await self._event_store.append(self._pending_events[0])
                 del self._pending_events[0]
 

@@ -396,6 +396,17 @@ class _ProcessLocalAuthorityRegistry:
                 and entry.generation.correlation_id == value.get("correlation_id")
             )
 
+    def has_live_session(self, session_id: str) -> bool:
+        """Report whether this PID retains any authority for ``session_id``."""
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            return (
+                entry is not None
+                and entry.creator_pid == os.getpid()
+                and self._is_issued_here(entry.generation)
+            )
+
     def claim(
         self,
         session_id: str,
@@ -594,6 +605,11 @@ def _has_live_process_local_authority_registration(
         execution_id,
         value,
     )
+
+
+def _has_live_process_local_authority_session(session_id: str) -> bool:
+    """Report a live local session binding without exposing its capability."""
+    return _PROCESS_LOCAL_AUTHORITY_REGISTRY.has_live_session(session_id)
 
 
 def _process_local_authority_is_claimed(

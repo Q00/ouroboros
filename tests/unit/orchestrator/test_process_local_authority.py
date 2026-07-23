@@ -22,6 +22,7 @@ from ouroboros.mcp.tools.job_handlers import CancelExecutionHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage
+from ouroboros.orchestrator.events import create_session_completed_event
 from ouroboros.orchestrator.execution_authority import (
     _PROCESS_LOCAL_AUTHORITY_REGISTRY,
     ProcessLocalCancellationDisposition,
@@ -43,7 +44,9 @@ from ouroboros.orchestrator.runner import (
     request_cancellation,
 )
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.uow import UnitOfWork
 
 
 class _CountingRuntime:
@@ -96,6 +99,20 @@ class _RecoverablePauseRuntime(_CountingRuntime):
             type="result",
             content="Usage limit reached. Please try again in 5 hours.",
             data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+
+
+class _FailedRuntime(_CountingRuntime):
+    """Runtime double that produces a non-recoverable failure."""
+
+    runtime_backend = "codex_cli"
+
+    async def execute_task(self, **_: object):
+        self.execute_calls += 1
+        yield AgentMessage(
+            type="result",
+            content="Permanent runtime failure",
+            data={"subtype": "error", "error_type": "RuntimeError"},
         )
 
 
@@ -233,6 +250,20 @@ async def test_pause_persistence_failure_keeps_durable_running_owner(tmp_path) -
         assert tracker.execution_id not in runner.active_sessions
         session_events = await event_store.replay("session", tracker.session_id)
         assert "orchestrator.session.paused" not in [event.type for event in session_events]
+
+        retried = await runner.resume_session(tracker.session_id, _seed())
+        assert retried.is_ok
+        assert retried.value.summary["replayed_pending_lifecycle"] == "paused"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.PAUSED
+        assert runner._adapter.execute_calls == 1
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
     finally:
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
@@ -1249,6 +1280,7 @@ async def test_completed_terminal_persistence_error_preserves_retryable_owner(tm
     assert prepared.is_ok
     tracker = prepared.value
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_mark_completed = runner._session_repo.mark_completed
     runner._session_repo.mark_completed = AsyncMock(
         return_value=Result.err(PersistenceError("completion store unavailable"))
     )
@@ -1265,6 +1297,122 @@ async def test_completed_terminal_persistence_error_preserves_retryable_owner(tm
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok
         assert durable.value.status == SessionStatus.RUNNING
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+
+        runner._session_repo.mark_completed = original_mark_completed
+        retried = await runner.resume_session(tracker.session_id, _seed())
+        assert retried.is_ok
+        assert retried.value.success is True
+        assert retried.value.summary["replayed_pending_lifecycle"] == "completed"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.COMPLETED
+        assert runner._adapter.execute_calls == 1
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_persistence_intent_replays_before_resume(tmp_path) -> None:
+    """A retained FAILED intent terminalizes before any resumed runtime effect."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'failed-pending-retry.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_FailedRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-failed-terminal-pending",
+        session_id="session-failed-terminal-pending",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_mark_failed = runner._session_repo.mark_failed
+    runner._session_repo.mark_failed = AsyncMock(
+        return_value=Result.err(PersistenceError("failure store unavailable"))
+    )
+
+    try:
+        result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        assert result.is_err
+        assert result.error.details["requested_status"] == SessionStatus.FAILED.value
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
+        execute_calls_after_failure = runner._adapter.execute_calls
+
+        runner._session_repo.mark_failed = original_mark_failed
+        retried = await runner.resume_session(tracker.session_id, _seed())
+
+        assert retried.is_ok
+        assert retried.value.success is False
+        assert retried.value.summary["replayed_pending_lifecycle"] == "failed"
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.FAILED
+        assert runner._adapter.execute_calls == execute_calls_after_failure
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_uow_rejects_terminal_write_for_live_process_local_owner(tmp_path) -> None:
+    """UnitOfWork cannot bypass lifecycle cleanup for a retained paused owner."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'uow-live-owner.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-uow-live-owner",
+        session_id="session-uow-live-owner",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    paused = await runner._session_repo.mark_paused(tracker.session_id, reason="retained pause")
+    assert paused.is_ok and paused.value is True
+    checkpoint_store = CheckpointStore(base_path=tmp_path / "uow-live-owner-checkpoints")
+    checkpoint_store.initialize()
+    uow = UnitOfWork(event_store, checkpoint_store)
+    uow.add_event(
+        create_session_completed_event(
+            tracker.session_id,
+            summary={"result": "must use owner"},
+            messages_processed=1,
+        )
+    )
+
+    try:
+        committed = await uow.commit()
+
+        assert committed.is_err
+        assert committed.error.details["process_local_authority_live"] is True
+        assert uow.pending_event_count == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.PAUSED
         assert runner._has_live_process_local_authority(
             tracker.session_id,
             tracker.execution_id,
