@@ -2,8 +2,8 @@
 
 import importlib.util
 import json
-import os
 from pathlib import Path
+import subprocess
 from unittest.mock import patch
 
 # Load keyword-detector.py as a module (it uses hyphens in filename)
@@ -20,99 +20,53 @@ is_mcp_configured = _mod.is_mcp_configured
 
 
 class TestMcpConfiguration:
-    def test_codex_only_registration_is_configured(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
-
-        with patch.object(_mod.Path, "home", return_value=tmp_path):
-            assert is_mcp_configured() is True
-
-    def test_codex_only_registration_uses_python_310_fallback(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text(
-            '[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = ["ouroboros-ai"]\n'
+    @staticmethod
+    def _codex_result(*, enabled=True, transport=None, returncode=0, stdout=None):
+        payload = {
+            "name": "ouroboros",
+            "enabled": enabled,
+            "transport": transport or {"type": "stdio", "command": "uvx", "args": ["ouroboros"]},
+        }
+        return subprocess.CompletedProcess(
+            ["codex", "mcp", "get", "ouroboros", "--json"],
+            returncode,
+            stdout=json.dumps(payload) if stdout is None else stdout,
+            stderr="",
         )
 
-        with (
-            patch.object(_mod.Path, "home", return_value=tmp_path),
-            patch.object(_mod, "_toml_loads", None),
-        ):
-            assert is_mcp_configured() is True
-
-    def test_python_310_fallback_rejects_header_without_transport(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\nargs = ["broken"]\n')
-
-        with (
-            patch.object(_mod.Path, "home", return_value=tmp_path),
-            patch.object(_mod, "_toml_loads", None),
-        ):
-            assert is_mcp_configured() is False
-
-    def test_codex_home_is_authoritative(self, tmp_path):
-        default_home = tmp_path / "home"
-        default_home.mkdir()
-        codex_home = tmp_path / "custom-codex"
-        codex_home.mkdir()
-        (codex_home / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
-
-        with (
-            patch.object(_mod.Path, "home", return_value=default_home),
-            patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=True),
-        ):
+    def test_codex_uses_effective_cli_registration(self):
+        with patch.object(_mod.subprocess, "run", return_value=self._codex_result()) as run:
             assert is_mcp_configured("codex") is True
 
-    def test_disabled_or_transportless_codex_registration_is_not_configured(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        config_path = codex_dir / "config.toml"
+        run.assert_called_once_with(
+            ["codex", "mcp", "get", "ouroboros", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
 
-        with patch.object(_mod.Path, "home", return_value=tmp_path):
-            config_path.write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\nenabled = false\n')
+    def test_disabled_or_transportless_codex_registration_is_not_configured(self):
+        disabled = self._codex_result(enabled=False)
+        transportless = self._codex_result(transport={"type": "stdio", "args": ["ouroboros"]})
+
+        with patch.object(_mod.subprocess, "run", return_value=disabled):
+            assert is_mcp_configured("codex") is False
+        with patch.object(_mod.subprocess, "run", return_value=transportless):
             assert is_mcp_configured("codex") is False
 
-            config_path.write_text('[mcp_servers.ouroboros]\nargs = ["ouroboros-ai"]\n')
-            assert is_mcp_configured("codex") is False
-
-    def test_python_310_fallback_accepts_inline_comments(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text(
-            '[mcp_servers.ouroboros]\ncommand = "uvx" # normal comment\nenabled = true # active\n'
-        )
-
-        with (
-            patch.object(_mod.Path, "home", return_value=tmp_path),
-            patch.object(_mod, "_toml_loads", None),
+    def test_missing_malformed_or_timed_out_codex_query_is_not_configured(self):
+        for result in (
+            self._codex_result(returncode=1),
+            self._codex_result(stdout="not json"),
         ):
-            assert is_mcp_configured("codex") is True
+            with patch.object(_mod.subprocess, "run", return_value=result):
+                assert is_mcp_configured("codex") is False
 
-    def test_python_310_fallback_ignores_triple_quote_in_comment(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text(
-            '# documentation mentions """ strings\n[mcp_servers.ouroboros]\ncommand = "uvx"\n'
-        )
-
-        with (
-            patch.object(_mod.Path, "home", return_value=tmp_path),
-            patch.object(_mod, "_toml_loads", None),
-        ):
-            assert is_mcp_configured("codex") is True
-
-    def test_python_310_fallback_ignores_multiline_string_decoy(self, tmp_path):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text(
-            'notice = """\n[mcp_servers.ouroboros]\ncommand = "uvx"\n"""\n'
-        )
-
-        with (
-            patch.object(_mod.Path, "home", return_value=tmp_path),
-            patch.object(_mod, "_toml_loads", None),
+        with patch.object(
+            _mod.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired("codex", 3),
         ):
             assert is_mcp_configured("codex") is False
 
@@ -129,6 +83,7 @@ class TestMcpConfiguration:
 
         with (
             patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod.subprocess, "run", return_value=self._codex_result(returncode=1)),
             patch("sys.stdin") as mock_stdin,
         ):
             mock_stdin.read.return_value = json.dumps(payload)
@@ -139,9 +94,6 @@ class TestMcpConfiguration:
         assert "/ouroboros:status" not in context
 
     def test_claude_hook_does_not_use_codex_only_registration(self, tmp_path, capsys):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
         payload = {
             "session_id": "claude-session",
             "prompt": "ooo status",
@@ -150,19 +102,18 @@ class TestMcpConfiguration:
 
         with (
             patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod.subprocess, "run", return_value=self._codex_result()) as run,
             patch("sys.stdin") as mock_stdin,
         ):
             mock_stdin.read.return_value = json.dumps(payload)
             main()
 
+        run.assert_not_called()
         context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:setup" in context
         assert "/ouroboros:status" not in context
 
     def test_codex_only_registration_routes_status_without_setup(self, tmp_path, capsys):
-        codex_dir = tmp_path / ".codex"
-        codex_dir.mkdir()
-        (codex_dir / "config.toml").write_text('[mcp_servers.ouroboros]\ncommand = "uvx"\n')
         payload = {
             "session_id": "test-session",
             "turn_id": "test-turn",
@@ -172,6 +123,7 @@ class TestMcpConfiguration:
 
         with (
             patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod.subprocess, "run", return_value=self._codex_result()),
             patch("sys.stdin") as mock_stdin,
         ):
             mock_stdin.read.return_value = json.dumps(payload)
@@ -185,7 +137,14 @@ class TestMcpConfiguration:
 class TestFirstTimePrefs:
     def test_missing_prefs_file_is_first_time(self, tmp_path):
         home = tmp_path
-        with patch.object(_mod.Path, "home", return_value=home):
+        with (
+            patch.object(_mod.Path, "home", return_value=home),
+            patch.object(
+                _mod.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+            ),
+        ):
             assert is_first_time() is True
 
     def test_welcome_completed_marks_not_first_time(self, tmp_path):
@@ -247,7 +206,14 @@ class TestFirstTimePrefs:
         # Regression guard for the discriminator: a truly empty home (no prefs,
         # no install artifacts, no MCP registration) is still a genuine first
         # run and SHOULD surface the welcome experience.
-        with patch.object(_mod.Path, "home", return_value=tmp_path):
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(
+                _mod.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+            ),
+        ):
             assert is_first_time() is True
 
     def test_malformed_prefs_stays_first_time_despite_install_markers(self, tmp_path):

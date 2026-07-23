@@ -13,15 +13,10 @@ Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
-import os
 from pathlib import Path
 import re
+import subprocess
 import sys
-
-try:
-    from tomllib import loads as _toml_loads
-except ModuleNotFoundError:  # Python 3.10 hook hosts
-    _toml_loads = None
 
 
 def _configure_utf8_stdio() -> None:
@@ -169,81 +164,20 @@ def _usable_mcp_transport(server: object) -> bool:
     )
 
 
-def _strip_toml_comment(line: str) -> str:
-    quote: str | None = None
-    escaped = False
-    for index, character in enumerate(line):
-        if quote is not None:
-            if quote == '"' and character == "\\" and not escaped:
-                escaped = True
-                continue
-            if character == quote and not escaped:
-                quote = None
-            escaped = False
-            continue
-        if character == "#":
-            return line[:index]
-        if character in ('"', "'"):
-            quote = character
-    return line
-
-
-def _fallback_codex_mcp_configured(config_text: str) -> bool:
-    in_ouroboros_section = False
-    section_count = 0
-    transport_found = False
-    enabled = True
-    multiline_delimiter: str | None = None
-
-    for raw_line in config_text.splitlines():
-        line = raw_line.strip()
-        if multiline_delimiter is not None:
-            if line.count(multiline_delimiter) % 2 == 1:
-                multiline_delimiter = None
-            continue
-        line = _strip_toml_comment(raw_line).strip()
-        for delimiter in ('"""', "'''"):
-            if line.count(delimiter) % 2 == 1:
-                multiline_delimiter = delimiter
-                line = line.split(delimiter, 1)[0].strip()
-                break
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("["):
-            if line in ("[mcp_servers.ouroboros]", '[mcp_servers."ouroboros"]'):
-                section_count += 1
-                in_ouroboros_section = True
-            else:
-                in_ouroboros_section = False
-            continue
-        if not in_ouroboros_section:
-            continue
-        match = re.fullmatch(r"(command|url|enabled)\s*=\s*(.+)", line)
-        if match is None:
-            continue
-        key, raw_value = match.groups()
-        raw_value = raw_value.strip()
-        if key == "enabled":
-            enabled = raw_value.split("#", 1)[0].strip() == "true"
-        elif (
-            len(raw_value) >= 2
-            and raw_value[0] == raw_value[-1]
-            and raw_value[0] in ('"', "'")
-            and bool(raw_value[1:-1].strip())
-        ):
-            transport_found = True
-
-    return section_count == 1 and enabled and transport_found
-
-
-def _codex_mcp_configured(config_text: str) -> bool:
-    if _toml_loads is not None:
-        codex_config = _toml_loads(config_text)
-        mcp_servers = codex_config.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            return False
-        return _usable_mcp_transport(mcp_servers.get("ouroboros"))
-    return _fallback_codex_mcp_configured(config_text)
+def _codex_mcp_configured() -> bool:
+    result = subprocess.run(
+        ["codex", "mcp", "get", "ouroboros", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    server = json.loads(result.stdout)
+    if not isinstance(server, dict) or server.get("enabled") is not True:
+        return False
+    return _usable_mcp_transport(server.get("transport"))
 
 
 def _claude_mcp_configured(config_text: str) -> bool:
@@ -261,14 +195,14 @@ def is_mcp_configured(host: str | None = None) -> bool:
     try:
         if host in (None, "claude"):
             claude_path = Path.home() / ".claude" / "mcp.json"
-            if claude_path.exists() and _claude_mcp_configured(claude_path.read_text()):
+            if claude_path.exists() and _claude_mcp_configured(
+                claude_path.read_text(encoding="utf-8")
+            ):
                 return True
             if host == "claude":
                 return False
 
-        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        codex_path = codex_home / "config.toml"
-        return codex_path.exists() and _codex_mcp_configured(codex_path.read_text())
+        return _codex_mcp_configured()
     except Exception:
         return False
 

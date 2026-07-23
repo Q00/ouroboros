@@ -717,14 +717,16 @@ def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
 
 
 def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
-    """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
+    """Register the Ouroboros MCP/env hookup in the active Codex home."""
     import tomllib
+
+    from .mcp_doctor import _codex_home_from_env
 
     if mode == "preserve":
         print_info("Preserved Codex MCP config.")
         return
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = _codex_home_from_env() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():

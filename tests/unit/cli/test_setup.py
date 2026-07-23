@@ -82,6 +82,25 @@ class TestCodexSetup:
         assert 'command = "uvx"' in contents
         assert 'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]' in contents
 
+    def test_register_codex_mcp_server_honors_codex_home(self, tmp_path: Path) -> None:
+        default_home = tmp_path / "home"
+        default_home.mkdir()
+        codex_home = tmp_path / "custom-codex"
+
+        with (
+            patch("pathlib.Path.home", return_value=default_home),
+            patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=True),
+            patch(
+                "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build",
+                return_value=False,
+            ),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        assert (codex_home / "config.toml").exists()
+        assert not (default_home / ".codex" / "config.toml").exists()
+
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
         self, tmp_path: Path
     ) -> None:
