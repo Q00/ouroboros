@@ -25,9 +25,9 @@ sufficient. The implementation audit found six contract gaps:
 
 1. The observer waits with `wait_for="ac_change"` and does not request the linked
    event stream, so deliver verdicts and frugality events cannot wake it.
-2. `execution.ac.outcome_finalized` is emitted after intermediate attempts as well
+2. `execution.ac.attempt_judged` is emitted after intermediate attempts as well
    as final attempts. It does not prove that retry and alternate-harness ownership
-   is closed.
+   is closed; only `execution.ac.acceptance_finalized` closes the terminal episode.
 3. Model-routing events do not explicitly record whether an escalation occurred,
    and deliver-verdict events have no lineage-stable semantic AC identity.
 4. Seed-QA blocking mutates Auto state but emits no dedicated gate-block event.
@@ -112,8 +112,10 @@ Required data:
 - `failed`
 
 This event is the authoritative proof that the conductor may consider a
-successor. `execution.ac.outcome_finalized` remains attempt-level telemetry and
-MUST NOT independently trigger a mutating conductor action.
+successor. `execution.ac.attempt_judged` (and the historical
+`execution.ac.outcome_finalized` alias) remains attempt-level telemetry and
+MUST NOT independently trigger a mutating conductor action. The terminal
+`execution.ac.acceptance_finalized` event is the only final admission fact.
 
 ### Model escalation evidence
 

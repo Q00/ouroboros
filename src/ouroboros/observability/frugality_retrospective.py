@@ -25,6 +25,8 @@ from ouroboros.orchestrator.evidence.common import (
     strict_bool,
 )
 from ouroboros.orchestrator.frugality_proof import (
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_AC_OUTCOME_FINALIZED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
@@ -139,6 +141,8 @@ def build_frugality_retrospective(
     outcome_attempts_seen: dict[int, set[int]] = {}
     invalid_outcome_attempts: set[tuple[int, int]] = set()
     invalid_outcome_roots: set[int] = set()
+    acceptance_by_root: dict[int, list[tuple[int, bool, str, str | None]]] = {}
+    invalid_acceptance_roots: set[int] = set()
 
     for position, event in enumerate(event_list):
         current_type = event_type(event)
@@ -163,32 +167,59 @@ def build_frugality_retrospective(
                 attempt.token_events.append((current_id, data.get("token_spend")))
             continue
 
-        if current_type != EVENT_AC_OUTCOME_FINALIZED:
+        if current_type in {EVENT_AC_ATTEMPT_JUDGED, EVENT_AC_OUTCOME_FINALIZED}:
+            root_ac_index = parse_root_ac_index(data)
+            retry_attempt = parse_retry_attempt(data)
+            success = strict_bool(data.get("success"))
+            outcome = _normalized_outcome(data, success=success) if success is not None else None
+            if root_ac_index is None:
+                anonymous_invalid_attempts.add(invalid_identity)
+                continue
+            if retry_attempt is None:
+                invalid_outcome_roots.add(root_ac_index)
+                anonymous_invalid_attempts.add(invalid_identity)
+                continue
+            outcome_attempts_seen.setdefault(root_ac_index, set()).add(retry_attempt)
+            if success is None or outcome is None:
+                invalid_outcome_attempts.add((root_ac_index, retry_attempt))
+                continue
+            outcomes_by_root.setdefault(root_ac_index, {}).setdefault(retry_attempt, []).append(
+                _OutcomeEvidence(
+                    root_ac_index=root_ac_index,
+                    retry_attempt=retry_attempt,
+                    success=success,
+                    outcome=outcome,
+                    event_id=current_id,
+                )
+            )
+            continue
+
+        if current_type != EVENT_AC_ACCEPTANCE_FINALIZED:
             continue
 
         root_ac_index = parse_root_ac_index(data)
-        retry_attempt = parse_retry_attempt(data)
-        success = strict_bool(data.get("success"))
-        outcome = _normalized_outcome(data, success=success) if success is not None else None
-        if root_ac_index is None:
-            anonymous_invalid_attempts.add(invalid_identity)
+        retry_attempt = data.get("final_retry_attempt")
+        accepted = strict_bool(data.get("accepted"))
+        outcome = _normalized_outcome(data, success=accepted) if accepted is not None else None
+        disposition = _non_empty_string(data.get("disposition"))
+        terminal_status = _non_empty_string(data.get("terminal_status"))
+        if (
+            root_ac_index is None
+            or isinstance(retry_attempt, bool)
+            or not isinstance(retry_attempt, int)
+            or retry_attempt < 0
+            or accepted is None
+            or outcome is None
+            or disposition is None
+            or terminal_status is None
+        ):
+            if root_ac_index is not None:
+                invalid_acceptance_roots.add(root_ac_index)
+            else:
+                anonymous_invalid_attempts.add(invalid_identity)
             continue
-        if retry_attempt is None:
-            invalid_outcome_roots.add(root_ac_index)
-            anonymous_invalid_attempts.add(invalid_identity)
-            continue
-        outcome_attempts_seen.setdefault(root_ac_index, set()).add(retry_attempt)
-        if success is None or outcome is None:
-            invalid_outcome_attempts.add((root_ac_index, retry_attempt))
-            continue
-        outcomes_by_root.setdefault(root_ac_index, {}).setdefault(retry_attempt, []).append(
-            _OutcomeEvidence(
-                root_ac_index=root_ac_index,
-                retry_attempt=retry_attempt,
-                success=success,
-                outcome=outcome,
-                event_id=current_id,
-            )
+        acceptance_by_root.setdefault(root_ac_index, []).append(
+            (retry_attempt, accepted, outcome, current_id)
         )
 
     measured: dict[_AttemptKey, tuple[float, str | None]] = {}
@@ -224,6 +255,25 @@ def build_frugality_retrospective(
             invalid_outcome_attempts.add((root_ac_index, latest_attempt))
             continue
         latest_outcomes[root_ac_index] = records[0]
+
+    # When the Final Gate event is present it is the terminal source of truth;
+    # historical outcome-finalized rows remain a provisional fallback only for
+    # old runs that predate Foundation B.
+    for root_ac_index, records in acceptance_by_root.items():
+        unique_records = set(records)
+        if root_ac_index in invalid_acceptance_roots or len(unique_records) != 1:
+            invalid_outcome_roots.add(root_ac_index)
+            latest_outcomes.pop(root_ac_index, None)
+            continue
+        acceptance_record: tuple[int, bool, str, str | None] = next(iter(unique_records))
+        retry_attempt, accepted, outcome, acceptance_event_id = acceptance_record
+        latest_outcomes[root_ac_index] = _OutcomeEvidence(
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+            success=accepted,
+            outcome=outcome,
+            event_id=acceptance_event_id,
+        )
 
     retry_keys: set[_AttemptKey] = set()
     retry_latest_attempts: list[int] = []

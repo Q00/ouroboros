@@ -301,7 +301,7 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
     assert isinstance(results[0], ACExecutionResult)
     assert results[0].success is False
     emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
-    markers = [event for event in emitted if event.type == "execution.ac.outcome_finalized"]
+    markers = [event for event in emitted if event.type == "execution.ac.attempt_judged"]
     assert len(markers) == 1
     assert markers[0].data == {
         "execution_id": "e",
@@ -309,9 +309,11 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "root_ac_index": 0,
         "ac_index": 0,
         "retry_attempt": 0,
+        "attempt_number": 1,
         "success": False,
         "outcome": "failed",
         "is_decomposed": True,
+        "is_decomposed_child": True,
     }
 
 

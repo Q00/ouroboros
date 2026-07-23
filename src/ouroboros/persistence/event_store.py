@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -27,6 +29,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.schema import (
+    ac_acceptance_guards_table,
     events_table,
     metadata,
     session_start_guards_table,
@@ -70,6 +73,8 @@ _SESSION_TERMINAL_EVENT_TYPES = frozenset(
     }
 )
 
+_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE = "execution.ac.acceptance_finalized"
+
 
 def _is_session_terminal_event(event: object) -> bool:
     """Return whether one event must use the durable terminal transition CAS."""
@@ -87,6 +92,113 @@ def _is_session_start_event(event: object) -> bool:
         and event.aggregate_type == "session"
         and event.type == "orchestrator.session.started"
     )
+
+
+def _is_ac_acceptance_finalized_event(event: object) -> bool:
+    """Return whether ``event`` requires the Foundation B acceptance CAS."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "execution"
+        and event.type == _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE
+    )
+
+
+def _acceptance_payload_digest(event: BaseEvent) -> str:
+    """Hash only stable final-decision fields for idempotent replay."""
+    payload = {
+        key: event.data.get(key)
+        for key in (
+            "execution_id",
+            "session_id",
+            "authority_correlation_id",
+            "root_ac_index",
+            "final_retry_attempt",
+            "accepted",
+            "disposition",
+            "outcome",
+            "terminal_status",
+        )
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
+    """Validate and return the durable Foundation B acceptance key."""
+    data = event.data
+    authority = data.get("authority_correlation_id")
+    root_index = data.get("root_ac_index")
+    if not isinstance(authority, str) or not authority.strip():
+        raise PersistenceError(
+            "Final acceptance requires a non-empty authority correlation ID.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if isinstance(root_index, bool) or not isinstance(root_index, int) or root_index < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative root AC index.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    required_strings = (
+        "execution_id",
+        "session_id",
+        "disposition",
+        "outcome",
+        "terminal_status",
+    )
+    for key in required_strings:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise PersistenceError(
+                f"Final acceptance requires a non-empty {key}.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                details={"event_type": event.type, "event_id": event.id, "field": key},
+            )
+    accepted = data.get("accepted")
+    if not isinstance(accepted, bool):
+        raise PersistenceError(
+            "Final acceptance requires a boolean accepted field.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    disposition = data.get("disposition")
+    terminal_status = data.get("terminal_status")
+    if (
+        isinstance(disposition, str)
+        and isinstance(terminal_status, str)
+        and terminal_status.strip().casefold() == "paused"
+    ):
+        raise PersistenceError(
+            "Final acceptance cannot be published for a paused episode.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if accepted and (
+        not isinstance(disposition, str)
+        or disposition.strip().casefold() != "accepted"
+        or not isinstance(terminal_status, str)
+        or terminal_status.strip().casefold() != "completed"
+    ):
+        raise PersistenceError(
+            "Accepted final acceptance requires accepted disposition and completed terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if not accepted and isinstance(disposition, str) and disposition.strip().casefold() == "accepted":
+        raise PersistenceError(
+            "Rejected final acceptance cannot use accepted disposition.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    retry_attempt = data.get("final_retry_attempt")
+    if isinstance(retry_attempt, bool) or not isinstance(retry_attempt, int) or retry_attempt < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative final retry attempt.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    return authority.strip(), root_index
 
 
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
@@ -437,6 +549,8 @@ class EventStore:
         # cannot accidentally bypass the conditional terminal CAS.
         if _is_session_terminal_event(event):
             return await self.append_session_terminal_if_active(event)
+        if _is_ac_acceptance_finalized_event(event):
+            return await self.append_ac_acceptance_finalized_if_absent(event)
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
         return None
 
@@ -665,6 +779,137 @@ class EventStore:
             details={"event_id": event.id, "event_type": event.type},
         )
 
+    async def append_ac_acceptance_finalized_if_absent(self, event: BaseEvent) -> bool:
+        """Append one Foundation B final acceptance decision per authority/root.
+
+        ``execution.ac.attempt_judged`` is append-only telemetry. This method
+        is the only durable write path for ``execution.ac.acceptance_finalized``.
+        An equivalent duplicate is an idempotent no-op; a conflicting payload
+        raises instead of allowing two final decisions for one authority key.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_ac_acceptance_finalized_if_absent",
+            )
+        if not _is_ac_acceptance_finalized_event(event):
+            raise PersistenceError(
+                "Conditional acceptance append requires an explicit final acceptance event.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                table="events",
+                details={
+                    "aggregate_type": getattr(event, "aggregate_type", None),
+                    "event_type": getattr(event, "type", None),
+                },
+            )
+
+        authority_correlation_id, root_ac_index = _acceptance_key_fields(event)
+        payload_digest = _acceptance_payload_digest(event)
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+                    try:
+                        existing = await conn.execute(
+                            select(ac_acceptance_guards_table.c.payload_digest).where(
+                                ac_acceptance_guards_table.c.authority_correlation_id
+                                == authority_correlation_id,
+                                ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+                            )
+                        )
+                        existing_digest = existing.scalar_one_or_none()
+                        if existing_digest is not None:
+                            if existing_digest != payload_digest:
+                                raise PersistenceError(
+                                    "Conflicting final acceptance already exists for authority/root.",
+                                    operation="append_ac_acceptance_finalized_if_absent",
+                                    table="ac_acceptance_guards",
+                                    details={
+                                        "authority_correlation_id": authority_correlation_id,
+                                        "root_ac_index": root_ac_index,
+                                        "acceptance_conflict": True,
+                                    },
+                                )
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            return False
+
+                        try:
+                            async with conn.begin_nested():
+                                await conn.execute(
+                                    ac_acceptance_guards_table.insert().values(
+                                        authority_correlation_id=authority_correlation_id,
+                                        root_ac_index=root_ac_index,
+                                        final_event_id=event.id,
+                                        payload_digest=payload_digest,
+                                    )
+                                )
+                        except IntegrityError:
+                            # A concurrent writer won the composite guard. The
+                            # savepoint rollback leaves the outer transaction
+                            # readable so we can distinguish an idempotent
+                            # replay from a contradictory final decision.
+                            existing = await conn.execute(
+                                select(ac_acceptance_guards_table.c.payload_digest).where(
+                                    ac_acceptance_guards_table.c.authority_correlation_id
+                                    == authority_correlation_id,
+                                    ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+                                )
+                            )
+                            existing_digest = existing.scalar_one_or_none()
+                            if existing_digest == payload_digest:
+                                if conn.in_transaction():
+                                    await conn.rollback()
+                                return False
+                            raise PersistenceError(
+                                "Conflicting concurrent final acceptance exists for authority/root.",
+                                operation="append_ac_acceptance_finalized_if_absent",
+                                table="ac_acceptance_guards",
+                                details={
+                                    "authority_correlation_id": authority_correlation_id,
+                                    "root_ac_index": root_ac_index,
+                                    "acceptance_conflict": True,
+                                },
+                            )
+
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return True
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except PersistenceError:
+                raise
+            except Exception as exc:
+                if "database is locked" in str(exc) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_ac_acceptance_finalized.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append final acceptance event: {exc}",
+                    operation="append_ac_acceptance_finalized_if_absent",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from exc
+        raise PersistenceError(
+            "Failed to conditionally append final acceptance event after retries.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
+
     async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
         """Append PAUSED only while no explicit terminal session event exists.
 
@@ -762,6 +1007,11 @@ class EventStore:
         """Return whether ``event`` publishes immutable session identity."""
         return _is_session_start_event(event)
 
+    @staticmethod
+    def is_ac_acceptance_finalized_event(event: object) -> bool:
+        """Return whether ``event`` requires the Foundation B final gate CAS."""
+        return _is_ac_acceptance_finalized_event(event)
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
@@ -787,6 +1037,14 @@ class EventStore:
             raise PersistenceError(
                 "Session start lifecycle events must be persisted via append() "
                 "or append_session_start_if_absent() to preserve immutable identity.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
+        if _is_ac_acceptance_finalized_event(event):
+            raise PersistenceError(
+                "Final acceptance events must be persisted via append() or "
+                "append_ac_acceptance_finalized_if_absent() to preserve the "
+                "one-winner guard.",
                 operation="append_with_rowid",
                 details={"event_type": event.type, "aggregate_id": event.aggregate_id},
             )
@@ -924,6 +1182,17 @@ class EventStore:
                 "use append() so each session transition takes the one-winner guard.",
                 operation="append_batch",
                 details={"count": len(terminal_session_events)},
+            )
+
+        acceptance_events = [
+            event for event in events if _is_ac_acceptance_finalized_event(event)
+        ]
+        if acceptance_events:
+            raise PersistenceError(
+                "Final acceptance events cannot be appended in a batch; use append() "
+                "so each authority/root transition takes the one-winner guard.",
+                operation="append_batch",
+                details={"count": len(acceptance_events)},
             )
 
         for attempt in range(3):

@@ -6281,19 +6281,19 @@ Respond with either ATOMIC or the structured JSON object only.
         session_id: str,
         execution_id: str,
     ) -> None:
-        """Persist the outer verify/retry layer's authoritative AC outcome.
+        """Persist one provisional outer verify/retry attempt judgment.
 
         Leaf-level deliver and shadow events are provisional because they are
-        emitted before the seed-level success contract runs.  The deterministic
-        frugality proof requires this marker and admits only roots whose latest
-        retry was finally accepted.  Event persistence remains observe-only: if
-        the marker is dropped, the proof fails closed by excluding the rows.
+        emitted before the seed-level success contract runs.  This marker is
+        deliberately telemetry only: it never grants acceptance or dispatch
+        authority.  ``execution.ac.outcome_finalized`` remains readable as a
+        historical alias, but new producers use ``attempt_judged``.
         """
         from ouroboros.events.base import BaseEvent
 
         await self._safe_emit_event(
             BaseEvent(
-                type="execution.ac.outcome_finalized",
+                type="execution.ac.attempt_judged",
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
@@ -6302,9 +6302,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     "root_ac_index": root_ac_index,
                     "ac_index": root_ac_index,
                     "retry_attempt": result.retry_attempt,
+                    "attempt_number": result.attempt_number,
                     "success": result.success,
-                    "outcome": result.outcome.value if result.outcome is not None else None,
+                    "outcome": result.outcome.value if result.outcome is not None else "failed",
                     "is_decomposed": result.is_decomposed,
+                    "is_decomposed_child": result.is_decomposed,
                 },
             )
         )

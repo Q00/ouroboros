@@ -19,8 +19,10 @@ A triad row joins three measured axes by ``ac_id``:
   accepted-leaf journal evidence (seed AC4).
 * **baseline** — ``execution.ac.shadow_replay`` (baseline_token_spend at parent
   model tier), emitted only by the opt-in isolated replay experiment (seed AC5).
-* **acceptance** — ``execution.ac.outcome_finalized``. Proof rows remain provisional
-  until the seed-level verify/retry layer authoritatively accepts their root AC.
+* **attempt judgment** — ``execution.ac.attempt_judged`` (with
+  ``execution.ac.outcome_finalized`` retained as a historical read alias).
+* **acceptance** — ``execution.ac.acceptance_finalized``. Proof rows remain
+  provisional until the Final Gate authoritatively accepts their root AC.
 
 A row only ``counts_in_proof`` when the lower model tier was ENFORCED, every retry
 attempt has a paired token/deliver/shadow measurement, the root AC was finally
@@ -64,7 +66,9 @@ EVENT_MODEL_ROUTED = "execution.ac.model_routed"
 EVENT_TOKEN_ATTRIBUTION = "execution.ac.token_attribution.reported"
 EVENT_DELIVER_VERDICT = "execution.ac.deliver_verdict"
 EVENT_SHADOW_REPLAY = "execution.ac.shadow_replay"
+EVENT_AC_ATTEMPT_JUDGED = "execution.ac.attempt_judged"
 EVENT_AC_OUTCOME_FINALIZED = "execution.ac.outcome_finalized"
+EVENT_AC_ACCEPTANCE_FINALIZED = "execution.ac.acceptance_finalized"
 
 EFFORT_MODE_ENFORCED = "enforced"
 MODEL_MODE_ENFORCED = "enforced"
@@ -236,11 +240,13 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     single implicit run — the original single-run behavior, preserved.
     """
     acc: dict[tuple[str | None, str], dict] = {}
-    finalized: dict[
+    judged: dict[
         tuple[str | None, int],
         dict[int, list[tuple[bool | None, bool | None]]],
     ] = {}
-    finalized_invalid: set[tuple[str | None, int]] = set()
+    judged_invalid: set[tuple[str | None, int]] = set()
+    acceptance: dict[tuple[str | None, int], list[tuple[str, int, bool, str, str]]] = {}
+    acceptance_invalid: set[tuple[str | None, int]] = set()
 
     def merge_root(row: dict, data: Mapping) -> None:
         observed = parse_root_ac_index(data)
@@ -273,7 +279,7 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     for event in events:
         etype = _event_type(event)
         data = _event_data(event)
-        if etype == EVENT_AC_OUTCOME_FINALIZED:
+        if etype in {EVENT_AC_ATTEMPT_JUDGED, EVENT_AC_OUTCOME_FINALIZED}:
             run_key = execution_run_anchor(data)
             root_index = parse_root_ac_index(data)
             attempt = parse_retry_attempt(data)
@@ -286,13 +292,46 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 # that root. Ignoring it would let the assembler fall back to an
                 # older successful marker and potentially PASS after the producer
                 # emitted a newer-but-corrupt authoritative outcome.
-                finalized_invalid.add((run_key, root_index))
+                judged_invalid.add((run_key, root_index))
                 continue
             # Preserve malformed booleans as ``None`` instead of dropping the
             # marker. If this is the latest root attempt, admission must fail closed
             # rather than falling back to an older successful marker.
-            finalized.setdefault((run_key, root_index), {}).setdefault(attempt, []).append(
+            judged.setdefault((run_key, root_index), {}).setdefault(attempt, []).append(
                 (success, is_decomposed)
+            )
+        elif etype == EVENT_AC_ACCEPTANCE_FINALIZED:
+            run_key = execution_run_anchor(data)
+            root_index = parse_root_ac_index(data)
+            authority = data.get("authority_correlation_id")
+            final_attempt = data.get("final_retry_attempt")
+            accepted = _strict_bool(data.get("accepted"))
+            disposition = data.get("disposition")
+            terminal_status = data.get("terminal_status")
+            if (
+                root_index is None
+                or not isinstance(authority, str)
+                or not authority.strip()
+                or isinstance(final_attempt, bool)
+                or not isinstance(final_attempt, int)
+                or final_attempt < 0
+                or accepted is None
+                or not isinstance(disposition, str)
+                or not disposition.strip()
+                or not isinstance(terminal_status, str)
+                or not terminal_status.strip()
+            ):
+                if root_index is not None:
+                    acceptance_invalid.add((run_key, root_index))
+                continue
+            acceptance.setdefault((run_key, root_index), []).append(
+                (
+                    authority.strip(),
+                    final_attempt,
+                    accepted,
+                    disposition.strip(),
+                    terminal_status.strip(),
+                )
             )
         elif etype == EVENT_EFFORT_ROUTED:
             row = slot(data)
@@ -469,26 +508,41 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         )
 
         root_index = v.get("root_ac_index")
-        final_markers = (
-            finalized.get((v.get("seed_run_id"), root_index), {})
-            if isinstance(root_index, int)
-            else {}
-        )
         authoritatively_accepted = False
-        if final_markers:
-            final_attempt = max(final_markers)
-            final_records = final_markers[final_attempt]
-            # The outer marker is authoritative only when there is exactly one
-            # unambiguous result for its latest attempt, that result is a successful
-            # decomposition, and this child actually participated in that final
-            # attempt. This prevents failed/stale child rows from hitchhiking on a
-            # later atomic root success.
-            authoritatively_accepted = (
-                (v.get("seed_run_id"), root_index) not in finalized_invalid
-                and len(final_records) == 1
-                and final_records[0] == (True, True)
-                and final_attempt in attempt_sets[0]
-            )
+        acceptance_records = (
+            acceptance.get((v.get("seed_run_id"), root_index), [])
+            if isinstance(root_index, int)
+            else []
+        )
+        if acceptance_records:
+            unique_acceptance = set(acceptance_records)
+            if (
+                (v.get("seed_run_id"), root_index) not in acceptance_invalid
+                and len(unique_acceptance) == 1
+            ):
+                _authority, final_attempt, accepted, disposition, terminal_status = next(
+                    iter(unique_acceptance)
+                )
+                judged_key = (v.get("seed_run_id"), root_index)
+                judged_records = judged.get(judged_key, {})
+                judged_latest = max(judged_records) if judged_records else None
+                judged_latest_records = (
+                    judged_records.get(judged_latest, []) if judged_latest is not None else []
+                )
+                # Final acceptance is authoritative only when the Final Gate
+                # explicitly accepted the root after its last observed attempt.
+                # Attempt judgments remain telemetry and cannot substitute for it.
+                authoritatively_accepted = (
+                    accepted
+                    and disposition == "accepted"
+                    and terminal_status == "completed"
+                    and final_attempt in attempt_sets[0]
+                    and final_attempt == max(attempt_sets[0])
+                    and judged_key not in judged_invalid
+                    and judged_latest == final_attempt
+                    and len(judged_latest_records) == 1
+                    and judged_latest_records[0] == (True, True)
+                )
 
         delivery_values = list(deliveries.values())
         grounding_regression = (

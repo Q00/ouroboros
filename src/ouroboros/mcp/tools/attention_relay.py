@@ -29,7 +29,9 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
         "execution.decomposition.level_completed",
         "execution.ac.model_routed",
         "execution.ac.alt_harness_redispatched",
+        "execution.ac.attempt_judged",
         "execution.ac.outcome_finalized",
+        "execution.ac.acceptance_finalized",
         "control.session.signal.queued",
         "control.session.signal.applied",
         "control.session.signal.completed",
@@ -379,17 +381,39 @@ def _proactive_relays(
                     },
                 )
             )
-        elif event.type == "execution.ac.outcome_finalized" and data.get("success") is True:
+        elif event.type in {
+            "execution.ac.attempt_judged",
+            "execution.ac.outcome_finalized",
+        } and data.get("success") is True:
             relays.append(
                 _progress(
                     event,
                     kind="progress_advanced",
-                    subtype="ac_verified",
+                    subtype="ac_attempt_judged",
                     job_id=job_id,
                     evidence={
                         "root_ac_index": data.get("root_ac_index"),
                         "retry_attempt": data.get("retry_attempt"),
+                        "attempt_number": data.get("attempt_number"),
                         "outcome": data.get("outcome"),
+                    },
+                )
+            )
+        elif event.type == "execution.ac.acceptance_finalized":
+            relays.append(
+                _progress(
+                    event,
+                    kind="progress_advanced",
+                    subtype=(
+                        "ac_accepted" if data.get("accepted") is True else "ac_rejected"
+                    ),
+                    job_id=job_id,
+                    evidence={
+                        "root_ac_index": data.get("root_ac_index"),
+                        "final_retry_attempt": data.get("final_retry_attempt"),
+                        "accepted": data.get("accepted"),
+                        "disposition": data.get("disposition"),
+                        "terminal_status": data.get("terminal_status"),
                     },
                 )
             )

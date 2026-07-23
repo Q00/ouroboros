@@ -10943,7 +10943,7 @@ class TestParallelACExecutor:
 
         appended_events = [call.args[0] for call in executor._event_store.append.await_args_list]
         outcome_events = [
-            event for event in appended_events if event.type == "execution.ac.outcome_finalized"
+            event for event in appended_events if event.type == "execution.ac.attempt_judged"
         ]
         coordinator_events = [
             event for event in appended_events if event.type.startswith("execution.coordinator.")

@@ -234,6 +234,91 @@ class TestEventStoreAppend:
 
         assert await event_store.replay("session", "sess-raw-terminal-path") == []
 
+    @staticmethod
+    def _acceptance_event(**overrides: object) -> BaseEvent:
+        data: dict[str, object] = {
+            "execution_id": "exec-acceptance-guard",
+            "session_id": "sess-acceptance-guard",
+            "authority_correlation_id": "authority-acceptance-guard",
+            "root_ac_index": 0,
+            "final_retry_attempt": 1,
+            "accepted": True,
+            "disposition": "accepted",
+            "outcome": "succeeded",
+            "terminal_status": "completed",
+        }
+        data.update(overrides)
+        return BaseEvent(
+            type="execution.ac.acceptance_finalized",
+            aggregate_type="execution",
+            aggregate_id="exec-acceptance-guard",
+            data=data,
+        )
+
+    async def test_final_acceptance_is_idempotent_and_guarded(
+        self, event_store: EventStore
+    ) -> None:
+        event = self._acceptance_event()
+
+        assert EventStore.is_ac_acceptance_finalized_event(event) is True
+        assert await event_store.append(event) is True
+        assert await event_store.append(event.model_copy(update={"id": "duplicate-event-id"})) is False
+
+        replayed = await event_store.replay("execution", event.aggregate_id)
+        assert [item.type for item in replayed] == ["execution.ac.acceptance_finalized"]
+
+    async def test_conflicting_final_acceptance_fails_closed(self, event_store: EventStore) -> None:
+        await event_store.append(self._acceptance_event())
+        conflicting = self._acceptance_event(
+            id="conflicting-event-id",
+            accepted=False,
+            disposition="rejected",
+            outcome="failed",
+            terminal_status="failed",
+        )
+
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(conflicting)
+
+        replayed = await event_store.replay("execution", conflicting.aggregate_id)
+        assert len(replayed) == 1
+        assert replayed[0].data["accepted"] is True
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"authority_correlation_id": ""},
+            {"root_ac_index": -1},
+            {"accepted": "true"},
+            {"final_retry_attempt": -1},
+            {"terminal_status": ""},
+            {"terminal_status": "paused"},
+            {"disposition": "rejected"},
+        ],
+    )
+    async def test_malformed_final_acceptance_is_rejected(
+        self, event_store: EventStore, overrides: dict[str, object]
+    ) -> None:
+        with pytest.raises(PersistenceError, match="Final acceptance|Accepted final|Rejected final"):
+            await event_store.append(self._acceptance_event(**overrides))
+
+    async def test_final_acceptance_raw_append_paths_are_rejected(
+        self, event_store: EventStore
+    ) -> None:
+        event = self._acceptance_event()
+        benign = BaseEvent(
+            type="execution.progress.updated",
+            aggregate_type="execution",
+            aggregate_id=event.aggregate_id,
+            data={},
+        )
+
+        with pytest.raises(PersistenceError, match="one-winner guard"):
+            await event_store.append_with_rowid(event)
+        with pytest.raises(PersistenceError, match="cannot be appended in a batch"):
+            await event_store.append_batch([benign, event])
+        assert await event_store.replay("execution", event.aggregate_id) == []
+
     async def test_conditional_pause_preserves_existing_terminal_winner(
         self, event_store: EventStore
     ) -> None:

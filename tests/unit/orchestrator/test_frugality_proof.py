@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -29,6 +30,7 @@ def _triad_events(
     retry_attempt: int = 0,
     root_ac_index: int = 0,
     final_success: bool = True,
+    include_acceptance: bool = True,
     **effort_overrides,
 ) -> list[dict]:
     """A full, accepted model/token/grounding/baseline row for one attempt."""
@@ -42,7 +44,7 @@ def _triad_events(
         "is_decomposed_child": True,
     }
     effort.update(effort_overrides)
-    return [
+    events = [
         _evt(EVENT_EFFORT_ROUTED, **effort),
         _evt(
             EVENT_MODEL_ROUTED,
@@ -86,14 +88,32 @@ def _triad_events(
             grounding_regression=False,
         ),
         _evt(
-            EVENT_AC_OUTCOME_FINALIZED,
+            EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id=run,
             root_ac_index=root_ac_index,
             retry_attempt=retry_attempt,
+            attempt_number=retry_attempt + 1,
             success=final_success,
+            outcome="succeeded" if final_success else "failed",
             is_decomposed=True,
         ),
     ]
+    if include_acceptance:
+        events.append(
+            _evt(
+                EVENT_AC_ACCEPTANCE_FINALIZED,
+                execution_id=run,
+                session_id=f"session-{run}",
+                authority_correlation_id=f"authority-{run}",
+                root_ac_index=root_ac_index,
+                final_retry_attempt=retry_attempt,
+                accepted=final_success,
+                disposition="accepted" if final_success else "rejected",
+                outcome="succeeded" if final_success else "failed",
+                terminal_status="completed" if final_success else "failed",
+            )
+        )
+    return events
 
 
 def _full_row(ac_id: str, *, run: str, token: float, baseline: float, regression: bool = False):
@@ -319,7 +339,7 @@ class TestAssembleTriads:
         assert rows[0].has_all_axes is False
 
     def test_retry_spend_cannot_false_pass_frugality_gate(self) -> None:
-        events = _triad_events("ac1", "r1", retry_attempt=0)
+        events = _triad_events("ac1", "r1", retry_attempt=0, include_acceptance=False)
         retry_events = _triad_events("ac1", "r1", retry_attempt=1)
         for event in retry_events:
             if event["type"] == EVENT_TOKEN_ATTRIBUTION:
@@ -348,11 +368,13 @@ class TestAssembleTriads:
         )
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=True,
             )
         )
@@ -364,7 +386,7 @@ class TestAssembleTriads:
 
     @pytest.mark.parametrize("newest_first", [False, True])
     def test_retry_grounding_regression_is_order_independent(self, newest_first: bool) -> None:
-        initial = _triad_events("ac1", "r1", retry_attempt=0)
+        initial = _triad_events("ac1", "r1", retry_attempt=0, include_acceptance=False)
         retry = _triad_events("ac1", "r1", retry_attempt=1)
         for event in retry:
             if event["type"] == EVENT_DELIVER_VERDICT:
@@ -393,7 +415,7 @@ class TestAssembleTriads:
         events = [
             event
             for event in _triad_events("ac1", "r1")
-            if event["type"] != EVENT_AC_OUTCOME_FINALIZED
+            if event["type"] != EVENT_AC_ACCEPTANCE_FINALIZED
         ]
 
         row = assemble_triads(events)[0]
@@ -407,7 +429,7 @@ class TestAssembleTriads:
         self, latest_is_decomposed: object
     ) -> None:
         events = _triad_events("ac1", "r1")
-        marker = next(event for event in events if event["type"] == EVENT_AC_OUTCOME_FINALIZED)
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
         marker["data"]["is_decomposed"] = latest_is_decomposed
 
         row = assemble_triads(events)[0]
@@ -420,11 +442,13 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1", retry_attempt=0)
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=True,
             )
         )
@@ -441,11 +465,13 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1", retry_attempt=0)
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=False,
             )
         )
@@ -462,11 +488,13 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1")
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
                 root_ac_index=0,
                 retry_attempt=0,
+                attempt_number=1,
                 success=duplicate_success,
+                outcome="succeeded" if duplicate_success else "failed",
                 is_decomposed=True,
             )
         )
@@ -480,11 +508,13 @@ class TestAssembleTriads:
     def test_malformed_outcome_marker_poisons_known_root(self, malformed_attempt: object) -> None:
         events = _triad_events("ac1", "r1")
         malformed = _evt(
-            EVENT_AC_OUTCOME_FINALIZED,
+            EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id="r1",
             root_ac_index=0,
             retry_attempt=malformed_attempt,
+            attempt_number=2,
             success=True,
+            outcome="succeeded",
             is_decomposed=True,
         )
         if malformed_attempt is None:

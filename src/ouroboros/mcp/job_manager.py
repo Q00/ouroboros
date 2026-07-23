@@ -1408,16 +1408,32 @@ class JobManager:
             event_type="execution.session.failed",
             limit=None,
         )
-        failed_outcome_events = await self._event_store.query_events(
+        failed_attempt_events = await self._event_store.query_events(
             aggregate_id=snapshot.links.execution_id,
-            event_type="execution.ac.outcome_finalized",
+            event_type="execution.ac.attempt_judged",
+            limit=20,
+        )
+        # Keep the historical event name readable for pre-Foundation-B runs.
+        failed_attempt_events.extend(
+            await self._event_store.query_events(
+                aggregate_id=snapshot.links.execution_id,
+                event_type="execution.ac.outcome_finalized",
+                limit=20,
+            )
+        )
+        final_acceptance_events = await self._event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            event_type="execution.ac.acceptance_finalized",
             limit=20,
         )
         failed_outcomes = [
             event
-            for event in failed_outcome_events
+            for event in [*failed_attempt_events, *final_acceptance_events]
             if event.data.get("success") is False
+            or event.data.get("accepted") is False
             or str(event.data.get("outcome") or "").casefold() == "failed"
+            or str(event.data.get("disposition") or "").casefold()
+            in {"rejected", "blocked", "cancelled"}
         ]
         if not terminal_failure_events and not failed_session_events and not failed_outcomes:
             return None

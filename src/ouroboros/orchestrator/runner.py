@@ -5340,6 +5340,10 @@ class OrchestratorRunner:
 
             async def _reconcile_existing_terminal_owner() -> None:
                 try:
+                    await self._emit_cancellation_acceptance_finalized(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                    )
                     if not execution_terminal_events:
                         await self._event_store.append(
                             create_execution_terminal_event(
@@ -5460,6 +5464,10 @@ class OrchestratorRunner:
         # durable CAS has committed.
         async def _reconcile_cancelled_owner() -> None:
             try:
+                await self._emit_cancellation_acceptance_finalized(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                )
                 await self._event_store.append(
                     create_execution_terminal_event(
                         execution_id=execution_id,
@@ -5502,6 +5510,66 @@ class OrchestratorRunner:
                 duration_seconds=duration,
             )
         )
+
+    async def _emit_cancellation_acceptance_finalized(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Close observed root-AC episodes as rejected on terminal cancellation."""
+        contract = self._execution_contract
+        authority_contract = contract.get("foundation_a_authority") if contract else None
+        authority = (
+            authority_contract.get("correlation_id")
+            if isinstance(authority_contract, Mapping)
+            else None
+        )
+        if not isinstance(authority, str) or not authority.strip():
+            return
+        attempts: list[Any] = []
+        for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
+            attempts.extend(
+                await self._event_store.query_events(
+                    aggregate_id=execution_id,
+                    event_type=event_type,
+                    limit=100,
+                )
+            )
+        latest_by_root: dict[int, int] = {}
+        for event in attempts:
+            root = event.data.get("root_ac_index")
+            retry = event.data.get("retry_attempt", 0)
+            if (
+                isinstance(root, int)
+                and not isinstance(root, bool)
+                and root >= 0
+                and isinstance(retry, int)
+                and not isinstance(retry, bool)
+                and retry >= 0
+            ):
+                latest_by_root[root] = max(latest_by_root.get(root, 0), retry)
+        from ouroboros.events.base import BaseEvent
+
+        for root, retry in latest_by_root.items():
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.acceptance_finalized",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "authority_correlation_id": authority.strip(),
+                        "root_ac_index": root,
+                        "final_retry_attempt": retry,
+                        "accepted": False,
+                        "disposition": "cancelled",
+                        "outcome": "cancelled",
+                        "terminal_status": SessionStatus.CANCELLED.value,
+                    },
+                )
+            )
 
     async def execute_seed(
         self,
@@ -6541,6 +6609,23 @@ class OrchestratorRunner:
                     else SessionStatus.FAILED.value
                 )
             )
+            await self._emit_terminal_acceptance_finalized(
+                seed=seed,
+                parallel_result=None,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=terminal_status,
+                accepted_root_indices=(
+                    set(range(len(seed.acceptance_criteria)))
+                    if terminal_status == SessionStatus.COMPLETED.value
+                    else set()
+                ),
+                default_outcome=(
+                    "succeeded"
+                    if terminal_status == SessionStatus.COMPLETED.value
+                    else terminal_status
+                ),
+            )
             terminal_event = create_execution_terminal_event(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
@@ -7027,6 +7112,13 @@ class OrchestratorRunner:
                 else SessionStatus.FAILED.value
             )
         )
+        await self._emit_terminal_acceptance_finalized(
+            seed=seed,
+            parallel_result=parallel_result,
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            terminal_status=terminal_status,
+        )
         terminal_event = create_execution_terminal_event(
             execution_id=exec_id,
             session_id=tracker.session_id,
@@ -7114,6 +7206,103 @@ class OrchestratorRunner:
                 duration_seconds=duration,
             )
         )
+
+    async def _emit_terminal_acceptance_finalized(
+        self,
+        *,
+        seed: Seed,
+        parallel_result: Any,
+        execution_id: str,
+        session_id: str,
+        terminal_status: str,
+        accepted_root_indices: set[int] | None = None,
+        default_outcome: str | None = None,
+    ) -> None:
+        """Have the terminal Final Gate publish one decision per root AC.
+
+        Attempt judgments are deliberately insufficient for admission. This
+        method runs only after the session CAS has produced a terminal status;
+        a paused episode therefore has no final acceptance event. The
+        EventStore's authority/root CAS makes retries and duplicate observers
+        idempotent while rejecting contradictory payloads.
+        """
+        if terminal_status == SessionStatus.PAUSED.value:
+            return
+        contract = self._execution_contract
+        authority_contract = contract.get("foundation_a_authority") if contract else None
+        authority_correlation_id = (
+            authority_contract.get("correlation_id")
+            if isinstance(authority_contract, Mapping)
+            else None
+        )
+        if not isinstance(authority_correlation_id, str) or not authority_correlation_id.strip():
+            # Low-level unit callers can invoke ``_execute_parallel`` with a
+            # synthetic tracker that was never prepared through Foundation A.
+            # Such a call has no authority generation to attribute, so it must
+            # not mint an unbound final event. Public prepared-session paths
+            # always carry this correlation and therefore continue below.
+            log.error(
+                "orchestrator.runner.acceptance_finalization_missing_authority",
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+            return
+
+        results_by_index: dict[int, Any] = {}
+        for result in getattr(parallel_result, "results", ()):
+            ac_index = getattr(result, "ac_index", None)
+            if isinstance(ac_index, bool) or not isinstance(ac_index, int) or ac_index < 0:
+                continue
+            if ac_index in results_by_index:
+                raise PersistenceError(
+                    "Final acceptance received duplicate root AC results.",
+                    operation="runner.emit_terminal_acceptance_finalized",
+                    details={"root_ac_index": ac_index, "execution_id": execution_id},
+                )
+            results_by_index[ac_index] = result
+
+        from ouroboros.events.base import BaseEvent
+
+        for root_ac_index in range(len(seed.acceptance_criteria)):
+            result = results_by_index.get(root_ac_index)
+            outcome = getattr(getattr(result, "outcome", None), "value", None)
+            if outcome is None and default_outcome is not None:
+                outcome = default_outcome
+            if not isinstance(outcome, str) or not outcome.strip():
+                outcome = "blocked" if result is None else ("failed" if not result.success else "succeeded")
+            retry_attempt = getattr(result, "retry_attempt", 0) if result is not None else 0
+            if isinstance(retry_attempt, bool) or not isinstance(retry_attempt, int) or retry_attempt < 0:
+                retry_attempt = 0
+            accepted = bool(
+                terminal_status == SessionStatus.COMPLETED.value
+                and (
+                    root_ac_index in accepted_root_indices
+                    if accepted_root_indices is not None
+                    else result is not None
+                    and outcome in {"succeeded", "satisfied_externally"}
+                )
+            )
+            disposition = "accepted" if accepted else (
+                "cancelled" if terminal_status == SessionStatus.CANCELLED.value else outcome
+            )
+            await self._event_store.append(
+                BaseEvent(
+                    type="execution.ac.acceptance_finalized",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "execution_id": execution_id,
+                        "session_id": session_id,
+                        "authority_correlation_id": authority_correlation_id.strip(),
+                        "root_ac_index": root_ac_index,
+                        "final_retry_attempt": retry_attempt,
+                        "accepted": accepted,
+                        "disposition": disposition,
+                        "outcome": outcome.strip(),
+                        "terminal_status": terminal_status,
+                    },
+                )
+            )
 
     async def resume_session(
         self,
