@@ -1380,6 +1380,111 @@ async def test_failed_terminal_persistence_intent_replays_before_resume(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_pending_completed_commit_then_cancel_reconciles_owner(tmp_path) -> None:
+    """A replay cancellation after the COMPLETED CAS cannot preserve authority."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'complete-post-cas.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(
+        _SuccessfulRuntime(),
+        event_store,
+        MagicMock(),
+        fat_harness_mode=False,
+    )
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-complete-post-cas",
+        session_id="session-complete-post-cas",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_mark_completed = runner._session_repo.mark_completed
+    runner._session_repo.mark_completed = AsyncMock(
+        return_value=Result.err(PersistenceError("completion store unavailable"))
+    )
+
+    try:
+        first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        assert first.is_err
+
+        async def _commit_then_cancel(*args: object, **kwargs: object):
+            committed = await original_mark_completed(*args, **kwargs)
+            assert committed.is_ok
+            raise asyncio.CancelledError
+
+        runner._session_repo.mark_completed = AsyncMock(side_effect=_commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await runner.resume_session(tracker.session_id, _seed())
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.COMPLETED
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_failed_commit_then_cancel_reconciles_owner(tmp_path) -> None:
+    """A replay cancellation after the FAILED CAS cannot preserve authority."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'failed-post-cas.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_FailedRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-failed-post-cas",
+        session_id="session-failed-post-cas",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    original_mark_failed = runner._session_repo.mark_failed
+    runner._session_repo.mark_failed = AsyncMock(
+        return_value=Result.err(PersistenceError("failure store unavailable"))
+    )
+
+    try:
+        first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        assert first.is_err
+
+        async def _commit_then_cancel(*args: object, **kwargs: object):
+            committed = await original_mark_failed(*args, **kwargs)
+            assert committed.is_ok
+            raise asyncio.CancelledError
+
+        runner._session_repo.mark_failed = AsyncMock(side_effect=_commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await runner.resume_session(tracker.session_id, _seed())
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.FAILED
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_uow_rejects_terminal_write_for_live_process_local_owner(tmp_path) -> None:
     """UnitOfWork cannot bypass lifecycle cleanup for a retained paused owner."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'uow-live-owner.db'}")
@@ -1590,6 +1695,144 @@ async def test_prepare_terminal_persistence_retries_before_retiring_authority(tm
             session_id="session-prepare-terminal-retry",
             execution_id="exec-prepare-terminal-retry",
         )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_failure_cleanup_commit_then_cancel_reconciles_owner(tmp_path) -> None:
+    """Generic failure persistence drains ownership after an interrupted CAS response."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'failure-cleanup-cas.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-failure-cleanup-cas",
+        session_id="session-failure-cleanup-cas",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    original_mark_failed = runner._session_repo.mark_failed
+
+    async def _commit_then_cancel(*args: object, **kwargs: object):
+        committed = await original_mark_failed(*args, **kwargs)
+        assert committed.is_ok
+        raise asyncio.CancelledError
+
+    try:
+        runner._session_repo.mark_failed = AsyncMock(side_effect=_commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await runner._persist_failure_and_cleanup(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                error=RuntimeError("runtime failed"),
+            )
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_lost_authority_commit_then_cancel_reconciles_owner(tmp_path) -> None:
+    """Lost-authority terminalization cannot leave a committed FAILED owner live."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'lost-authority-cas.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-lost-authority-cas",
+        session_id="session-lost-authority-cas",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._register_session(tracker.execution_id, tracker.session_id)
+    original_mark_failed = runner._session_repo.mark_failed_if_active
+
+    async def _commit_then_cancel(*args: object, **kwargs: object):
+        committed = await original_mark_failed(*args, **kwargs)
+        assert committed.is_ok and committed.value is True
+        raise asyncio.CancelledError
+
+    try:
+        runner._session_repo.mark_failed_if_active = AsyncMock(side_effect=_commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await runner._mark_process_local_resume_unavailable(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+        assert tracker.execution_id not in runner.active_sessions
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_preparation_failure_commit_then_cancel_reconciles_owner(tmp_path) -> None:
+    """Preparation cleanup reconciles FAILED before propagating cancellation."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepare-failure-cas.db'}")
+    await event_store.initialize()
+    runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
+    runner._session_repo.track_progress = AsyncMock(
+        return_value=Result.err(PersistenceError("initial progress unavailable"))
+    )
+    original_mark_failed = runner._session_repo.mark_failed
+
+    async def _commit_then_cancel(*args: object, **kwargs: object):
+        committed = await original_mark_failed(*args, **kwargs)
+        assert committed.is_ok
+        raise asyncio.CancelledError
+
+    runner._session_repo.mark_failed = AsyncMock(side_effect=_commit_then_cancel)
+    session_id = "session-prepare-failure-cas"
+    execution_id = "exec-prepare-failure-cas"
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await runner.prepare_session(
+                _seed(),
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+        durable = await SessionRepository(event_store).reconstruct_session(session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.FAILED
+        assert (session_id, execution_id) not in runner._process_local_authorities
+        assert not heartbeat.is_holder_alive(session_id)
+        assert execution_id not in runner.active_sessions
+    finally:
+        runner._retire_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        runner._unregister_session(execution_id, session_id)
         await event_store.close()
 
 

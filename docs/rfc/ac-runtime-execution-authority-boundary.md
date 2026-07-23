@@ -481,6 +481,19 @@ The Foundation A implementation must demonstrate all of the following:
     `cancelled_by` metadata through both the same-process registry and the
     atomic file-backed cross-process channel; the owning runner uses that
     metadata for the durable session cancellation event.
+52. retained `COMPLETED` and `FAILED` intent replay reconstructs the durable
+    winner after an interrupted terminal CAS response; a committed winner
+    retires authority, heartbeat, active routing, and workspace ownership
+    instead of preserving a contradictory retry owner.
+53. generic failure cleanup applies the same post-CAS reconstruction before
+    returning persistence-pending or propagating cancellation, so a committed
+    terminal winner cannot coexist with live process-local resources.
+54. lost-authority terminalization reconciles an interrupted conditional
+    `FAILED` write under shielding before deciding whether terminal intent must
+    remain pending.
+55. preparation-failure terminalization uses the same durable-winner boundary;
+    cancellation after a committed `FAILED` append drains the early authority
+    and heartbeat before it propagates.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

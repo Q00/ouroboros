@@ -1608,13 +1608,13 @@ class OrchestratorRunner:
             cause=error,
         )
 
-    async def _cleanup_if_durable_terminal(
+    async def _reconcile_durable_terminal_and_cleanup(
         self,
         *,
         session_id: str,
         execution_id: str,
-    ) -> bool:
-        """Retire a claimed owner only after reconstructing a terminal winner.
+    ) -> SessionStatus | None:
+        """Return and fully reconcile a reconstructed durable terminal winner.
 
         Cancellation can arrive after the session CAS commits but before the
         execution-stream projection or ordinary cleanup finishes.  In that
@@ -1622,17 +1622,19 @@ class OrchestratorRunner:
         terminal source of truth, so interruption paths reconcile first.
         """
 
-        async def _reconcile() -> bool:
+        async def _reconcile() -> SessionStatus | None:
             try:
                 reconstructed = await self._session_repo.reconstruct_session(session_id)
             except Exception:
-                return False
+                return None
             if reconstructed.is_err or reconstructed.value.status not in {
                 SessionStatus.COMPLETED,
                 SessionStatus.FAILED,
                 SessionStatus.CANCELLED,
             }:
-                return False
+                return None
+            durable_status = reconstructed.value.status
+            self._pending_lifecycle_intents.pop(session_id, None)
             self._retire_process_local_authority(
                 session_id=session_id,
                 execution_id=execution_id,
@@ -1641,9 +1643,24 @@ class OrchestratorRunner:
             await clear_cancellation(session_id)
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
-            return True
+            return durable_status
 
-        return bool(await _await_process_local_cleanup(_reconcile()))
+        return await _await_process_local_cleanup(_reconcile())
+
+    async def _cleanup_if_durable_terminal(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Retire a claimed owner only after reconstructing a terminal winner."""
+        return (
+            await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            is not None
+        )
 
     async def _persist_failure_and_cleanup(
         self,
@@ -1654,6 +1671,7 @@ class OrchestratorRunner:
         messages_processed: int = 0,
     ) -> tuple[SessionStatus | None, Result[OrchestratorResult, OrchestratorError] | None]:
         """Persist one durable failure winner before withdrawing ownership."""
+        reconciled_during_exception = False
         try:
             durable_status = await self._persist_session_terminal_status(
                 session_id=session_id,
@@ -1663,22 +1681,53 @@ class OrchestratorRunner:
                 error_type=type(error).__name__,
                 messages_processed=messages_processed,
             )
-        except BaseException as persistence_error:
+        except (Exception, asyncio.CancelledError) as persistence_error:
+            durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if durable_status is not None:
+                reconciled_during_exception = True
+                if isinstance(persistence_error, asyncio.CancelledError):
+                    raise
+            else:
+                self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                    execution_id=execution_id,
+                    status=SessionStatus.FAILED,
+                    error_message=str(error),
+                    error_type=type(error).__name__,
+                    messages_processed=messages_processed,
+                )
+                if isinstance(persistence_error, asyncio.CancelledError):
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    raise
+                return None, self._terminal_persistence_pending_result(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    requested_status=SessionStatus.FAILED,
+                    cause=persistence_error,
+                )
+
+        if durable_status is None:
             return None, self._terminal_persistence_pending_result(
                 session_id=session_id,
                 execution_id=execution_id,
                 requested_status=SessionStatus.FAILED,
-                cause=persistence_error,
+                cause=error,
             )
 
-        self._retire_process_local_authority(
-            session_id=session_id,
-            execution_id=execution_id,
-        )
-        self._unregister_session(execution_id, session_id)
-        await clear_cancellation(session_id)
-        if self._task_workspace is not None:
-            release_lock(self._task_workspace.lock_path)
+        if not reconciled_during_exception:
+            self._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            self._unregister_session(execution_id, session_id)
+            await clear_cancellation(session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
         try:
             await self._event_store.append(
                 create_execution_terminal_event(
@@ -2338,7 +2387,27 @@ class OrchestratorRunner:
                     error.message,
                     error.details,
                 )
-            except Exception as exc:  # pragma: no cover - defensive persistence boundary
+            except (Exception, asyncio.CancelledError) as exc:
+                durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                if durable_status is not None:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return error
+                if isinstance(exc, asyncio.CancelledError):
+                    self._pending_lifecycle_intents[session_id] = _PendingLifecycleIntent(
+                        execution_id=execution_id,
+                        status=SessionStatus.FAILED,
+                        error_message=error.message,
+                        error_details=dict(error.details),
+                    )
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    raise
                 last_error = exc
             else:
                 if result.is_ok:
@@ -2405,7 +2474,28 @@ class OrchestratorRunner:
                     message,
                     dict(details),
                 )
-            except Exception as exc:  # pragma: no cover - defensive persistence boundary
+            except (Exception, asyncio.CancelledError) as exc:
+                durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                if durable_status is not None:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    return None
+                if isinstance(exc, asyncio.CancelledError):
+                    self._pending_lifecycle_intents[tracker.session_id] = _PendingLifecycleIntent(
+                        execution_id=tracker.execution_id,
+                        status=SessionStatus.FAILED,
+                        error_message=message,
+                        error_details=dict(details),
+                        messages_processed=tracker.messages_processed,
+                    )
+                    self._preserve_process_local_owner_for_retry(
+                        session_id=tracker.session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                    raise
                 last_error = exc
             else:
                 if result.is_ok:
@@ -2760,10 +2850,17 @@ class OrchestratorRunner:
                     cancelled_by=intent.cancelled_by,
                 )
         except asyncio.CancelledError:
-            self._preserve_process_local_owner_for_retry(
-                session_id=tracker.session_id,
-                execution_id=tracker.execution_id,
-            )
+            if (
+                await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                is None
+            ):
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
             raise
         except BaseException as exc:
             pending = self._terminal_persistence_pending_from_error(
