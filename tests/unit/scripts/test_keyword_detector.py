@@ -77,6 +77,32 @@ class TestMcpConfiguration:
             config_path.write_text('[mcp_servers.ouroboros]\nargs = ["ouroboros-ai"]\n')
             assert is_mcp_configured("codex") is False
 
+    def test_python_310_fallback_accepts_inline_comments(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "uvx" # normal comment\nenabled = true # active\n'
+        )
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod, "_toml_loads", None),
+        ):
+            assert is_mcp_configured("codex") is True
+
+    def test_python_310_fallback_ignores_triple_quote_in_comment(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "config.toml").write_text(
+            '# documentation mentions """ strings\n[mcp_servers.ouroboros]\ncommand = "uvx"\n'
+        )
+
+        with (
+            patch.object(_mod.Path, "home", return_value=tmp_path),
+            patch.object(_mod, "_toml_loads", None),
+        ):
+            assert is_mcp_configured("codex") is True
+
     def test_python_310_fallback_ignores_multiline_string_decoy(self, tmp_path):
         codex_dir = tmp_path / ".codex"
         codex_dir.mkdir()

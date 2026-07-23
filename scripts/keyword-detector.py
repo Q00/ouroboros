@@ -169,6 +169,25 @@ def _usable_mcp_transport(server: object) -> bool:
     )
 
 
+def _strip_toml_comment(line: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(line):
+        if quote is not None:
+            if quote == '"' and character == "\\" and not escaped:
+                escaped = True
+                continue
+            if character == quote and not escaped:
+                quote = None
+            escaped = False
+            continue
+        if character == "#":
+            return line[:index]
+        if character in ('"', "'"):
+            quote = character
+    return line
+
+
 def _fallback_codex_mcp_configured(config_text: str) -> bool:
     in_ouroboros_section = False
     section_count = 0
@@ -182,6 +201,7 @@ def _fallback_codex_mcp_configured(config_text: str) -> bool:
             if line.count(multiline_delimiter) % 2 == 1:
                 multiline_delimiter = None
             continue
+        line = _strip_toml_comment(raw_line).strip()
         for delimiter in ('"""', "'''"):
             if line.count(delimiter) % 2 == 1:
                 multiline_delimiter = delimiter
