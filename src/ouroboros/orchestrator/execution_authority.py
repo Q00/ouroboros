@@ -981,7 +981,9 @@ async def request_process_local_cancellation(
             reason=reason,
             cancelled_by=cancelled_by,
         )
-    except BaseException:
+    except BaseException as operation_error:
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        cleanup_error: BaseException | None = None
         if terminalization_started:
 
             async def _retry_interrupted_terminalization() -> tuple[str | None, bool]:
@@ -1001,7 +1003,14 @@ async def request_process_local_cancellation(
                 interrupted_status, terminal_winner = await _await_process_local_cleanup(
                     _retry_interrupted_terminalization()
                 )
-            except BaseException:
+            except asyncio.CancelledError as exc:
+                cleanup_cancellation = exc
+                _LOG.warning(
+                    "process_local_authority.interrupted_terminal_reconcile_cancelled",
+                    extra={"session_id": session_id, "execution_id": execution_id},
+                )
+            except BaseException as exc:
+                cleanup_error = exc
                 _LOG.warning(
                     "process_local_authority.interrupted_terminal_reconcile_failed",
                     extra={"session_id": session_id, "execution_id": execution_id},
@@ -1023,7 +1032,20 @@ async def request_process_local_cancellation(
                     extra={"session_id": session_id, "execution_id": execution_id},
                 )
         elif cancellation_request_published:
-            await clear_cancellation(session_id)
+            try:
+                await clear_cancellation(session_id)
+            except asyncio.CancelledError as exc:
+                cleanup_cancellation = exc
+            except BaseException as exc:
+                cleanup_error = exc
+        if cleanup_cancellation is not None:
+            # The caller's cancellation is the stronger lifecycle signal. The
+            # reconciliation helper has already drained its shielded task, so
+            # propagate it after preserving the original operation failure as
+            # context instead of silently returning the persistence error.
+            raise cleanup_cancellation from operation_error
+        if cleanup_error is not None:
+            raise operation_error from cleanup_error
         raise
 
     if cancel_result.is_err:

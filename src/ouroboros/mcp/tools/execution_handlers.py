@@ -105,6 +105,10 @@ _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
         "cancellation_persistence_pending",
         "pause_persistence_pending",
         "terminal_persistence_pending",
+        # Durable reconstruction was inconclusive. The retained process-local
+        # owner remains the only safe retry path; the background wrapper must
+        # not manufacture a generic FAILED terminal event.
+        "process_local_reconstruction_pending",
         # This error path already conditionally persisted its own terminal
         # result (or observed a concurrent terminal winner). A background
         # wrapper must never append a second FAILED event over that outcome.
