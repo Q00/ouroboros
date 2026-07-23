@@ -6011,7 +6011,13 @@ class TestJobManager:
             ) is None
 
             gate.set()
-            await asyncio.sleep(0.05)
+            completed = await _wait_for_job_status(
+                manager,
+                started.job_id,
+                JobStatus.COMPLETED,
+                timeout=2.0,
+            )
+            assert completed.job_id == started.job_id
 
             assert (await manager.find_active_job_by_lineage("lin_recovery")) is None
             terminal_recovered = await manager.find_active_job_by_lineage(
