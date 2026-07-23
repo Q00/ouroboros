@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -99,10 +100,26 @@ class TestCodexSetup:
                 return_value=False,
             ),
             patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch(
+                "ouroboros.codex.install_codex_artifacts",
+                return_value=SimpleNamespace(
+                    rules_path=codex_home / "AGENTS.md",
+                    skill_paths=[codex_home / "skills" / "ouroboros"],
+                ),
+            ) as install_artifacts,
         ):
             setup_cmd._register_codex_mcp_server()
+            setup_cmd._register_codex_default_profiles()
+            setup_cmd._register_codex_worker_profile()
+            setup_cmd._install_codex_artifacts()
 
-        assert (codex_home / "config.toml").exists()
+        config_path = codex_home / "config.toml"
+        assert config_path.exists()
+        contents = config_path.read_text(encoding="utf-8")
+        assert "[mcp_servers.ouroboros]" in contents
+        assert "[profiles.ouroboros-fast]" in contents
+        assert "[profiles.ouroboros-worker]" in contents
+        install_artifacts.assert_called_once_with(codex_dir=codex_home, prune=True)
         assert not (default_home / ".codex" / "config.toml").exists()
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(

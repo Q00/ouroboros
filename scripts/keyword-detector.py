@@ -13,10 +13,8 @@ Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
-import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 
 
@@ -165,33 +163,6 @@ def _usable_mcp_transport(server: object) -> bool:
     )
 
 
-def _codex_subprocess_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    codex_home = environment.get("CODEX_HOME", "").strip()
-    if codex_home:
-        environment["CODEX_HOME"] = str(Path(codex_home).expanduser())
-    else:
-        environment.pop("CODEX_HOME", None)
-    return environment
-
-
-def _codex_mcp_configured() -> bool:
-    result = subprocess.run(
-        ["codex", "mcp", "get", "ouroboros", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        check=False,
-        env=_codex_subprocess_environment(),
-    )
-    if result.returncode != 0:
-        return False
-    server = json.loads(result.stdout)
-    if not isinstance(server, dict) or server.get("enabled") is not True:
-        return False
-    return _usable_mcp_transport(server.get("transport"))
-
-
 def _claude_mcp_configured(config_text: str) -> bool:
     claude_config = json.loads(config_text)
     if not isinstance(claude_config, dict):
@@ -203,18 +174,14 @@ def _claude_mcp_configured(config_text: str) -> bool:
 
 
 def is_mcp_configured(host: str | None = None) -> bool:
-    """Check the active host's Ouroboros MCP registration."""
+    """Check the legacy Claude host's Ouroboros MCP registration."""
+    if host not in (None, "claude"):
+        return False
     try:
-        if host in (None, "claude"):
-            claude_path = Path.home() / ".claude" / "mcp.json"
-            if claude_path.exists() and _claude_mcp_configured(
-                claude_path.read_text(encoding="utf-8")
-            ):
-                return True
-            if host == "claude":
-                return False
-
-        return _codex_mcp_configured()
+        claude_path = Path.home() / ".claude" / "mcp.json"
+        return claude_path.exists() and _claude_mcp_configured(
+            claude_path.read_text(encoding="utf-8")
+        )
     except Exception:
         return False
 
@@ -333,7 +300,7 @@ def _extract_prompt_and_host(hook_input: str) -> tuple[str, str | None]:
     try:
         payload = json.loads(hook_input)
     except (ValueError, RecursionError):
-        return hook_input, None
+        return hook_input, "claude"
 
     if (
         isinstance(payload, dict)
@@ -343,7 +310,7 @@ def _extract_prompt_and_host(hook_input: str) -> tuple[str, str | None]:
     ):
         host = "codex" if isinstance(payload.get("turn_id"), str) else "claude"
         return payload["prompt"], host
-    return hook_input, None
+    return hook_input, "claude"
 
 
 def _extract_prompt(hook_input: str) -> str:
@@ -391,8 +358,11 @@ IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confir
         skill = result["suggested_skill"]
         keyword = result["keyword"]
 
-        # Gate check: if MCP not configured and skill requires it, redirect to setup
-        if skill not in SETUP_BYPASS_SKILLS and not is_mcp_configured(host):
+        # Codex hook payloads do not expose the parent session's --profile/-c
+        # layers. Reconstructing state in a child CLI can contradict the active
+        # session, so only the legacy Claude path applies the setup gate.
+        needs_setup = host != "codex" and not is_mcp_configured("claude")
+        if skill not in SETUP_BYPASS_SKILLS and needs_setup:
             _emit_context("""<skill-suggestion>
 🎯 REQUIRED SKILL:
 - /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
