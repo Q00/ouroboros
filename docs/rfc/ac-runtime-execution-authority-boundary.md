@@ -180,8 +180,10 @@ Effectful execution atomically claims the live session capability. A second
 same-process caller receives `process_local_execution_in_progress` and must
 not terminalize or retire the original caller. `PAUSED` releases **only** that
 exclusive claim: its registry registration/capability and liveness lease remain
-held by the original owner. Terminal, cancellation, and setup-abort paths retire
-the registration, issuance, claim, and owned lease together.
+held by the original owner. Only a durable terminal winner retires the
+registration, issuance, claim, and owned lease. A raw task cancellation or
+failed terminal write releases the exiting coroutine's claim, active route, and
+worktree lock while preserving the exact owner for retry.
 
 On a valid process-local resume, a foreign runner or observer must treat either
 a live registry registration or a live liveness lease as an active owner and
@@ -305,9 +307,10 @@ the durable winner and projects that status instead; it never publishes a
 | MCP execution wrapper receives `cancellation_persistence_pending` | must not call `mark_failed` | retains the exact owner and its liveness until a successful terminal write | retryable nonterminal error |
 | A stale paused/running snapshot observes authority retirement after a public terminal write | conditional terminal append finds the existing terminal event and does not append `FAILED` | no generation is recreated or retired a second time | fail-closed resume error while the durable terminal status remains unchanged |
 | A concurrent same-owner resume occurs during a claim or terminalization reservation | no competing terminal write | `claim` fails without releasing the live owner or its worktree state | `process_local_execution_in_progress` |
-| A foreign live process holds the heartbeat lease | must not terminalize a process it cannot signal | no local registration is manufactured or retired | retryable `process_local_authority_held_elsewhere` |
+| A foreign live process holds the heartbeat lease and public cancel arrives | publish a file-backed nonterminal request; do not write terminal state beneath its effects | no local registration is manufactured or retired; the owner observes the request at its normal checkpoints | successful `cancellation_requested`; an unavailable signal path returns a retryable persistence error |
 | A terminal record is written through a public paused-owner cancellation | call `retire_after_terminal_persistence` only after the write | registry atomically detaches the opaque binding, then finalizers evict runner/cache/store and lease resources | later resume sees terminal state and cannot leak a retained owner |
 | A raw caller cancellation interrupts pre-effect contract/tool setup after a claim | first drain any published cooperative cancellation in a shielded task | successful cancellation retires normally; failed persistence releases only the claim/route/lock and preserves retryable authority | cancellation result or `cancellation_persistence_pending`, never `PAUSED → FAILED` through lost authority |
+| Setup or execution raises and the `FAILED` transition cannot persist | no false terminal result is reported | release only claim/route/worktree; retain registration and heartbeat for the same owner | typed `terminal_persistence_pending`; wrapper must retain rather than manufacture another failure |
 
 The `claim` and terminalization reservation are intentionally the same mutual
 exclusion boundary. Thus a resume cannot acquire effects between public-cancel
@@ -372,9 +375,10 @@ The Foundation A implementation must demonstrate all of the following:
 18. a failed worker cancellation write releases the departed effect claim,
     active route, and worktree lock while preserving the live registration,
     heartbeat, and cancellation request for an exact-owner retry;
-19. the MCP wrapper preserves that retryable cancellation state rather than
-    manufacturing `FAILED`, and a foreign live heartbeat receives a retryable
-    ownership block rather than an unsafe public terminal write;
+19. the MCP wrapper preserves retryable cancellation/terminal-persistence state
+    rather than manufacturing `FAILED`; a foreign resume receives the typed
+    ownership block, while a foreign public cancel publishes a durable
+    nonterminal request instead of writing terminal state beneath active effects;
 20. an externally persisted terminal record drains the exact retained runner,
     handler cache, heartbeat, worktree ownership, and owned EventStore through
     the registry's one finalizer path; and
@@ -396,6 +400,12 @@ The Foundation A implementation must demonstrate all of the following:
     `COMPLETED`, `FAILED`, or `CANCELLED` lifecycle event as absorbing; a late
     `runtime_status: running` progress checkpoint cannot make orphan detection
     or another snapshot consumer observe the session as active again.
+27. setup and execution exception handlers persist or observe a terminal winner
+    before retiring authority or liveness; if that write fails, they preserve an
+    unclaimed same-process owner and return `terminal_persistence_pending`.
+28. cancellation issued from a separate CLI/MCP process reaches a live owner
+    through a containment-safe file-backed request marker, which is distinct
+    from both the heartbeat lease and terminal session evidence.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

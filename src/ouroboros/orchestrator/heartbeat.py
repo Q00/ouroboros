@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
+from uuid import uuid4
 
 try:  # pragma: no cover - exercised on Unix CI; fallback supports Windows imports
     import fcntl
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover - Windows fallback
 log = logging.getLogger(__name__)
 
 LOCK_DIR = Path.home() / ".ouroboros" / "locks"
+CANCELLATION_DIR = Path.home() / ".ouroboros" / "cancellations"
 _LEASE_OPERATION_LOCK = RLock()
 _HELD_LEASE_FDS: dict[str, int] = {}
 _SAFE_LOCK_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -38,6 +40,11 @@ _SAFE_LOCK_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 def _ensure_dir() -> Path:
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     return LOCK_DIR
+
+
+def _ensure_cancellation_dir() -> Path:
+    CANCELLATION_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return CANCELLATION_DIR
 
 
 def _clear_held_leases_after_fork() -> None:
@@ -115,6 +122,53 @@ def lock_path(session_id: str) -> Path:
     # created, while this digest prevents a legacy value from escaping LOCK_DIR.
     raw = str(session_id).encode("utf-8", "surrogatepass")
     return _ensure_dir() / f"__invalid_session_id__{hashlib.sha256(raw).hexdigest()}"
+
+
+def cancellation_path(session_id: str) -> Path:
+    """Return a containment-safe cooperative cancellation signal path."""
+    if isinstance(session_id, str) and _SAFE_LOCK_SESSION_ID.fullmatch(session_id) is not None:
+        return _ensure_cancellation_dir() / session_id
+    raw = str(session_id).encode("utf-8", "surrogatepass")
+    return _ensure_cancellation_dir() / (f"__invalid_session_id__{hashlib.sha256(raw).hexdigest()}")
+
+
+def publish_cancellation_request(session_id: str) -> None:
+    """Publish a durable nonterminal cancellation signal across processes.
+
+    The liveness lease intentionally cannot be used as a signal channel: an
+    observer must never replace or remove another process's lease.  This
+    separate existence-only marker lets CLI/MCP processes request cooperative
+    cancellation while the owning runner keeps sole authority to persist the
+    terminal session result.
+    """
+    path = cancellation_path(session_id)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def has_cancellation_request(session_id: str) -> bool:
+    """Return whether any process published a cooperative cancellation request."""
+    return cancellation_path(session_id).is_file()
+
+
+def clear_cancellation_request(session_id: str) -> None:
+    """Remove a cooperative request after the owning lifecycle acknowledges it."""
+    try:
+        cancellation_path(session_id).unlink(missing_ok=True)
+    except OSError:
+        log.warning(
+            "session_cancellation.clear_failed",
+            extra={"session_id": session_id},
+        )
 
 
 def acquire(session_id: str) -> None:

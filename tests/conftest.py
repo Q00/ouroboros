@@ -35,7 +35,9 @@ def isolate_heartbeat_locks_per_test_worker(tmp_path_factory):
     from ouroboros.orchestrator import heartbeat
 
     previous_lock_dir = heartbeat.LOCK_DIR
+    previous_cancellation_dir = heartbeat.CANCELLATION_DIR
     heartbeat.LOCK_DIR = tmp_path_factory.mktemp("heartbeat-locks")
+    heartbeat.CANCELLATION_DIR = tmp_path_factory.mktemp("cancellation-signals")
     try:
         yield
     finally:
@@ -44,6 +46,7 @@ def isolate_heartbeat_locks_per_test_worker(tmp_path_factory):
         for session_id in tuple(heartbeat._HELD_LEASE_FDS):
             heartbeat.release(session_id)
         heartbeat.LOCK_DIR = previous_lock_dir
+        heartbeat.CANCELLATION_DIR = previous_cancellation_dir
 
 
 @pytest.fixture(autouse=True)

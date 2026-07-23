@@ -711,9 +711,21 @@ async def request_process_local_cancellation(
         )
 
     if not terminalization_started and is_holder_alive(session_id):
-        # Registry signals cannot cross processes, so a live foreign holder
-        # must not receive a durable terminal state beneath active effects.
-        return ProcessLocalCancellationOutcome(ProcessLocalCancellationDisposition.HELD_ELSEWHERE)
+        # Do not terminalize beneath a foreign process's active effects. The
+        # request marker is a separate durable nonterminal channel that the
+        # owning runner observes at its normal cancellation checkpoints.
+        from ouroboros.orchestrator.heartbeat import publish_cancellation_request
+
+        try:
+            publish_cancellation_request(session_id)
+        except OSError as exc:
+            return ProcessLocalCancellationOutcome(
+                ProcessLocalCancellationDisposition.PERSISTENCE_PENDING,
+                error=exc,
+            )
+        return ProcessLocalCancellationOutcome(
+            ProcessLocalCancellationDisposition.CANCELLATION_REQUESTED
+        )
 
     cancellation_request_published = False
     try:

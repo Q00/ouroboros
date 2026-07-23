@@ -1648,7 +1648,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
-        """Start-event failures should release the workspace lock and unregister the session."""
+        """A terminal-write failure releases effects but preserves the live lease."""
         from ouroboros.core.types import Result
 
         runner = OrchestratorRunner(
@@ -1684,8 +1684,18 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_err
-        unregister_mock.assert_called_once_with("exec_setup", tracker.session_id)
+        assert result.error.details["resume_blocked"] == "terminal_persistence_pending"
+        unregister_mock.assert_called_once_with(
+            "exec_setup",
+            tracker.session_id,
+            release_liveness_lease=False,
+        )
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id="exec_setup",
+        )
+        runner._unregister_session("exec_setup", tracker.session_id)
 
     @pytest.mark.asyncio
     async def test_execute_seed_tool_setup_failure_cleans_up_workspace_lock(

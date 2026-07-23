@@ -8,10 +8,13 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from ouroboros.cli.commands.cancel import _cancel_session
 from ouroboros.cli.main import app
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
-from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.orchestrator import heartbeat
+from ouroboros.orchestrator.runner import clear_cancellation
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 
 runner = CliRunner()
 
@@ -56,6 +59,51 @@ class TestCancelExecutionValidation:
         result = runner.invoke(app, ["cancel", "execution", "orch_test123", "--all"])
         assert result.exit_code == 1
         assert "Cannot specify both" in result.output
+
+    @pytest.mark.asyncio
+    async def test_cli_process_publishes_request_for_live_foreign_owner(self) -> None:
+        """A separate CLI process can signal without writing terminal state."""
+        tracker = _make_tracker(session_id="orch_foreign_cli").with_progress(
+            {
+                "execution_contract": {
+                    "foundation_a_authority": {
+                        "version": 1,
+                        "scope": "process_local",
+                        "correlation_id": "a" * 32,
+                    }
+                }
+            }
+        )
+        event_store = AsyncMock()
+        mark_cancelled = AsyncMock(return_value=Result.ok(True))
+        try:
+            with (
+                patch.object(
+                    SessionRepository,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(tracker)),
+                ),
+                patch.object(
+                    SessionRepository,
+                    "mark_cancelled_if_active",
+                    mark_cancelled,
+                ),
+                patch(
+                    "ouroboros.orchestrator.heartbeat.is_holder_alive",
+                    return_value=True,
+                ),
+            ):
+                cancelled = await _cancel_session(
+                    event_store,
+                    tracker.session_id,
+                    "cross-process CLI cancellation",
+                )
+
+            assert cancelled is True
+            assert heartbeat.has_cancellation_request(tracker.session_id)
+            mark_cancelled.assert_not_awaited()
+        finally:
+            await clear_cancellation(tracker.session_id)
 
 
 class TestBareMode:

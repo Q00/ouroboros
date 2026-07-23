@@ -100,7 +100,10 @@ _PROCESS_LOCAL_BACKGROUND_OWNED_BLOCKS = frozenset(
         "process_local_execution_in_progress",
         "process_local_authority_held_elsewhere",
         "session_not_paused",
+        "typed_evidence_gate_required",
+        "investment_authority_required",
         "cancellation_persistence_pending",
+        "terminal_persistence_pending",
         # This error path already conditionally persisted its own terminal
         # result (or observed a concurrent terminal winner). A background
         # wrapper must never append a second FAILED event over that outcome.
@@ -1541,10 +1544,26 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         session_id=session_id,
                     )
                     if prepared.is_err:
+                        prepared_details = prepared.error.details
+                        terminal_persistence_pending = (
+                            prepared_details.get("resume_blocked") == "terminal_persistence_pending"
+                        )
+                        if terminal_persistence_pending:
+                            retained_tracker = await session_repo.reconstruct_session(
+                                prepared_details.get("session_id", session_id or "")
+                            )
+                            if retained_tracker.is_ok:
+                                self._remember_process_local_owner(
+                                    retained_tracker.value,
+                                    runner,
+                                    owned_event_store=(event_store if owns_event_store else None),
+                                )
                         return Result.err(
                             MCPToolError(
                                 f"Execution failed: {prepared.error.message}",
                                 tool_name="ouroboros_execute_seed",
+                                is_retriable=terminal_persistence_pending,
+                                details=dict(prepared_details),
                             )
                         )
                     tracker = prepared.value
