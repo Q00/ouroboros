@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
@@ -150,13 +151,7 @@ class EventStore:
                 ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
         if database_url is None:
-            # Local import avoids a persistence -> config import cycle at module
-            # load time. get_config_dir() honours $OUROBOROS_HOME so the default
-            # DB relocates with the rest of the Ouroboros state root (tests
-            # isolate it per-run instead of hammering the real shared DB).
-            from ouroboros.config.models import get_config_dir
-
-            db_path = get_config_dir() / "ouroboros.db"
+            db_path = Path.home() / ".ouroboros" / "ouroboros.db"
             if not read_only:
                 db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"

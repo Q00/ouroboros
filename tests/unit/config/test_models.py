@@ -769,21 +769,13 @@ class TestGetConfigDir:
         config_dir = get_config_dir()
         assert isinstance(config_dir, Path)
 
-    def test_get_config_dir_is_in_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_config_dir returns ``~/.ouroboros`` when no override is set."""
+    def test_get_config_dir_is_in_home(self) -> None:
+        """get_config_dir returns path in home directory."""
         from pathlib import Path
 
-        monkeypatch.delenv("OUROBOROS_HOME", raising=False)
         config_dir = get_config_dir()
         assert config_dir.parent == Path.home()
         assert config_dir.name == ".ouroboros"
-
-    def test_get_config_dir_honours_ouroboros_home_override(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``OUROBOROS_HOME`` relocates the state dir (the test-isolation seam)."""
-        monkeypatch.setenv("OUROBOROS_HOME", str(tmp_path))
-        assert get_config_dir() == tmp_path / ".ouroboros"
 
 
 class TestRuntimeProfileConfig:
