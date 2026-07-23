@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from ouroboros.auto.execution_acceptance import (
+    _AUTORESEARCH_CANONICAL_AC,
+    _unwrap_seed_repairer_original_requirement,
     is_auto_reporting_acceptance_criterion,
     normalize_execution_acceptance,
+)
+
+_SEED_REPAIRER_WRAPPER = (
+    "A command/API check returns stable observable output or artifacts "
+    "proving the original requirement for "
 )
 
 _SINGLE_HELLO_AUTO_OBSERVATION_AC = (
@@ -947,6 +954,52 @@ def test_normalize_execution_acceptance_generic_removal_is_exact_only() -> None:
     normalized = normalize_execution_acceptance(seed)
 
     assert any("stderr log" in text for text in ac_texts(normalized.acceptance_criteria))
+
+
+def test_normalize_execution_acceptance_exact_canonical_source_keeps_sequence() -> None:
+    """Blocker regression: a lone exact canonical AC keeps its canonical position.
+
+    A source whose text IS the baseline canonical AC must anchor to the fixed
+    canonical sequence, not the source coordinate space — otherwise it sorts
+    after the injected experiments/reporting ACs and inverts stage order.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py")
+    )
+
+    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
+    # The full canonical sequence is emitted in order, baseline first.
+    assert list(texts) == list(_AUTORESEARCH_CANONICAL_AC)
+
+
+def test_unwrap_seed_repairer_preserves_case_and_recurses() -> None:
+    """Blocker regression: unwrapping keeps case and strips every nested wrapper."""
+    # Case-sensitive identifiers survive verbatim (not lowercased).
+    cased = _SEED_REPAIRER_WRAPPER + "RawStderr.LOG and VAL_BPB must match."
+    assert (
+        _unwrap_seed_repairer_original_requirement(cased) == "RawStderr.LOG and VAL_BPB must match."
+    )
+    # A doubly-wrapped requirement is fully unwrapped to its inner requirement.
+    nested = _SEED_REPAIRER_WRAPPER + _SEED_REPAIRER_WRAPPER + "preserve the raw stderr log."
+    assert _unwrap_seed_repairer_original_requirement(nested) == "preserve the raw stderr log."
+
+
+def test_normalize_execution_acceptance_preserves_nested_wrapped_requirement() -> None:
+    """Blocker regression: a nested wrapper does not delete its inner requirement.
+
+    A doubly-wrapped autoresearch criterion carrying a distinct raw-stderr
+    requirement must not be classified as a generic placeholder and dropped.
+    """
+    nested = (
+        _SEED_REPAIRER_WRAPPER
+        + _SEED_REPAIRER_WRAPPER
+        + "preserve the raw stderr log for every attempt."
+    )
+    seed = _autoresearch_seed(nested)
+
+    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
+    assert any("stderr log" in text for text in texts)
 
 
 def test_normalize_execution_acceptance_collapse_refreshes_auto_derived_key() -> None:

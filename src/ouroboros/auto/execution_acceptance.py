@@ -163,6 +163,16 @@ _AUTORESEARCH_CANONICAL_AC = (
     "The final report artifact includes baseline val_bpb, each attempted experiment result, final best val_bpb, and the keep/discard reason for every candidate.",
 )
 
+
+def _autoresearch_canonical_position(text: str) -> int | None:
+    """Return the fixed canonical index of ``text``, or None if not canonical."""
+    stripped = text.strip()
+    for index, canonical in enumerate(_AUTORESEARCH_CANONICAL_AC):
+        if canonical.strip() == stripped:
+            return index
+    return None
+
+
 _AUTORESEARCH_NON_GOALS = (
     "Do not edit prepare.py.",
     "Do not edit files outside train.py unless scope_widening_ledger explicitly widens scope.",
@@ -357,7 +367,15 @@ def _restore_surviving_acceptance_specs(
         )
         if exact_index is not None:
             criterion, _text = _pop(exact_index)
-            _emit((1, float(exact_index)), criterion)
+            # A source whose text IS an autoresearch canonical AC belongs in the
+            # fixed canonical sequence (tier 0 at its canonical index), not the
+            # source coordinate space — otherwise a lone exact baseline AC would
+            # sort after injected experiments/reporting and invert stage order.
+            canonical_position = _autoresearch_canonical_position(text)
+            if canonical_position is not None:
+                _emit((0, float(canonical_position)), criterion)
+            else:
+                _emit((1, float(exact_index)), criterion)
             continue
 
         # A filtered text with no remaining source.  Either the normalizer
@@ -526,7 +544,14 @@ def _collapse_canonical_acceptance_specs(
 def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:
     """Return whether one structured hello_auto AC became ``normalized_text``."""
     subject = _unwrap_seed_repairer_original_requirement(original_text).strip()
-    if _normalize_known_observation_execution_line(subject) == normalized_text:
+    normalized_subject = _normalize_known_observation_execution_line(subject)
+    # ``_normalize_known_observation_execution_line`` returns its input unchanged
+    # for anything it does not recognize as a hello_auto line.  Requiring an
+    # actual transformation avoids a false identity match — e.g. an autoresearch
+    # canonical AC equal to its own ``normalized_text`` must NOT be treated as a
+    # hello collapse (which would route it into the source coordinate space and
+    # invert the canonical sequence).
+    if normalized_subject != subject and normalized_subject == normalized_text:
         return True
     return normalized_text.startswith(
         "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
@@ -853,8 +878,31 @@ def _is_observation_report_wrapper(criterion: str) -> bool:
     return "observation report" in key or "plain chat summary" in key
 
 
+# Case-insensitive, whitespace-tolerant matcher for the seed-repairer wrapper
+# prefix.  Stripping via this regex (rather than the case-folded criterion key)
+# preserves the original casing of the wrapped requirement — a repaired
+# requirement referencing case-sensitive identifiers like ``RawStderr.LOG`` or
+# ``VAL_BPB`` must round-trip verbatim, not lowercased.
+_SEED_REPAIRER_WRAPPER_RE = re.compile(
+    r"^\s*"
+    + re.escape(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX.strip()).replace(r"\ ", r"\s+")
+    + r"\s+",
+    re.IGNORECASE,
+)
+
+
 def _unwrap_seed_repairer_original_requirement(criterion: str) -> str:
-    key = _criterion_key(criterion)
-    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
-        return criterion
-    return key.removeprefix(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX)
+    """Strip every nested seed-repairer wrapper, preserving the inner casing.
+
+    The repairer can wrap an already-wrapped criterion, so unwrapping must
+    recurse until the innermost requirement is exposed; otherwise a nested
+    wrapper is later matched as a generic placeholder and the real requirement
+    it carries is deleted.  Casing is preserved so case-sensitive identifiers
+    survive round-trip.
+    """
+    text = criterion.strip()
+    while True:
+        stripped = _SEED_REPAIRER_WRAPPER_RE.sub("", text, count=1).strip()
+        if stripped == text:
+            return text
+        text = stripped
