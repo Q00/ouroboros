@@ -159,6 +159,7 @@ class _ProcessLocalAuthorityLifecycle:
     registration: _ProcessLocalAuthorityRegistration
     state: _ProcessLocalAuthorityLifecycleState
     terminal_finalizers: dict[object, Callable[[], object]]
+    terminalization_retryable: bool = False
 
 
 class ProcessLocalCancellationDisposition(StrEnum):
@@ -293,9 +294,16 @@ class _ProcessLocalAuthorityRegistry:
                 or entry.generation.correlation_id != value.get("correlation_id")
             ):
                 return False, False
+            if (
+                lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+                and lifecycle.terminalization_retryable
+            ):
+                lifecycle.terminalization_retryable = False
+                return True, False
             if lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED:
                 return False, True
             lifecycle.state = _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+            lifecycle.terminalization_retryable = False
             return True, False
 
     def abort_terminalization(
@@ -319,6 +327,29 @@ class _ProcessLocalAuthorityRegistry:
                 and lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
             ):
                 lifecycle.state = _ProcessLocalAuthorityLifecycleState.REGISTERED
+                lifecycle.terminalization_retryable = False
+
+    def retain_terminalization_for_retry(
+        self,
+        session_id: str,
+        execution_id: str,
+        value: object,
+    ) -> None:
+        """Keep an ambiguous terminal writer non-effectful but reclaimable."""
+        if not valid_process_local_authority_contract(value):
+            return
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is not None
+                and entry.creator_pid == os.getpid()
+                and entry.execution_id == execution_id
+                and self._is_issued_here(entry.generation)
+                and entry.generation.correlation_id == value.get("correlation_id")
+                and lifecycle.state is _ProcessLocalAuthorityLifecycleState.TERMINALIZING
+            ):
+                lifecycle.terminalization_retryable = True
 
     def is_terminalizing(
         self,
@@ -681,6 +712,19 @@ def _process_local_authority_is_terminalizing(
     )
 
 
+def _retain_process_local_authority_terminalization_for_retry(
+    session_id: str,
+    execution_id: str,
+    value: object,
+) -> None:
+    """Leave an ambiguous public terminalization reserved for exact retry."""
+    _PROCESS_LOCAL_AUTHORITY_REGISTRY.retain_terminalization_for_retry(
+        session_id,
+        execution_id,
+        value,
+    )
+
+
 def _register_process_local_authority_terminal_finalizer(
     session_id: str,
     execution_id: str,
@@ -914,6 +958,11 @@ async def request_process_local_cancellation(
                     authority,
                 )
             elif not terminal_winner:
+                _retain_process_local_authority_terminalization_for_retry(
+                    session_id,
+                    execution_id,
+                    authority,
+                )
                 _LOG.warning(
                     "process_local_authority.interrupted_terminal_reconcile_pending",
                     extra={"session_id": session_id, "execution_id": execution_id},

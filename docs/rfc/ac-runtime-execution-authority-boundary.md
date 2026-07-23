@@ -501,6 +501,21 @@ The Foundation A implementation must demonstrate all of the following:
 57. the active-runner cancellation entry point forwards the caller's bounded
     `reason` and `cancelled_by` metadata unchanged to the cooperative request
     consumed by terminal persistence.
+58. active-runner cancellation interrupted immediately after its conditional
+    `CANCELLED` write reconstructs the durable winner under shielding; a
+    committed winner drains authority, heartbeat, routing, and workspace
+    ownership before the original cancellation propagates.
+59. an unreadable public-cancellation result keeps a non-effectful retryable
+    `TERMINALIZING` reservation, and a later cancellation request may reclaim
+    that reservation to retry the terminal CAS when durable state is still
+    `RUNNING` or `PAUSED`.
+60. one session aggregate has exactly one immutable `session.started` identity:
+    concurrent creation and caller-supplied reuse cannot append a second start
+    event, including when the public event factory is committed through
+    `UnitOfWork`.
+61. resume replays pending lifecycle intent and arbitrates persisted
+    process-local authority before evaluating current fat-harness or investment
+    policy; lost or foreign authority cannot be masked by a newer policy gate.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

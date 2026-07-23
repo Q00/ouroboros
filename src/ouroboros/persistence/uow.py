@@ -95,20 +95,27 @@ class UnitOfWork:
             # one-winner CAS cannot be bypassed. A CAS loser is a successful
             # no-op and is removed from pending just like a winning append.
             while self._pending_events:
-                terminal_index = next(
+                lifecycle_index = next(
                     (
                         index
                         for index, event in enumerate(self._pending_events)
                         if self._event_store.is_session_terminal_event(event)
+                        or self._event_store.is_session_start_event(event)
                     ),
                     len(self._pending_events),
                 )
-                if terminal_index:
-                    await self._event_store.append_batch(self._pending_events[:terminal_index])
-                    del self._pending_events[:terminal_index]
+                if lifecycle_index:
+                    await self._event_store.append_batch(self._pending_events[:lifecycle_index])
+                    del self._pending_events[:lifecycle_index]
                     continue
 
-                terminal_event = self._pending_events[0]
+                lifecycle_event = self._pending_events[0]
+                if self._event_store.is_session_start_event(lifecycle_event):
+                    await self._event_store.append(lifecycle_event)
+                    del self._pending_events[0]
+                    continue
+
+                terminal_event = lifecycle_event
                 from ouroboros.orchestrator.execution_authority import (
                     _has_live_process_local_authority_session,
                 )

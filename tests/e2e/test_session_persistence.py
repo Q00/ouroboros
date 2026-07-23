@@ -9,16 +9,17 @@ This module tests the complete session lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.persistence.event_store import EventStore
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
-    from ouroboros.persistence.event_store import EventStore
     from tests.e2e.conftest import MockClaudeAgentAdapter
 
 
@@ -71,6 +72,47 @@ class TestSessionCreation:
 
         assert result1.is_ok and result2.is_ok
         assert result1.value.session_id != result2.value.session_id
+
+    async def test_concurrent_custom_session_id_has_one_start_identity(
+        self,
+        tmp_path,
+        sample_seed: Seed,
+    ) -> None:
+        """Concurrent publishers cannot create two executions for one session ID."""
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'start-identity-cas.db'}"
+        first_store = EventStore(database_url)
+        second_store = EventStore(database_url)
+        await first_store.initialize()
+        await second_store.initialize()
+        session_id = "session-concurrent-start-identity"
+        try:
+            first, second = await asyncio.gather(
+                SessionRepository(first_store).create_session(
+                    execution_id="exec-concurrent-start-a",
+                    seed_id=sample_seed.metadata.seed_id,
+                    session_id=session_id,
+                ),
+                SessionRepository(second_store).create_session(
+                    execution_id="exec-concurrent-start-b",
+                    seed_id=sample_seed.metadata.seed_id,
+                    session_id=session_id,
+                ),
+            )
+
+            assert int(first.is_ok) + int(second.is_ok) == 1
+            loser = second if first.is_ok else first
+            assert loser.is_err
+            assert loser.error.details["session_start_conflict"] is True
+            events = await first_store.replay("session", session_id)
+            starts = [event for event in events if event.type == "orchestrator.session.started"]
+            assert len(starts) == 1
+            assert starts[0].data["execution_id"] in {
+                "exec-concurrent-start-a",
+                "exec-concurrent-start-b",
+            }
+        finally:
+            await second_store.close()
+            await first_store.close()
 
     async def test_session_tracks_execution_id(
         self,

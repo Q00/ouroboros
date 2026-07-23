@@ -10,6 +10,7 @@ from ouroboros.orchestrator import heartbeat
 from ouroboros.orchestrator.events import (
     create_session_cancelled_event,
     create_session_completed_event,
+    create_session_started_event,
 )
 from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
@@ -234,6 +235,63 @@ class TestUnitOfWork:
         assert uow.pending_event_count == 0
         events = await event_store.replay("session", session_id)
         assert [event.type for event in events] == ["orchestrator.session.cancelled"]
+
+    async def test_commit_routes_session_start_through_immutable_identity_guard(
+        self,
+        uow: UnitOfWork,
+        event_store: EventStore,
+    ) -> None:
+        """Public start factories remain compatible with UnitOfWork."""
+        session_id = "sess-uow-start"
+        uow.add_event(
+            create_session_started_event(
+                session_id,
+                execution_id="exec-uow-start",
+                seed_id="seed-uow-start",
+                seed_goal="Verify immutable start identity",
+            )
+        )
+
+        result = await uow.commit()
+
+        assert result.is_ok
+        assert uow.pending_event_count == 0
+        events = await event_store.replay("session", session_id)
+        assert [event.type for event in events] == ["orchestrator.session.started"]
+        assert events[0].data["execution_id"] == "exec-uow-start"
+
+    async def test_commit_retains_conflicting_session_start_in_pending(
+        self,
+        uow: UnitOfWork,
+        event_store: EventStore,
+    ) -> None:
+        """A reused session ID fails without appending a second start identity."""
+        session_id = "sess-uow-start-conflict"
+        first = create_session_started_event(
+            session_id,
+            execution_id="exec-uow-start-original",
+            seed_id="seed-uow-start",
+            seed_goal="Original execution",
+        )
+        await event_store.append(first)
+        uow.add_event(
+            create_session_started_event(
+                session_id,
+                execution_id="exec-uow-start-conflict",
+                seed_id="seed-uow-start",
+                seed_goal="Conflicting execution",
+            )
+        )
+
+        result = await uow.commit()
+
+        assert result.is_err
+        assert result.error.details["session_start_conflict"] is True
+        assert uow.pending_event_count == 1
+        events = await event_store.replay("session", session_id)
+        starts = [event for event in events if event.type == "orchestrator.session.started"]
+        assert len(starts) == 1
+        assert starts[0].data["execution_id"] == "exec-uow-start-original"
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires a forked lease owner")
     async def test_commit_rejects_terminal_event_while_foreign_heartbeat_is_live(

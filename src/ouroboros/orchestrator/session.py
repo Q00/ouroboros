@@ -701,6 +701,8 @@ class SessionRepository:
                 session_id=tracker.session_id,
                 error=str(e),
             )
+            if isinstance(e, PersistenceError):
+                return Result.err(e)
             return Result.err(
                 PersistenceError(
                     message=f"Failed to create session: {e}",

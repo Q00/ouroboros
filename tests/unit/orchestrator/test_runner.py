@@ -1886,17 +1886,29 @@ class TestOrchestratorRunner:
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
         )
-        with (
-            patch.object(
-                runner._session_repo,
-                "reconstruct_session",
-                return_value=Result.ok(running_tracker),
-            ),
-            patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
-            patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
-            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
-        ):
-            result = await runner.resume_session("sess_resume", sample_seed)
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            sample_seed,
+            session_id="sess_resume",
+        )
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    return_value=Result.ok(running_tracker),
+                ),
+                patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+                patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+                patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+            ):
+                result = await runner.resume_session("sess_resume", sample_seed)
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume",
+                execution_id=running_tracker.execution_id,
+            )
 
         assert result.is_err
         assert "Resume is blocked" in result.error.message
@@ -1904,7 +1916,7 @@ class TestOrchestratorRunner:
         assert result.error.details["resume_blocked"] == "typed_evidence_gate_required"
         get_merged_tools.assert_not_called()
         execute_task.assert_not_called()
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resume_investment_seed_is_blocked_before_ungated_direct_execution(
@@ -1941,18 +1953,30 @@ class TestOrchestratorRunner:
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
         )
+        running_tracker = _attach_live_process_local_contract(
+            runner,
+            running_tracker,
+            investment_seed,
+            session_id="sess_resume",
+        )
 
-        with (
-            patch.object(
-                runner._session_repo,
-                "reconstruct_session",
-                return_value=Result.ok(running_tracker),
-            ),
-            patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
-            patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
-            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
-        ):
-            result = await runner.resume_session("sess_resume", investment_seed)
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    return_value=Result.ok(running_tracker),
+                ),
+                patch.object(runner, "_get_merged_tools", AsyncMock()) as get_merged_tools,
+                patch.object(mock_adapter, "execute_task", AsyncMock()) as execute_task,
+                patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+            ):
+                result = await runner.resume_session("sess_resume", investment_seed)
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume",
+                execution_id=running_tracker.execution_id,
+            )
 
         assert result.is_err
         assert "Resume is blocked" in result.error.message
@@ -1960,7 +1984,7 @@ class TestOrchestratorRunner:
         assert result.error.details["resume_blocked"] == "investment_authority_required"
         get_merged_tools.assert_not_called()
         execute_task.assert_not_called()
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(

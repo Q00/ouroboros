@@ -5250,7 +5250,31 @@ class OrchestratorRunner:
                 reason=cancellation_reason,
                 cancelled_by=cancelled_by,
             )
+        except asyncio.CancelledError:
+            if (
+                await self._reconcile_durable_terminal_and_cleanup(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                is None
+            ):
+                self._preserve_process_local_owner_for_retry(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+            raise
         except Exception as exc:
+            durable_status = await self._reconcile_durable_terminal_and_cleanup(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if durable_status is not None:
+                return await self._handle_cancellation(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
             log.warning(
                 "orchestrator.runner.mark_cancelled_raised",
                 session_id=session_id,
@@ -5515,6 +5539,23 @@ class OrchestratorRunner:
             )
 
         if session_result.is_err:
+            persistence_details = getattr(session_result.error, "details", {})
+            if (
+                isinstance(persistence_details, Mapping)
+                and persistence_details.get("session_start_conflict") is True
+            ):
+                abort_process_local_preparation()
+                return Result.err(
+                    OrchestratorError(
+                        message="Session ID already belongs to an immutable execution",
+                        details={
+                            "execution_id": exec_id,
+                            "session_id": resolved_session_id,
+                            "resume_blocked": "session_id_conflict",
+                            "session_id_conflict": True,
+                        },
+                    )
+                )
             retained_owner = await self._reconcile_session_publication_interruption(
                 session_id=resolved_session_id,
                 execution_id=exec_id,
@@ -6991,52 +7032,6 @@ class OrchestratorRunner:
         if pending_lifecycle is not None:
             return pending_lifecycle
 
-        if self._fat_harness_mode:
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
-                retire_authority=False,
-            )
-            return Result.err(
-                OrchestratorError(
-                    message=(
-                        "Resume is blocked because this resume path cannot enforce "
-                        "typed evidence plus verifier PASS; restart the "
-                        "run so each AC goes through the fat-harness acceptance gate."
-                    ),
-                    details={
-                        "session_id": session_id,
-                        "execution_id": tracker.execution_id,
-                        "fat_harness_mode": True,
-                        "resume_blocked": "typed_evidence_gate_required",
-                    },
-                )
-            )
-
-        if _seed_has_investment_metadata(seed):
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
-                retire_authority=False,
-            )
-            return Result.err(
-                OrchestratorError(
-                    message=(
-                        "Resume is blocked because this resume path cannot preserve "
-                        "per-AC investment authority; restart the run so each AC goes "
-                        "through the investment-aware AC executor."
-                    ),
-                    details={
-                        "session_id": session_id,
-                        "execution_id": tracker.execution_id,
-                        "investment_metadata_present": True,
-                        "resume_blocked": "investment_authority_required",
-                    },
-                )
-            )
-
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
         if not isinstance(raw_contract, Mapping):
             error = await self._mark_process_local_resume_unavailable(
@@ -7051,134 +7046,9 @@ class OrchestratorRunner:
             )
             return Result.err(error)
 
-        # A RUNNING tracker with a current Foundation A contract belongs to an
-        # active process while its early liveness lease is held.  If the lease
-        # is gone and this process has no live registry capability, the prior
-        # owner has crashed or exited and Foundation A must terminally reject it
-        # rather than leave a restartable-looking RUNNING session stranded.
-        if tracker.status != SessionStatus.PAUSED:
-            authority_generation, authority_claimed = (
-                self._claim_process_local_authority_generation(
-                    session_id,
-                    tracker.execution_id,
-                    raw_contract,
-                )
-            )
-            if authority_claimed:
-                # The current runner is already performing effects. Do not
-                # release its worktree or downgrade the typed nonterminal
-                # ownership result to a generic state error.
-                return Result.err(
-                    self._process_local_execution_in_progress_error(
-                        session_id,
-                        tracker.execution_id,
-                    )
-                )
-            if authority_generation is not None:
-                # A previous cancellation attempt may have failed its durable
-                # write after the worker stopped.  Its request remains live
-                # precisely so this retained owner can claim the generation
-                # and retry terminalization instead of stranding a claim or
-                # turning a RUNNING tracker into a normal resume.
-                # Register a route before the await so cancellation cleanup
-                # has one owner.  This probe is cancellation-safe: on raw task
-                # cancellation it releases only its claim/route and preserves
-                # the live registration and lease of the original owner.
-                try:
-                    self._register_session(tracker.execution_id, session_id)
-                    if await self._check_startup_cancellation(session_id):
-                        return await self._handle_cancellation(
-                            session_id=session_id,
-                            execution_id=tracker.execution_id,
-                            messages_processed=tracker.messages_processed,
-                            start_time=datetime.now(UTC),
-                        )
-                except asyncio.CancelledError:
-                    self._release_process_local_authority(
-                        session_id=session_id,
-                        execution_id=tracker.execution_id,
-                    )
-                    self._unregister_session(
-                        tracker.execution_id,
-                        session_id,
-                        release_liveness_lease=False,
-                    )
-                    if self._task_workspace is not None:
-                        release_lock(self._task_workspace.lock_path)
-                    raise
-                except Exception as exc:
-                    self._release_process_local_authority(
-                        session_id=session_id,
-                        execution_id=tracker.execution_id,
-                    )
-                    self._unregister_session(
-                        tracker.execution_id,
-                        session_id,
-                        release_liveness_lease=False,
-                    )
-                    if self._task_workspace is not None:
-                        release_lock(self._task_workspace.lock_path)
-                    return Result.err(
-                        OrchestratorError(
-                            message=f"Failed to inspect live process-local session: {exc}",
-                            details={
-                                "session_id": session_id,
-                                "execution_id": tracker.execution_id,
-                            },
-                        )
-                    )
-
-                # This runner still owns the live generation but the durable
-                # status is non-resumable. The probe claim was only for
-                # arbitration, so restore the pre-existing unclaimed state
-                # without touching its workspace or lease.
-                self._release_process_local_authority(
-                    session_id=session_id,
-                    execution_id=tracker.execution_id,
-                )
-                self._unregister_session(
-                    tracker.execution_id,
-                    session_id,
-                    release_liveness_lease=False,
-                )
-                return Result.err(
-                    OrchestratorError(
-                        message=(
-                            f"Session is not paused and cannot resume ({tracker.status.value})"
-                        ),
-                        details={
-                            "session_id": session_id,
-                            "status": tracker.status.value,
-                            "resume_blocked": "session_not_paused",
-                        },
-                    )
-                )
-            if self._process_local_authority_held_elsewhere(
-                session_id,
-                tracker.execution_id,
-                raw_contract,
-            ):
-                return Result.err(
-                    self._process_local_authority_held_elsewhere_error(
-                        session_id,
-                        tracker.execution_id,
-                    )
-                )
-            error = await self._mark_process_local_resume_unavailable(
-                session_id=session_id,
-                execution_id=tracker.execution_id,
-            )
-            self._cleanup_pre_execution_state(
-                tracker.execution_id,
-                session_id,
-                session_registered=False,
-                retire_authority=False,
-            )
-            return Result.err(error)
-
-        # This is intentionally before Foundation A contract restoration,
-        # resume-handle selection, and every runtime-owned identity provider.
-        # The durable correlation id cannot recreate this process's capability.
+        # Persisted process-local authority is arbitrated before any policy
+        # derived from the current runner or seed. A current policy gate must
+        # never mask that the exact paused owner has disappeared.
         authority_generation, authority_claimed = self._claim_process_local_authority_generation(
             session_id,
             tracker.execution_id,
@@ -7214,6 +7084,120 @@ class OrchestratorRunner:
                 retire_authority=False,
             )
             return Result.err(error)
+
+        # A RUNNING tracker with a current Foundation A contract belongs to an
+        # active process while its early liveness lease is held.  If the lease
+        # is gone and this process has no live registry capability, the prior
+        # owner has crashed or exited and Foundation A must terminally reject it
+        # rather than leave a restartable-looking RUNNING session stranded.
+        if tracker.status != SessionStatus.PAUSED:
+            # A previous cancellation attempt may have failed its durable
+            # write after the worker stopped. Its request remains live so this
+            # exact owner can retry terminalization before rejecting RUNNING.
+            try:
+                self._register_session(tracker.execution_id, session_id)
+                if await self._check_startup_cancellation(session_id):
+                    return await self._handle_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=tracker.messages_processed,
+                        start_time=datetime.now(UTC),
+                    )
+            except asyncio.CancelledError:
+                self._release_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    session_id,
+                    release_liveness_lease=False,
+                )
+                if self._task_workspace is not None:
+                    release_lock(self._task_workspace.lock_path)
+                raise
+            except Exception as exc:
+                self._release_process_local_authority(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                self._unregister_session(
+                    tracker.execution_id,
+                    session_id,
+                    release_liveness_lease=False,
+                )
+                if self._task_workspace is not None:
+                    release_lock(self._task_workspace.lock_path)
+                return Result.err(
+                    OrchestratorError(
+                        message=f"Failed to inspect live process-local session: {exc}",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                )
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            self._unregister_session(
+                tracker.execution_id,
+                session_id,
+                release_liveness_lease=False,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=f"Session is not paused and cannot resume ({tracker.status.value})",
+                    details={
+                        "session_id": session_id,
+                        "status": tracker.status.value,
+                        "resume_blocked": "session_not_paused",
+                    },
+                )
+            )
+
+        if self._fat_harness_mode:
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Resume is blocked because this resume path cannot enforce "
+                        "typed evidence plus verifier PASS; restart the "
+                        "run so each AC goes through the fat-harness acceptance gate."
+                    ),
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "fat_harness_mode": True,
+                        "resume_blocked": "typed_evidence_gate_required",
+                    },
+                )
+            )
+
+        if _seed_has_investment_metadata(seed):
+            self._release_process_local_authority(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Resume is blocked because this resume path cannot preserve "
+                        "per-AC investment authority; restart the run so each AC goes "
+                        "through the investment-aware AC executor."
+                    ),
+                    details={
+                        "session_id": session_id,
+                        "execution_id": tracker.execution_id,
+                        "investment_metadata_present": True,
+                        "resume_blocked": "investment_authority_required",
+                    },
+                )
+            )
 
         try:
             execution_contract_changed = await asyncio.to_thread(

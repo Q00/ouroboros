@@ -26,7 +26,12 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.persistence.schema import events_table, metadata, session_terminal_guards_table
+from ouroboros.persistence.schema import (
+    events_table,
+    metadata,
+    session_start_guards_table,
+    session_terminal_guards_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,15 @@ def _is_session_terminal_event(event: object) -> bool:
         isinstance(event, BaseEvent)
         and event.aggregate_type == "session"
         and event.type in _SESSION_TERMINAL_EVENT_TYPES
+    )
+
+
+def _is_session_start_event(event: object) -> bool:
+    """Return whether one event publishes immutable session identity."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "session"
+        and event.type == "orchestrator.session.started"
     )
 
 
@@ -414,6 +428,9 @@ class EventStore:
         Raises:
             PersistenceError: If the append operation fails.
         """
+        if _is_session_start_event(event):
+            await self.append_session_start_if_absent(event)
+            return None
         # Terminal session lifecycle is a one-winner transition, not a generic
         # append-only observation.  Keep this guard at the public EventStore
         # boundary so event factories and older SessionRepository callers
@@ -422,6 +439,113 @@ class EventStore:
             return await self.append_session_terminal_if_active(event)
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
         return None
+
+    async def append_session_start_if_absent(self, event: BaseEvent) -> None:
+        """Publish exactly one immutable start identity for a session ID."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="append_session_start_if_absent",
+            )
+        if not _is_session_start_event(event):
+            raise PersistenceError(
+                "Conditional session start append requires an explicit started event.",
+                operation="append_session_start_if_absent",
+                table="events",
+                details={
+                    "aggregate_type": getattr(event, "aggregate_type", None),
+                    "event_type": getattr(event, "type", None),
+                },
+            )
+        raw_execution_id = event.data.get("execution_id")
+        execution_id = raw_execution_id.strip() if isinstance(raw_execution_id, str) else ""
+
+        for attempt in range(3):
+            try:
+                async with self._engine.connect() as conn:
+                    sqlite = conn.dialect.name == "sqlite"
+                    if sqlite:
+                        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                        transaction = None
+                    else:
+                        transaction = await conn.begin()
+                    try:
+                        existing_start = await conn.scalar(
+                            select(events_table.c.id)
+                            .where(
+                                events_table.c.aggregate_type == "session",
+                                events_table.c.aggregate_id == event.aggregate_id,
+                                events_table.c.event_type == "orchestrator.session.started",
+                            )
+                            .limit(1)
+                        )
+                        if existing_start is not None:
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            raise PersistenceError(
+                                "Session ID already has an immutable start identity.",
+                                operation="append_session_start_if_absent",
+                                table="events",
+                                details={
+                                    "session_id": event.aggregate_id,
+                                    "execution_id": execution_id,
+                                    "session_start_conflict": True,
+                                },
+                            )
+                        try:
+                            async with conn.begin_nested():
+                                await conn.execute(
+                                    session_start_guards_table.insert().values(
+                                        session_id=event.aggregate_id,
+                                        start_event_id=event.id,
+                                        execution_id=execution_id,
+                                    )
+                                )
+                        except IntegrityError as exc:
+                            if conn.in_transaction():
+                                await conn.rollback()
+                            raise PersistenceError(
+                                "Session ID already has an immutable start identity.",
+                                operation="append_session_start_if_absent",
+                                table="events",
+                                details={
+                                    "session_id": event.aggregate_id,
+                                    "execution_id": execution_id,
+                                    "session_start_conflict": True,
+                                },
+                            ) from exc
+                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        if sqlite:
+                            await conn.commit()
+                        elif transaction is not None:
+                            await transaction.commit()
+                        return
+                    except BaseException:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        raise
+            except PersistenceError:
+                raise
+            except Exception as exc:
+                if "database is locked" in str(exc) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_session_start_if_absent.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to conditionally append session start event: {exc}",
+                    operation="append_session_start_if_absent",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from exc
+        raise PersistenceError(
+            "Failed to conditionally append session start event after retries.",
+            operation="append_session_start_if_absent",
+            table="events",
+            details={"event_id": event.id, "event_type": event.type},
+        )
 
     async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
         """Append one terminal session event only while no terminal event exists.
@@ -631,6 +755,11 @@ class EventStore:
         """Return whether ``event`` requires the terminal one-winner append."""
         return _is_session_terminal_event(event)
 
+    @staticmethod
+    def is_session_start_event(event: object) -> bool:
+        """Return whether ``event`` publishes immutable session identity."""
+        return _is_session_start_event(event)
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
@@ -649,6 +778,13 @@ class EventStore:
             raise PersistenceError(
                 "Terminal session lifecycle events must be persisted via append() "
                 "or append_session_terminal_if_active() to preserve the one-winner guard.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
+        if _is_session_start_event(event):
+            raise PersistenceError(
+                "Session start lifecycle events must be persisted via append() "
+                "or append_session_start_if_absent() to preserve immutable identity.",
                 operation="append_with_rowid",
                 details={"event_type": event.type, "aggregate_id": event.aggregate_id},
             )
@@ -744,6 +880,17 @@ class EventStore:
                 invalid_event,
                 operation="append_batch",
                 index=invalid_index,
+            )
+
+        session_start_events = [event for event in events if _is_session_start_event(event)]
+        if session_start_events:
+            raise PersistenceError(
+                "Session start lifecycle events cannot use append_batch; persist each "
+                "through append() to preserve immutable session identity.",
+                operation="append_batch",
+                details={
+                    "session_ids": sorted({event.aggregate_id for event in session_start_events})
+                },
             )
 
         # Mirror the ``append()`` workflow_ir guard so callers cannot bypass

@@ -79,6 +79,25 @@ session_terminal_guards_table = Table(
     ),
 )
 
+# One immutable start identity per session aggregate. The append-only event
+# stream cannot express a uniqueness constraint over a conditional event type,
+# so this guard closes the absent-row race for caller-supplied session IDs on
+# every supported database backend.
+session_start_guards_table = Table(
+    "session_start_guards",
+    metadata,
+    Column("session_id", String(128), primary_key=True),
+    Column("start_event_id", String(36), nullable=False),
+    Column("execution_id", String(128), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 # Brownfield repos table - registered repositories/worktrees from brownfield scan.
 # Filesystem discovery is bounded to the scan root. Normal repo roots can add
 # Git-reported linked worktrees outside that root, but linked worktree seeds are
