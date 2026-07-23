@@ -104,20 +104,15 @@ def _is_ac_acceptance_finalized_event(event: object) -> bool:
 
 
 def _acceptance_payload_digest(event: BaseEvent) -> str:
-    """Hash only stable final-decision fields for idempotent replay."""
+    """Hash the complete canonical payload for idempotent replay.
+
+    The authority/root guard is only idempotent for an equivalent final event.
+    Hashing a hand-picked subset silently treats a payload with additional
+    semantics as a duplicate, which is unsafe for fail-closed replay.
+    """
     payload = {
-        key: event.data.get(key)
-        for key in (
-            "execution_id",
-            "session_id",
-            "authority_correlation_id",
-            "root_ac_index",
-            "final_retry_attempt",
-            "accepted",
-            "disposition",
-            "outcome",
-            "terminal_status",
-        )
+        "event_version": event.event_version,
+        "data": event.data,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -203,6 +198,30 @@ def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
             details={"event_type": event.type, "event_id": event.id},
         )
     return authority.strip(), root_index
+
+
+def _acceptance_event_from_terminal_payload(payload: object) -> BaseEvent:
+    """Reconstruct one acceptance event carried by a terminalization plan."""
+    if not isinstance(payload, Mapping):
+        raise PersistenceError(
+            "Terminal acceptance plan entries must be mappings.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    data = dict(payload)
+    execution_id = data.get("execution_id")
+    if not isinstance(execution_id, str) or not execution_id.strip():
+        raise PersistenceError(
+            "Terminal acceptance plan requires an execution_id.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    return BaseEvent(
+        type=_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
 
 
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
@@ -752,6 +771,21 @@ class EventStore:
                                 await conn.rollback()
                             return False
 
+                        acceptance_plan = event.data.get("acceptance_finalizations", ())
+                        if acceptance_plan is None:
+                            acceptance_plan = ()
+                        if not isinstance(acceptance_plan, (list, tuple)):
+                            raise PersistenceError(
+                                "Terminal acceptance plan must be a list.",
+                                operation="append_session_terminal_if_active",
+                                details={"acceptance_plan_invalid": True},
+                            )
+                        for payload in acceptance_plan:
+                            await self._append_ac_acceptance_in_transaction(
+                                conn,
+                                _acceptance_event_from_terminal_payload(payload),
+                            )
+
                         await conn.execute(events_table.insert().values(**event.to_db_dict()))
                         if sqlite:
                             await conn.commit()
@@ -783,6 +817,71 @@ class EventStore:
             details={"event_id": event.id, "event_type": event.type},
         )
 
+    async def _append_ac_acceptance_in_transaction(
+        self,
+        conn: Any,
+        event: BaseEvent,
+    ) -> bool:
+        """Append one acceptance event using an already-open transaction."""
+        authority_correlation_id, root_ac_index = _acceptance_key_fields(event)
+        payload_digest = _acceptance_payload_digest(event)
+        existing = await conn.execute(
+            select(ac_acceptance_guards_table.c.payload_digest).where(
+                ac_acceptance_guards_table.c.authority_correlation_id
+                == authority_correlation_id,
+                ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+            )
+        )
+        existing_digest = existing.scalar_one_or_none()
+        if existing_digest is not None:
+            if existing_digest != payload_digest:
+                raise PersistenceError(
+                    "Conflicting final acceptance already exists for authority/root.",
+                    operation="append_ac_acceptance_finalized_if_absent",
+                    table="ac_acceptance_guards",
+                    details={
+                        "authority_correlation_id": authority_correlation_id,
+                        "root_ac_index": root_ac_index,
+                        "acceptance_conflict": True,
+                    },
+                )
+            return False
+
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    ac_acceptance_guards_table.insert().values(
+                        authority_correlation_id=authority_correlation_id,
+                        root_ac_index=root_ac_index,
+                        final_event_id=event.id,
+                        payload_digest=payload_digest,
+                    )
+                )
+        except IntegrityError:
+            existing = await conn.execute(
+                select(ac_acceptance_guards_table.c.payload_digest).where(
+                    ac_acceptance_guards_table.c.authority_correlation_id
+                    == authority_correlation_id,
+                    ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+                )
+            )
+            existing_digest = existing.scalar_one_or_none()
+            if existing_digest == payload_digest:
+                return False
+            raise PersistenceError(
+                "Conflicting concurrent final acceptance exists for authority/root.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                table="ac_acceptance_guards",
+                details={
+                    "authority_correlation_id": authority_correlation_id,
+                    "root_ac_index": root_ac_index,
+                    "acceptance_conflict": True,
+                },
+            )
+
+        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+        return True
+
     async def append_ac_acceptance_finalized_if_absent(self, event: BaseEvent) -> bool:
         """Append one Foundation B final acceptance decision per authority/root.
 
@@ -807,8 +906,6 @@ class EventStore:
                 },
             )
 
-        authority_correlation_id, root_ac_index = _acceptance_key_fields(event)
-        payload_digest = _acceptance_payload_digest(event)
         for attempt in range(3):
             try:
                 async with self._engine.connect() as conn:
@@ -819,74 +916,12 @@ class EventStore:
                     else:
                         transaction = await conn.begin()
                     try:
-                        existing = await conn.execute(
-                            select(ac_acceptance_guards_table.c.payload_digest).where(
-                                ac_acceptance_guards_table.c.authority_correlation_id
-                                == authority_correlation_id,
-                                ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
-                            )
-                        )
-                        existing_digest = existing.scalar_one_or_none()
-                        if existing_digest is not None:
-                            if existing_digest != payload_digest:
-                                raise PersistenceError(
-                                    "Conflicting final acceptance already exists for authority/root.",
-                                    operation="append_ac_acceptance_finalized_if_absent",
-                                    table="ac_acceptance_guards",
-                                    details={
-                                        "authority_correlation_id": authority_correlation_id,
-                                        "root_ac_index": root_ac_index,
-                                        "acceptance_conflict": True,
-                                    },
-                                )
-                            if conn.in_transaction():
-                                await conn.rollback()
-                            return False
-
-                        try:
-                            async with conn.begin_nested():
-                                await conn.execute(
-                                    ac_acceptance_guards_table.insert().values(
-                                        authority_correlation_id=authority_correlation_id,
-                                        root_ac_index=root_ac_index,
-                                        final_event_id=event.id,
-                                        payload_digest=payload_digest,
-                                    )
-                                )
-                        except IntegrityError:
-                            # A concurrent writer won the composite guard. The
-                            # savepoint rollback leaves the outer transaction
-                            # readable so we can distinguish an idempotent
-                            # replay from a contradictory final decision.
-                            existing = await conn.execute(
-                                select(ac_acceptance_guards_table.c.payload_digest).where(
-                                    ac_acceptance_guards_table.c.authority_correlation_id
-                                    == authority_correlation_id,
-                                    ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
-                                )
-                            )
-                            existing_digest = existing.scalar_one_or_none()
-                            if existing_digest == payload_digest:
-                                if conn.in_transaction():
-                                    await conn.rollback()
-                                return False
-                            raise PersistenceError(
-                                "Conflicting concurrent final acceptance exists for authority/root.",
-                                operation="append_ac_acceptance_finalized_if_absent",
-                                table="ac_acceptance_guards",
-                                details={
-                                    "authority_correlation_id": authority_correlation_id,
-                                    "root_ac_index": root_ac_index,
-                                    "acceptance_conflict": True,
-                                },
-                            )
-
-                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        persisted = await self._append_ac_acceptance_in_transaction(conn, event)
                         if sqlite:
                             await conn.commit()
                         elif transaction is not None:
                             await transaction.commit()
-                        return True
+                        return persisted
                     except BaseException:
                         if conn.in_transaction():
                             await conn.rollback()

@@ -1802,9 +1802,24 @@ class OrchestratorRunner:
         execution_id: str,
         error: BaseException,
         messages_processed: int = 0,
+        seed: Seed | None = None,
+        execution_contract: Mapping[str, Any] | None = None,
     ) -> tuple[SessionStatus | None, Result[OrchestratorResult, OrchestratorError] | None]:
         """Persist one durable failure winner before withdrawing ownership."""
         reconciled_during_exception = False
+        acceptance_finalizations = (
+            self._build_terminal_acceptance_finalizations(
+                seed=seed,
+                parallel_result=None,
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status=SessionStatus.FAILED.value,
+                default_outcome="failed",
+                execution_contract=execution_contract,
+            )
+            if seed is not None
+            else None
+        )
         try:
             durable_status = await self._persist_session_terminal_status(
                 session_id=session_id,
@@ -1813,6 +1828,7 @@ class OrchestratorRunner:
                 error_message=str(error),
                 error_type=type(error).__name__,
                 messages_processed=messages_processed,
+                acceptance_finalizations=acceptance_finalizations,
             )
         except (Exception, asyncio.CancelledError) as persistence_error:
             durable_status = await self._reconcile_durable_terminal_and_cleanup(
@@ -1856,6 +1872,25 @@ class OrchestratorRunner:
             await self._cleanup_terminal_process_local_state(
                 session_id=session_id,
                 execution_id=execution_id,
+            )
+        if seed is not None:
+            await self._emit_terminal_acceptance_finalized(
+                seed=seed,
+                parallel_result=None,
+                execution_id=execution_id,
+                session_id=session_id,
+                terminal_status=durable_status.value,
+                accepted_root_indices=(
+                    set(range(len(seed.acceptance_criteria)))
+                    if durable_status is SessionStatus.COMPLETED
+                    else set()
+                ),
+                default_outcome=(
+                    "succeeded"
+                    if durable_status is SessionStatus.COMPLETED
+                    else durable_status.value
+                ),
+                execution_contract=execution_contract,
             )
         try:
             await self._event_store.append(
@@ -2748,6 +2783,7 @@ class OrchestratorRunner:
         error_type: str | None = None,
         messages_processed: int = 0,
         cancelled_by: str = "runner",
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
     ) -> SessionStatus:
         """Persist one terminal winner and return the authoritative status.
 
@@ -2770,11 +2806,17 @@ class OrchestratorRunner:
         last_error: object | None = None
         for attempt in range(3):
             try:
+                acceptance_kwargs = (
+                    {"acceptance_finalizations": acceptance_finalizations}
+                    if acceptance_finalizations is not None
+                    else {}
+                )
                 if requested_status is SessionStatus.COMPLETED:
                     result = await self._session_repo.mark_completed(
                         session_id,
                         summary,
                         messages_processed=messages_processed,
+                        **acceptance_kwargs,
                     )
                 elif requested_status is SessionStatus.FAILED:
                     result = await self._session_repo.mark_failed(
@@ -2783,12 +2825,14 @@ class OrchestratorRunner:
                         error_details,
                         error_type=error_type,
                         messages_processed=messages_processed,
+                        **acceptance_kwargs,
                     )
                 elif requested_status is SessionStatus.CANCELLED:
                     result = await self._session_repo.mark_cancelled(
                         session_id,
                         reason=error_message or "Execution cancelled",
                         cancelled_by=cancelled_by,
+                        **acceptance_kwargs,
                     )
                 else:
                     raise ValueError(
@@ -5317,6 +5361,11 @@ class OrchestratorRunner:
         # cancellation that the durable session never recorded.
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
+        session_contract = None
+        if session_result.is_ok:
+            persisted_contract = session_result.value.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+            if isinstance(persisted_contract, Mapping):
+                session_contract = dict(persisted_contract)
         # An unreadable snapshot cannot prove that a terminal state already
         # exists.  Continue through ``mark_cancelled`` while retaining the live
         # owner; that append is the authoritative terminal write and preserves
@@ -5343,6 +5392,8 @@ class OrchestratorRunner:
                     await self._emit_cancellation_acceptance_finalized(
                         execution_id=execution_id,
                         session_id=session_id,
+                        terminal_status=terminal_status,
+                        execution_contract=session_contract,
                     )
                     if not execution_terminal_events:
                         await self._event_store.append(
@@ -5467,6 +5518,8 @@ class OrchestratorRunner:
                 await self._emit_cancellation_acceptance_finalized(
                     execution_id=execution_id,
                     session_id=session_id,
+                    terminal_status=SessionStatus.CANCELLED,
+                    execution_contract=session_contract,
                 )
                 await self._event_store.append(
                     create_execution_terminal_event(
@@ -5516,9 +5569,11 @@ class OrchestratorRunner:
         *,
         execution_id: str,
         session_id: str,
+        terminal_status: SessionStatus = SessionStatus.CANCELLED,
+        execution_contract: Mapping[str, Any] | None = None,
     ) -> None:
-        """Close observed root-AC episodes as rejected on terminal cancellation."""
-        contract = self._execution_contract
+        """Close observed root-AC episodes using the durable terminal winner."""
+        contract = execution_contract or self._execution_contract
         authority_contract = contract.get("foundation_a_authority") if contract else None
         authority = (
             authority_contract.get("correlation_id")
@@ -5529,13 +5584,26 @@ class OrchestratorRunner:
             return
         attempts: list[Any] = []
         for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
-            attempts.extend(
-                await self._event_store.query_events(
-                    aggregate_id=execution_id,
-                    event_type=event_type,
-                    limit=100,
+            try:
+                attempts.extend(
+                    await self._event_store.query_events(
+                        aggregate_id=execution_id,
+                        event_type=event_type,
+                        limit=None,
+                    )
                 )
-            )
+            except Exception:
+                # Cancellation remains a valid durable terminal result even
+                # when optional attempt telemetry cannot be read. A later
+                # reconciler can replay the finalization plan from the
+                # terminal session event when one was persisted.
+                log.warning(
+                    "orchestrator.runner.cancellation_acceptance_scan_failed",
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    event_type=event_type,
+                )
+                return
         latest_by_root: dict[int, int] = {}
         for event in attempts:
             root = event.data.get("root_ac_index")
@@ -5551,7 +5619,35 @@ class OrchestratorRunner:
                 latest_by_root[root] = max(latest_by_root.get(root, 0), retry)
         from ouroboros.events.base import BaseEvent
 
+        latest_event_by_root: dict[int, Any] = {}
+        for event in attempts:
+            root = event.data.get("root_ac_index")
+            if root not in latest_by_root:
+                continue
+            retry = event.data.get("retry_attempt", 0)
+            if retry == latest_by_root[root]:
+                latest_event_by_root[root] = event
+
         for root, retry in latest_by_root.items():
+            latest = latest_event_by_root.get(root)
+            latest_data = latest.data if latest is not None else {}
+            outcome = str(latest_data.get("outcome") or "").strip()
+            if not outcome:
+                outcome = (
+                    "succeeded"
+                    if latest_data.get("success") is True
+                    else terminal_status.value
+                )
+            accepted = bool(
+                terminal_status is SessionStatus.COMPLETED
+                and (
+                    latest_data.get("success") is True
+                    or outcome in {"succeeded", "satisfied_externally"}
+                )
+            )
+            disposition = "accepted" if accepted else (
+                "cancelled" if terminal_status is SessionStatus.CANCELLED else outcome
+            )
             await self._event_store.append(
                 BaseEvent(
                     type="execution.ac.acceptance_finalized",
@@ -5563,10 +5659,10 @@ class OrchestratorRunner:
                         "authority_correlation_id": authority.strip(),
                         "root_ac_index": root,
                         "final_retry_attempt": retry,
-                        "accepted": False,
-                        "disposition": "cancelled",
-                        "outcome": "cancelled",
-                        "terminal_status": SessionStatus.CANCELLED.value,
+                        "accepted": accepted,
+                        "disposition": disposition,
+                        "outcome": outcome,
+                        "terminal_status": terminal_status.value,
                     },
                 )
             )
@@ -6058,11 +6154,19 @@ class OrchestratorRunner:
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 error=exc,
+                seed=seed,
+                execution_contract=(
+                    dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+                ),
             )
             if persistence_pending is not None:
                 return persistence_pending
             return Result.err(exc)
-        self._execution_contract = dict(raw_contract)
+        # Keep the immutable per-session contract local to this invocation.
+        # ``self._execution_contract`` is retained for legacy helpers, but it
+        # must never be the source of acceptance authority under concurrency.
+        execution_contract = dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+        self._execution_contract = execution_contract
 
         log.info(
             "orchestrator.runner.execute_started",
@@ -6145,6 +6249,7 @@ class OrchestratorRunner:
                     "tool_catalog": tool_catalog,
                     "system_prompt": system_prompt,
                     "start_time": start_time,
+                    "execution_contract": execution_contract,
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
@@ -6223,6 +6328,8 @@ class OrchestratorRunner:
                 session_id=tracker.session_id,
                 execution_id=exec_id,
                 error=e,
+                seed=seed,
+                execution_contract=execution_contract,
             )
             if persistence_pending is not None:
                 return persistence_pending
@@ -6505,18 +6612,30 @@ class OrchestratorRunner:
 
             durable_terminal_status: SessionStatus | None = None
             completion_summary: dict[str, Any] | None = None
+            acceptance_finalizations: list[dict[str, Any]] | None = None
             if success:
                 completion_summary = {
                     "final_message": final_message[:500],
                     "messages_processed": messages_processed,
                     **self._task_summary(),
                 }
+                acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                    seed=seed,
+                    parallel_result=None,
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                    terminal_status=SessionStatus.COMPLETED.value,
+                    accepted_root_indices=set(range(len(seed.acceptance_criteria))),
+                    default_outcome="succeeded",
+                    execution_contract=execution_contract,
+                )
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     requested_status=SessionStatus.COMPLETED,
                     summary=completion_summary,
                     messages_processed=messages_processed,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
                 success = durable_terminal_status is SessionStatus.COMPLETED
                 if not success:
@@ -6571,12 +6690,22 @@ class OrchestratorRunner:
                         f"{pause_status.value}."
                     )
             else:
+                acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                    seed=seed,
+                    parallel_result=None,
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                    terminal_status=SessionStatus.FAILED.value,
+                    default_outcome="failed",
+                    execution_contract=execution_contract,
+                )
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     requested_status=SessionStatus.FAILED,
                     error_message=final_message,
                     messages_processed=messages_processed,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
                 success = durable_terminal_status is SessionStatus.COMPLETED
                 if durable_terminal_status is not SessionStatus.FAILED:
@@ -6625,6 +6754,7 @@ class OrchestratorRunner:
                     if terminal_status == SessionStatus.COMPLETED.value
                     else terminal_status
                 ),
+                execution_contract=execution_contract,
             )
             terminal_event = create_execution_terminal_event(
                 execution_id=exec_id,
@@ -6750,6 +6880,8 @@ class OrchestratorRunner:
                 execution_id=exec_id,
                 error=e,
                 messages_processed=messages_processed,
+                seed=seed,
+                execution_contract=execution_contract,
             )
             if persistence_pending is not None:
                 return persistence_pending
@@ -6786,6 +6918,7 @@ class OrchestratorRunner:
         tool_catalog: SessionToolCatalog,
         system_prompt: str,
         start_time: datetime,
+        execution_contract: Mapping[str, Any] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         force_sequential_levels: bool = False,
     ) -> Result[OrchestratorResult, OrchestratorError]:
@@ -7011,13 +7144,23 @@ class OrchestratorRunner:
         }
 
         durable_terminal_status: SessionStatus | None = None
+        acceptance_finalizations: list[dict[str, Any]] | None = None
         if success:
+            acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                seed=seed,
+                parallel_result=parallel_result,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=SessionStatus.COMPLETED.value,
+                execution_contract=execution_contract,
+            )
             durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
                 requested_status=SessionStatus.COMPLETED,
                 summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
+                acceptance_finalizations=acceptance_finalizations,
             )
             success = durable_terminal_status is SessionStatus.COMPLETED
             if not success:
@@ -7072,6 +7215,14 @@ class OrchestratorRunner:
                     f"{pause_status.value}."
                 )
         else:
+            acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                seed=seed,
+                parallel_result=parallel_result,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                terminal_status=SessionStatus.FAILED.value,
+                execution_contract=execution_contract,
+            )
             durable_terminal_status = await self._persist_session_terminal_status(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
@@ -7083,6 +7234,7 @@ class OrchestratorRunner:
                     f"{parallel_result.invalid_count} invalid"
                 ),
                 messages_processed=parallel_result.total_messages,
+                acceptance_finalizations=acceptance_finalizations,
             )
             success = durable_terminal_status is SessionStatus.COMPLETED
             if durable_terminal_status is not SessionStatus.FAILED:
@@ -7118,6 +7270,7 @@ class OrchestratorRunner:
             execution_id=exec_id,
             session_id=tracker.session_id,
             terminal_status=terminal_status,
+            execution_contract=execution_contract,
         )
         terminal_event = create_execution_terminal_event(
             execution_id=exec_id,
@@ -7207,7 +7360,7 @@ class OrchestratorRunner:
             )
         )
 
-    async def _emit_terminal_acceptance_finalized(
+    def _build_terminal_acceptance_finalizations(
         self,
         *,
         seed: Seed,
@@ -7217,18 +7370,14 @@ class OrchestratorRunner:
         terminal_status: str,
         accepted_root_indices: set[int] | None = None,
         default_outcome: str | None = None,
-    ) -> None:
-        """Have the terminal Final Gate publish one decision per root AC.
-
-        Attempt judgments are deliberately insufficient for admission. This
-        method runs only after the session CAS has produced a terminal status;
-        a paused episode therefore has no final acceptance event. The
-        EventStore's authority/root CAS makes retries and duplicate observers
-        idempotent while rejecting contradictory payloads.
-        """
+        execution_contract: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build the complete root decision set before terminal CAS."""
         if terminal_status == SessionStatus.PAUSED.value:
-            return
-        contract = self._execution_contract
+            return []
+        contract = execution_contract
+        if contract is None:
+            contract = self._execution_contract
         authority_contract = contract.get("foundation_a_authority") if contract else None
         authority_correlation_id = (
             authority_contract.get("correlation_id")
@@ -7236,17 +7385,12 @@ class OrchestratorRunner:
             else None
         )
         if not isinstance(authority_correlation_id, str) or not authority_correlation_id.strip():
-            # Low-level unit callers can invoke ``_execute_parallel`` with a
-            # synthetic tracker that was never prepared through Foundation A.
-            # Such a call has no authority generation to attribute, so it must
-            # not mint an unbound final event. Public prepared-session paths
-            # always carry this correlation and therefore continue below.
             log.error(
                 "orchestrator.runner.acceptance_finalization_missing_authority",
                 execution_id=execution_id,
                 session_id=session_id,
             )
-            return
+            return []
 
         results_by_index: dict[int, Any] = {}
         for result in getattr(parallel_result, "results", ()):
@@ -7261,8 +7405,7 @@ class OrchestratorRunner:
                 )
             results_by_index[ac_index] = result
 
-        from ouroboros.events.base import BaseEvent
-
+        finalizations: list[dict[str, Any]] = []
         for root_ac_index in range(len(seed.acceptance_criteria)):
             result = results_by_index.get(root_ac_index)
             outcome = getattr(getattr(result, "outcome", None), "value", None)
@@ -7294,22 +7437,60 @@ class OrchestratorRunner:
                 if accepted
                 else ("cancelled" if terminal_status == SessionStatus.CANCELLED.value else outcome)
             )
+            finalizations.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "authority_correlation_id": authority_correlation_id.strip(),
+                    "root_ac_index": root_ac_index,
+                    "final_retry_attempt": retry_attempt,
+                    "accepted": accepted,
+                    "disposition": disposition,
+                    "outcome": outcome.strip(),
+                    "terminal_status": terminal_status,
+                }
+            )
+        return finalizations
+
+    async def _emit_terminal_acceptance_finalized(
+        self,
+        *,
+        seed: Seed,
+        parallel_result: Any,
+        execution_id: str,
+        session_id: str,
+        terminal_status: str,
+        accepted_root_indices: set[int] | None = None,
+        default_outcome: str | None = None,
+        execution_contract: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Have the terminal Final Gate publish one decision per root AC.
+
+        Attempt judgments are deliberately insufficient for admission. This
+        method runs only after the session CAS has produced a terminal status;
+        a paused episode therefore has no final acceptance event. The
+        EventStore's authority/root CAS makes retries and duplicate observers
+        idempotent while rejecting contradictory payloads.
+        """
+        finalizations = self._build_terminal_acceptance_finalizations(
+            seed=seed,
+            parallel_result=parallel_result,
+            execution_id=execution_id,
+            session_id=session_id,
+            terminal_status=terminal_status,
+            accepted_root_indices=accepted_root_indices,
+            default_outcome=default_outcome,
+            execution_contract=execution_contract,
+        )
+        from ouroboros.events.base import BaseEvent
+
+        for finalization in finalizations:
             await self._event_store.append(
                 BaseEvent(
                     type="execution.ac.acceptance_finalized",
                     aggregate_type="execution",
                     aggregate_id=execution_id or session_id,
-                    data={
-                        "execution_id": execution_id,
-                        "session_id": session_id,
-                        "authority_correlation_id": authority_correlation_id.strip(),
-                        "root_ac_index": root_ac_index,
-                        "final_retry_attempt": retry_attempt,
-                        "accepted": accepted,
-                        "disposition": disposition,
-                        "outcome": outcome.strip(),
-                        "terminal_status": terminal_status,
-                    },
+                    data=finalization,
                 )
             )
 
@@ -7580,6 +7761,11 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
+            execution_contract = (
+                dict(self._execution_contract)
+                if isinstance(self._execution_contract, Mapping)
+                else dict(raw_contract)
+            )
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -7616,6 +7802,10 @@ class OrchestratorRunner:
                 session_id=session_id,
                 execution_id=tracker.execution_id,
                 error=exc,
+                seed=seed,
+                execution_contract=(
+                    dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+                ),
             )
             if persistence_pending is not None:
                 return persistence_pending
@@ -7757,6 +7947,8 @@ Note: This is a resumed session. Please continue from where execution was interr
                 execution_id=tracker.execution_id,
                 error=e,
                 messages_processed=tracker.messages_processed,
+                seed=seed,
+                execution_contract=execution_contract,
             )
             if persistence_pending is not None:
                 return persistence_pending
@@ -7912,7 +8104,18 @@ Note: This is a resumed session. Please continue from where execution was interr
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             durable_terminal_status: SessionStatus | None = None
+            acceptance_finalizations: list[dict[str, Any]] | None = None
             if success:
+                acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                    seed=seed,
+                    parallel_result=None,
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    terminal_status=SessionStatus.COMPLETED.value,
+                    accepted_root_indices=set(range(len(seed.acceptance_criteria))),
+                    default_outcome="succeeded",
+                    execution_contract=execution_contract,
+                )
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=session_id,
                     execution_id=tracker.execution_id,
@@ -7922,6 +8125,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         **self._task_summary(),
                     },
                     messages_processed=messages_processed,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
                 success = durable_terminal_status is SessionStatus.COMPLETED
                 if not success:
@@ -7975,12 +8179,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                         f"{pause_status.value}."
                     )
             else:
+                acceptance_finalizations = self._build_terminal_acceptance_finalizations(
+                    seed=seed,
+                    parallel_result=None,
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    terminal_status=SessionStatus.FAILED.value,
+                    default_outcome="failed",
+                    execution_contract=execution_contract,
+                )
                 durable_terminal_status = await self._persist_session_terminal_status(
                     session_id=session_id,
                     execution_id=tracker.execution_id,
                     requested_status=SessionStatus.FAILED,
                     error_message=final_message,
                     messages_processed=messages_processed,
+                    acceptance_finalizations=acceptance_finalizations,
                 )
                 success = durable_terminal_status is SessionStatus.COMPLETED
                 if durable_terminal_status is not SessionStatus.FAILED:
@@ -8009,6 +8223,24 @@ Note: This is a resumed session. Please continue from where execution was interr
                     if durable_terminal_status is not None
                     else SessionStatus.FAILED.value
                 )
+            )
+            await self._emit_terminal_acceptance_finalized(
+                seed=seed,
+                parallel_result=None,
+                execution_id=tracker.execution_id,
+                session_id=session_id,
+                terminal_status=terminal_status,
+                accepted_root_indices=(
+                    set(range(len(seed.acceptance_criteria)))
+                    if terminal_status == SessionStatus.COMPLETED.value
+                    else set()
+                ),
+                default_outcome=(
+                    "succeeded"
+                    if terminal_status == SessionStatus.COMPLETED.value
+                    else terminal_status
+                ),
+                execution_contract=execution_contract,
             )
             terminal_event = create_execution_terminal_event(
                 execution_id=tracker.execution_id,
@@ -8132,6 +8364,8 @@ Note: This is a resumed session. Please continue from where execution was interr
                 execution_id=tracker.execution_id,
                 error=e,
                 messages_processed=messages_processed,
+                seed=seed,
+                execution_contract=execution_contract,
             )
             if persistence_pending is not None:
                 return persistence_pending

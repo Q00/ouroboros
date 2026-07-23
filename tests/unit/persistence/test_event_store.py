@@ -286,6 +286,61 @@ class TestEventStoreAppend:
         assert len(replayed) == 1
         assert replayed[0].data["accepted"] is True
 
+    async def test_terminal_acceptance_plan_is_atomic(self, event_store: EventStore) -> None:
+        """Terminal CAS and all planned root decisions commit together."""
+        payload = self._acceptance_event().data
+        terminal = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-plan",
+            data={"acceptance_finalizations": [payload]},
+        )
+
+        assert await event_store.append(terminal) is True
+        assert [event.type for event in await event_store.replay("session", terminal.aggregate_id)] == [
+            "orchestrator.session.completed"
+        ]
+        assert [
+            event.type for event in await event_store.replay("execution", payload["execution_id"])
+        ] == ["execution.ac.acceptance_finalized"]
+
+    async def test_terminal_acceptance_plan_rolls_back_on_conflict(
+        self, event_store: EventStore
+    ) -> None:
+        """A contradictory plan cannot leave a terminal session without its winner."""
+        existing = self._acceptance_event()
+        await event_store.append(existing)
+        conflicting = dict(
+            existing.data,
+            accepted=False,
+            disposition="rejected",
+            outcome="failed",
+            terminal_status="failed",
+        )
+        terminal = BaseEvent(
+            type="orchestrator.session.failed",
+            aggregate_type="session",
+            aggregate_id="sess-acceptance-plan-conflict",
+            data={"acceptance_finalizations": [conflicting]},
+        )
+
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(terminal)
+        assert await event_store.replay("session", terminal.aggregate_id) == []
+
+    async def test_acceptance_digest_includes_additional_payload_fields(
+        self, event_store: EventStore
+    ) -> None:
+        """Extra final-event fields are part of fail-closed idempotence."""
+        event = self._acceptance_event()
+        await event_store.append(event)
+        conflicting = event.model_copy(
+            update={"id": "extra-payload-event-id", "data": {**event.data, "marker": "changed"}}
+        )
+
+        with pytest.raises(PersistenceError, match="Conflicting final acceptance"):
+            await event_store.append(conflicting)
+
     @pytest.mark.parametrize(
         "overrides",
         [

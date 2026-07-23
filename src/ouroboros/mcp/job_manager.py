@@ -1424,17 +1424,29 @@ class JobManager:
         final_acceptance_events = await self._event_store.query_events(
             aggregate_id=snapshot.links.execution_id,
             event_type="execution.ac.acceptance_finalized",
-            limit=20,
+            limit=None,
         )
-        failed_outcomes = [
-            event
-            for event in [*failed_attempt_events, *final_acceptance_events]
-            if event.data.get("success") is False
-            or event.data.get("accepted") is False
-            or str(event.data.get("outcome") or "").casefold() == "failed"
-            or str(event.data.get("disposition") or "").casefold()
-            in {"rejected", "blocked", "cancelled"}
-        ]
+        # A final acceptance is the Final Gate's authoritative disposition.
+        # Provisional failed attempts are diagnostic only and must not
+        # override a later accepted final event during dead-owner recovery.
+        if final_acceptance_events:
+            failed_outcomes = [
+                event
+                for event in final_acceptance_events
+                if event.data.get("accepted") is False
+                or str(event.data.get("outcome") or "").casefold() == "failed"
+                or str(event.data.get("disposition") or "").casefold()
+                in {"rejected", "blocked", "cancelled"}
+            ]
+        else:
+            failed_outcomes = [
+                event
+                for event in failed_attempt_events
+                if event.data.get("success") is False
+                or str(event.data.get("outcome") or "").casefold() == "failed"
+                or str(event.data.get("disposition") or "").casefold()
+                in {"rejected", "blocked", "cancelled"}
+            ]
         if not terminal_failure_events and not failed_session_events and not failed_outcomes:
             return None
 

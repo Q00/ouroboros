@@ -60,10 +60,19 @@ Required fields:
 ```
 
 The durable uniqueness key is
-`(authority_correlation_id, root_ac_index)`. The EventStore inserts the event
-and its guard row in one transaction. A duplicate append is an idempotent
-no-op only when the existing payload is byte-for-byte equivalent; a conflicting
-payload is a persistence error and never becomes a second final decision.
+`(authority_correlation_id, root_ac_index)`. The terminal session transition
+carries the complete root decision set as a replayable finalization plan. The
+EventStore writes the winning terminal session event, every acceptance guard,
+and every acceptance event in one transaction. A duplicate append is an
+idempotent no-op only when the existing payload is byte-for-byte equivalent; a
+conflicting payload is a persistence error and rolls back the terminal winner
+instead of becoming a second final decision.
+
+If a caller is replaying an already-terminal session, it reconstructs the
+authority contract from that session's immutable start/progress data rather
+than from runner-global mutable state. Resume, exception, and cancellation
+paths use the same finalization plan/finalizer. A paused episode carries no
+plan and therefore remains resumable until a later terminal transition.
 
 No final acceptance event is emitted for a recoverable `PAUSED` transition.
 The retained owner must resume the same authority generation and publish the
@@ -95,4 +104,3 @@ distinguish a rejected final gate from an unfinished attempt.
 4. A paused episode has no final event until it resumes and reaches a terminal
    disposition.
 5. Duplicate or contradictory final payloads fail closed.
-

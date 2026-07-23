@@ -202,7 +202,7 @@ def build_frugality_retrospective(
         accepted = strict_bool(data.get("accepted"))
         outcome = _normalized_outcome(data, success=accepted) if accepted is not None else None
         disposition = _non_empty_string(data.get("disposition"))
-        terminal_status = _non_empty_string(data.get("terminal_status"))
+        event_terminal_status = _non_empty_string(data.get("terminal_status"))
         if (
             root_ac_index is None
             or isinstance(retry_attempt, bool)
@@ -211,7 +211,7 @@ def build_frugality_retrospective(
             or accepted is None
             or outcome is None
             or disposition is None
-            or terminal_status is None
+            or event_terminal_status is None
         ):
             if root_ac_index is not None:
                 invalid_acceptance_roots.add(root_ac_index)
@@ -274,6 +274,13 @@ def build_frugality_retrospective(
             outcome=outcome,
             event_id=acceptance_event_id,
         )
+
+    # A malformed final event is authoritative evidence that this root cannot
+    # be safely reconstructed. Do not fall back to a provisional attempt and
+    # accidentally report a misleading terminal outcome.
+    for root_ac_index in invalid_acceptance_roots:
+        invalid_outcome_roots.add(root_ac_index)
+        latest_outcomes.pop(root_ac_index, None)
 
     retry_keys: set[_AttemptKey] = set()
     retry_latest_attempts: list[int] = []
@@ -339,7 +346,10 @@ def build_frugality_retrospective(
         )
 
     invalid_count = (
-        len(invalid_attempt_keys) + len(anonymous_invalid_attempts) + len(invalid_outcome_attempts)
+        len(invalid_attempt_keys)
+        + len(anonymous_invalid_attempts)
+        + len(invalid_outcome_attempts)
+        + len(invalid_acceptance_roots)
     )
     payload: dict[str, Any] = {
         "execution_id": execution_id,

@@ -762,6 +762,7 @@ class SessionRepository:
         summary: dict[str, Any] | None = None,
         *,
         messages_processed: int = 0,
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
     ) -> Result[bool, PersistenceError]:
         """Mark session as completed.
 
@@ -774,15 +775,18 @@ class SessionRepository:
             Result whose value is ``True`` when this completion became durable,
             or ``False`` when another terminal transition already won.
         """
+        data: dict[str, Any] = {
+            "summary": summary or {},
+            "messages_processed": max(messages_processed, 0),
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
+        if acceptance_finalizations is not None:
+            data["acceptance_finalizations"] = acceptance_finalizations
         event = BaseEvent(
             type="orchestrator.session.completed",
             aggregate_type="session",
             aggregate_id=session_id,
-            data={
-                "summary": summary or {},
-                "messages_processed": max(messages_processed, 0),
-                "completed_at": datetime.now(UTC).isoformat(),
-            },
+            data=data,
         )
 
         try:
@@ -820,6 +824,7 @@ class SessionRepository:
         *,
         error_type: str | None = None,
         messages_processed: int = 0,
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
     ) -> Result[bool, PersistenceError]:
         """Mark session as failed.
 
@@ -834,17 +839,20 @@ class SessionRepository:
             Result whose value is ``True`` when this failure became durable,
             or ``False`` when another terminal transition already won.
         """
+        data: dict[str, Any] = {
+            "error": error_message,
+            "error_details": error_details or {},
+            "error_type": error_type,
+            "messages_processed": max(messages_processed, 0),
+            "failed_at": datetime.now(UTC).isoformat(),
+        }
+        if acceptance_finalizations is not None:
+            data["acceptance_finalizations"] = acceptance_finalizations
         event = BaseEvent(
             type="orchestrator.session.failed",
             aggregate_type="session",
             aggregate_id=session_id,
-            data={
-                "error": error_message,
-                "error_details": error_details or {},
-                "error_type": error_type,
-                "messages_processed": max(messages_processed, 0),
-                "failed_at": datetime.now(UTC).isoformat(),
-            },
+            data=data,
         )
 
         try:
@@ -961,6 +969,8 @@ class SessionRepository:
         session_id: str,
         reason: str,
         cancelled_by: str = "user",
+        *,
+        acceptance_finalizations: list[dict[str, Any]] | None = None,
     ) -> Result[bool, PersistenceError]:
         """Mark session as cancelled.
 
@@ -973,15 +983,18 @@ class SessionRepository:
             Result whose value is ``True`` when this cancellation became
             durable, or ``False`` when another terminal transition already won.
         """
+        data: dict[str, Any] = {
+            "reason": reason,
+            "cancelled_by": cancelled_by,
+            "cancelled_at": datetime.now(UTC).isoformat(),
+        }
+        if acceptance_finalizations is not None:
+            data["acceptance_finalizations"] = acceptance_finalizations
         event = BaseEvent(
             type="orchestrator.session.cancelled",
             aggregate_type="session",
             aggregate_id=session_id,
-            data={
-                "reason": reason,
-                "cancelled_by": cancelled_by,
-                "cancelled_at": datetime.now(UTC).isoformat(),
-            },
+            data=data,
         )
 
         try:
