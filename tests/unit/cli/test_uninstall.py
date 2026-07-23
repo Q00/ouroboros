@@ -400,6 +400,34 @@ class TestUninstallCLI:
         assert result.exit_code == 0
         assert data_dir.exists()
 
+    def test_nested_only_custom_codex_profile_is_discovered_and_removed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        home_dir = tmp_path / "home"
+        project_dir = tmp_path / "project"
+        codex_home = tmp_path / "active-codex"
+        home_dir.mkdir()
+        project_dir.mkdir()
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        config_path.write_text(
+            '[profiles.ouroboros-fast.model_provider]\nname = "custom"\n\n[other]\nfoo = 1\n'
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        with (
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
+            patch("ouroboros.cli.commands.uninstall._find_opencode_config", return_value=None),
+        ):
+            result = runner.invoke(app, ["--keep-data", "-y"])
+
+        assert result.exit_code == 0
+        assert "Ouroboros has been removed." in result.output
+        remaining = config_path.read_text()
+        assert "profiles.ouroboros-fast" not in remaining
+        assert "[other]" in remaining
+
     def test_custom_codex_config_failure_reports_partial_removal(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -58,6 +58,15 @@ def _managed_codex_profile_names() -> set[str]:
     return {*_CODEX_DEFAULT_PROFILE_SECTIONS, _CODEX_WORKER_PROFILE_NAME}
 
 
+def _is_managed_codex_header(header: str) -> bool:
+    if header == "[mcp_servers.ouroboros]" or header.startswith("[mcp_servers.ouroboros."):
+        return True
+    return any(
+        header == f"[profiles.{name}]" or header.startswith(f"[profiles.{name}.")
+        for name in _managed_codex_profile_names()
+    )
+
+
 def _remove_claude_mcp(dry_run: bool) -> bool:
     """Remove ouroboros entry from ~/.claude/mcp.json."""
     mcp_path = Path.home() / ".claude" / "mcp.json"
@@ -99,20 +108,7 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
         print_warning(f"{codex_config} is unreadable — skipping.")
         return False
 
-    managed_profile_headers = {f"[profiles.{name}]" for name in _managed_codex_profile_names()}
-    managed_profile_prefixes = tuple(
-        f"[profiles.{name}." for name in _managed_codex_profile_names()
-    )
-
-    def is_managed_header(header: str) -> bool:
-        return (
-            header == "[mcp_servers.ouroboros]"
-            or header.startswith("[mcp_servers.ouroboros.")
-            or header in managed_profile_headers
-            or header.startswith(managed_profile_prefixes)
-        )
-
-    if not any(is_managed_header(line.strip()) for line in raw.splitlines()):
+    if not any(_is_managed_codex_header(line.strip()) for line in raw.splitlines()):
         return False
 
     if dry_run:
@@ -134,7 +130,7 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
             continue
         in_comment_block = False
 
-        if is_managed_header(stripped):
+        if _is_managed_codex_header(stripped):
             skip = True
             continue
         if skip:
@@ -481,12 +477,7 @@ def uninstall(
     try:
         if codex_config.exists():
             codex_text = codex_config.read_text()
-            managed_profile_headers = {
-                f"[profiles.{name}]" for name in _managed_codex_profile_names()
-            }
-            if "[mcp_servers.ouroboros]" in codex_text or any(
-                header in codex_text for header in managed_profile_headers
-            ):
+            if any(_is_managed_codex_header(line.strip()) for line in codex_text.splitlines()):
                 targets.append(f"Codex MCP/profile config ({codex_config})")
     except OSError:
         targets.append(f"Codex MCP/profile config ({codex_config} — may be unreadable)")
