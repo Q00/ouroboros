@@ -581,6 +581,9 @@ def admit_route(
     ``advisor_order`` can only break ties between equal-cost eligible routes.
     Unknown or repeated IDs are ignored for selection and never create a route;
     therefore an Advisor cannot authorize a dispatch or bypass a constraint.
+    The returned admission is the only Kernel-produced authorization value;
+    callers must not treat contract serialization or an Advisor ranking as an
+    alternative publication path.
     """
 
     if not isinstance(registry, RouteRegistry):
