@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import ac_text
@@ -31,6 +32,7 @@ from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsule
     from ouroboros.orchestrator.adapter import AgentMessage
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.persistence.event_store import EventStore
@@ -73,6 +75,179 @@ class ExecutionEventEmitter:
                 parts.append(f"{key}: {rendered}")
         preview = ", ".join(parts)
         return preview[:100] if preview else None
+
+    @staticmethod
+    def _dispatch_runtime_payload(runtime_handle: Any) -> dict[str, Any] | None:
+        """Return the bounded reconnect identity allowed in dispatch events."""
+        if runtime_handle is None:
+            return None
+        metadata = runtime_handle.metadata
+        allowed_metadata = {
+            key: metadata[key]
+            for key in (
+                "ac_id",
+                "execution_id",
+                "session_scope_id",
+                "session_attempt_id",
+                "retry_attempt",
+                "ac_capsule_fingerprint",
+                "ac_dispatch_id",
+                "ac_session_origin",
+                "process_local_resume_nonce",
+                "runtime_event_type",
+                "server_session_id",
+            )
+            if key in metadata
+        }
+        return {
+            "backend": runtime_handle.backend,
+            "kind": runtime_handle.kind,
+            "native_session_id": runtime_handle.native_session_id,
+            "conversation_id": runtime_handle.conversation_id,
+            "previous_response_id": runtime_handle.previous_response_id,
+            "approval_mode": runtime_handle.approval_mode,
+            "metadata": allowed_metadata,
+        }
+
+    async def emit_ac_capsule_compiled(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        session_id: str,
+        capsule: ACExecutionCapsule,
+        session_origin: str,
+    ) -> None:
+        """Persist the redacted capsule authority before provider entry.
+
+        This is intentionally a hard persistence boundary. If the manifest
+        cannot be written, the caller must not invoke a provider because the
+        attempt would then have no durable authority record to recover against.
+        """
+        if session_origin not in {"fresh", "restored_same_attempt"}:
+            raise ValueError("AC capsule session origin is invalid")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.capsule.compiled",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "execution_id": capsule.execution_id,
+                    "session_id": session_id,
+                    "semantic_ac_key": capsule.semantic_ac_key,
+                    "ac_id": capsule.ac_id,
+                    "session_attempt_id": capsule.session_attempt_id,
+                    "capsule_fingerprint": capsule.fingerprint,
+                    "capsule_manifest": capsule.manifest.to_contract_data(),
+                    "session_origin": session_origin,
+                },
+            )
+        )
+
+    async def emit_ac_attempt_dispatched(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
+        previous_dispatch_id: str | None,
+        execution_id: str,
+        session_id: str,
+        capsule_fingerprint: str,
+        session_origin: str,
+        runtime_handle: Any,
+        dispatch_kind: str = "primary",
+        signal_id: str | None = None,
+        signal_mode: str | None = None,
+        follow_up_input_digest: str | None = None,
+    ) -> None:
+        """Persist the provider-entry transition immediately before dispatch."""
+        if not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+            raise ValueError("AC dispatch id is invalid")
+        if previous_dispatch_id is not None and not re.fullmatch(
+            r"[0-9a-f]{32}", previous_dispatch_id
+        ):
+            raise ValueError("previous AC dispatch id is invalid")
+        if session_origin not in {"fresh", "restored_same_attempt"}:
+            raise ValueError("AC dispatch session origin is invalid")
+        if dispatch_kind not in {"primary", "session_signal_followup"}:
+            raise ValueError("AC dispatch kind is invalid")
+        if dispatch_kind == "primary" and any(
+            value is not None for value in (signal_id, signal_mode, follow_up_input_digest)
+        ):
+            raise ValueError("primary AC dispatch cannot carry signal identity")
+        if dispatch_kind == "session_signal_followup":
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (signal_id, signal_mode, follow_up_input_digest)
+            ) or not re.fullmatch(r"sha256:[0-9a-f]{64}", follow_up_input_digest or ""):
+                raise ValueError("signal follow-up dispatch metadata is invalid")
+        if not isinstance(capsule_fingerprint, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", capsule_fingerprint
+        ):
+            raise ValueError("AC dispatch capsule fingerprint is invalid")
+        if runtime_handle is not None:
+            metadata = runtime_handle.metadata
+            if metadata.get("ac_dispatch_id") != dispatch_id:
+                raise ValueError("runtime handle dispatch id disagrees with dispatch event")
+            if metadata.get("ac_capsule_fingerprint") != capsule_fingerprint:
+                raise ValueError("runtime handle capsule disagrees with dispatch event")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.attempt.dispatched",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_dispatch_id": dispatch_id,
+                    "previous_ac_dispatch_id": previous_dispatch_id,
+                    "dispatch_kind": dispatch_kind,
+                    "signal_id": signal_id,
+                    "signal_mode": signal_mode,
+                    "follow_up_input_digest": follow_up_input_digest,
+                    "capsule_fingerprint": capsule_fingerprint,
+                    "session_origin": session_origin,
+                    "runtime_backend": (
+                        runtime_handle.backend if runtime_handle is not None else None
+                    ),
+                    "runtime": (self._dispatch_runtime_payload(runtime_handle)),
+                },
+            )
+        )
+
+    async def emit_ac_dispatch_sealed(
+        self,
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        dispatch_id: str,
+        execution_id: str,
+        session_id: str,
+        capsule_fingerprint: str,
+        reason: str,
+    ) -> None:
+        """Seal an entered provider boundary when replay is not safe."""
+        if not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+            raise ValueError("AC dispatch id is invalid")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", capsule_fingerprint):
+            raise ValueError("AC dispatch capsule fingerprint is invalid")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("AC dispatch seal reason is missing")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.dispatch.sealed",
+                aggregate_type=runtime_identity.runtime_scope.aggregate_type,
+                aggregate_id=runtime_identity.session_scope_id,
+                data={
+                    **runtime_identity.to_metadata(),
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "ac_dispatch_id": dispatch_id,
+                    "capsule_fingerprint": capsule_fingerprint,
+                    "reason": reason[:500],
+                },
+            )
+        )
 
     async def emit_decomposition_decision_finalized(
         self,

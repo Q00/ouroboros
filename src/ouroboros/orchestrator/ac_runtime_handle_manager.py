@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.ac_execution_capsule import ACExecutionCapsuleManifest
 from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     runtime_handle_tool_catalog,
@@ -47,6 +48,13 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+_AC_CAPSULE_COMPILED_EVENT = "execution.ac.capsule.compiled"
+_AC_ATTEMPT_DISPATCHED_EVENT = "execution.ac.attempt.dispatched"
+_AC_DISPATCH_SEALED_EVENT = "execution.ac.dispatch.sealed"
+
+
+class AmbiguousACExecutionError(RuntimeError):
+    """A provider boundary exists but cannot be resumed safely."""
 
 
 class ACRuntimeHandleManager:
@@ -58,10 +66,12 @@ class ACRuntimeHandleManager:
         event_store: EventStore,
         *,
         task_cwd: str | None,
+        process_local_resume_nonce: str | None = None,
     ) -> None:
         self._adapter = adapter
         self._event_store = event_store
         self._task_cwd = task_cwd
+        self._process_local_resume_nonce = process_local_resume_nonce
         self.runtime_handles: dict[str, RuntimeHandle] = {}
 
     @staticmethod
@@ -369,6 +379,8 @@ class ACRuntimeHandleManager:
         approval_mode = getattr(self._adapter, "permission_mode", None)
         metadata: dict[str, Any] = dict(seeded_handle.metadata) if seeded_handle is not None else {}
         metadata.update(runtime_identity.to_metadata())
+        if self._process_local_resume_nonce is not None:
+            metadata["process_local_resume_nonce"] = self._process_local_resume_nonce
         metadata.setdefault("turn_number", 1)
         metadata.setdefault(
             "turn_id",
@@ -428,6 +440,8 @@ class ACRuntimeHandleManager:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
+        expected_capsule_fingerprint: str | None = None,
+        expected_process_local_resume_nonce: str | None = None,
     ) -> RuntimeHandle | None:
         """Load the latest reusable AC-scoped runtime handle from execution events."""
         runtime_identity = self._resolve_ac_runtime_identity(
@@ -454,12 +468,46 @@ class ACRuntimeHandleManager:
         )
         if cached_runtime_handle is not None and cached_handle is None:
             self.runtime_handles.pop(runtime_identity.cache_key, None)
-        if cached_handle is not None:
+        if cached_handle is not None and expected_capsule_fingerprint is None:
             return cached_handle
 
+        if expected_capsule_fingerprint is not None:
+            cached_fingerprint = (
+                cached_handle.metadata.get("ac_capsule_fingerprint") if cached_handle else None
+            )
+            if cached_fingerprint not in {None, expected_capsule_fingerprint}:
+                raise AmbiguousACExecutionError(
+                    "cached runtime handle disagrees with the current AC capsule"
+                )
+            cached_nonce = (
+                cached_handle.metadata.get("process_local_resume_nonce") if cached_handle else None
+            )
+            if (
+                expected_process_local_resume_nonce is not None
+                and cached_handle is not None
+                and self._is_resumable_runtime_handle(cached_handle)
+                and cached_nonce != expected_process_local_resume_nonce
+            ):
+                raise AmbiguousACExecutionError(
+                    "cached runtime handle belongs to a different process-local authority"
+                )
+            # A resumable cached handle without a capsule fingerprint belongs to
+            # the pre-capsule lifecycle.  It cannot be silently reclassified as
+            # this attempt: doing so would inherit provider continuity without a
+            # durable capsule/dispatch authority.  Configuration-only handles
+            # (no provider continuity) remain reusable as fresh-session inputs.
+            if (
+                cached_handle is not None
+                and cached_fingerprint is None
+                and self._is_resumable_runtime_handle(cached_handle)
+            ):
+                self.runtime_handles.pop(runtime_identity.cache_key, None)
+                cached_handle = None
+
         candidate_scope_ids = (
-            runtime_identity.session_scope_id,
-            *runtime_identity.legacy_session_scope_ids,
+            (runtime_identity.session_scope_id,)
+            if expected_capsule_fingerprint is not None
+            else (runtime_identity.session_scope_id, *runtime_identity.legacy_session_scope_ids)
         )
         for candidate_scope_id in dict.fromkeys(candidate_scope_ids):
             try:
@@ -477,7 +525,88 @@ class ACRuntimeHandleManager:
                     retry_attempt=retry_attempt,
                     session_scope_id=candidate_scope_id,
                 )
+                if expected_capsule_fingerprint is not None:
+                    raise
                 continue
+
+            if expected_capsule_fingerprint is not None:
+                matching_compiled = []
+                for event in events:
+                    if event.type != _AC_CAPSULE_COMPILED_EVENT:
+                        continue
+                    event_data = event.data if isinstance(event.data, dict) else {}
+                    if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
+                        continue
+                    manifest = ACExecutionCapsuleManifest.from_contract_data(
+                        event_data.get("capsule_manifest")
+                    )
+                    persisted_fingerprint = event_data.get("capsule_fingerprint")
+                    if persisted_fingerprint != manifest.fingerprint:
+                        raise AmbiguousACExecutionError(
+                            "durable AC capsule fingerprint disagrees with its manifest"
+                        )
+                    if manifest.fingerprint != expected_capsule_fingerprint:
+                        raise AmbiguousACExecutionError(
+                            "durable AC capsule disagrees with the current dispatch"
+                        )
+                    if (
+                        manifest.ac_id != runtime_identity.ac_id
+                        or manifest.session_attempt_id != runtime_identity.session_attempt_id
+                    ):
+                        raise AmbiguousACExecutionError(
+                            "durable AC capsule identity disagrees with the current attempt"
+                        )
+                    matching_compiled.append(event)
+
+                dispatch_events = [
+                    event
+                    for event in events
+                    if event.type == _AC_ATTEMPT_DISPATCHED_EVENT
+                    and self._event_matches_ac_runtime_identity(
+                        event.data if isinstance(event.data, dict) else {}, runtime_identity
+                    )
+                ]
+                if not matching_compiled:
+                    if dispatch_events:
+                        raise AmbiguousACExecutionError(
+                            "durable AC dispatch exists without capsule authority"
+                        )
+                    continue
+                matching_indices = [
+                    index
+                    for index, event in enumerate(events)
+                    if self._event_matches_ac_runtime_identity(
+                        event.data if isinstance(event.data, dict) else {}, runtime_identity
+                    )
+                ]
+                last_terminal_index = max(
+                    (
+                        index
+                        for index in matching_indices
+                        if events[index].type in _NON_REUSABLE_RUNTIME_EVENT_TYPES
+                    ),
+                    default=-1,
+                )
+                last_seal_index = max(
+                    (
+                        index
+                        for index in matching_indices
+                        if events[index].type == _AC_DISPATCH_SEALED_EVENT
+                    ),
+                    default=-1,
+                )
+                last_dispatch_index = max(
+                    (
+                        index
+                        for index in matching_indices
+                        if events[index].type == _AC_ATTEMPT_DISPATCHED_EVENT
+                    ),
+                    default=-1,
+                )
+                if last_seal_index > last_terminal_index and last_seal_index >= last_dispatch_index:
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch boundary is sealed and cannot be replayed"
+                    )
 
             for event in reversed(events):
                 event_data = event.data if isinstance(event.data, dict) else {}
@@ -485,6 +614,10 @@ class ACRuntimeHandleManager:
                     continue
 
                 if event.type in _NON_REUSABLE_RUNTIME_EVENT_TYPES:
+                    if expected_capsule_fingerprint is not None:
+                        raise AmbiguousACExecutionError(
+                            "AC attempt already has a terminal lifecycle; refusing redispatch"
+                        )
                     self._forget_ac_runtime_handle(
                         ac_index,
                         execution_context_id=execution_context_id,
@@ -514,6 +647,20 @@ class ACRuntimeHandleManager:
                     continue
                 if runtime_handle is None:
                     continue
+                if expected_capsule_fingerprint is not None:
+                    persisted_fingerprint = runtime_handle.metadata.get("ac_capsule_fingerprint")
+                    if persisted_fingerprint != expected_capsule_fingerprint:
+                        raise AmbiguousACExecutionError(
+                            "persisted runtime handle disagrees with the durable AC capsule"
+                        )
+                    persisted_nonce = runtime_handle.metadata.get("process_local_resume_nonce")
+                    if (
+                        expected_process_local_resume_nonce is not None
+                        and persisted_nonce != expected_process_local_resume_nonce
+                    ):
+                        raise AmbiguousACExecutionError(
+                            "persisted runtime handle belongs to a different process-local authority"
+                        )
                 runtime_handle = self._normalize_ac_runtime_handle(
                     runtime_handle,
                     runtime_scope=runtime_identity.runtime_scope,
@@ -531,6 +678,18 @@ class ACRuntimeHandleManager:
 
                 self.runtime_handles[runtime_identity.cache_key] = runtime_handle
                 return runtime_handle
+
+            if expected_capsule_fingerprint is not None:
+                if any(
+                    event.type == _AC_ATTEMPT_DISPATCHED_EVENT
+                    and self._event_matches_ac_runtime_identity(
+                        event.data if isinstance(event.data, dict) else {}, runtime_identity
+                    )
+                    for event in events
+                ):
+                    raise AmbiguousACExecutionError(
+                        "AC provider boundary exists without a reusable same-attempt handle"
+                    )
 
         return None
 
@@ -848,6 +1007,15 @@ class ACRuntimeHandleManager:
             "turn_id",
             cls._runtime_turn_id(runtime_handle, runtime_identity=runtime_identity),
         )
+        if previous_handle is not None:
+            for key in (
+                "ac_capsule_fingerprint",
+                "ac_dispatch_id",
+                "ac_session_origin",
+                "process_local_resume_nonce",
+            ):
+                if key not in metadata and key in previous_handle.metadata:
+                    metadata[key] = previous_handle.metadata[key]
 
         if previous_handle is not None and cls._runtime_handle_same_session(
             previous_handle,

@@ -9635,9 +9635,12 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        assert resume_handle.native_session_id == "opencode-session-9"
+        # Foundation C rejects historical persisted handles without a durable
+        # capsule/dispatch authority; the fresh attempt must not inherit the
+        # provider session across an executor boundary.
+        assert resume_handle.native_session_id is None
         assert resume_handle.approval_mode == "bypassPermissions"
-        assert resume_handle.metadata["server_session_id"] == "server-99"
+        assert "server_session_id" not in resume_handle.metadata
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
@@ -9900,8 +9903,8 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        assert resume_handle.native_session_id == "opencode-session-resumed"
-        assert resume_handle.metadata["server_session_id"] == "server-resumed"
+        assert resume_handle.native_session_id is None
+        assert "server_session_id" not in resume_handle.metadata
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
@@ -11507,9 +11510,10 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        # Should have resumed from the valid (first) event, not the invalid (second) one
-        assert resume_handle.native_session_id == "opencode-session-valid"
-        assert resume_handle.metadata["server_session_id"] == "server-valid"
+        # Historical events without capsule authority are not eligible for
+        # cross-process continuation, even when one contains a valid handle.
+        assert resume_handle.native_session_id is None
+        assert "server_session_id" not in resume_handle.metadata
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata

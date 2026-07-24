@@ -41,6 +41,7 @@ from pathlib import Path
 import re
 import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from uuid import uuid4
 from weakref import ref
 
 import anyio
@@ -79,6 +80,11 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.ac_execution_capsule import (
+    bind_capsule_to_runtime_handle,
+    build_ac_dispatch_authority_scope,
+    compile_ac_execution_capsule,
+)
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -1672,10 +1678,12 @@ class ParallelACExecutor:
         self._authority_coordinator = self._coordinator
         self._authority_coordinator_review = self._coordinator.run_review
         self._semaphore = anyio.Semaphore(max_concurrent)
+        self._process_local_resume_nonce = uuid4().hex
         self._ac_runtime_handle_manager = ACRuntimeHandleManager(
             adapter,
             event_store,
             task_cwd=task_cwd,
+            process_local_resume_nonce=self._process_local_resume_nonce,
         )
         self._ac_runtime_handles = self._ac_runtime_handle_manager.runtime_handles
         self._event_emitter = ExecutionEventEmitter(
@@ -2130,6 +2138,8 @@ class ParallelACExecutor:
         sub_ac_index: int | None = None,
         node_identity: ExecutionNodeIdentity | None = None,
         retry_attempt: int = 0,
+        expected_capsule_fingerprint: str | None = None,
+        expected_process_local_resume_nonce: str | None = None,
     ) -> RuntimeHandle | None:
         return await self._ac_runtime_handle_manager._load_persisted_ac_runtime_handle(
             ac_index,
@@ -2139,6 +2149,8 @@ class ParallelACExecutor:
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=expected_capsule_fingerprint,
+            expected_process_local_resume_nonce=expected_process_local_resume_nonce,
         )
 
     def _remember_ac_runtime_handle(
@@ -5862,6 +5874,46 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         ac_session_id: str | None = None
         semantic_ac_key = semantic_ac_key or derive_semantic_ac_key(ac_spec or ac_content)
+        execution_context_id = execution_id or session_id
+        runtime_identity = build_ac_runtime_identity(
+            ac_index,
+            execution_context_id=execution_context_id,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            node_identity=node_identity,
+            retry_attempt=retry_attempt,
+        )
+        capsule = compile_ac_execution_capsule(
+            runtime_identity=runtime_identity,
+            execution_id=execution_context_id,
+            semantic_ac_key=semantic_ac_key,
+            workspace=(
+                self._task_cwd or getattr(self._adapter, "working_directory", None) or os.getcwd()
+            ),
+            authority_scope=(
+                build_ac_dispatch_authority_scope(
+                    base_scope=self.execution_authority.fingerprint,
+                    dispatch_contract={
+                        "backend": getattr(self._adapter, "runtime_backend", None),
+                        "tools": list(tools),
+                        "system_prompt": system_prompt,
+                        "ac_content": ac_content,
+                        "seed_goal": seed_goal,
+                        "retry_prompt_extra": retry_prompt_extra,
+                    },
+                    execution_policy={
+                        "retry_attempt": retry_attempt,
+                        "is_sub_ac": is_sub_ac,
+                        "decomposition_trustworthy": decomposition_trustworthy,
+                    },
+                )
+            ),
+            seed_goal=seed_goal,
+            ac_content=ac_content,
+            ac_spec=ac_spec,
+            level_contexts=tuple(level_contexts or ()),
+        )
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -5878,6 +5930,7 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             retry_prompt_extra=retry_prompt_extra,
             ac_spec=ac_spec,
+            capsule=capsule,
         )
         prompt = prompt_bundle.prompt
         label = prompt_bundle.label
@@ -5888,7 +5941,6 @@ Respond with either ATOMIC or the structured JSON object only.
         final_message = ""
         success = False
         clear_cached_runtime_handle = False
-        execution_context_id = execution_id or session_id
         persisted_runtime_handle = await self._load_persisted_ac_runtime_handle(
             ac_index,
             execution_context_id=execution_context_id,
@@ -5897,6 +5949,8 @@ Respond with either ATOMIC or the structured JSON object only.
             sub_ac_index=sub_ac_index,
             node_identity=node_identity,
             retry_attempt=retry_attempt,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce=self._process_local_resume_nonce,
         )
         if persisted_runtime_handle is not None:
             self._remember_ac_runtime_handle(
@@ -5919,14 +5973,27 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             tool_catalog=tool_catalog,
         )
-        runtime_identity = build_ac_runtime_identity(
-            ac_index,
-            execution_context_id=execution_context_id,
-            is_sub_ac=is_sub_ac,
-            parent_ac_index=parent_ac_index,
-            sub_ac_index=sub_ac_index,
-            node_identity=node_identity,
-            retry_attempt=retry_attempt,
+        runtime_handle = bind_capsule_to_runtime_handle(
+            capsule,
+            runtime_handle,
+            restored_same_attempt=(
+                persisted_runtime_handle is not None
+                or self._is_resumable_runtime_handle(runtime_handle)
+            ),
+            expected_backend=getattr(self._adapter, "runtime_backend", None),
+            expected_approval_mode=getattr(self._adapter, "permission_mode", None),
+        )
+        session_origin = (
+            "restored_same_attempt"
+            if persisted_runtime_handle is not None
+            or self._is_resumable_runtime_handle(runtime_handle)
+            else "fresh"
+        )
+        await self._event_emitter.emit_ac_capsule_compiled(
+            runtime_identity=runtime_identity,
+            session_id=session_id,
+            capsule=capsule,
+            session_origin=session_origin,
         )
         await self._emit_atomic_context_governed_event(
             runtime_identity=runtime_identity,
@@ -6117,7 +6184,29 @@ Respond with either ATOMIC or the structured JSON object only.
                 with contextlib.suppress(Exception):
                     shadow_snapshot_stack.close()
                 shadow_snapshot_stack = contextlib.ExitStack()
+        dispatch_id = uuid4().hex
+        previous_dispatch_id = None
+        if runtime_handle is not None:
+            previous_value = runtime_handle.metadata.get("ac_dispatch_id")
+            if isinstance(previous_value, str) and previous_value:
+                previous_dispatch_id = previous_value
+            runtime_metadata = dict(runtime_handle.metadata)
+            runtime_metadata["ac_dispatch_id"] = dispatch_id
+            runtime_metadata["ac_capsule_fingerprint"] = capsule.fingerprint
+            runtime_metadata["ac_session_origin"] = session_origin
+            runtime_handle = replace(runtime_handle, metadata=runtime_metadata)
+        await self._event_emitter.emit_ac_attempt_dispatched(
+            runtime_identity=runtime_identity,
+            dispatch_id=dispatch_id,
+            previous_dispatch_id=previous_dispatch_id,
+            execution_id=execution_context_id,
+            session_id=session_id,
+            capsule_fingerprint=capsule.fingerprint,
+            session_origin=session_origin,
+            runtime_handle=runtime_handle,
+        )
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
+        active_dispatch_id = dispatch_id
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -6181,6 +6270,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     message_count=dispatch_state.message_count,
                 )
                 clear_cached_runtime_handle = True
+                await self._event_emitter.emit_ac_dispatch_sealed(
+                    runtime_identity=runtime_identity,
+                    dispatch_id=active_dispatch_id,
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                    capsule_fingerprint=capsule.fingerprint,
+                    reason="provider stall crossed an uncertain external-effect boundary",
+                )
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -6233,6 +6330,45 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         continue
 
+                    follow_up_prompt = (
+                        render_inform_signal_prompt(queued_signal.signal)
+                        if queued_signal.effective_mode is SessionSignalMode.INFORM
+                        else render_after_turn_signal_prompt(queued_signal.signal)
+                    )
+                    if dispatch_state.runtime_handle is not None:
+                        await self._event_emitter.emit_ac_dispatch_sealed(
+                            runtime_identity=runtime_identity,
+                            dispatch_id=active_dispatch_id,
+                            execution_id=execution_context_id,
+                            session_id=session_id,
+                            capsule_fingerprint=capsule.fingerprint,
+                            reason="completed provider turn superseded by a SessionSignal follow-up",
+                        )
+                    follow_up_dispatch_id = uuid4().hex
+                    if dispatch_state.runtime_handle is not None:
+                        follow_up_metadata = dict(dispatch_state.runtime_handle.metadata)
+                        follow_up_metadata["ac_dispatch_id"] = follow_up_dispatch_id
+                        dispatch_state.runtime_handle = replace(
+                            dispatch_state.runtime_handle,
+                            metadata=follow_up_metadata,
+                        )
+                    await self._event_emitter.emit_ac_attempt_dispatched(
+                        runtime_identity=runtime_identity,
+                        dispatch_id=follow_up_dispatch_id,
+                        previous_dispatch_id=active_dispatch_id,
+                        execution_id=execution_context_id,
+                        session_id=session_id,
+                        capsule_fingerprint=capsule.fingerprint,
+                        session_origin="restored_same_attempt",
+                        runtime_handle=dispatch_state.runtime_handle,
+                        dispatch_kind="session_signal_followup",
+                        signal_id=queued_signal.signal.signal_id,
+                        signal_mode=queued_signal.effective_mode.value,
+                        follow_up_input_digest=(
+                            "sha256:" + hashlib.sha256(follow_up_prompt.encode("utf-8")).hexdigest()
+                        ),
+                    )
+                    active_dispatch_id = follow_up_dispatch_id
                     message_count_before_signal = dispatch_state.message_count
                     primary_final_message = dispatch_state.final_message
                     primary_success = dispatch_state.success
@@ -6250,11 +6386,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         await self._authority_leaf_dispatcher_stream(
                             self._authority_leaf_dispatcher,
                             state=dispatch_state,
-                            prompt=(
-                                render_inform_signal_prompt(queued_signal.signal)
-                                if inform_mode
-                                else render_after_turn_signal_prompt(queued_signal.signal)
-                            ),
+                            prompt=(follow_up_prompt),
                             tools=[] if inform_mode else tools,
                             system_prompt=system_prompt,
                             execute_effort_kwargs=execute_effort_kwargs,
@@ -6608,6 +6740,16 @@ Respond with either ATOMIC or the structured JSON object only.
 
         except Exception as e:
             duration = (datetime.now(UTC) - start_time).total_seconds()
+
+            with contextlib.suppress(Exception):
+                await self._event_emitter.emit_ac_dispatch_sealed(
+                    runtime_identity=runtime_identity,
+                    dispatch_id=active_dispatch_id,
+                    execution_id=execution_context_id,
+                    session_id=session_id,
+                    capsule_fingerprint=capsule.fingerprint,
+                    reason="provider attempt raised before authoritative terminalization",
+                )
 
             self._remember_ac_runtime_handle(
                 ac_index,
