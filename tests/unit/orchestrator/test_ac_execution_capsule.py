@@ -422,6 +422,33 @@ def test_dispatch_authority_scope_changes_with_execution_inputs(
     assert changed != original
 
 
+def test_dispatch_authority_scope_distinguishes_absent_and_empty_tool_catalog() -> None:
+    """Missing catalog authority must not collide with explicit empty authority."""
+    common = {
+        "tools": [],
+        "system_prompt": None,
+        "runtime": {"backend": "codex_cli"},
+    }
+    absent = build_ac_dispatch_authority_scope(
+        base_scope="execution:1",
+        dispatch_contract={
+            **common,
+            "tool_catalog": {"present": False, "entries": []},
+        },
+        execution_policy={},
+    )
+    empty = build_ac_dispatch_authority_scope(
+        base_scope="execution:1",
+        dispatch_contract={
+            **common,
+            "tool_catalog": {"present": True, "entries": []},
+        },
+        execution_policy={},
+    )
+
+    assert absent != empty
+
+
 def test_context_reference_rejects_prompt_control_characters() -> None:
     with pytest.raises(ValueError, match="control characters"):
         ACContextReference(

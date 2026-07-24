@@ -5903,7 +5903,14 @@ Respond with either ATOMIC or the structured JSON object only.
                         # contract.  Fingerprint the complete canonical catalog
                         # too, so schema/source changes cannot reuse a dispatch
                         # authority that merely has the same tool names.
-                        "tool_catalog": serialize_tool_catalog(tool_catalog or ()),
+                        # Preserve presence separately from entries: ``None``
+                        # means the provider received no catalog authority,
+                        # while an explicit empty tuple means an intentionally
+                        # empty capability/control-plane contract.
+                        "tool_catalog": {
+                            "present": tool_catalog is not None,
+                            "entries": serialize_tool_catalog(tool_catalog or ()),
+                        },
                         "system_prompt": system_prompt,
                         "ac_content": ac_content,
                         "seed_goal": seed_goal,
