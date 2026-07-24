@@ -93,8 +93,10 @@ def is_credential_shaped(value: str) -> bool:
     if not normalized:
         return False
     candidates = [normalized]
-    for delimiter in (":", "/"):
-        candidates.extend(part for part in normalized.split(delimiter) if part)
+    namespace_parts = [part for part in re.split(r"[:/]", normalized) if part]
+    candidates.extend(namespace_parts)
+    if any(part.lower() in {"bearer", "token", "secret"} for part in namespace_parts[:-1]):
+        return True
     for candidate in candidates:
         lowered = candidate.lower()
         if lowered.startswith(("bearer ", "token ", "secret_")):
