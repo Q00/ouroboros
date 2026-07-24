@@ -302,7 +302,82 @@ class TestCodexCompletionReviewRoundOne:
         assert results[0].data.get("is_error") is True, (
             "a cancelled item must never be laundered into success by stale nested metadata"
         )
-        assert _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0])) is False
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_returncode_alias_nonzero_is_error(self) -> None:
+        """Every accepted exit-code alias must feed the failure verdict."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for alias in ("exit_code", "exitCode", "returncode", "return_code"):
+            event = {
+                "type": "item.completed",
+                "item": {
+                    "id": f"item_{alias}",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    alias: 1,
+                },
+            }
+
+            messages = runtime._convert_event(event, current_handle=None)
+
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert len(results) == 1, alias
+            assert results[0].data.get("is_error") is True, (
+                f"non-zero {alias} must override the completed status"
+            )
+
+    def test_web_search_start_records_exactly_the_query(self) -> None:
+        """web_search tool input must carry item['query'], not the whole item."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "item_ws",
+                "type": "web_search",
+                "query": "ouroboros seed contract",
+                "status": "in_progress",
+            },
+        }
+
+        messages = runtime._convert_event(event, current_handle=None)
+
+        assert len(messages) == 1
+        tool_input = messages[0].data.get("tool_input") or {}
+        assert tool_input.get("query") == "ouroboros seed contract"
+
+    def test_idless_web_search_lifecycle_pairs_without_duplicate_start(self) -> None:
+        """Status changes must not alter the id-less correlation signature."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        started = {
+            "type": "item.started",
+            "item": {
+                "type": "web_search",
+                "query": "ouroboros seed contract",
+                "status": "in_progress",
+            },
+        }
+        completed = {
+            "type": "item.completed",
+            "item": {
+                "type": "web_search",
+                "query": "ouroboros seed contract",
+                "status": "completed",
+            },
+        }
+
+        start_messages = runtime._convert_event(started, current_handle=None)
+        completion_messages = runtime._convert_event(completed, current_handle=None)
+
+        assert len(start_messages) == 1
+        assert len(completion_messages) == 1, (
+            "an id-less completion whose signature drifted with status "
+            "synthesized a duplicate start"
+        )
+        assert completion_messages[0].data.get("subtype") == "tool_result"
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""

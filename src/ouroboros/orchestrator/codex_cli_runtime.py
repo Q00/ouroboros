@@ -1860,6 +1860,12 @@ class CodexCliRuntime:
             return item_id.strip()
         return None
 
+    @staticmethod
+    def _extract_web_search_query(item: dict[str, Any]) -> str:
+        """Extract exactly the search query from a web_search thread item."""
+        query = item.get("query")
+        return query.strip() if isinstance(query, str) else ""
+
     def _item_lifecycle_signature(self, item_type: str, item: dict[str, Any]) -> str:
         """Build a best-effort identity for id-less legacy thread items."""
         if item_type == "command_execution":
@@ -1869,6 +1875,11 @@ class CodexCliRuntime:
             return name.strip() if isinstance(name, str) else ""
         if item_type == "file_change":
             return "\n".join(self._extract_paths(item))
+        if item_type == "web_search":
+            # The query is the only stable identity: volatile fields such as
+            # status must not change the signature between started/completed,
+            # or an id-less completion would synthesize a duplicate start.
+            return self._extract_web_search_query(item)
         return self._extract_text(item)
 
     def _item_tool_calls(self, item_type: str, item: dict[str, Any]) -> list[_CodexToolCall]:
@@ -1915,7 +1926,7 @@ class CodexCliRuntime:
             ]
 
         if item_type == "web_search":
-            query = self._extract_text(item)
+            query = self._extract_web_search_query(item)
             return [
                 _CodexToolCall(
                     tool_name="WebSearch",
@@ -1981,7 +1992,7 @@ class CodexCliRuntime:
         # never let an outer success status shadow a nested failure (review
         # blocker: failure signals take precedence wherever they appear).
         for source in self._iter_item_metadata_sources(item):
-            for exit_key in ("exit_code", "exitCode"):
+            for exit_key in ("exit_code", "exitCode", "returncode", "return_code"):
                 exit_code = source.get(exit_key)
                 if isinstance(exit_code, int) and not isinstance(exit_code, bool):
                     if exit_code == 0:
