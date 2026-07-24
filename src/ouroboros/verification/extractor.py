@@ -15,6 +15,7 @@ import json
 import logging
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.seed import AcceptanceCriterionInput, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -142,12 +143,10 @@ class AssertionExtractor:
     ) -> tuple[SpecAssertion, ...]:
         """Parse LLM response into SpecAssertions."""
         try:
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
-
-            data = json.loads(cleaned)
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            data = json.loads(json_str if json_str is not None else content)
             if not isinstance(data, list):
                 logger.warning("Expected JSON array, got: %s", type(data))
                 return ()
