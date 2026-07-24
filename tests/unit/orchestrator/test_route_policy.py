@@ -7,6 +7,7 @@ import copy
 from dataclasses import replace
 import json
 import pickle
+import weakref
 
 import pytest
 
@@ -496,6 +497,36 @@ def test_effect_boundary_revalidates_admission_against_live_registry() -> None:
 
     forged = object.__new__(RouteAdmission)
     object.__setattr__(forged, "_sealed_state", object.__getattribute__(decision, "_sealed_state"))
+    assert validate_admission(registry, requirements, forged) is False
+
+
+def test_effect_boundary_rejects_closure_registered_outside_route() -> None:
+    original = _route("original", cost=1)
+    outside = _route("outside-registry", cost=1)
+    registry = _registry(original)
+    requirements = RouteRequirements()
+
+    cells = tuple(cell.cell_contents for cell in admit_route.__closure__ or ())
+    state_type = next(item for item in cells if getattr(item, "__name__", "") == "AdmissionState")
+    kernel_type = RouteAdmission
+    trusted = next(item for item in cells if isinstance(item, dict))
+    candidate_fingerprint = next(
+        item for item in cells if getattr(item, "__name__", "") == "candidate_fingerprint"
+    )
+    state = state_type(
+        RouteDecisionDisposition.ADMITTED,
+        outside,
+        candidate_fingerprint(outside),
+        (outside.route_id,),
+        (),
+        (),
+        "cheapest_eligible_route",
+    )
+    forged = object.__new__(kernel_type)
+    object.__setattr__(forged, "_sealed_state", state)
+    trusted[id(forged)] = (weakref.ref(forged), state)
+
+    assert forged.admitted is True
     assert validate_admission(registry, requirements, forged) is False
 
 
