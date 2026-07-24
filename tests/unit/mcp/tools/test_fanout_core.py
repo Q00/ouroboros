@@ -3645,13 +3645,21 @@ def test_cte_prefixed_raw_projection_is_rejected() -> None:
     errors = _data_evidence_boundary_violations(proposal(raw_cte))
     assert any("without aggregation" in error for error in errors)
 
-    # A projection OVER an aggregated CTE stays valid — the marker scan runs
-    # over the whole query.
-    aggregated_cte = (
-        "WITH agg AS (SELECT plan, count(*) AS c FROM accounts GROUP BY plan) "
-        "SELECT plan, c FROM agg"
+    # Round-24: the aggregation must live in the MAIN statement — an
+    # unrelated aggregated CTE cannot launder a raw final projection, so a
+    # bare projection over ANY CTE now rejects with guidance to aggregate in
+    # the outermost SELECT.
+    laundered = "WITH c AS (SELECT count(*) FROM audit_log) SELECT account_id, plan FROM accounts"
+    assert any(
+        "without aggregation" in error
+        for error in _data_evidence_boundary_violations(proposal(laundered))
     )
-    assert _data_evidence_boundary_violations(proposal(aggregated_cte)) == []
+    # Aggregating in the outermost SELECT over a CTE stays valid.
+    outer_aggregated_cte = (
+        "WITH base AS (SELECT plan, seats FROM accounts) "
+        "SELECT plan, count(*), avg(seats) FROM base GROUP BY plan"
+    )
+    assert _data_evidence_boundary_violations(proposal(outer_aggregated_cte)) == []
 
 
 def test_acronym_entity_roster_is_rejected() -> None:
@@ -3714,6 +3722,169 @@ def test_const_object_root_contract_is_enforceable(tmp_path: Any) -> None:
         fanout_id=fanout_id,
     )
     assert conforming["status"] == "complete"
+
+
+def test_type_array_object_contract_is_enforceable(tmp_path: Any) -> None:
+    """{"type": ["object"]} forces objects; multi-type unions do not (r24)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    array_type_contract = {
+        "contract_id": "array_type.v1",
+        "response_model_schema": {
+            "type": ["object"],
+            "required": ["lane_id", "verdict"],
+            "properties": {
+                "lane_id": {"const": "array_lane"},
+                "verdict": {"type": "string"},
+            },
+        },
+    }
+    assert _enforceable_lane_contract(array_type_contract)
+
+    union_contract = {
+        "contract_id": "union_type.v1",
+        "response_model_schema": {"type": ["object", "null"]},
+    }
+    assert not _enforceable_lane_contract(union_contract)
+
+    lanes = [
+        {
+            "lane_id": "array_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": array_type_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-array-type", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-array-type",
+        correlation_key="context.lane_id",
+        results=[{"key": "array_lane", "content": {"invalid": True}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["array_lane"]
+
+
+def test_all_lane_violation_messages_are_redacted(tmp_path: Any) -> None:
+    """No lane's rejected value leaks through its violation report (r24).
+
+    A non-data lane failing pattern validation with an email/token value
+    previously copied the full rejected value into the response AND the
+    persisted terminal record via jsonschema's echoing messages.
+    """
+    lanes = [
+        {
+            "lane_id": "guarded_lane",
+            "capability": "future_capability",
+            "required": False,
+            "answer_contract": {
+                "contract_id": "guarded.v1",
+                "response_model_schema": {
+                    "type": "object",
+                    "required": ["lane_id", "note"],
+                    "properties": {
+                        "lane_id": {"const": "guarded_lane"},
+                        "note": {"type": "string", "pattern": r"^[0-9 %]+$"},
+                    },
+                },
+            },
+        },
+        {
+            "lane_id": "ambiguity_contrarian",
+            "capability": "run_lateral_review",
+            "persona": "contrarian",
+            "required": True,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-redact-all", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-redact-all",
+        correlation_key="context.lane_id",
+        results=[
+            {
+                "key": "guarded_lane",
+                "content": {
+                    "lane_id": "guarded_lane",
+                    "note": "alice@example.com token=sk-live-123",
+                },
+            },
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    violations = out["contract_violations"]
+    assert [item["lane_id"] for item in violations] == ["guarded_lane"]
+    joined = " ".join(violations[0]["errors"])
+    assert "alice@example.com" not in joined
+    assert "sk-live-123" not in joined
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-123" not in persisted
+
+
+def test_distinct_over_identity_column_is_rejected() -> None:
+    """DISTINCT of a PII/identity column is a raw identifier list (r24)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    errors = _data_evidence_boundary_violations(proposal("SELECT DISTINCT email FROM users"))
+    assert any("identity/PII column" in error for error in errors)
+
+    assert _data_evidence_boundary_violations(proposal("SELECT DISTINCT plan FROM accounts")) == []
+
+
+def test_blank_content_does_not_count_toward_completion(tmp_path: Any) -> None:
+    """content: "" is not a usable finding (round-24 warning)."""
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-blank",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-blank",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": ""},
+            {"key": "answer_simplifier", "content": "   "},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["malformed_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:

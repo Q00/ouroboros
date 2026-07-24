@@ -3453,7 +3453,10 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     resolved = _resolve_local_root_from(schema, node)
     if not isinstance(resolved, Mapping):
         return False
-    if resolved.get("type") == "object":
+    declared_type = resolved.get("type")
+    # JSON Schema allows the type keyword as an array (round-24): a
+    # single-member ["object"] forces objects; a multi-type union does not.
+    if declared_type == "object" or declared_type == ["object"]:
         return True
     # A const (or an enum whose members are all mappings) NECESSARILY
     # describes an object without declaring a type (round-23).
@@ -3537,6 +3540,29 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
             else:
                 return False
     return True
+
+
+def _main_select_segment(query: str) -> str:
+    """Return the query text from its first TOP-LEVEL select.
+
+    CTE prefixes (``WITH name AS (...), ...``) are skipped by paren
+    depth-walking, so an aggregate marker inside an unrelated CTE cannot
+    launder a raw final projection (round-24). Aggregation belongs in the
+    outermost SELECT.
+    """
+    lowered = query.lower()
+    if not re.match(r"\s*with\b", lowered):
+        return query
+    depth = 0
+    for index in range(len(lowered)):
+        char = lowered[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and lowered.startswith("select", index):
+            return query[index:]
+    return query
 
 
 def _mutating_source_identifier_verb(source: str) -> str | None:
@@ -3823,16 +3849,34 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         # over the WHOLE query, so a raw projection OVER an aggregated CTE
         # stays valid.
         elif isinstance(query, str) and re.match(r"\s*(with|select)\b", query, re.IGNORECASE):
-            # LIMIT 1 is NOT an aggregate marker (round-21): it fetches one
-            # ROW of raw columns, not a scalar — a scalar fetch aggregates
-            # (max(col)) instead.
+            # The aggregation must live in the MAIN statement (round-24): an
+            # unrelated aggregated CTE must not launder a raw final
+            # projection, so markers are scanned from the first top-level
+            # SELECT after any WITH prefix. LIMIT 1 is NOT an aggregate
+            # marker (round-21): it fetches one ROW of raw columns.
+            main_statement = _main_select_segment(query)
             has_aggregate_marker = re.search(
                 r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
                 r"|\bgroup\s+by\b|\bdistinct\b",
-                query,
+                main_statement,
                 re.IGNORECASE,
             )
-            if not has_aggregate_marker:
+            distinct_pii = re.search(
+                r"\bdistinct\b[^,]*\b(email|phone|address|ssn"
+                r"|first_name|last_name|full_name|user_id|account_id|customer_id)\b",
+                main_statement,
+                re.IGNORECASE,
+            )
+            if distinct_pii:
+                # DISTINCT deduplicates to categories — a DISTINCT projection
+                # of an identity/PII column is a raw identifier list, not a
+                # category set (round-24: SELECT DISTINCT email FROM users).
+                errors.append(
+                    f"proposed_queries[{index}].query: DISTINCT over an "
+                    "identity/PII column returns raw identifiers; aggregate "
+                    "by count instead"
+                )
+            elif not has_aggregate_marker:
                 errors.append(
                     f"proposed_queries[{index}].query: a SELECT projection "
                     "without aggregation returns raw rows; use "
@@ -3929,18 +3973,16 @@ def _lane_answer_contract_violations(
         # crash re-entry with UnknownType.
         try:
             validator = Draft202012Validator(dict(schema))
-            if contract_id == _DATA_EVIDENCE_CONTRACT_ID:
-                # Redacted messages: jsonschema echoes the offending instance
-                # value into ``error.message``, and for a data lane that
-                # instance can BE the leak (PII/credential-shaped evidence).
-                # Report the location and the violated keyword, never the
-                # content.
-                errors = sorted(
-                    f"{error.json_path}: violates {error.validator!r}"
-                    for error in validator.iter_errors(dict(output))
-                )
-            else:
-                errors = sorted(error.message for error in validator.iter_errors(dict(output)))
+            # Redacted messages for EVERY lane (rounds 12 and 24): jsonschema
+            # echoes the offending instance value into ``error.message``, and
+            # violations ride the response AND the persisted terminal record —
+            # so any lane's rejected value would otherwise leak into durable
+            # state through its own violation report. Report the location and
+            # the violated keyword, never the content.
+            errors = sorted(
+                f"{error.json_path}: violates {error.validator!r}"
+                for error in validator.iter_errors(dict(output))
+            )
         except Exception:
             # An ADVERTISED contract whose validation explodes must fail
             # CLOSED (bot-review round-17): content that cannot be verified
@@ -4327,7 +4369,12 @@ def _submit_fanout_results_locked(
         # (bot-review round-14): counting it toward completion would
         # terminalize a fan-out around None outputs. The lane stays missing
         # and is reported under malformed_keys.
-        if "content" not in result or result.get("content") is None:
+        raw_content = result.get("content")
+        if (
+            "content" not in result
+            or raw_content is None
+            or (isinstance(raw_content, str) and not raw_content.strip())
+        ):
             if resolved_key not in malformed_keys:
                 malformed_keys.append(resolved_key)
             continue
