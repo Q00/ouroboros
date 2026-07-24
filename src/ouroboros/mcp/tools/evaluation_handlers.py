@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import ValidationError as PydanticValidationError
 import structlog
@@ -1639,13 +1640,31 @@ class LateralThinkHandler(BridgeAwareMixin):
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                plugin_shape: dict[str, Any] = {
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "persona_count": len(payloads),
+                }
+                # Transport parity (bot-review round-16): the plugin envelope
+                # must carry the same durable re-entry contract as the inline
+                # paths — register the fan-out and stamp its identity BEFORE
+                # returning, with the same generated-owner boundary.
+                if self.fanout_registry is not None:
+                    plugin_owner = str(arguments.get("session_id") or "")
+                    if not plugin_owner:
+                        plugin_owner = f"lateral-{uuid4().hex[:16]}"
+                    plugin_fanout_id = register_lateral_persona_fanout(
+                        self.fanout_registry,
+                        session_id=plugin_owner,
+                        payloads=payloads,
+                    )
+                    if plugin_fanout_id is not None:
+                        plugin_shape["fanout_id"] = plugin_fanout_id
+                        plugin_shape["result_correlation_key"] = "context.persona"
+                        plugin_shape["session_id"] = plugin_owner
                 return build_multi_subagent_result(
                     payloads,
-                    response_shape={
-                        "status": "delegated_to_subagent",
-                        "dispatch_mode": "plugin",
-                        "persona_count": len(payloads),
-                    },
+                    response_shape=plugin_shape,
                 )
 
             # --- Inline/sequential fallback: concatenate persona prompts ---
@@ -1728,9 +1747,18 @@ class LateralThinkHandler(BridgeAwareMixin):
             if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             if self.fanout_registry is not None:
+                owner_session = str(arguments.get("session_id") or "")
+                if not owner_session:
+                    # ouroboros_lateral_think declares no session parameter,
+                    # and a record registered without identity skips the
+                    # strict correlation check — any session could complete
+                    # it (bot-review round-16). A generated owner token,
+                    # stamped on the dispatch record, restores the ownership
+                    # boundary: only a caller echoing it can submit.
+                    owner_session = f"lateral-{uuid4().hex[:16]}"
                 lateral_fanout_id = register_lateral_persona_fanout(
                     self.fanout_registry,
-                    session_id=str(arguments.get("session_id") or ""),
+                    session_id=owner_session,
                     payloads=payloads,
                 )
                 # A fan-out id whose record could not be persisted is not
@@ -1738,6 +1766,7 @@ class LateralThinkHandler(BridgeAwareMixin):
                 # an id whose first submission is unknown_fanout_id.
                 if lateral_fanout_id is not None:
                     dispatch_record["fanout_id"] = lateral_fanout_id
+                    dispatch_record["session_id"] = owner_session
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (

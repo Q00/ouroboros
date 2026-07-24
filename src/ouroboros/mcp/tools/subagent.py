@@ -3487,12 +3487,18 @@ def _is_row_shaped_value(value: str) -> bool:
         and not any(char.isdigit() for char in stripped)
     ):
         return True
-    # A REPEATED key=value field is a record list (round-15 probe:
-    # "customer=Alice Kim tier=premium; customer=Bob Lee tier=free") — one
-    # aggregate states each field once ("p50=120ms p95=340ms" stays valid,
-    # every key distinct).
-    assignment_keys = re.findall(r"\b(\w+)=", stripped)
-    return len(assignment_keys) >= 2 and len(set(assignment_keys)) < len(assignment_keys)
+    # A REPEATED field label is a record list, independent of punctuation
+    # (rounds 15-16 probes: "customer=Alice ...; customer=Bob ..." and
+    # "customer: Alice ...; customer: Bob ...") — one aggregate states each
+    # field once, so "p50=120ms p95=340ms" and "p50: 120ms p95: 340ms" stay
+    # valid (labels distinct). Labels start with a letter so clock times
+    # ("10:00 and 10:45") never count, and URL schemes are excluded.
+    labels = [
+        label.lower()
+        for label in re.findall(r"\b([A-Za-z_]\w*)\s*[=:]", stripped)
+        if label.lower() not in ("http", "https")
+    ]
+    return len(labels) >= 2 and len(set(labels)) < len(labels)
 
 
 # Error-envelope shapes: a JSON error key or an HTTP 4xx/5xx status inside an
@@ -3704,9 +3710,6 @@ def _lane_answer_contract_violations(
     for lane_id, contract in contracts.items():
         if lane_id not in provided or not isinstance(contract, Mapping):
             continue
-        schema = contract.get("response_model_schema")
-        if not isinstance(schema, Mapping):
-            continue
         contract_id = str(contract.get("contract_id") or "")
         output = provided[lane_id]
         if not isinstance(output, Mapping):
@@ -3718,15 +3721,27 @@ def _lane_answer_contract_violations(
                 }
             )
             continue
-        # The data boundary scan runs INDEPENDENTLY of schema validity
-        # (round-14): the data lane's fail-closed guarantee must hold even
-        # for a legacy record whose persisted schema is invalid — schema
-        # unenforceability never disables the policy scan.
+        # The data boundary scan runs INDEPENDENTLY of schema shape AND
+        # validity (rounds 14 and 16): the data lane's fail-closed guarantee
+        # is keyed on the contract identity, so a legacy record whose
+        # persisted schema is missing, non-mapping, or invalid still gets the
+        # policy scan — schema unenforceability never disables it.
         boundary_errors = (
             _data_evidence_boundary_violations(output)
             if contract_id == _DATA_EVIDENCE_CONTRACT_ID
             else []
         )
+        schema = contract.get("response_model_schema")
+        if not isinstance(schema, Mapping):
+            if boundary_errors:
+                violations.append(
+                    {
+                        "lane_id": lane_id,
+                        "contract_id": contract_id,
+                        "errors": boundary_errors,
+                    }
+                )
+            continue
         # Belt for records persisted before registration validated schemas
         # (round-12): an invalid registered schema must degrade to
         # "unenforced" — the child never received an enforceable form — not

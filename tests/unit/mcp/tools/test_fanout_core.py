@@ -2935,6 +2935,96 @@ def test_accumulated_violations_are_scrubbed_before_partial_persistence(
     assert "sk-live-555" not in persisted
 
 
+def test_colon_delimited_repeated_records_are_rejected() -> None:
+    """Repeated-record detection is punctuation-independent (round-16)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "customer: Alice Kim tier: premium; customer: Bob Lee tier: free"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("row-shaped" in error for error in errors)
+
+    for clean in (
+        "p50: 120ms p95: 340ms max: 890ms",
+        "between 10:00 and 10:45 KST",
+        "sources: https://a.example and https://b.example",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == [], clean
+
+
+def test_non_mapping_legacy_schema_keeps_data_boundary_scan() -> None:
+    """The data policy scan is keyed on contract identity, not schema shape.
+
+    Bot-review round-16 probe: response_model_schema="invalid" skipped the
+    boundary scan entirely, accepting email/token content.
+    """
+    from ouroboros.mcp.tools.subagent import _lane_answer_contract_violations
+
+    legacy_contracts = {
+        "data_context": {
+            "contract_id": "data_evidence_answer.v1",
+            "response_model_schema": "invalid",
+        }
+    }
+    pii_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Contact alice@example.com token=sk-live-777",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    violations = _lane_answer_contract_violations(legacy_contracts, {"data_context": pii_output})
+    assert [item["lane_id"] for item in violations] == ["data_context"]
+    assert any("raw evidence" in error for error in violations[0]["errors"])
+
+
+@pytest.mark.asyncio
+async def test_plugin_lateral_envelope_carries_reentry_identity(tmp_path: Any) -> None:
+    """The plugin lateral transport gets the same durable re-entry contract.
+
+    Bot-review round-16 probe: the plugin envelope returned neither
+    fanout_id nor correlation key and created no record, making re-entry
+    unavailable on that transport.
+    """
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+        fanout_registry=registry,
+    )
+    result = await handler.handle(
+        {
+            "problem_context": "stuck on a milestone question",
+            "current_approach": "keep asking the same thing",
+            "personas": ["researcher", "contrarian"],
+        }
+    )
+    assert result.is_ok, result
+    meta = result.unwrap().meta
+    assert meta["dispatch_mode"] == "plugin"
+    fanout_id = meta["fanout_id"]
+    assert meta["result_correlation_key"] == "context.persona"
+    owner_session = meta["session_id"]
+    assert owner_session.startswith("lateral-")
+
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.session_id == owner_session
+
+    out = submit_fanout_results(
+        registry,
+        session_id=owner_session,
+        correlation_key="context.persona",
+        results=[
+            {"key": "researcher", "content": "researcher-out"},
+            {"key": "contrarian", "content": "contrarian-out"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
@@ -3002,9 +3092,15 @@ async def test_lateral_handler_registers_fanout_and_submit_tool_synthesizes(
     fanout_id = meta["fanout_id"]
     assert meta["host_action"] == "process_payloads_sequentially"
 
+    # Round-16 ownership boundary: sessionless lateral dispatches stamp a
+    # generated owner token that the submitter must echo.
+    owner_session = meta["session_id"]
+    assert owner_session.startswith("lateral-")
+
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
         {
+            "session_id": owner_session,
             "correlation_key": "context.persona",
             "fanout_id": fanout_id,
             "results": [{"key": p, "content": f"{p}-out"} for p in personas],
@@ -3013,6 +3109,19 @@ async def test_lateral_handler_registers_fanout_and_submit_tool_synthesizes(
     assert submit_result.is_ok, submit_result
     out = submit_result.unwrap().meta
     assert out["status"] == "complete"
+
+    # A caller WITHOUT the stamped owner token is rejected — the boundary
+    # the generated identity exists to enforce.
+    foreign = await submit.handle(
+        {
+            "session_id": "some-other-session",
+            "correlation_key": "context.persona",
+            "fanout_id": fanout_id,
+            "results": [],
+        }
+    )
+    assert foreign.is_ok
+    assert foreign.unwrap().meta["status"] == "correlation_mismatch"
     assert out["result"]["ready_for_synthesis"] is True
 
 
