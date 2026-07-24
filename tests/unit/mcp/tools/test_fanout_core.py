@@ -4623,6 +4623,106 @@ def test_allof_routed_ref_cycle_is_rejected() -> None:
     assert _enforceable_lane_contract(acyclic)
 
 
+def test_alphabetic_credential_assignment_is_rejected() -> None:
+    """api_key=supersecret is a secret, digits or not (round-34 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = _minimal_data_output("42 accounts; api_key=supersecret")
+    errors = _data_evidence_boundary_violations(probe)
+    assert any("credential-assignment" in error for error in errors)
+
+    clean = _minimal_data_output("42 accounts use api keys; 12% rotated this month")
+    assert _data_evidence_boundary_violations(clean) == []
+
+
+def test_hyphenated_identity_rows_are_rejected() -> None:
+    """user-123 style ids mark identity rows (round-34 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = _minimal_data_output("user-123 premium 34, user-456 free 12")
+    errors = _data_evidence_boundary_violations(probe)
+    assert any("row-shaped" in error for error in errors)
+
+    clean = _minimal_data_output("region us-east 34, region eu-west 12")
+    assert _data_evidence_boundary_violations(clean) == []
+
+
+def test_bare_http_failure_status_is_not_evidence() -> None:
+    """403 Forbidden without an HTTP prefix rejects (round-34 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = _minimal_data_output("403 Forbidden")
+    probe["evidence"][0]["query_summary"] = "GET metrics returned 403 Forbidden"
+    errors = _data_evidence_boundary_violations(probe)
+    assert any("error-shaped" in error for error in errors)
+
+    clean = _minimal_data_output("p95 latency 403ms across 12k calls")
+    assert _data_evidence_boundary_violations(clean) == []
+
+
+def test_long_local_ref_chains_stay_enforceable() -> None:
+    """Valid deep ref chains are not depth-capped away (round-34 probe)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    defs: dict[str, Any] = {}
+    for i in range(8):
+        defs[f"d{i}"] = {"$ref": f"#/$defs/d{i + 1}"}
+    defs["d8"] = {"type": "string", "const": "leaf"}
+    chain_contract = {
+        "contract_id": "deep_chain.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["payload"],
+            "properties": {"payload": {"$ref": "#/$defs/d0"}},
+            "$defs": defs,
+        },
+    }
+    assert _enforceable_lane_contract(chain_contract)
+
+
+def test_graphql_identity_detection_is_case_insensitive() -> None:
+    """{ Users { ID Name } } rejects like its lowercase form (round-34)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    proposal = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "graphql_api",
+                "query": "{ Users { ID Name Plan } }",
+                "expected_decision": "n/a",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    errors = _data_evidence_boundary_violations(proposal)
+    assert any("identity" in error for error in errors)
+
+
+def test_known_tool_grammar_matches_safe_identifier_grammar(monkeypatch: Any) -> None:
+    """Configured tool names round-trip the identifier contract (round-34)."""
+    monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "token:usage_v2,token_usage_v2")
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-grammar-align",
+        question="Which plan tier do most active users hit?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    lanes = {lane["lane_id"]: lane for lane in meta["question_advisory_request"]["lanes"]}
+    # The colon form is filtered out; the aligned form survives and is NOT
+    # credential-shaped at re-entry.
+    assert lanes["data_context"]["known_data_tools"] == ["token_usage_v2"]
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

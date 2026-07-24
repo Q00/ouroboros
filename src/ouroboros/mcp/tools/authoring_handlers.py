@@ -730,7 +730,10 @@ def _build_question_advisory_request(
 
 
 # Known data tools from the environment are identifiers, not free text.
-_KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# Aligned with the safe-identifier grammar used at re-entry (round-34): a
+# colon would read as a credential assignment there, so it is not part of
+# the tool-name grammar.
+_KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 _MAX_KNOWN_DATA_TOOLS = 16
 
 

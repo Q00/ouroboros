@@ -3329,6 +3329,7 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
     from ouroboros.orchestrator.capabilities.interview_schemas import (
         DATA_EVIDENCE_AUTH_HEADER_PATTERN,
         DATA_EVIDENCE_AWS_KEY_PATTERN,
+        DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN,
         DATA_EVIDENCE_EMAIL_PATTERN,
         DATA_EVIDENCE_PASSWORD_PATTERN,
         DATA_EVIDENCE_PHONE_PATTERN,
@@ -3346,6 +3347,10 @@ def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...
         (
             "password-assignment-shaped (secret)",
             re.compile(DATA_EVIDENCE_PASSWORD_PATTERN, re.IGNORECASE),
+        ),
+        (
+            "credential-assignment-shaped (secret)",
+            re.compile(DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN, re.IGNORECASE),
         ),
         # AWS access-key ids are uppercase by definition; case-insensitive
         # matching would false-positive on ordinary prose.
@@ -3477,7 +3482,7 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     ALL of whose branches declare one (a disjunction forces objects only
     when every alternative does). Bounded recursion keeps this cycle-safe.
     """
-    if depth > 6:
+    if depth > 32:
         return False
     if not isinstance(node, Mapping):
         return False
@@ -3527,12 +3532,17 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
     ``$ref``, and ``None`` when a hop cannot be resolved locally.
     """
     node: Any = start
-    for _hop in range(8):
+    seen: set[str] = set()
+    # Visited-based, not hop-bounded (round-34: a valid eight-hop chain was
+    # silently dropped): ref cycles are already rejected by the graph
+    # check, so termination is guaranteed by the visited set.
+    for _hop in range(64):
         if not isinstance(node, Mapping) or "$ref" not in node:
             return node
         ref = node.get("$ref")
-        if not isinstance(ref, str) or not ref.startswith("#/"):
+        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen:
             return None
+        seen.add(ref)
         target: Any = schema
         for raw_part in ref[2:].split("/"):
             part = raw_part.replace("~1", "/").replace("~0", "~")
@@ -3819,9 +3829,20 @@ def _is_row_shaped_value(value: str) -> bool:
         id_shaped_seconds = sum(
             1
             for tokens in tokens_per_segment
-            if len(tokens) > 1 and re.match(r"^[A-Za-z]+\d+$", tokens[1])
+            if len(tokens) > 1 and re.match(r"^[A-Za-z]+[-_]?\d+$", tokens[1])
         )
         if len(firsts) == 1 and id_shaped_seconds >= 2:
+            return True
+        # Segments LED by separator-bearing ids are identity rows too
+        # (round-34: "user-123 premium 34, user-456 free 12") — the
+        # separator requirement keeps bare quarter buckets ("q1 78, q2 82")
+        # valid.
+        id_shaped_firsts = sum(
+            1
+            for tokens in tokens_per_segment
+            if tokens and re.match(r"^[A-Za-z]+[-_]\d+$", tokens[0])
+        )
+        if id_shaped_firsts >= 2:
             return True
     # Segments sharing their FIRST token are repeated records (round-20:
     # "acct u1 premium 34 \\ acct u2 free 12") — grouped aggregates lead each
@@ -3885,6 +3906,10 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # Failure prose variants (round-33: "query failed because permission was
     # denied"); plural metric forms ("queries failed: 12") stay valid.
     r"|\b(query|request|call|lookup|connection)\s+failed\b"
+    # Bare HTTP failure statuses (round-34: "403 Forbidden", "returned 403").
+    r"|\b[45]\d{2}\s+(forbidden|unauthorized|not\s+found|bad\s+request"
+    r"|unavailable|error)\b"
+    r"|\breturned\s+[45]\d{2}\b"
     r"|\b(permission|access|authorization)\s+(was|is)\s+denied\b"
     r"|\bafter\s+\d+\s+(attempts?|retries)\b"
     # Availability narratives and bare status codes (round-29: "database
@@ -4150,6 +4175,7 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         if isinstance(query, str) and re.search(
             r"\{[^{}]*\b(id|email|phone|name|address|ssn)\b[^{}]*\}",
             query,
+            re.IGNORECASE,
         ):
             errors.append(
                 f"proposed_queries[{index}].query: selects raw identity "

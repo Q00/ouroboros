@@ -33,6 +33,12 @@ DATA_EVIDENCE_AUTH_HEADER_PATTERN = (
     r"|\b(authorization|bearer)\s*:\s*\S{6,}"
 )
 DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
+# Credential ASSIGNMENTS are secrets regardless of alphabet (round-34:
+# "api_key=supersecret") — the assignment itself is the signal, no digit
+# entropy required.
+DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
+    r"\b(api[_-]?key|access[_-]?key|secret|token)\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
+)
 DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
 # US Social Security Number shape (round-7 probe): the phone pattern's group
 # widths deliberately do not cover the 3-2-4 split.
