@@ -3305,10 +3305,17 @@ def test_unaggregated_select_projection_is_rejected() -> None:
     )
     assert any("without aggregation" in error for error in errors)
 
+    # Round-21: LIMIT 1 fetches one ROW of raw columns, so it is no longer
+    # an aggregate marker — a scalar fetch aggregates (max(col)) instead.
+    limited_row = _data_evidence_boundary_violations(
+        proposal("SELECT account_id, plan, seats FROM accounts LIMIT 1")
+    )
+    assert any("without aggregation" in error for error in limited_row)
+
     for aggregate in (
         "SELECT plan, count(*) FROM accounts GROUP BY plan",
         "SELECT DISTINCT plan FROM accounts",
-        "SELECT max_seats FROM config LIMIT 1",
+        "SELECT max(max_seats) FROM config",
         "count calls per user last 30d",
     ):
         assert _data_evidence_boundary_violations(proposal(aggregate)) == [], aggregate
@@ -3422,6 +3429,118 @@ def test_code_partial_never_persists_invalid_content(tmp_path: Any) -> None:
     record = registry.load(fanout_id)
     assert record is not None
     assert record.received_results == {}
+
+
+def test_invalid_retry_still_scrubs_legacy_violating_value(tmp_path: Any) -> None:
+    """Scrubbing judges the accumulated value independently (round-21 probe).
+
+    An old invalid data value plus a NEW invalid retry for the same lane
+    previously re-saved the old email because the scrub filter excluded
+    lanes already violating in the current call.
+    """
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    old_invalid = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Contact old-leak@example.com",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": False,
+    }
+    record = FanoutRecord(
+        fanout_id="fanout_retry_scrub",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-retry-scrub",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context", "ambiguity_contrarian", "answer_simplifier"),
+        synthesizer_input={
+            "lane_ids": ["data_context", "ambiguity_contrarian", "answer_simplifier"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        required_keys=("data_context", "ambiguity_contrarian", "answer_simplifier"),
+        received_results={"data_context": old_invalid},
+    )
+    assert registry.save(record)
+
+    new_invalid = {**old_invalid, "finding": "Another bad attempt with new-leak@example.com"}
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-retry-scrub",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": new_invalid},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        ],
+        fanout_id="fanout_retry_scrub",
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    persisted = (tmp_path / "fanout_retry_scrub.json").read_text()
+    assert "old-leak@example.com" not in persisted
+    assert "new-leak@example.com" not in persisted
+
+
+def test_allof_object_root_contract_is_enforceable(tmp_path: Any) -> None:
+    """Every publicly accepted object form is enforceable (round-21 probe).
+
+    An allOf-wrapped object contract was silently dropped at registration,
+    after which {"ok": false} completed with no violation.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    allof_contract = {
+        "contract_id": "allof_root.v1",
+        "response_model_schema": {
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["lane_id", "verdict"],
+                    "properties": {
+                        "lane_id": {"const": "allof_lane"},
+                        "verdict": {"type": "string"},
+                    },
+                },
+                {"required": ["lane_id"]},
+            ]
+        },
+    }
+    assert _enforceable_lane_contract(allof_contract)
+
+    scalar_allof = {
+        "contract_id": "allof_scalar.v1",
+        "response_model_schema": {"allOf": [{"type": "string"}]},
+    }
+    assert not _enforceable_lane_contract(scalar_allof)
+
+    lanes = [
+        {
+            "lane_id": "allof_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": allof_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-allof", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-allof",
+        correlation_key="context.lane_id",
+        results=[{"key": "allof_lane", "content": {"ok": False}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["allof_lane"]
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:

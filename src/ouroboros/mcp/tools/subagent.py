@@ -3423,8 +3423,7 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     # stay permanently partial (bot-review round-13). The root may be
     # expressed through a LOCAL $ref (round-20): the effective root after
     # bounded resolution is what must declare the object type.
-    effective_root = _resolve_local_root(schema)
-    if not isinstance(effective_root, Mapping) or effective_root.get("type") != "object":
+    if not _declares_object_root(schema, schema, depth=0):
         return False
     try:
         Draft202012Validator.check_schema(dict(schema))
@@ -3439,13 +3438,40 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     return _schema_local_refs_resolve(schema)
 
 
-def _resolve_local_root(schema: Mapping[str, Any]) -> Any:
-    """Follow a chain of LOCAL root ``$ref``s to the effective root schema.
+def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> bool:
+    """Whether the effective root necessarily describes an OBJECT.
 
-    Bounded and cycle-safe; returns the schema itself when the root carries
-    no ``$ref``, and ``None`` when a hop cannot be resolved locally.
+    Covers every object form the public lane schema accepts (bot-review
+    rounds 20-21): a literal root ``type: object``, a LOCAL root ``$ref`` to
+    one, and an ``allOf`` conjunction any branch of which declares one —
+    an allOf conjunct with ``type: object`` forces object instances.
+    Bounded recursion keeps this cycle-safe.
     """
-    node: Any = schema
+    if depth > 6:
+        return False
+    resolved = _resolve_local_root_from(schema, node)
+    if not isinstance(resolved, Mapping):
+        return False
+    if resolved.get("type") == "object":
+        return True
+    all_of = resolved.get("allOf")
+    if isinstance(all_of, list):
+        return any(_declares_object_root(schema, branch, depth + 1) for branch in all_of)
+    return False
+
+
+def _resolve_local_root(schema: Mapping[str, Any]) -> Any:
+    """Follow a chain of LOCAL root ``$ref``s to the effective root schema."""
+    return _resolve_local_root_from(schema, schema)
+
+
+def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
+    """Resolve ``start`` (a node of ``schema``) through local ``$ref`` hops.
+
+    Bounded and cycle-safe; returns the node itself when it carries no
+    ``$ref``, and ``None`` when a hop cannot be resolved locally.
+    """
+    node: Any = start
     for _hop in range(8):
         if not isinstance(node, Mapping) or "$ref" not in node:
             return node
@@ -3780,9 +3806,12 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         # accounts"): the aggregate policy binds confirmable payload, so it
         # must aggregate, deduplicate to categories, or fetch a scalar.
         elif isinstance(query, str) and re.match(r"\s*select\b", query, re.IGNORECASE):
+            # LIMIT 1 is NOT an aggregate marker (round-21): it fetches one
+            # ROW of raw columns, not a scalar — a scalar fetch aggregates
+            # (max(col)) instead.
             has_aggregate_marker = re.search(
                 r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
-                r"|\bgroup\s+by\b|\bdistinct\b|\blimit\s+1\b",
+                r"|\bgroup\s+by\b|\bdistinct\b",
                 query,
                 re.IGNORECASE,
             )
@@ -3790,7 +3819,8 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 errors.append(
                     f"proposed_queries[{index}].query: a SELECT projection "
                     "without aggregation returns raw rows; use "
-                    "COUNT/AVG/GROUP BY/DISTINCT (or LIMIT 1 for a scalar)"
+                    "COUNT/AVG/GROUP BY/DISTINCT (a scalar fetch is "
+                    "max(col), not LIMIT 1)"
                 )
         if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
             errors.append(
@@ -4308,15 +4338,18 @@ def _submit_fanout_results_locked(
     # a partial or finalize=false re-save. Violations found in the
     # accumulated mapping are scrubbed here, reported alongside the
     # current-call ones, and their required lanes reopen as missing.
-    accumulated_violations = [
-        item
-        for item in _lane_answer_contract_violations(contracts, provided)
-        if item["lane_id"] not in violating_lanes
-    ]
+    # Scrubbing considers the accumulated value INDEPENDENTLY of the current
+    # call (bot-review round-21): when a lane's replacement ALSO violates,
+    # the old violating value it failed to replace must still be scrubbed —
+    # only the violation REPORT is deduplicated per lane.
+    accumulated_violations = _lane_answer_contract_violations(contracts, provided)
     if accumulated_violations:
         scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
         provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
-        contract_violations = [*contract_violations, *accumulated_violations]
+        contract_violations = [
+            *contract_violations,
+            *[item for item in accumulated_violations if item["lane_id"] not in violating_lanes],
+        ]
 
     # Kind-specific content validation runs before even PARTIAL persistence
     # for code investigations (round-20 follow-up, dormant-hardening): a
