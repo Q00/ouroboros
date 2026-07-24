@@ -240,13 +240,19 @@ def _build_tool_signature_with_aliases(
             }
             if p.required:
                 field_kwargs["default"] = ...
-            elif p.default is None:
-                field_kwargs["default_factory"] = lambda: None
             else:
                 field_kwargs["default"] = p.default
+                if p.default is None:
+                    field_kwargs["json_schema_extra"] = lambda schema, extra=schema_extra: (
+                        schema.pop("default", None),
+                        schema.update(extra),
+                    )[-1]
             default = Field(**field_kwargs)
         elif not p.required and p.default is None:
-            default = Field(default_factory=lambda: None)
+            default = Field(
+                default=None,
+                json_schema_extra=lambda schema: schema.pop("default", None),
+            )
 
         if p.required:
             sig_params.append(
@@ -290,7 +296,7 @@ def _validate_parameter_constraints(
         if parameter.name not in arguments:
             continue
         value = arguments[parameter.name]
-        if parameter.enum is not None and value not in parameter.enum:
+        if value is not None and parameter.enum is not None and value not in parameter.enum:
             raise ValueError(
                 f"Invalid value for {parameter.name}: expected one of {parameter.enum}"
             )
@@ -301,7 +307,8 @@ def _validate_parameter_constraints(
         if expected_type is None:
             continue
         if any(
-            not isinstance(item, expected_type) or (expected_type is int and isinstance(item, bool))
+            not isinstance(item, expected_type)
+            or (item_type in {"integer", "number"} and isinstance(item, bool))
             for item in value
         ):
             raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")

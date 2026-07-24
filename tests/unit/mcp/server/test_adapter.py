@@ -1438,6 +1438,17 @@ class TestServeTransport:
                             default=None,
                             description="Optional input",
                         ),
+                        MCPToolParameter(
+                            name="optional_mode",
+                            type=ToolInputType.STRING,
+                            enum=("fast", "safe"),
+                            default=None,
+                        ),
+                        MCPToolParameter(
+                            name="scores",
+                            type=ToolInputType.ARRAY,
+                            items={"type": "number"},
+                        ),
                     ),
                 )
 
@@ -1457,12 +1468,32 @@ class TestServeTransport:
 
         await adapter._mcp_server.call_tool(
             "optional_tool",
-            {"required_input": "provided"},
+            {"required_input": "provided", "scores": [1.5]},
         )
 
         handler.handle_mock.assert_awaited_once_with(
-            {"required_input": "provided", "optional_input": None}
+            {
+                "required_input": "provided",
+                "optional_input": None,
+                "optional_mode": None,
+                "scores": [1.5],
+            }
         )
+
+        with pytest.raises(Exception, match="Invalid value for optional_mode"):
+            await adapter._mcp_server.call_tool(
+                "optional_tool",
+                {
+                    "required_input": "provided",
+                    "optional_mode": "unsafe",
+                    "scores": [1.5],
+                },
+            )
+        with pytest.raises(Exception, match="Invalid items for scores"):
+            await adapter._mcp_server.call_tool(
+                "optional_tool",
+                {"required_input": "provided", "scores": [True]},
+            )
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
