@@ -39,6 +39,7 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    _atomic_write_text,
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
@@ -1180,7 +1181,14 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        filepath.write_text(json_content, encoding="utf-8")
+        durability_confirmed = _atomic_write_text(filepath, json_content)
+
+        if not durability_confirmed:
+            log.warning(
+                "pm.seed_save_durability_uncertain",
+                path=str(filepath),
+                pm_id=seed.pm_id,
+            )
 
         log.info(
             "pm.seed_saved",
