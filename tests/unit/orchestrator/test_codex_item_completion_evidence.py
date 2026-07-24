@@ -281,6 +281,29 @@ class TestCodexCompletionReviewRoundOne:
             is False
         )
 
+    def test_cancelled_item_with_stale_nested_completed_is_never_success(self) -> None:
+        """Cancellation must win over a stale nested completed status."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_6",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "cancelled",
+                "result": {"status": "completed", "output": "partial"},
+            },
+        }
+
+        messages = runtime._convert_event(event, current_handle=None)
+
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True, (
+            "a cancelled item must never be laundered into success by stale nested metadata"
+        )
+        assert _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0])) is False
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")

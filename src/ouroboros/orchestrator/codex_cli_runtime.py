@@ -151,7 +151,23 @@ _TOOL_STARTED_RUNTIME_EVENT_TYPE = "tool.started"
 _ITEM_METADATA_CONTAINER_KEYS = ("output", "result", "metadata", "data")
 # Explicit status strings. Anything outside both sets is treated as unknown
 # and produces no success claim (fail closed, #1692 review blocker 1).
-_ITEM_FAILURE_STATUSES = frozenset({"failed", "failure", "error", "errored"})
+_ITEM_FAILURE_STATUSES = frozenset(
+    {
+        "failed",
+        "failure",
+        "error",
+        "errored",
+        # Non-success terminal states: a cancelled or interrupted item must
+        # never be laundered into success by a stale nested completed status.
+        "cancelled",
+        "canceled",
+        "aborted",
+        "interrupted",
+        "killed",
+        "timeout",
+        "timed_out",
+    }
+)
 _ITEM_SUCCESS_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
