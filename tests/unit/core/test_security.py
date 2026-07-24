@@ -126,6 +126,8 @@ class TestSensitiveDetection:
             "AKIA" + "A" * 16,
             "ASIA" + "A" * 16,
             "github:ghp_namespaced-credential",
+            "api_key:opaque-provider-credential",
+            "access_token/opaque-provider-credential",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         ):
             assert is_credential_shaped(value) is True

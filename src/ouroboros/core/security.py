@@ -78,6 +78,23 @@ _CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"),
 )
 
+_CREDENTIAL_NAMESPACE_LABELS = frozenset(
+    (
+        *SENSITIVE_FIELD_NAMES,
+        "access_token",
+        "client_secret",
+    )
+)
+
+
+def _is_credential_namespace_label(value: str) -> bool:
+    """Return whether a namespace segment labels a credential-bearing value."""
+
+    label = value.strip().lower().replace("-", "_")
+    return label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
+        ("_key", "_token", "_secret", "_credential")
+    )
+
 
 def is_credential_shaped(value: str) -> bool:
     """Return whether a string matches a high-confidence credential shape.
@@ -95,7 +112,7 @@ def is_credential_shaped(value: str) -> bool:
     candidates = [normalized]
     namespace_parts = [part for part in re.split(r"[:/]", normalized) if part]
     candidates.extend(namespace_parts)
-    if any(part.lower() in {"bearer", "token", "secret"} for part in namespace_parts[:-1]):
+    if any(_is_credential_namespace_label(part) for part in namespace_parts[:-1]):
         return True
     for candidate in candidates:
         lowered = candidate.lower()

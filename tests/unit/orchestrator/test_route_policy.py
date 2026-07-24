@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 import json
+import pickle
 
 import pytest
 
@@ -16,6 +17,7 @@ from ouroboros.orchestrator.route_policy import (
     RouteCandidate,
     RouteDecisionDisposition,
     RouteRegistry,
+    RouteRejection,
     RouteRejectionCode,
     RouteRequirements,
     admit_route,
@@ -259,6 +261,8 @@ def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
         RouteRequirements(required_capabilities={"read"})  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="ordered"):
         RouteRegistry(candidates={_route("unordered", cost=1)})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="ordered"):
+        RouteRejection("rejected", [RouteRejectionCode.DISABLED])  # type: ignore[arg-type]
 
 
 def test_credential_shaped_authority_identity_is_rejected_before_serialization() -> None:
@@ -268,6 +272,8 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "AKIA" + "A" * 16,
         "ASIA" + "A" * 16,
         "github:ghp_namespaced-credential",
+        "api_key:opaque-provider-credential",
+        "access_token/opaque-provider-credential",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
     )
     for identity in credential_shapes:
@@ -327,6 +333,9 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     assert copy.copy(decision) is decision
     assert copy.deepcopy(decision) is decision
     assert decision.selected is original
+
+    with pytest.raises(TypeError, match="pickled"):
+        pickle.dumps(decision)
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:

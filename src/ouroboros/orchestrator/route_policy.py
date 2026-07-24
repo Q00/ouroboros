@@ -307,6 +307,8 @@ class RouteRejection:
     def __post_init__(self) -> None:
         if not _SAFE_ROUTE_ID.fullmatch(self.route_id):
             raise ValueError("route rejection route_id is invalid")
+        if not isinstance(self.reasons, tuple):
+            raise ValueError("route rejection reasons must be an ordered tuple")
         if not self.reasons or len(self.reasons) > MAX_REJECTION_REASONS:
             raise ValueError("route rejection must contain at least one reason")
         if not all(isinstance(reason, RouteRejectionCode) for reason in self.reasons):
@@ -424,6 +426,16 @@ class RouteAdmission:
 
         memo[id(self)] = self
         return self
+
+    def __reduce__(self) -> object:
+        """Reject pickle restoration, which cannot re-run Kernel validation."""
+
+        raise TypeError("RouteAdmission cannot be pickled")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        """Reject protocol-specific pickle restoration as well."""
+
+        raise TypeError("RouteAdmission cannot be pickled")
 
     def __repr__(self) -> str:
         return (

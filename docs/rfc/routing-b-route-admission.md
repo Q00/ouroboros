@@ -88,8 +88,10 @@ The returned `RouteAdmission` is an authorization boundary for a later
 executor: only `selected` on an `admitted` result may be passed to dispatch.
 Admission results are Kernel-produced and validate disposition, selected-route
 membership, eligible/rejected-set coherence, bounded ordered collections, and
-the internal provenance marker. The module deliberately has no provider calls,
-retry/escalation policy, or Final Gate behavior.
+the internal provenance marker. Admissions are sealed value objects: ordinary
+mutation, dataclass replacement, shallow/deep copying, and pickle restoration
+cannot create a new authorization state. The module deliberately has no
+provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
