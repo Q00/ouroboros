@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import copy
 from dataclasses import replace
 import json
@@ -122,6 +123,66 @@ def test_oversized_or_malformed_advisor_order_falls_back_to_kernel_order() -> No
     assert oversized_decision.selected.route_id == "first"
     assert malformed_decision.selected.route_id == "first"
     assert malformed_string_decision.selected.route_id == "first"
+
+
+def test_advisor_callbacks_are_bounded_and_fail_closed() -> None:
+    registry = _registry(
+        _route("first", cost=5, ordinal=0),
+        _route("second", cost=5, ordinal=1),
+    )
+
+    class RaisesDuringIteration(Sequence[str]):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            return "second"
+
+        def __iter__(self):
+            raise RuntimeError("broken advisor")
+
+    class InfiniteAdvisor(Sequence[str]):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            return "second"
+
+        def __iter__(self):
+            while True:
+                yield "second"
+
+    for advisor in (RaisesDuringIteration(), InfiniteAdvisor()):
+        decision = admit_route(
+            registry,
+            RouteRequirements(),
+            advisor_order=advisor,  # type: ignore[arg-type]
+        )
+        assert decision.selected is not None
+        assert decision.selected.route_id == "first"
+
+    class LyingSequence(Sequence[str]):
+        def __len__(self):
+            raise RuntimeError("length is unavailable")
+
+        def __getitem__(self, index):
+            if index == 0:
+                return "second"
+            if index == 1:
+                return "first"
+            raise IndexError(index)
+
+        def __iter__(self):
+            yield "second"
+            yield "first"
+
+    decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=LyingSequence(),  # type: ignore[arg-type]
+    )
+    assert decision.selected is not None
+    assert decision.selected.route_id == "second"
 
 
 def test_required_capabilities_and_harness_allowlist_are_hard_constraints() -> None:
@@ -285,11 +346,13 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "glpat-opaque-provider-credential",
         "hf_opaque-provider-credential",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        "SG." + "A" * 22 + "." + "B" * 43,
+        "hvs." + "A" * 24,
     )
     for identity in credential_shapes:
-        with pytest.raises(ValueError, match="credential-shaped"):
+        with pytest.raises(ValueError, match="stable authority descriptor"):
             _route("credential", cost=1, authority_identity=identity)
-        with pytest.raises(ValueError, match="credential-shaped"):
+        with pytest.raises(ValueError, match="stable authority descriptor"):
             RouteRequirements(pinned_authority_identity=identity)
 
 
@@ -350,6 +413,22 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
 
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(decision)
+
+
+def test_object_protocol_cannot_forge_or_rewrite_admission_state() -> None:
+    original = _route("original", cost=1)
+    outside = _route("outside-registry", cost=2)
+    decision = admit_route(_registry(original), RouteRequirements())
+
+    forged = object.__new__(RouteAdmission)
+    object.__setattr__(forged, "_sealed_state", object.__getattribute__(decision, "_sealed_state"))
+    with pytest.raises(TypeError, match="unpublished"):
+        _ = forged.admitted
+
+    state = object.__getattribute__(decision, "_sealed_state")
+    object.__setattr__(decision, "_sealed_state", state._replace(selected=outside))
+    with pytest.raises(TypeError, match="unpublished"):
+        _ = decision.selected
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:

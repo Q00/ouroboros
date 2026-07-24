@@ -37,9 +37,15 @@ Each candidate has:
 - `model`, `harness`, and optional `effort`;
 - `cost_units`: non-negative configured relative cost;
 - `persona`, `tool_policy`, and `authority_identity`: explicit route identity
-  dimensions, never inferred from a provider name. Authority identities are
-  opaque non-secret identifiers; credential-shaped values are rejected before
-  serialization;
+  dimensions, never inferred from a provider name. Authority identities use a
+  small allowlisted stable-descriptor grammar (for example
+  `runtime:claude` or `session-a`); opaque values and credential-shaped values
+  are rejected before serialization;
+
+The route contract uses the shared `core.security.is_stable_authority_identity`
+boundary. The process-local execution-authority module retains its separate
+recursive sanitizer for nested authority payloads; it is broader by design and
+does not make free-form route identities admissible.
 - `capabilities`: bounded unique capability tokens;
 - `enabled`: configuration kill switch;
 - `ordinal`: stable configuration order for the final deterministic tie-break.
@@ -73,10 +79,11 @@ cost_units → Advisor rank (equal-cost ties only) → ordinal → route_id
 ```
 
 An unknown or repeated Advisor ID is ignored. If the ranking itself is
-malformed or exceeds its bound, the complete ranking is discarded and the
-Kernel uses its non-Advisor deterministic order; advisory input can therefore
-never veto admission. An Advisor cannot make an expensive route win over a
-cheaper eligible route, and cannot dispatch a route absent from the registry.
+malformed, raises while iterating, or exceeds its bound, the complete ranking is
+discarded after consuming at most `MAX_ADVISOR_ORDER + 1` values and the Kernel
+uses its non-Advisor deterministic order; advisory input can therefore never
+veto admission. An Advisor cannot make an expensive route win over a cheaper
+eligible route, and cannot dispatch a route absent from the registry.
 Repeating the same registry, requirements, and Advisor order produces
 byte-equivalent contract data.
 
@@ -88,9 +95,12 @@ The returned `RouteAdmission` is an authorization boundary for a later
 executor: only `selected` on an `admitted` result may be passed to dispatch.
 Admission results are Kernel-produced and validate disposition, selected-route
 membership, eligible/rejected-set coherence, and bounded ordered collections.
-Admissions are sealed value objects: ordinary
-mutation, dataclass replacement, shallow/deep copying, and pickle restoration
-cannot create a new authorization state. The module deliberately has no
+Admissions are sealed value objects: ordinary mutation, object-protocol
+construction/replacement, dataclass replacement, shallow/deep copying, and
+pickle restoration cannot create a new authorization state. The Kernel checks a
+private immutable publication state and candidate fingerprints on every public
+projection, so an object created or rewritten with `object.__new__` or
+`object.__setattr__` is not an admission. The module deliberately has no
 provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices

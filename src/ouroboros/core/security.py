@@ -75,6 +75,9 @@ _CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^pypi-"),
     re.compile(r"^glpat-"),
     re.compile(r"^hf_"),
+    # SendGrid API keys and HashiCorp Vault service tokens.
+    re.compile(r"^SG\.[A-Za-z0-9]{22}\.[A-Za-z0-9]{43}$"),
+    re.compile(r"^hvs\.[A-Za-z0-9_-]{16,}$"),
     # Google API keys, AWS access-key IDs, and JWT-shaped bearer values.
     re.compile(r"^AIza[A-Za-z0-9_-]{35,}$"),
     re.compile(r"^AKIA[0-9A-Z]{16}$"),
@@ -96,6 +99,14 @@ _CREDENTIAL_COMPOUND_PREFIX = re.compile(
     r"token|credential|credentials|auth|authorization|key|private|bearer|passwd)"
     r"[-_]"
     r"(?=(?:opaque|credential|secret|token|key|value))"
+)
+
+# Authority identities are descriptors, not opaque values.  Requiring a known
+# stable namespace keeps this boundary fail-closed without trying to enumerate
+# every provider's credential prefix (for example SendGrid or Vault tokens).
+_STABLE_AUTHORITY_IDENTITY = re.compile(
+    r"^(?:authority|session|runtime|workspace|process|execution|project|tenant|system|default)"
+    r"(?:[-_:/\.][A-Za-z0-9][A-Za-z0-9._:/-]{0,238})?$",
 )
 
 
@@ -125,6 +136,14 @@ def is_credential_shaped(value: str) -> bool:
     if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
         return True
     candidates = [normalized]
+    # Preserve the opaque payload after a stable namespace delimiter so a
+    # descriptor such as ``runtime:SG.<id>.<secret>`` cannot hide a credential
+    # from the shape matcher when the namespace is split below.
+    candidates.extend(
+        normalized.split(delimiter, 1)[1]
+        for delimiter in (":", "/")
+        if delimiter in normalized
+    )
     namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
     candidates.extend(namespace_parts)
     if any(_is_credential_namespace_label(part) for part in namespace_parts[:-1]):
@@ -136,6 +155,24 @@ def is_credential_shaped(value: str) -> bool:
         if any(pattern.match(candidate) for pattern in _CREDENTIAL_SHAPE_PATTERNS):
             return True
     return False
+
+
+def is_stable_authority_identity(value: str) -> bool:
+    """Return whether ``value`` is an allowlisted non-secret descriptor.
+
+    Route authority identities intentionally use a small, stable namespace
+    vocabulary (``runtime:claude``, ``session-a``, ``authority-default``).  A
+    free-form opaque token is not accepted merely because it is not yet known
+    to the credential denylist; it must first match this descriptor grammar and
+    then pass the shared credential-shape guard.
+    """
+
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return bool(_STABLE_AUTHORITY_IDENTITY.fullmatch(normalized)) and not is_credential_shaped(
+        normalized
+    )
 
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:

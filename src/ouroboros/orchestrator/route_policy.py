@@ -18,8 +18,10 @@ from collections.abc import Iterable, Mapping, Sequence, Set, Sized
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
+from typing import NamedTuple
+import weakref
 
-from ouroboros.core.security import is_credential_shaped
+from ouroboros.core.security import is_stable_authority_identity
 
 ROUTE_CONTRACT_VERSION = 1
 MAX_ROUTE_ID_CHARS = 160
@@ -316,6 +318,49 @@ class RouteRejection:
         return {"route_id": self.route_id, "reasons": [reason.value for reason in self.reasons]}
 
 
+class _AdmissionState(NamedTuple):
+    """Immutable Kernel state retained behind the admission boundary."""
+
+    disposition: RouteDecisionDisposition
+    selected: RouteCandidate | None
+    selected_fingerprint: tuple[object, ...] | None
+    eligible_route_ids: tuple[str, ...]
+    rejections: tuple[RouteRejection, ...]
+    rejection_fingerprints: tuple[tuple[object, ...], ...]
+    reason: str
+
+
+# Keep a weak reference plus immutable state so a forged object's id cannot be
+# recycled into a previously published authorization, without leaking every
+# admission ever produced.  The mapping is intentionally private; callers
+# receive only the immutable projection below, never the state registry.
+_TRUSTED_ADMISSIONS: dict[
+    int, tuple[weakref.ReferenceType[RouteAdmission], _AdmissionState]
+] = {}
+
+
+def _candidate_fingerprint(candidate: RouteCandidate | None) -> tuple[object, ...] | None:
+    if candidate is None:
+        return None
+    return (
+        candidate.route_id,
+        candidate.model,
+        candidate.harness,
+        candidate.effort,
+        candidate.cost_units,
+        candidate.persona,
+        candidate.tool_policy,
+        candidate.authority_identity,
+        tuple(candidate.capabilities),
+        candidate.enabled,
+        candidate.ordinal,
+    )
+
+
+def _rejection_fingerprint(rejection: RouteRejection) -> tuple[object, ...]:
+    return (rejection.route_id, tuple(reason.value for reason in rejection.reasons))
+
+
 class RouteAdmission:
     """Deterministic Kernel result; only ``selected`` may enter dispatch.
 
@@ -326,19 +371,7 @@ class RouteAdmission:
     and seals results through its private publication path.
     """
 
-    __slots__ = (
-        "disposition",
-        "selected",
-        "eligible_route_ids",
-        "rejections",
-        "reason",
-    )
-
-    disposition: RouteDecisionDisposition
-    selected: RouteCandidate | None
-    eligible_route_ids: tuple[str, ...]
-    rejections: tuple[RouteRejection, ...]
-    reason: str
+    __slots__ = ("_sealed_state", "__weakref__")
 
     def __new__(cls, *_args: object, **_kwargs: object) -> RouteAdmission:
         raise TypeError("route admission must be produced by the Admission Kernel")
@@ -352,6 +385,56 @@ class RouteAdmission:
         reason: str,
     ) -> None:
         raise TypeError("route admission must be produced by the Admission Kernel")
+
+    @staticmethod
+    def _trusted_state(instance: RouteAdmission) -> _AdmissionState:
+        """Return state only for an object published by the current Kernel.
+
+        ``object.__new__`` and ``object.__setattr__`` intentionally bypass a
+        Python class' normal guards.  Every public projection therefore checks
+        both the private publication registry and the immutable state identity.
+        A caller can manufacture an object-shaped value, but it cannot make that
+        value an authorization without going through ``admit_route``.
+        """
+
+        try:
+            state = object.__getattribute__(instance, "_sealed_state")
+        except AttributeError as exc:
+            raise TypeError("unpublished route admission") from exc
+        entry = _TRUSTED_ADMISSIONS.get(id(instance))
+        if entry is None or entry[0]() is not instance or entry[1] is not state:
+            raise TypeError("unpublished route admission")
+        if not isinstance(state, _AdmissionState):
+            raise TypeError("invalid route admission state")
+        if state.selected is not None and _candidate_fingerprint(state.selected) != (
+            state.selected_fingerprint
+        ):
+            raise TypeError("route admission state was mutated")
+        if tuple(_rejection_fingerprint(item) for item in state.rejections) != (
+            state.rejection_fingerprints
+        ):
+            raise TypeError("route admission state was mutated")
+        return state
+
+    @property
+    def disposition(self) -> RouteDecisionDisposition:
+        return self._trusted_state(self).disposition
+
+    @property
+    def selected(self) -> RouteCandidate | None:
+        return self._trusted_state(self).selected
+
+    @property
+    def eligible_route_ids(self) -> tuple[str, ...]:
+        return self._trusted_state(self).eligible_route_ids
+
+    @property
+    def rejections(self) -> tuple[RouteRejection, ...]:
+        return self._trusted_state(self).rejections
+
+    @property
+    def reason(self) -> str:
+        return self._trusted_state(self).reason
 
     @staticmethod
     def _validate(
@@ -412,11 +495,13 @@ class RouteAdmission:
     def __copy__(self) -> RouteAdmission:
         """Return this immutable authorization rather than reconstructing it."""
 
+        self._trusted_state(self)
         return self
 
     def __deepcopy__(self, memo: dict[int, object]) -> RouteAdmission:
         """Return this immutable authorization rather than copying its fields."""
 
+        self._trusted_state(self)
         memo[id(self)] = self
         return self
 
@@ -431,34 +516,33 @@ class RouteAdmission:
         raise TypeError("RouteAdmission cannot be pickled")
 
     def __repr__(self) -> str:
+        state = self._trusted_state(self)
         return (
             "RouteAdmission("
-            f"disposition={self.disposition!r}, "
-            f"selected={self.selected!r}, "
-            f"eligible_route_ids={self.eligible_route_ids!r}, "
-            f"rejections={self.rejections!r}, "
-            f"reason={self.reason!r})"
+            f"disposition={state.disposition!r}, "
+            f"selected={state.selected!r}, "
+            f"eligible_route_ids={state.eligible_route_ids!r}, "
+            f"rejections={state.rejections!r}, "
+            f"reason={state.reason!r})"
         )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RouteAdmission):
             return NotImplemented
-        return (
-            self.disposition == other.disposition
-            and self.selected == other.selected
-            and self.eligible_route_ids == other.eligible_route_ids
-            and self.rejections == other.rejections
-            and self.reason == other.reason
-        )
+        try:
+            return self._trusted_state(self) == self._trusted_state(other)
+        except TypeError:
+            return False
 
     def __hash__(self) -> int:
+        state = self._trusted_state(self)
         return hash(
             (
-                self.disposition,
-                self.selected,
-                self.eligible_route_ids,
-                self.rejections,
-                self.reason,
+                state.disposition,
+                state.selected_fingerprint,
+                state.eligible_route_ids,
+                state.rejection_fingerprints,
+                state.reason,
             )
         )
 
@@ -466,15 +550,16 @@ class RouteAdmission:
     def admitted(self) -> bool:
         """Whether the Admission Kernel authorized one route."""
 
-        return self.disposition is RouteDecisionDisposition.ADMITTED
+        return self._trusted_state(self).disposition is RouteDecisionDisposition.ADMITTED
 
     def to_contract_data(self) -> dict[str, object]:
+        state = self._trusted_state(self)
         return {
-            "disposition": self.disposition.value,
-            "selected_route_id": self.selected.route_id if self.selected else None,
-            "eligible_route_ids": list(self.eligible_route_ids),
-            "rejections": [item.to_contract_data() for item in self.rejections],
-            "reason": self.reason,
+            "disposition": state.disposition.value,
+            "selected_route_id": state.selected.route_id if state.selected else None,
+            "eligible_route_ids": list(state.eligible_route_ids),
+            "rejections": [item.to_contract_data() for item in state.rejections],
+            "reason": state.reason,
         }
 
 
@@ -510,11 +595,17 @@ def admit_route(
 
         RouteAdmission._validate(disposition, selected, eligible_route_ids, rejections, reason)
         instance = object.__new__(RouteAdmission)
-        object.__setattr__(instance, "disposition", disposition)
-        object.__setattr__(instance, "selected", selected)
-        object.__setattr__(instance, "eligible_route_ids", eligible_route_ids)
-        object.__setattr__(instance, "rejections", rejections)
-        object.__setattr__(instance, "reason", reason)
+        state = _AdmissionState(
+            disposition=disposition,
+            selected=selected,
+            selected_fingerprint=_candidate_fingerprint(selected),
+            eligible_route_ids=eligible_route_ids,
+            rejections=rejections,
+            rejection_fingerprints=tuple(_rejection_fingerprint(item) for item in rejections),
+            reason=reason,
+        )
+        object.__setattr__(instance, "_sealed_state", state)
+        _TRUSTED_ADMISSIONS[id(instance)] = (weakref.ref(instance), state)
         return instance
 
     required_capabilities = set(requirements.required_capabilities)
@@ -599,11 +690,21 @@ def _advisor_rank(
         advisor_order, str | bytes | bytearray
     ):
         return {}
-    if len(advisor_order) > MAX_ADVISOR_ORDER:
-        return {}
     known = {candidate.route_id for candidate in registry.candidates}
     ranks: dict[str, int] = {}
-    for value in advisor_order:
+    try:
+        iterator = iter(advisor_order)
+    except Exception:
+        return {}
+    for index in range(MAX_ADVISOR_ORDER + 1):
+        try:
+            value = next(iterator)
+        except StopIteration:
+            break
+        except Exception:
+            return {}
+        if index >= MAX_ADVISOR_ORDER:
+            return {}
         if not isinstance(value, str):
             return {}
         route_id = value.strip()
@@ -629,8 +730,8 @@ def _bounded_token(value: object, *, field: str, pattern: re.Pattern[str]) -> st
 
 def _bounded_identity(value: object, *, field: str) -> str:
     normalized = _bounded_token(value, field=field, pattern=_SAFE_TOKEN)
-    if is_credential_shaped(normalized):
-        raise ValueError(f"{field} is credential-shaped")
+    if not is_stable_authority_identity(normalized):
+        raise ValueError(f"{field} must be a stable authority descriptor")
     return normalized
 
 

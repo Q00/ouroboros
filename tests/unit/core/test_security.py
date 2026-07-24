@@ -17,6 +17,7 @@ from ouroboros.core.security import (
     is_credential_shaped,
     is_sensitive_field,
     is_sensitive_value,
+    is_stable_authority_identity,
     mask_api_key,
     mask_sensitive_value,
     sanitize_for_logging,
@@ -139,12 +140,32 @@ class TestSensitiveDetection:
             "glpat-opaque-provider-credential",
             "hf_opaque-provider-credential",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+            "SG." + "A" * 22 + "." + "B" * 43,
+            "hvs." + "A" * 24,
         ):
             assert is_credential_shaped(value) is True
         assert is_credential_shaped("authority-session-123") is False
         assert is_credential_shaped("github:read") is False
         assert is_credential_shaped("token-budget") is False
         assert is_credential_shaped("auth-plane:default") is False
+
+    def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
+        for value in (
+            "authority-default",
+            "session-a",
+            "runtime:claude",
+            "workspace/project-1",
+            "default",
+        ):
+            assert is_stable_authority_identity(value) is True
+        for value in (
+            "opaque-provider-id",
+            "token-budget",
+            "SG." + "A" * 22 + "." + "B" * 43,
+            "hvs." + "A" * 24,
+            "runtime:SG." + "A" * 22 + "." + "B" * 43,
+        ):
+            assert is_stable_authority_identity(value) is False
 
 
 class TestMaskSensitiveValue:
