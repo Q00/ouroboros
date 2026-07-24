@@ -304,8 +304,8 @@ def test_admission_rejects_non_route_selected_values() -> None:
 
 def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     original = _route("original", cost=1)
-    other = _route("other", cost=2)
-    decision = admit_route(_registry(original, other), RouteRequirements())
+    other = _route("outside-registry", cost=2)
+    decision = admit_route(_registry(original), RouteRequirements())
 
     with pytest.raises(TypeError, match="dataclass"):
         replace(
