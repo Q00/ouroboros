@@ -6228,21 +6228,6 @@ Respond with either ATOMIC or the structured JSON object only.
             runtime_metadata["ac_capsule_fingerprint"] = capsule.fingerprint
             runtime_metadata["ac_session_origin"] = session_origin
             runtime_handle = replace(runtime_handle, metadata=runtime_metadata)
-            # Cache the capsule-bound pre-dispatch handle before entering the
-            # provider boundary.  Runtimes are allowed to return a fresh handle
-            # object on their first message; the cache gives _augment_ac_runtime_handle
-            # an authoritative predecessor from which to carry the capsule,
-            # dispatch, and process-local bindings onto that replacement.
-            runtime_handle = self._remember_ac_runtime_handle(
-                ac_index,
-                runtime_handle,
-                execution_context_id=execution_context_id,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                node_identity=node_identity,
-                retry_attempt=retry_attempt,
-            )
         await self._event_emitter.emit_ac_attempt_dispatched(
             runtime_identity=runtime_identity,
             dispatch_id=dispatch_id,
@@ -6253,6 +6238,21 @@ Respond with either ATOMIC or the structured JSON object only.
             session_origin=session_origin,
             runtime_handle=runtime_handle,
         )
+        if runtime_handle is not None:
+            # Cache only after the dispatch transition is durable.  This still
+            # occurs before provider entry, so a runtime that returns a fresh
+            # handle can inherit the capsule bindings, while an append failure
+            # cannot leave an undurable dispatch ID as the next predecessor.
+            runtime_handle = self._remember_ac_runtime_handle(
+                ac_index,
+                runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         active_dispatch_id = dispatch_id
         sealed_dispatch_ids: set[str] = set()

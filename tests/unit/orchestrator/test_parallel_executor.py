@@ -945,6 +945,53 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     return event_store, appended_events
 
 
+@pytest.mark.asyncio
+async def test_dispatch_append_failure_does_not_cache_phantom_predecessor() -> None:
+    """A failed dispatch append must leave the next attempt with no fake predecessor."""
+    event_store, appended_events = _make_replaying_event_store()
+    fail_dispatch_append = True
+
+    async def _append(event: BaseEvent) -> None:
+        nonlocal fail_dispatch_append
+        if event.type == "execution.ac.attempt.dispatched" and fail_dispatch_append:
+            fail_dispatch_append = False
+            raise RuntimeError("dispatch append failed")
+        appended_events.append(event)
+
+    event_store.append = AsyncMock(side_effect=_append)
+    executor = ParallelACExecutor(
+        adapter=_FinalMessageRuntime("done", native_session_id="session-1"),
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    kwargs = {
+        "ac_index": 0,
+        "ac_content": "Implement AC 1",
+        "session_id": "orch_123",
+        "tools": ["Read"],
+        "system_prompt": "system",
+        "seed_goal": "Ship the feature",
+        "depth": 0,
+        "start_time": datetime.now(UTC),
+    }
+
+    with pytest.raises(RuntimeError, match="dispatch append failed"):
+        await executor._execute_atomic_ac(**kwargs)
+    assert executor._ac_runtime_handles == {}
+
+    result = await executor._execute_atomic_ac(**kwargs)
+
+    assert result.success is True
+    dispatch_events = [
+        event
+        for event in appended_events
+        if event.type == "execution.ac.attempt.dispatched"
+    ]
+    assert len(dispatch_events) == 1
+    assert dispatch_events[0].data["previous_ac_dispatch_id"] is None
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     (

@@ -709,6 +709,12 @@ class ACRuntimeHandleManager:
                     )
                 last_seal_index = max(seal_indices, default=-1)
                 last_dispatch_index = max(dispatch_indices, default=-1)
+                if last_terminal_index >= 0 and any(
+                    index > last_terminal_index for index in matching_indices
+                ):
+                    raise AmbiguousACExecutionError(
+                        "AC terminal lifecycle is absorbing; later runtime events cannot be replayed"
+                    )
                 if last_seal_index > last_terminal_index and last_seal_index >= last_dispatch_index:
                     raise AmbiguousACExecutionError(
                         "AC dispatch boundary is sealed and cannot be replayed"

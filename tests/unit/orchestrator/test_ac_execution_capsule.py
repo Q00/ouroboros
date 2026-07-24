@@ -960,6 +960,64 @@ async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(tm
 
 
 @pytest.mark.asyncio
+async def test_capsule_resume_rejects_runtime_events_after_terminal_lifecycle(tmp_path) -> None:
+    """A terminal AC attempt is absorbing even if a stale resume event follows it."""
+    capsule = _capsule(tmp_path)
+    identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
+    dispatch_id = "a" * 32
+    resumed_handle = RuntimeHandle(
+        backend="codex_cli",
+        native_session_id="stale-resume-session",
+        cwd=str(tmp_path.resolve()),
+        approval_mode="acceptEdits",
+        metadata={
+            **identity.to_metadata(),
+            "ac_capsule_fingerprint": capsule.fingerprint,
+            "ac_dispatch_id": dispatch_id,
+            "process_local_resume_nonce": "nonce-a",
+        },
+    )
+    events = [
+        _lifecycle_event(
+            identity,
+            "execution.ac.capsule.compiled",
+            extra={
+                "capsule_fingerprint": capsule.fingerprint,
+                "capsule_manifest": capsule.manifest.to_contract_data(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.ac.attempt.dispatched",
+            extra={
+                "ac_dispatch_id": dispatch_id,
+                "previous_ac_dispatch_id": None,
+                "capsule_fingerprint": capsule.fingerprint,
+            },
+        ),
+        _lifecycle_event(identity, "execution.session.completed"),
+        _lifecycle_event(
+            identity,
+            "execution.session.resumed",
+            extra={
+                "capsule_fingerprint": capsule.fingerprint,
+                "runtime": resumed_handle.to_persisted_dict(),
+            },
+        ),
+    ]
+    manager = _manager_for_events(events)
+
+    with pytest.raises(AmbiguousACExecutionError, match="terminal lifecycle is absorbing"):
+        await manager._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="execution-1",
+            retry_attempt=0,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce="nonce-a",
+        )
+
+
+@pytest.mark.asyncio
 async def test_capsule_resume_rejects_process_nonce_mismatch(tmp_path) -> None:
     capsule = _capsule(tmp_path)
     identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
