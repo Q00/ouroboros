@@ -1254,6 +1254,53 @@ class TestClaudeSetup:
         warning.assert_called_once()
         assert "decode" in warning.call_args.args[0]
 
+    @pytest.mark.parametrize(
+        "original_content",
+        [
+            '{"mcpServers": {"existing": {}}, "mcpServers": {}}',
+            '{"mcpServers": {"existing": NaN}}',
+        ],
+    )
+    def test_non_standard_mcp_json_warns_without_overwriting(
+        self, tmp_path: Path, original_content: str
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        warning.assert_called_once()
+        assert "Could not parse" in warning.call_args.args[0]
+
+    def test_hard_linked_mcp_json_warns_without_replacing_link(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        managed_config = tmp_path / "managed-mcp.json"
+        original_content = '{"mcpServers": {"managed": {"command": "custom"}}}\n'
+        managed_config.write_text(original_content, encoding="utf-8")
+        claude_config = claude_dir / "mcp.json"
+        claude_config.hardlink_to(managed_config)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+            patch("ouroboros.cli.commands.setup._detect_mcp_entry") as detect,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.stat().st_ino == managed_config.stat().st_ino
+        assert managed_config.read_text(encoding="utf-8") == original_content
+        detect.assert_not_called()
+        warning.assert_called_once()
+        assert "hard-linked" in warning.call_args.args[0]
+
     def test_mcp_directory_creation_failure_warns_without_crashing(self, tmp_path: Path) -> None:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),

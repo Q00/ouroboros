@@ -22,7 +22,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
 from rich.prompt import Prompt
 from rich.table import Table
@@ -62,6 +62,19 @@ from ouroboros.persistence.brownfield import BrownfieldStore
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     """Return the canonical uvx args for the requested Ouroboros package spec."""
     return ["--from", package_spec, "ouroboros", "mcp", "serve"]
+
+
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -122,14 +135,18 @@ def _ensure_claude_mcp_entry() -> None:
     mcp_data: dict[str, object] = {}
     if config_exists:
         try:
-            mcp_data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+            mcp_data = json.loads(
+                mcp_config_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_json_constant,
+            )
         except UnicodeDecodeError:
             print_warning(
                 f"Could not decode {mcp_config_path} as UTF-8 — leaving it untouched. "
                 "Fix the file encoding and re-run setup."
             )
             return
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             print_warning(
                 f"Could not parse {mcp_config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings. Fix the JSON syntax and re-run setup."
@@ -213,7 +230,7 @@ def _ensure_claude_mcp_entry() -> None:
 
     if needs_write:
         try:
-            mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if config_exists else 0o644
+            mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if config_exists else 0o600
             _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2), mode=mode)
         except (OSError, TypeError, ValueError) as exc:
             print_warning(f"Could not write {mcp_config_path} — leaving it untouched: {exc}")
@@ -2601,7 +2618,7 @@ def _bridge_plugin_source_text() -> str | None:
         return None
 
 
-def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
+def _atomic_write_text(path: Path, content: str, *, mode: int = 0o600) -> None:
     """Write *content* to *path* atomically — temp file + ``os.replace``.
 
     Readers always see either the pre-existing file or the final content —
@@ -2615,6 +2632,12 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
     if path.is_symlink():
         raise OSError(f"Refusing to replace symlink: {path}")
 
+    try:
+        if path.stat().st_nlink > 1:
+            raise OSError(f"Refusing to replace hard-linked file: {path}")
+    except FileNotFoundError:
+        pass
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
@@ -2622,15 +2645,15 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
         dir=str(path.parent),
     )
     try:
+        if os.name == "posix":
+            os.fchmod(fd, mode)
+        else:
+            os.chmod(tmp_name, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, path)
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            pass  # e.g. Windows FAT — not fatal
     except OSError:
         try:
             Path(tmp_name).unlink()
