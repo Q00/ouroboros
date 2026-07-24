@@ -3573,23 +3573,37 @@ def _schema_uses_keyword(node: Any, needle: str, *, in_schema: bool = True) -> b
 
 
 def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
-    """Whether every ``$ref`` in ``schema`` resolves inside the document."""
+    """Whether every ``$ref`` in ``schema`` resolves inside the document.
+
+    Traversal is SCHEMA-AWARE like the ``$id`` check (bot-review round-27):
+    a ``$ref`` key inside literal ``const``/``enum`` data is instance
+    content, not a reference, so a contract matching outputs that contain a
+    field named ``$ref`` stays enforceable.
+    """
     refs: list[str] = []
 
-    def _walk(node: Any) -> None:
+    def _walk(node: Any, in_schema: bool) -> None:
         if isinstance(node, Mapping):
             for key, value in node.items():
-                # Every Draft 2020-12 reference form is preflighted
-                # (bot-review round-18): $dynamicRef (and legacy
-                # $recursiveRef) explode at validation exactly like $ref.
-                if key in ("$ref", "$dynamicRef", "$recursiveRef") and isinstance(value, str):
-                    refs.append(value)
-                _walk(value)
+                if in_schema:
+                    # Every Draft 2020-12 reference form is preflighted
+                    # (round-18): $dynamicRef (and legacy $recursiveRef)
+                    # explode at validation exactly like $ref.
+                    if key in ("$ref", "$dynamicRef", "$recursiveRef") and isinstance(value, str):
+                        refs.append(value)
+                    if key in _SCHEMA_DATA_VALUED_KEYWORDS:
+                        continue
+                    if key in _SCHEMA_NAME_MAP_KEYWORDS:
+                        if isinstance(value, Mapping):
+                            for sub in value.values():
+                                _walk(sub, True)
+                        continue
+                _walk(value, in_schema)
         elif isinstance(node, list):
             for value in node:
-                _walk(value)
+                _walk(value, in_schema)
 
-    _walk(schema)
+    _walk(schema, True)
     for ref in refs:
         if ref == "#":
             continue
@@ -3753,7 +3767,12 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # "status=failed code=502", "status: failed; code: 502",
     # "success=false; status_code=503; retries exhausted").
     r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
-    r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b",
+    r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b"
+    # Singular-subject failure narratives (round-27: "request timed out
+    # after 3 attempts"); PLURAL forms are metrics ABOUT failures ("1,240
+    # requests timed out: 0.8%") and stay valid.
+    r"|\b(request|query|connection|call|lookup)\s+timed\s+out\b"
+    r"|\bafter\s+\d+\s+(attempts?|retries)\b",
     re.IGNORECASE,
 )
 

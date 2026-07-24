@@ -4124,6 +4124,44 @@ def test_property_named_dollar_id_is_not_schema_rebasing() -> None:
     assert not _enforceable_lane_contract(keyword_contract)
 
 
+def test_ref_inside_const_data_is_not_a_reference() -> None:
+    """$ref inside literal data is instance content (round-27 probe)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    const_ref_contract = {
+        "contract_id": "const_ref.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["payload"],
+            "properties": {"payload": {"const": {"$ref": "literal-output-value"}}},
+        },
+    }
+    assert _enforceable_lane_contract(const_ref_contract)
+
+    # A REAL unresolvable schema-level ref still rejects.
+    schema_ref_contract = {
+        "contract_id": "schema_ref.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/missing"}},
+        },
+    }
+    assert not _enforceable_lane_contract(schema_ref_contract)
+
+
+def test_singular_failure_narrative_is_not_evidence() -> None:
+    """Failure narratives reject; failure METRICS stay valid (round-27)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "request timed out after 3 attempts"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("error-shaped" in error for error in errors)
+
+    # Plural forms are aggregates ABOUT failures — the legitimate output.
+    metric = "1,240 requests timed out (0.8% of 155k)"
+    assert _data_evidence_boundary_violations(_minimal_data_output(metric)) == []
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
