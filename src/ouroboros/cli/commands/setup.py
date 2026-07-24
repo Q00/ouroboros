@@ -107,6 +107,13 @@ def _ensure_claude_mcp_entry() -> None:
         return
 
     try:
+        if mcp_config_path.is_symlink():
+            print_warning(
+                f"Could not update {mcp_config_path} because it is a symlink — "
+                "leaving it untouched. Update the linked configuration target manually "
+                "and re-run setup."
+            )
+            return
         config_exists = mcp_config_path.exists()
     except OSError as exc:
         print_warning(f"Could not inspect {mcp_config_path} — leaving it untouched: {exc}")
@@ -2604,6 +2611,9 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
     """
     import os
     import tempfile
+
+    if path.is_symlink():
+        raise OSError(f"Refusing to replace symlink: {path}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
