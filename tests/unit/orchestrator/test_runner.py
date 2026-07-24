@@ -1112,6 +1112,42 @@ class TestOrchestratorRunner:
         assert progress_event.data["content_preview"] == "[AC_COMPLETE: 1] Done!"
         assert progress_event.data["progress"]["last_content_preview"] == "[AC_COMPLETE: 1] Done!"
 
+    def test_build_progress_update_keeps_message_runtime_event_type(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        message = AgentMessage(
+            type="assistant",
+            content="Updated src/app.py",
+            data={
+                "subtype": "tool_result",
+                "tool_name": "Edit",
+                "runtime_event_type": "tool.completed",
+            },
+            resume_handle=RuntimeHandle(
+                backend="opencode",
+                native_session_id="oc-session-1",
+                metadata={"runtime_event_type": "tool.started"},
+            ),
+        )
+
+        progress = runner._build_progress_update(message, 3)
+
+        assert progress["runtime_event_type"] == "tool.completed"
+
+    def test_build_tool_called_event_skips_named_tool_results(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        message = AgentMessage(
+            type="assistant",
+            content="Updated src/app.py",
+            tool_name="Edit",
+            data={"subtype": "tool_result"},
+        )
+
+        assert runner._build_tool_called_event("sess_123", message) is None
+
     def test_build_progress_update_extracts_ac_tracking_from_tool_result_payload(
         self,
         runner: OrchestratorRunner,

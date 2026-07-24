@@ -11462,6 +11462,32 @@ class TestParallelACExecutor:
         assert tool_completed.data["tool_result"]["is_error"] is False
         assert tool_completed.data["tool_result"]["meta"]["exit_status"] == 0
 
+    def test_codex_id_bearing_exit_only_test_completion_proves_file_claim(self) -> None:
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        command = "pytest -q tests/test_example.py"
+        messages = tuple(
+            CodexCliRuntime(cli_path="codex", cwd="/tmp/project")._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "cmd-exit-only",
+                        "type": "command_execution",
+                        "command": command,
+                        "exit_code": 0,
+                    },
+                },
+                current_handle=None,
+            )
+        )
+
+        assert _runtime_messages_support_test_claim(
+            value="tests/test_example.py",
+            backed_commands=(command,),
+            messages=messages,
+            task_cwd=None,
+        )
+
     @pytest.mark.asyncio
     async def test_atomic_ac_projects_empty_tool_result_content_into_completion_events(
         self,
