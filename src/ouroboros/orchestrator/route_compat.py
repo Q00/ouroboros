@@ -155,6 +155,38 @@ def _configured_models(
     return configured
 
 
+def _snapshot_router_models(model_router: ModelRouter) -> dict[str, str] | None:
+    """Copy a router catalog with a finite tier bound."""
+
+    raw = model_router.tier_models
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        iterator = iter(raw.items())
+        snapshot: dict[str, str] = {}
+        for index in range(len(MODEL_TIER_LADDER) + 1):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return snapshot
+            except Exception:
+                return None
+            if index >= len(MODEL_TIER_LADDER):
+                return None
+            tier, model = item
+            if (
+                not isinstance(tier, str)
+                or tier in snapshot
+                or tier not in MODEL_TIER_LADDER
+                or not isinstance(model, str)
+            ):
+                return None
+            snapshot[tier] = model
+    except Exception:
+        return None
+    return None
+
+
 def build_route_compat_projection(
     economics: EconomicsConfig,
     *,
@@ -179,9 +211,8 @@ def build_route_compat_projection(
     if model_router.runtime_backend != runtime_backend:
         return None
     configured = _configured_models(economics, runtime_backend=runtime_backend)
-    try:
-        routed = dict(model_router.tier_models)
-    except Exception:
+    routed = _snapshot_router_models(model_router)
+    if routed is None:
         return None
     if routed != configured or not routed:
         return None
