@@ -108,11 +108,18 @@ def test_oversized_or_malformed_advisor_order_falls_back_to_kernel_order() -> No
         RouteRequirements(),
         advisor_order=(object(), "second"),  # type: ignore[arg-type]
     )
+    malformed_string_decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=("second", "x" * 161),
+    )
 
     assert oversized_decision.selected is not None
     assert malformed_decision.selected is not None
+    assert malformed_string_decision.selected is not None
     assert oversized_decision.selected.route_id == "first"
     assert malformed_decision.selected.route_id == "first"
+    assert malformed_string_decision.selected.route_id == "first"
 
 
 def test_required_capabilities_and_harness_allowlist_are_hard_constraints() -> None:
@@ -316,6 +323,10 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
 
     with pytest.raises(AttributeError, match="immutable"):
         decision.selected = other  # type: ignore[misc]
+
+    assert copy.copy(decision) is decision
+    assert copy.deepcopy(decision) is decision
+    assert decision.selected is original
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:

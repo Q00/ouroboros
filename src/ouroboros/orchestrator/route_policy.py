@@ -414,6 +414,17 @@ class RouteAdmission:
     def __delattr__(self, name: str) -> None:
         raise AttributeError("RouteAdmission is immutable")
 
+    def __copy__(self) -> RouteAdmission:
+        """Return this immutable authorization rather than reconstructing it."""
+
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> RouteAdmission:
+        """Return this immutable authorization rather than copying its fields."""
+
+        memo[id(self)] = self
+        return self
+
     def __repr__(self) -> str:
         return (
             "RouteAdmission("
@@ -574,6 +585,8 @@ def _advisor_rank(
         if not isinstance(value, str):
             return {}
         route_id = value.strip()
+        if not _SAFE_ROUTE_ID.fullmatch(route_id):
+            return {}
         if route_id in known and route_id not in ranks:
             ranks[route_id] = len(ranks)
     return ranks
