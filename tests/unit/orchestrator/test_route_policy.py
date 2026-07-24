@@ -277,6 +277,10 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "accessToken:opaqueProviderSecret",
         "clientSecret/opaqueProviderSecret",
         "api_key.opaqueProviderSecret",
+        "access_token_opaque-provider-credential",
+        "access-token-opaque-provider-credential",
+        "glpat-opaque-provider-credential",
+        "hf_opaque-provider-credential",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
     )
     for identity in credential_shapes:
@@ -337,6 +341,7 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     assert copy.deepcopy(decision) is decision
     assert decision.selected is original
     assert not hasattr(decision, "_kernel_token")
+    assert not hasattr(RouteAdmission, "_from_kernel")
 
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(decision)

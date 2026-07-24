@@ -131,6 +131,10 @@ class TestSensitiveDetection:
             "accessToken:opaqueProviderSecret",
             "clientSecret/opaqueProviderSecret",
             "api_key.opaqueProviderSecret",
+            "access_token_opaque-provider-credential",
+            "access-token-opaque-provider-credential",
+            "glpat-opaque-provider-credential",
+            "hf_opaque-provider-credential",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         ):
             assert is_credential_shaped(value) is True

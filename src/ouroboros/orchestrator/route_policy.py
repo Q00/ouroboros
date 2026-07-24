@@ -322,8 +322,8 @@ class RouteAdmission:
     This is intentionally not a dataclass.  Admission is an authority-bearing
     value, so allowing ordinary reconstruction to copy its provenance would
     let callers alter the selected route while retaining Kernel authority. The
-    public constructor never publishes a valid value; the Kernel-only factory
-    validates and seals the result before returning it.
+    public constructor never publishes a valid value; ``admit_route`` validates
+    and seals results through its private publication path.
     """
 
     __slots__ = (
@@ -402,27 +402,6 @@ class RouteAdmission:
             raise ValueError("route admission reason must be non-empty")
         if len(reason) > MAX_ROUTE_FIELD_CHARS:
             raise ValueError("route admission reason exceeds its bound")
-
-    @classmethod
-    def _from_kernel(
-        cls,
-        disposition: RouteDecisionDisposition,
-        selected: RouteCandidate | None,
-        eligible_route_ids: tuple[str, ...],
-        rejections: tuple[RouteRejection, ...],
-        reason: str,
-    ) -> RouteAdmission:
-        """Build a validated admission without exposing transferable state."""
-
-        cls._validate(disposition, selected, eligible_route_ids, rejections, reason)
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "disposition", disposition)
-        object.__setattr__(instance, "selected", selected)
-        object.__setattr__(instance, "eligible_route_ids", eligible_route_ids)
-        object.__setattr__(instance, "rejections", rejections)
-        object.__setattr__(instance, "reason", reason)
-        object.__setattr__(instance, "_sealed", True)
-        return instance
 
     def __setattr__(self, name: str, value: object) -> None:
         if getattr(self, "_sealed", False):
@@ -521,6 +500,26 @@ def admit_route(
     advisor_rank = _advisor_rank(advisor_order, registry)
     eligible: list[RouteCandidate] = []
     rejections: list[RouteRejection] = []
+
+    def publish(
+        disposition: RouteDecisionDisposition,
+        selected: RouteCandidate | None,
+        eligible_route_ids: tuple[str, ...],
+        rejections: tuple[RouteRejection, ...],
+        reason: str,
+    ) -> RouteAdmission:
+        """Validate and seal a result without exposing a minting API."""
+
+        RouteAdmission._validate(disposition, selected, eligible_route_ids, rejections, reason)
+        instance = object.__new__(RouteAdmission)
+        object.__setattr__(instance, "disposition", disposition)
+        object.__setattr__(instance, "selected", selected)
+        object.__setattr__(instance, "eligible_route_ids", eligible_route_ids)
+        object.__setattr__(instance, "rejections", rejections)
+        object.__setattr__(instance, "reason", reason)
+        object.__setattr__(instance, "_sealed", True)
+        return instance
+
     required_capabilities = set(requirements.required_capabilities)
     allowed_harnesses = set(requirements.allowed_harnesses)
 
@@ -578,7 +577,7 @@ def admit_route(
         )
     )
     if not eligible:
-        return RouteAdmission._from_kernel(
+        return publish(
             disposition=RouteDecisionDisposition.BLOCKED,
             selected=None,
             eligible_route_ids=(),
@@ -586,7 +585,7 @@ def admit_route(
             reason="no_eligible_route",
         )
     selected = eligible[0]
-    return RouteAdmission._from_kernel(
+    return publish(
         disposition=RouteDecisionDisposition.ADMITTED,
         selected=selected,
         eligible_route_ids=tuple(candidate.route_id for candidate in eligible),

@@ -71,6 +71,8 @@ _CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^xapp-"),
     re.compile(r"^npm_"),
     re.compile(r"^pypi-"),
+    re.compile(r"^glpat-"),
+    re.compile(r"^hf_"),
     # Google API keys, AWS access-key IDs, and JWT-shaped bearer values.
     re.compile(r"^AIza[A-Za-z0-9_-]{35,}$"),
     re.compile(r"^AKIA[0-9A-Z]{16}$"),
@@ -84,6 +86,13 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
         "access_token",
         "client_secret",
     )
+)
+
+_CREDENTIAL_LABEL_FRAGMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?:password|api[-_]?key|apikey|secret|access[-_]?token|client[-_]?secret|"
+    r"token|credential|auth|authorization|key|private|bearer)"
+    r"(?=[:/._-])"
 )
 
 
@@ -110,6 +119,8 @@ def is_credential_shaped(value: str) -> bool:
     normalized = value.strip()
     if not normalized:
         return False
+    if _CREDENTIAL_LABEL_FRAGMENT.search(normalized):
+        return True
     candidates = [normalized]
     namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
     candidates.extend(namespace_parts)
