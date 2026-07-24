@@ -3424,6 +3424,44 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
         Draft202012Validator.check_schema(dict(schema))
     except Exception:
         return False
+    # Every $ref must resolve WITHIN the document (bot-review round-17): a
+    # meta-schema-valid contract referencing missing #/$defs passes
+    # check_schema but explodes only when validation reaches the ref —
+    # advertising it would make enforcement silently fail open at re-entry.
+    # External/anchor refs are rejected conservatively (contracts must be
+    # self-contained; nothing resolves over the network at re-entry).
+    return _schema_local_refs_resolve(schema)
+
+
+def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
+    """Whether every ``$ref`` in ``schema`` resolves inside the document."""
+    refs: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if key == "$ref" and isinstance(value, str):
+                    refs.append(value)
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(schema)
+    for ref in refs:
+        if ref == "#":
+            continue
+        if not ref.startswith("#/"):
+            return False
+        node: Any = schema
+        for raw_part in ref[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(node, Mapping) and part in node:
+                node = node[part]
+            elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            else:
+                return False
     return True
 
 
@@ -3761,12 +3799,20 @@ def _lane_answer_contract_violations(
             else:
                 errors = sorted(error.message for error in validator.iter_errors(dict(output)))
         except Exception:
+            # An ADVERTISED contract whose validation explodes must fail
+            # CLOSED (bot-review round-17): content that cannot be verified
+            # is not accepted into durable state. Registration now rejects
+            # unresolvable schemas, so this belt only fires for legacy
+            # records — whose retention window expires them.
             log.warning(
-                "fanout.lane_contract.invalid_schema_not_enforced",
+                "fanout.lane_contract.validation_failed_closed",
                 lane_id=lane_id,
                 contract_id=contract_id,
             )
-            errors = []
+            errors = [
+                "contract validation failed (unresolvable or broken schema); "
+                "the output cannot be verified and is not accepted"
+            ]
         errors = [*errors, *boundary_errors]
         if errors:
             violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})

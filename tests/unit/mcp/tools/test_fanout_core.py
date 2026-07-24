@@ -2383,7 +2383,12 @@ def test_unenforceable_contract_shapes_are_never_advertised(tmp_path: Any) -> No
             "response_model_schema": {"type": "objectt"},
         }
     }
-    assert _lane_answer_contract_violations(legacy_contracts, {"bad_lane": {"x": 1}}) == []
+    # Round-17: a legacy ADVERTISED contract whose validation explodes fails
+    # CLOSED — the output cannot be verified, so it is a violation (never a
+    # crash, never silent acceptance).
+    belt = _lane_answer_contract_violations(legacy_contracts, {"bad_lane": {"x": 1}})
+    assert [item["lane_id"] for item in belt] == ["bad_lane"]
+    assert any("cannot be verified" in error for error in belt[0]["errors"])
 
 
 def test_contract_budget_and_delivery_share_one_serialization(tmp_path: Any) -> None:
@@ -3023,6 +3028,123 @@ async def test_plugin_lateral_envelope_carries_reentry_identity(tmp_path: Any) -
         fanout_id=fanout_id,
     )
     assert out["status"] == "complete"
+
+
+def test_unresolvable_ref_contract_is_not_advertised(tmp_path: Any) -> None:
+    """Contract validation never fails open on unresolved $refs (round-17).
+
+    A meta-schema-valid contract referencing missing #/$defs previously
+    registered, then validation exceptions became errors=[] — completing
+    with arbitrary content on an advertised required contract.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    unresolvable_contract = {
+        "contract_id": "future_ref.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["lane_id", "payload"],
+            "properties": {
+                "lane_id": {"const": "ref_lane"},
+                "payload": {"$ref": "#/$defs/missing_definition"},
+            },
+        },
+    }
+    assert not _enforceable_lane_contract(unresolvable_contract)
+
+    # A RESOLVABLE local ref stays enforceable — no false positive.
+    resolvable_contract = {
+        "contract_id": "future_ref_ok.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["lane_id", "payload"],
+            "properties": {
+                "lane_id": {"const": "ref_lane"},
+                "payload": {"$ref": "#/$defs/payload_shape"},
+            },
+            "$defs": {"payload_shape": {"type": "string"}},
+        },
+    }
+    assert _enforceable_lane_contract(resolvable_contract)
+
+    # End-to-end: the unresolvable contract is never advertised, so the lane
+    # completes on the generic shape with no silent-unenforced window.
+    lanes = [
+        {
+            "lane_id": "ref_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": unresolvable_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-ref", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.synthesizer_input.get("lane_answer_contracts", {}) == {}
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-ref",
+        correlation_key="context.lane_id",
+        results=[{"key": "ref_lane", "content": "generic finding"}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+
+
+def test_legacy_unresolvable_ref_record_fails_closed(tmp_path: Any) -> None:
+    """A legacy ADVERTISED-but-broken contract keeps its lane incomplete.
+
+    Bot-review round-17: content that cannot be verified is not accepted —
+    the violation is reported and the required lane stays missing instead of
+    completing unvalidated.
+    """
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    record = FanoutRecord(
+        fanout_id="fanout_legacy_ref",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-legacy-ref",
+        correlation_key="context.lane_id",
+        expected_keys=("ref_lane",),
+        synthesizer_input={
+            "lane_ids": ["ref_lane"],
+            "lane_answer_contracts": {
+                "ref_lane": {
+                    "contract_id": "future_ref.v1",
+                    "response_model_schema": {
+                        "type": "object",
+                        "properties": {"payload": {"$ref": "#/$defs/missing_definition"}},
+                    },
+                }
+            },
+        },
+        required_keys=("ref_lane",),
+    )
+    assert registry.save(record)
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-legacy-ref",
+        correlation_key="context.lane_id",
+        results=[{"key": "ref_lane", "content": {"payload": "anything"}}],
+        fanout_id="fanout_legacy_ref",
+    )
+    assert out["status"] == "partial"
+    assert "ref_lane" in out["missing_required_keys"]
+    violations = out["contract_violations"]
+    assert [item["lane_id"] for item in violations] == ["ref_lane"]
+    assert any("cannot be verified" in error for error in violations[0]["errors"])
+    reloaded = registry.load("fanout_legacy_ref")
+    assert reloaded is not None
+    assert reloaded.completed is False
+    assert reloaded.received_results == {}
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
