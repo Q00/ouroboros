@@ -332,7 +332,6 @@ class RouteAdmission:
         "eligible_route_ids",
         "rejections",
         "reason",
-        "_sealed",
     )
 
     disposition: RouteDecisionDisposition
@@ -340,7 +339,9 @@ class RouteAdmission:
     eligible_route_ids: tuple[str, ...]
     rejections: tuple[RouteRejection, ...]
     reason: str
-    _sealed: bool
+
+    def __new__(cls, *_args: object, **_kwargs: object) -> RouteAdmission:
+        raise TypeError("route admission must be produced by the Admission Kernel")
 
     def __init__(
         self,
@@ -350,8 +351,7 @@ class RouteAdmission:
         rejections: tuple[RouteRejection, ...],
         reason: str,
     ) -> None:
-        self._validate(disposition, selected, eligible_route_ids, rejections, reason)
-        raise ValueError("route admission must be produced by the Admission Kernel")
+        raise TypeError("route admission must be produced by the Admission Kernel")
 
     @staticmethod
     def _validate(
@@ -404,9 +404,7 @@ class RouteAdmission:
             raise ValueError("route admission reason exceeds its bound")
 
     def __setattr__(self, name: str, value: object) -> None:
-        if getattr(self, "_sealed", False):
-            raise AttributeError("RouteAdmission is immutable")
-        object.__setattr__(self, name, value)
+        raise AttributeError("RouteAdmission is immutable")
 
     def __delattr__(self, name: str) -> None:
         raise AttributeError("RouteAdmission is immutable")
@@ -517,7 +515,6 @@ def admit_route(
         object.__setattr__(instance, "eligible_route_ids", eligible_route_ids)
         object.__setattr__(instance, "rejections", rejections)
         object.__setattr__(instance, "reason", reason)
-        object.__setattr__(instance, "_sealed", True)
         return instance
 
     required_capabilities = set(requirements.required_capabilities)

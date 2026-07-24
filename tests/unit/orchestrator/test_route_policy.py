@@ -279,6 +279,9 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "api_key.opaqueProviderSecret",
         "access_token_opaque-provider-credential",
         "access-token-opaque-provider-credential",
+        "credentials:opaquevalue",
+        "credentials_opaquevalue",
+        "passwd:opaquevalue",
         "glpat-opaque-provider-credential",
         "hf_opaque-provider-credential",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
@@ -303,7 +306,7 @@ def test_numeric_contract_fields_are_bounded_and_json_serializable() -> None:
 
 
 def test_admission_rejects_non_route_selected_values() -> None:
-    with pytest.raises(ValueError, match="RouteCandidate"):
+    with pytest.raises(TypeError, match="Admission Kernel"):
         RouteAdmission(
             disposition=RouteDecisionDisposition.ADMITTED,
             selected=object(),  # type: ignore[arg-type]
@@ -312,7 +315,7 @@ def test_admission_rejects_non_route_selected_values() -> None:
             reason="test",
         )
 
-    with pytest.raises(ValueError, match="Admission Kernel"):
+    with pytest.raises(TypeError, match="Admission Kernel"):
         RouteAdmission(
             disposition=RouteDecisionDisposition.ADMITTED,
             selected=_route("fabricated", cost=1),
@@ -342,6 +345,8 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     assert decision.selected is original
     assert not hasattr(decision, "_kernel_token")
     assert not hasattr(RouteAdmission, "_from_kernel")
+    with pytest.raises(TypeError, match="Admission Kernel"):
+        RouteAdmission.__new__(RouteAdmission)
 
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(decision)

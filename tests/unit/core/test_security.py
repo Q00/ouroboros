@@ -133,6 +133,9 @@ class TestSensitiveDetection:
             "api_key.opaqueProviderSecret",
             "access_token_opaque-provider-credential",
             "access-token-opaque-provider-credential",
+            "credentials:opaquevalue",
+            "credentials_opaquevalue",
+            "passwd:opaquevalue",
             "glpat-opaque-provider-credential",
             "hf_opaque-provider-credential",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
@@ -140,6 +143,8 @@ class TestSensitiveDetection:
             assert is_credential_shaped(value) is True
         assert is_credential_shaped("authority-session-123") is False
         assert is_credential_shaped("github:read") is False
+        assert is_credential_shaped("token-budget") is False
+        assert is_credential_shaped("auth-plane:default") is False
 
 
 class TestMaskSensitiveValue:
