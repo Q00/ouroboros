@@ -286,6 +286,7 @@ from ouroboros.orchestrator.level_context import (
     extract_level_context,
     serialize_level_contexts,
 )
+from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 from ouroboros.orchestrator.model_routing import (
     decide_model,
     resolve_execute_model,
@@ -5898,6 +5899,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     dispatch_contract={
                         "backend": getattr(self._adapter, "runtime_backend", None),
                         "tools": list(tools),
+                        # The allow-list is only a projection of the provider
+                        # contract.  Fingerprint the complete canonical catalog
+                        # too, so schema/source changes cannot reuse a dispatch
+                        # authority that merely has the same tool names.
+                        "tool_catalog": serialize_tool_catalog(tool_catalog or ()),
                         "system_prompt": system_prompt,
                         "ac_content": ac_content,
                         "seed_goal": seed_goal,
@@ -6249,6 +6255,22 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         active_dispatch_id = dispatch_id
+        sealed_dispatch_ids: set[str] = set()
+
+        async def _seal_dispatch(dispatch_id_to_seal: str, *, reason: str) -> None:
+            """Seal one provider boundary at most once."""
+            if dispatch_id_to_seal in sealed_dispatch_ids:
+                return
+            await self._event_emitter.emit_ac_dispatch_sealed(
+                runtime_identity=runtime_identity,
+                dispatch_id=dispatch_id_to_seal,
+                execution_id=execution_context_id,
+                session_id=session_id,
+                capsule_fingerprint=capsule.fingerprint,
+                reason=reason,
+            )
+            sealed_dispatch_ids.add(dispatch_id_to_seal)
+
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -6312,12 +6334,8 @@ Respond with either ATOMIC or the structured JSON object only.
                     message_count=dispatch_state.message_count,
                 )
                 clear_cached_runtime_handle = True
-                await self._event_emitter.emit_ac_dispatch_sealed(
-                    runtime_identity=runtime_identity,
-                    dispatch_id=active_dispatch_id,
-                    execution_id=execution_context_id,
-                    session_id=session_id,
-                    capsule_fingerprint=capsule.fingerprint,
+                await _seal_dispatch(
+                    active_dispatch_id,
                     reason="provider stall crossed an uncertain external-effect boundary",
                 )
                 return ACExecutionResult(
@@ -6377,23 +6395,48 @@ Respond with either ATOMIC or the structured JSON object only.
                         if queued_signal.effective_mode is SessionSignalMode.INFORM
                         else render_after_turn_signal_prompt(queued_signal.signal)
                     )
-                    if dispatch_state.runtime_handle is not None:
-                        await self._event_emitter.emit_ac_dispatch_sealed(
-                            runtime_identity=runtime_identity,
-                            dispatch_id=active_dispatch_id,
-                            execution_id=execution_context_id,
-                            session_id=session_id,
-                            capsule_fingerprint=capsule.fingerprint,
-                            reason="completed provider turn superseded by a SessionSignal follow-up",
+                    follow_up_runtime_handle = dispatch_state.runtime_handle
+                    if (
+                        follow_up_runtime_handle is None
+                        or not self._is_resumable_runtime_handle(follow_up_runtime_handle)
+                        or follow_up_runtime_handle.metadata.get("ac_capsule_fingerprint")
+                        != capsule.fingerprint
+                        or follow_up_runtime_handle.metadata.get("ac_dispatch_id")
+                        != active_dispatch_id
+                    ):
+                        await _seal_dispatch(
+                            active_dispatch_id,
+                            reason=(
+                                "completed provider turn cannot accept a SessionSignal "
+                                "without a capsule-bound resumable runtime handle"
+                            ),
                         )
+                        await self._event_store.append(
+                            create_session_signal_rejected_event(
+                                queued_signal.signal,
+                                rejection_code="resumable_runtime_handle_unavailable",
+                                detail=(
+                                    "The active provider did not expose a capsule-bound "
+                                    "resumable runtime handle for this follow-up."
+                                ),
+                                effective_mode=queued_signal.effective_mode,
+                                runtime_backend=signal_target.runtime_backend,
+                                orchestrator_session_id=session_id,
+                            )
+                        )
+                        continue
+
+                    await _seal_dispatch(
+                        active_dispatch_id,
+                        reason="completed provider turn superseded by a SessionSignal follow-up",
+                    )
                     follow_up_dispatch_id = uuid4().hex
-                    if dispatch_state.runtime_handle is not None:
-                        follow_up_metadata = dict(dispatch_state.runtime_handle.metadata)
-                        follow_up_metadata["ac_dispatch_id"] = follow_up_dispatch_id
-                        dispatch_state.runtime_handle = replace(
-                            dispatch_state.runtime_handle,
-                            metadata=follow_up_metadata,
-                        )
+                    follow_up_metadata = dict(follow_up_runtime_handle.metadata)
+                    follow_up_metadata["ac_dispatch_id"] = follow_up_dispatch_id
+                    dispatch_state.runtime_handle = replace(
+                        follow_up_runtime_handle,
+                        metadata=follow_up_metadata,
+                    )
                     await self._event_emitter.emit_ac_attempt_dispatched(
                         runtime_identity=runtime_identity,
                         dispatch_id=follow_up_dispatch_id,
@@ -6460,6 +6503,10 @@ Respond with either ATOMIC or the structured JSON object only.
                                 orchestrator_session_id=session_id,
                             )
                         )
+                        await _seal_dispatch(
+                            follow_up_dispatch_id,
+                            reason="SessionSignal follow-up crossed an uncertain delivery boundary",
+                        )
                         if inform_mode:
                             dispatch_state.success = primary_success
                             dispatch_state.final_message = primary_final_message
@@ -6489,6 +6536,10 @@ Respond with either ATOMIC or the structured JSON object only.
                                 runtime_backend=signal_target.runtime_backend,
                                 orchestrator_session_id=session_id,
                             )
+                        )
+                        await _seal_dispatch(
+                            follow_up_dispatch_id,
+                            reason="SessionSignal follow-up acknowledgement was uncertain",
                         )
                         if inform_mode:
                             dispatch_state.success = primary_success
@@ -6784,16 +6835,19 @@ Respond with either ATOMIC or the structured JSON object only.
             # Cancellation after the durable dispatch event is an uncertain
             # provider-effect boundary.  Shield the seal write so cancellation
             # cannot leave a replayable handle that may resend work.
-            with anyio.CancelScope(shield=True):
-                with contextlib.suppress(Exception):
-                    await self._event_emitter.emit_ac_dispatch_sealed(
-                        runtime_identity=runtime_identity,
-                        dispatch_id=active_dispatch_id,
-                        execution_id=execution_context_id,
-                        session_id=session_id,
-                        capsule_fingerprint=capsule.fingerprint,
+            try:
+                with anyio.CancelScope(shield=True):
+                    await _seal_dispatch(
+                        active_dispatch_id,
                         reason="provider attempt cancelled after dispatch boundary",
                     )
+            except Exception as seal_error:
+                # A cancellation seal is the last durable protection against
+                # replay.  Hiding its failure would leave an entered provider
+                # boundary looking resumable, so surface a fail-closed error.
+                raise RuntimeError(
+                    "AC dispatch cancellation seal failed; refusing replayable recovery"
+                ) from seal_error
             self._remember_ac_runtime_handle(
                 ac_index,
                 dispatch_state.runtime_handle,
@@ -6809,15 +6863,10 @@ Respond with either ATOMIC or the structured JSON object only.
         except Exception as e:
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            with contextlib.suppress(Exception):
-                await self._event_emitter.emit_ac_dispatch_sealed(
-                    runtime_identity=runtime_identity,
-                    dispatch_id=active_dispatch_id,
-                    execution_id=execution_context_id,
-                    session_id=session_id,
-                    capsule_fingerprint=capsule.fingerprint,
-                    reason="provider attempt raised before authoritative terminalization",
-                )
+            await _seal_dispatch(
+                active_dispatch_id,
+                reason="provider attempt raised before authoritative terminalization",
+            )
 
             self._remember_ac_runtime_handle(
                 ac_index,

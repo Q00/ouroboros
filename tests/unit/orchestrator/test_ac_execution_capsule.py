@@ -288,10 +288,35 @@ def test_success_contract_rejects_unbounded_text_before_serialization() -> None:
         ACSuccessContract(verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1))
 
 
-def test_success_contract_rejects_output_assertion_without_command() -> None:
-    """R9 (non-blocking): mirror the spec rule — output_assertion needs a command."""
-    with pytest.raises(ValueError, match="output_assertion requires a verify_command"):
-        ACSuccessContract(output_assertion="OK")
+def test_success_contract_preserves_output_assertion_without_command() -> None:
+    """The public Seed schema permits output-only contracts and capsules preserve them."""
+    contract = ACSuccessContract(output_assertion="OK")
+
+    assert contract.has_success_contract is True
+    assert contract.to_contract_data() == {
+        "verify_command": None,
+        "expected_artifacts": [],
+        "output_assertion": "OK",
+    }
+
+
+def test_runtime_handle_cache_rejects_foreign_provider_before_rebinding() -> None:
+    """A Claude continuity handle must not be relabeled as the Codex runtime."""
+    manager = _manager_for_events([])
+    identity = manager._resolve_ac_runtime_identity(0, execution_context_id="execution-1")
+    manager.runtime_handles[identity.cache_key] = RuntimeHandle(
+        backend="claude",
+        kind="implementation_session",
+        native_session_id="foreign-claude-session",
+        cwd="/tmp/project",
+        approval_mode="acceptEdits",
+    )
+
+    rebound = manager._build_ac_runtime_handle(0, execution_context_id="execution-1")
+
+    assert rebound is not None
+    assert rebound.backend == "codex_cli"
+    assert rebound.native_session_id is None
 
 
 def test_capsule_fingerprint_changes_with_acceptance_authority(tmp_path) -> None:
@@ -348,6 +373,10 @@ def test_capsule_success_contract_override_is_child_local(tmp_path) -> None:
     ("section", "replacement"),
     [
         ("dispatch", {"tools": ["Read"]}),
+        (
+            "dispatch",
+            {"tool_catalog": [{"name": "Read", "description": "changed"}]},
+        ),
         ("dispatch", {"system_prompt": {"identity": "sha256:changed"}}),
         ("dispatch", {"runtime": {"backend": "codex", "permission_mode": "bypass"}}),
         ("policy", {"reasoning_effort": "xhigh"}),
@@ -360,6 +389,10 @@ def test_dispatch_authority_scope_changes_with_execution_inputs(
 ) -> None:
     dispatch = {
         "tools": ["Read", "Edit"],
+        "tool_catalog": [
+            {"name": "Read", "description": "read a file"},
+            {"name": "Edit", "description": "edit a file"},
+        ],
         "system_prompt": {"identity": "sha256:original"},
         "runtime": {"backend": "claude", "permission_mode": "acceptEdits"},
     }

@@ -479,6 +479,24 @@ async def test_fresh_runtime_handle_inherits_pre_dispatch_authority() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancellation_seal_failure_is_fail_closed() -> None:
+    """Cancellation must surface a seal failure instead of leaving replayable state."""
+    store, _events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_CancelledRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    executor._event_emitter.emit_ac_dispatch_sealed = AsyncMock(
+        side_effect=RuntimeError("ledger unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="cancellation seal failed"):
+        await _run_one_ac(executor, is_sub_ac=False)
+
+
+@pytest.mark.asyncio
 async def test_effort_event_store_failure_does_not_abort_ac() -> None:
     """A degraded event store degrades the proof event to a warning, not an AC failure.
 

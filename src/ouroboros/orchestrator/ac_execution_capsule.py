@@ -212,11 +212,6 @@ class ACSuccessContract:
             raise ValueError("success contract verify command is invalid")
         if self.output_assertion is not None and not isinstance(self.output_assertion, str):
             raise ValueError("success contract output assertion is invalid")
-        # Mirror AcceptanceCriterionSpec: an output_assertion has no authoritative
-        # output to assert against without a verify_command, so the projected
-        # capsule contract must not carry that otherwise-unevaluable shape.
-        if self.output_assertion and not self.verify_command:
-            raise ValueError("success contract output_assertion requires a verify_command")
         try:
             artifact_count = len(self.expected_artifacts)
         except TypeError as exc:

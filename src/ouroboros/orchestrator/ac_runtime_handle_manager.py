@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -249,6 +250,98 @@ class ACRuntimeHandleManager:
             metadata=metadata,
         )
 
+    @staticmethod
+    def _canonical_runtime_backend(value: object) -> str | None:
+        """Resolve a runtime backend selector without changing a persisted handle."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return RuntimeHandle(backend=value).backend
+        except ValueError:
+            return None
+
+    def _raw_provider_identity_matches_runtime(
+        self,
+        runtime_handle: RuntimeHandle,
+        *,
+        require_workspace: bool,
+    ) -> bool:
+        """Validate provider identity before AC normalization can overwrite it.
+
+        A persisted handle is provider continuity, not merely configuration.  In
+        particular, ``_build_ac_runtime_handle`` must not turn a Claude handle
+        into a Codex handle (or replace its approval/workspace identity) before
+        the capsule boundary has checked the original values.
+        """
+        expected_backend = self._canonical_runtime_backend(
+            getattr(self._adapter, "runtime_backend", None)
+        )
+        if expected_backend is None:
+            # Without a concrete adapter backend there is no safe comparison to
+            # make (legacy adapters/test doubles); retain the prior behavior.
+            return True
+        if runtime_handle.backend != expected_backend:
+            return False
+
+        # Provider adapters commonly return the generic kind on the first
+        # streamed message; both kinds are valid, but arbitrary persisted kinds
+        # are not an acceptable continuity identity.
+        if runtime_handle.kind not in {_IMPLEMENTATION_SESSION_KIND, "agent_runtime"}:
+            return False
+
+        continuity_values = (
+            runtime_handle.native_session_id,
+            runtime_handle.conversation_id,
+            runtime_handle.previous_response_id,
+            runtime_handle.transcript_path,
+            runtime_handle.server_session_id,
+        )
+        raw_server_session_id = runtime_handle.metadata.get("server_session_id")
+        if raw_server_session_id is not None and (
+            not isinstance(raw_server_session_id, str) or not raw_server_session_id.strip()
+        ):
+            return False
+        if not any(isinstance(value, str) and value.strip() for value in continuity_values):
+            # A configuration-only capsule seed has no provider identity to
+            # resume; its cwd/approval values are intentionally rebound below.
+            return True
+        if any(
+            value is not None and (not isinstance(value, str) or not value.strip())
+            for value in continuity_values
+        ):
+            return False
+
+        expected_approval_mode = getattr(self._adapter, "permission_mode", None)
+        if (
+            isinstance(expected_approval_mode, str)
+            and expected_approval_mode.strip()
+            and runtime_handle.approval_mode is not None
+            and runtime_handle.approval_mode != expected_approval_mode.strip()
+        ):
+            return False
+
+        if require_workspace:
+            expected_workspace = self._task_cwd or getattr(
+                self._adapter,
+                "working_directory",
+                None,
+            )
+            if not isinstance(expected_workspace, (str, os.PathLike)):
+                # Test doubles and legacy adapters may not expose a concrete
+                # workspace; there is no trustworthy value to compare here.
+                return True
+            if not isinstance(runtime_handle.cwd, str) or not runtime_handle.cwd.strip():
+                return False
+            try:
+                if os.path.realpath(os.path.expanduser(runtime_handle.cwd)) != os.path.realpath(
+                    os.path.expanduser(os.fspath(expected_workspace))
+                ):
+                    return False
+            except (OSError, TypeError, ValueError):
+                return False
+
+        return True
+
     def _normalize_ac_runtime_handle(
         self,
         runtime_handle: RuntimeHandle | None,
@@ -265,6 +358,23 @@ class ACRuntimeHandleManager:
     ) -> RuntimeHandle | None:
         """Bind a runtime handle to the active AC scope and reject foreign resumes."""
         if runtime_handle is None:
+            return None
+
+        if not self._raw_provider_identity_matches_runtime(
+            runtime_handle,
+            require_workspace=(
+                require_resume_scope_match and self._is_resumable_runtime_handle(runtime_handle)
+            ),
+        ):
+            log.warning(
+                "parallel_executor.ac.runtime_handle_provider_identity_rejected",
+                source=source,
+                observed_backend=runtime_handle.backend,
+                observed_kind=runtime_handle.kind,
+                observed_approval_mode=runtime_handle.approval_mode,
+                observed_cwd=runtime_handle.cwd,
+                expected_backend=getattr(self._adapter, "runtime_backend", None),
+            )
             return None
 
         expected_metadata = self._build_expected_ac_runtime_metadata(
@@ -912,9 +1022,7 @@ class ACRuntimeHandleManager:
                     raise AmbiguousACExecutionError("AC dispatch chain contains a duplicate id")
                 predecessor = event_data.get("previous_ac_dispatch_id")
                 if predecessor != previous_dispatch_id:
-                    raise AmbiguousACExecutionError(
-                        "AC dispatch predecessor chain is invalid"
-                    )
+                    raise AmbiguousACExecutionError("AC dispatch predecessor chain is invalid")
                 runtime_payload = event_data.get("runtime")
                 if isinstance(runtime_payload, dict):
                     runtime_metadata = runtime_payload.get("metadata")
