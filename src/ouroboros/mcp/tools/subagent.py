@@ -3244,6 +3244,13 @@ class FanoutRegistry:
         try:
             import fcntl
         except ImportError:
+            # PLATFORM QUALIFICATION (round-26): without fcntl (e.g. native
+            # Windows) the section degrades to best-effort and the
+            # terminal-immutability guarantee is process-local only.
+            log.warning(
+                "fanout.registry.exclusive_unavailable_no_fcntl",
+                fanout_id=fanout_id,
+            )
             yield
             return
         locked_fd: int | None = None
@@ -3435,7 +3442,7 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     # (round-25): our pointer-walk preflight cannot mirror standards
     # reference-scope resolution, and a contract that registers but fails
     # every submission is worse than one declared unsupported.
-    if _schema_contains_key(schema, "$id"):
+    if _schema_uses_keyword(schema, "$id"):
         return False
     # Answer forms are OBJECTS: re-entry rejects non-object outputs before
     # schema validation, so a valid scalar schema ({"type": "string"}) would
@@ -3533,13 +3540,35 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
     return None
 
 
-def _schema_contains_key(node: Any, needle: str) -> bool:
+# Keys whose VALUES are data (never subschemas): property NAMES and literal
+# payloads must not be mistaken for schema keywords (round-26: a schema
+# requiring a property literally named "$id" is valid and enforceable).
+_SCHEMA_DATA_VALUED_KEYWORDS = frozenset({"const", "enum", "default", "examples"})
+_SCHEMA_NAME_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+
+
+def _schema_uses_keyword(node: Any, needle: str, *, in_schema: bool = True) -> bool:
+    """Whether ``needle`` appears as a SCHEMA KEYWORD (not as data)."""
     if isinstance(node, Mapping):
-        if needle in node:
+        if in_schema and needle in node:
             return True
-        return any(_schema_contains_key(value, needle) for value in node.values())
+        for key, value in node.items():
+            if in_schema and key in _SCHEMA_DATA_VALUED_KEYWORDS:
+                continue
+            if in_schema and key in _SCHEMA_NAME_MAP_KEYWORDS:
+                # The map's KEYS are names; its VALUES are subschemas.
+                if isinstance(value, Mapping) and any(
+                    _schema_uses_keyword(sub, needle, in_schema=True) for sub in value.values()
+                ):
+                    return True
+                continue
+            if _schema_uses_keyword(value, needle, in_schema=in_schema):
+                return True
+        return False
     if isinstance(node, list):
-        return any(_schema_contains_key(value, needle) for value in node)
+        return any(_schema_uses_keyword(value, needle, in_schema=in_schema) for value in node)
     return False
 
 
@@ -3720,9 +3749,11 @@ def _is_row_shaped_value(value: str) -> bool:
 _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
     r"|\btraceback \(most recent call last\)"
-    # Assignment-style failure envelopes, = and : forms (rounds 19-20:
-    # "status=failed code=502", "status: failed; code: 502").
-    r"|\bstatus\s*[:=]\s*(failed|error)\b|\bcode\s*[:=]\s*[45]\d{2}\b",
+    # Assignment-style failure envelopes, = and : forms (rounds 19-26:
+    # "status=failed code=502", "status: failed; code: 502",
+    # "success=false; status_code=503; retries exhausted").
+    r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
+    r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b",
     re.IGNORECASE,
 )
 
@@ -3894,6 +3925,23 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         # policy binds the QUERY too (bot-review round-19): a select-star
         # projection requests raw rows by construction. count(*)/aggregated
         # projections stay valid.
+        #
+        # DIALECT BOUNDARY (round-26): this lint classifies SQL — the
+        # dominant dialect — plus the demonstrated GraphQL identity-field
+        # shape below. Other dialects and natural-language proposals are
+        # validated by the confirming human, who sees every proposal
+        # verbatim before any execution; the lint is advisory
+        # defense-in-depth under that structural gate, not a completeness
+        # contract.
+        if isinstance(query, str) and re.search(
+            r"\{[^{}]*\b(id|email|phone|name|address|ssn)\b[^{}]*\}",
+            query,
+        ):
+            errors.append(
+                f"proposed_queries[{index}].query: selects raw identity "
+                "fields (GraphQL-style entity selection); request aggregate "
+                "fields (counts, totals) instead"
+            )
         if isinstance(query, str) and re.search(r"\bselect\s+(?:\w+\.)?\*", query, re.IGNORECASE):
             errors.append(
                 f"proposed_queries[{index}].query: requests raw rows "
