@@ -334,9 +334,7 @@ class _AdmissionState(NamedTuple):
 # recycled into a previously published authorization, without leaking every
 # admission ever produced.  The mapping is intentionally private; callers
 # receive only the immutable projection below, never the state registry.
-_TRUSTED_ADMISSIONS: dict[
-    int, tuple[weakref.ReferenceType[RouteAdmission], _AdmissionState]
-] = {}
+_TRUSTED_ADMISSIONS: dict[int, tuple[weakref.ReferenceType[RouteAdmission], _AdmissionState]] = {}
 
 
 def _candidate_fingerprint(candidate: RouteCandidate | None) -> tuple[object, ...] | None:
