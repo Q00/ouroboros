@@ -127,6 +127,13 @@ def _ensure_claude_mcp_entry() -> None:
                 "and re-run setup."
             )
             return
+        if mcp_config_path.exists() and mcp_config_path.stat().st_nlink > 1:
+            print_warning(
+                f"Could not update {mcp_config_path} because it is hard-linked — "
+                "leaving it untouched. Update the linked configuration manually "
+                "and re-run setup."
+            )
+            return
         config_exists = mcp_config_path.exists()
     except OSError as exc:
         print_warning(f"Could not inspect {mcp_config_path} — leaving it untouched: {exc}")
