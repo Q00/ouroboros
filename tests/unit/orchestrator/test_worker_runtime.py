@@ -26,6 +26,7 @@ class _FakeTransport:
     """Records calls and returns canned turns."""
 
     backend_name = "fake_worker"
+    cli_path = "/usr/bin/fake-worker"
 
     def __init__(self, *, spawn_turn: WorkerTurn, resume_turn: WorkerTurn | None = None) -> None:
         self._spawn_turn = spawn_turn
@@ -340,6 +341,7 @@ class TestErrors:
     async def test_transport_exception_becomes_error_result(self) -> None:
         class _Boom:
             backend_name = "boom"
+            cli_path = "/usr/bin/boom"
 
             async def spawn(self, **kwargs) -> WorkerTurn:
                 raise RuntimeError("transport exploded")
