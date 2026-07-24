@@ -1019,7 +1019,17 @@ class MCPServerAdapter:
                         if alias_key in kwargs:
                             normalized_kwargs[original_key] = kwargs[alias_key]
                     for key, value in kwargs.items():
-                        normalized_kwargs.setdefault(key, value)
+                        normalized_kwargs.setdefault(alias_to_original.get(key, key), value)
+                    optional_parameter_names = {
+                        parameter.name
+                        for parameter in h.definition.parameters
+                        if not parameter.required
+                    }
+                    normalized_kwargs = {
+                        key: value
+                        for key, value in normalized_kwargs.items()
+                        if value is not None or key not in optional_parameter_names
+                    }
 
                     # Route through call_tool() to enforce security checks.
                     # FastMCP does not provide credentials, so:
