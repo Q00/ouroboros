@@ -6440,14 +6440,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     follow_up_dispatch_id = uuid4().hex
                     follow_up_metadata = dict(follow_up_runtime_handle.metadata)
                     follow_up_metadata["ac_dispatch_id"] = follow_up_dispatch_id
-                    dispatch_state.runtime_handle = replace(
+                    candidate_follow_up_runtime_handle = replace(
                         follow_up_runtime_handle,
                         metadata=follow_up_metadata,
                     )
-                    if dispatch_state.runtime_handle is None:
-                        raise RuntimeError(
-                            "SessionSignal follow-up lost its capsule-bound runtime handle"
-                        )
                     await self._event_emitter.emit_ac_attempt_dispatched(
                         runtime_identity=runtime_identity,
                         dispatch_id=follow_up_dispatch_id,
@@ -6456,7 +6452,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         session_id=session_id,
                         capsule_fingerprint=capsule.fingerprint,
                         session_origin="restored_same_attempt",
-                        runtime_handle=dispatch_state.runtime_handle,
+                        runtime_handle=candidate_follow_up_runtime_handle,
                         dispatch_kind="session_signal_followup",
                         signal_id=queued_signal.signal.signal_id,
                         signal_mode=queued_signal.effective_mode.value,
@@ -6464,13 +6460,19 @@ Respond with either ATOMIC or the structured JSON object only.
                             "sha256:" + hashlib.sha256(follow_up_prompt.encode("utf-8")).hexdigest()
                         ),
                     )
+                    # Do not expose the candidate handle to the outer failure
+                    # path until its dispatch append is durable.  If the
+                    # append fails, terminalization must retain the last
+                    # durable predecessor (the sealed primary), never the
+                    # nonexistent follow-up ID.
+                    active_dispatch_id = follow_up_dispatch_id
                     # Keep the same durable-before-cache invariant as the
                     # primary dispatch.  The follow-up handle is still cached
                     # before provider entry, but a failed append cannot leave
                     # its undurable dispatch ID as a phantom predecessor.
-                    dispatch_state.runtime_handle = self._remember_ac_runtime_handle(
+                    remembered_follow_up_runtime_handle = self._remember_ac_runtime_handle(
                         ac_index,
-                        dispatch_state.runtime_handle,
+                        candidate_follow_up_runtime_handle,
                         execution_context_id=execution_context_id,
                         is_sub_ac=is_sub_ac,
                         parent_ac_index=parent_ac_index,
@@ -6478,11 +6480,11 @@ Respond with either ATOMIC or the structured JSON object only.
                         node_identity=node_identity,
                         retry_attempt=retry_attempt,
                     )
-                    if dispatch_state.runtime_handle is None:
+                    if remembered_follow_up_runtime_handle is None:
                         raise RuntimeError(
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
                         )
-                    active_dispatch_id = follow_up_dispatch_id
+                    dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
                     message_count_before_signal = dispatch_state.message_count
                     primary_final_message = dispatch_state.final_message
                     primary_success = dispatch_state.success

@@ -287,6 +287,110 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_follow_up_dispatch_append_failure_keeps_last_durable_runtime_handle(
+    tmp_path: Path,
+) -> None:
+    """A rejected follow-up append must not terminalize a phantom dispatch handle."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    original_append = store.append
+    dispatch_append_count = 0
+
+    async def _append_with_follow_up_failure(event) -> None:
+        nonlocal dispatch_append_count
+        if event.type == "execution.ac.attempt.dispatched":
+            dispatch_append_count += 1
+            if dispatch_append_count == 2:
+                raise RuntimeError("follow-up dispatch append failed")
+        await original_append(event)
+
+    store.append = _append_with_follow_up_failure  # type: ignore[method-assign]
+    hub = SessionSignalHub(event_store=store)
+    runtime = _TwoTurnRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    target_resolver = EventStoreSessionSignalTargetResolver(
+        event_store=store,
+        capabilities_by_backend={runtime.runtime_backend: runtime.capabilities.session_signals},
+    )
+    mailbox = SessionSignalMailbox(event_store=store, target_resolver=target_resolver)
+    execution_id = "exec_synapse_follow_up_failure"
+    scope_id = f"{execution_id}_ac_1"
+    attempt_id = f"{scope_id}_attempt_1"
+    signal = SessionSignal(
+        signal_id=derive_session_signal_id(
+            expected_execution_id=execution_id,
+            target_session_scope_id=scope_id,
+            target_session_attempt_id=attempt_id,
+            idempotency_key="follow_up_append_failure",
+        ),
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Make the confirmation copy explicit.",
+        source=SessionSignalSource.USER,
+        reason="The user clarified the desired UX.",
+        idempotency_key="follow_up_append_failure",
+    )
+
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the confirmation interaction",
+            session_id="orch_synapse_follow_up_failure",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Deliver a friendly confirmation UX",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        queued = await mailbox.request(signal)
+        assert queued.state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        execution_events = await store.replay("execution", scope_id)
+        dispatch_events = [
+            event
+            for event in execution_events
+            if event.type == "execution.ac.attempt.dispatched"
+        ]
+        lifecycle_events = [
+            event
+            for event in execution_events
+            if event.type
+            in {
+                "execution.session.started",
+                "execution.session.failed",
+                "execution.session.completed",
+            }
+        ]
+
+        assert result.success is False
+        assert len(dispatch_events) == 1
+        durable_dispatch_id = dispatch_events[0].data["ac_dispatch_id"]
+        assert all(
+            event.data["runtime"]["metadata"]["ac_dispatch_id"] == durable_dispatch_id
+            for event in lifecycle_events
+            if isinstance(event.data.get("runtime"), dict)
+        )
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_error_only_resume_is_delivery_uncertain_not_applied(tmp_path: Path) -> None:
     store = EventStore("sqlite+aiosqlite:///:memory:")
     await store.initialize()
