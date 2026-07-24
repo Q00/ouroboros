@@ -1154,6 +1154,232 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_malformed_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_content = '{"mcpServers": BROKEN JSON}'
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        warning.assert_called_once()
+        assert "Could not parse" in warning.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        "original_content",
+        [
+            "null",
+            "[]",
+            '{"mcpServers": null}',
+            '{"mcpServers": []}',
+            '{"mcpServers": {"ouroboros": null}}',
+            '{"mcpServers": {"ouroboros": "disabled"}}',
+        ],
+        ids=[
+            "null-top-level",
+            "array-top-level",
+            "null-servers",
+            "array-servers",
+            "null-ouroboros-entry",
+            "scalar-ouroboros-entry",
+        ],
+    )
+    def test_invalid_mcp_json_shape_warns_without_overwriting(
+        self,
+        tmp_path: Path,
+        original_content: str,
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        warning.assert_called_once()
+        assert "leaving it untouched" in warning.call_args.args[0]
+
+    @pytest.mark.parametrize("invalid_command", [[], {}], ids=["array", "object"])
+    def test_invalid_mcp_command_shape_warns_without_overwriting(
+        self,
+        tmp_path: Path,
+        invalid_command: object,
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_content = json.dumps(
+            {"mcpServers": {"ouroboros": {"command": invalid_command, "timeout": 600}}}
+        )
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": []},
+            ),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        warning.assert_called_once()
+        assert "command" in warning.call_args.args[0]
+
+    def test_non_utf8_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_content = b"\xff\xfe\x00"
+        claude_config.write_bytes(original_content)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_bytes() == original_content
+        warning.assert_called_once()
+        assert "decode" in warning.call_args.args[0]
+
+    @pytest.mark.parametrize(
+        "original_content",
+        [
+            '{"mcpServers": {"existing": {}}, "mcpServers": {}}',
+            '{"mcpServers": {"existing": NaN}}',
+        ],
+    )
+    def test_non_standard_mcp_json_warns_without_overwriting(
+        self, tmp_path: Path, original_content: str
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        warning.assert_called_once()
+        assert "Could not parse" in warning.call_args.args[0]
+
+    def test_hard_linked_mcp_json_warns_without_replacing_link(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        managed_config = tmp_path / "managed-mcp.json"
+        original_content = '{"mcpServers": {"managed": {"command": "custom"}}}\n'
+        managed_config.write_text(original_content, encoding="utf-8")
+        claude_config = claude_dir / "mcp.json"
+        claude_config.hardlink_to(managed_config)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+            patch("ouroboros.cli.commands.setup._detect_mcp_entry") as detect,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.stat().st_ino == managed_config.stat().st_ino
+        assert managed_config.read_text(encoding="utf-8") == original_content
+        detect.assert_not_called()
+        warning.assert_called_once()
+        assert "hard-linked" in warning.call_args.args[0]
+
+    def test_mcp_directory_creation_failure_warns_without_crashing(self, tmp_path: Path) -> None:
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.mkdir", side_effect=OSError("read-only filesystem")),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        warning.assert_called_once()
+        assert "Could not create" in warning.call_args.args[0]
+        assert not (tmp_path / ".claude" / "mcp.json").exists()
+
+    def test_mcp_existence_check_failure_warns_without_crashing(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.exists", side_effect=OSError("stat denied")),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        warning.assert_called_once()
+        assert "Could not inspect" in warning.call_args.args[0]
+
+    def test_symlinked_mcp_json_warns_without_replacing_link(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        managed_config = tmp_path / "managed-mcp.json"
+        original_content = '{"mcpServers": {"managed": {"command": "custom"}}}\n'
+        managed_config.write_text(original_content, encoding="utf-8")
+        claude_config = claude_dir / "mcp.json"
+        claude_config.symlink_to(managed_config)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+            patch("ouroboros.cli.commands.setup._detect_mcp_entry") as detect,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.is_symlink()
+        assert claude_config.resolve() == managed_config
+        assert managed_config.read_text(encoding="utf-8") == original_content
+        detect.assert_not_called()
+        warning.assert_called_once()
+        assert "symlink" in warning.call_args.args[0]
+
+    def test_mcp_write_failure_preserves_existing_file_and_cleans_temp(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_content = '{"mcpServers": {}}\n'
+        claude_config.write_text(original_content, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": []},
+            ),
+            patch("os.fsync", wraps=os.fsync) as fsync,
+            patch("os.replace", side_effect=OSError("disk full")),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert claude_config.read_text(encoding="utf-8") == original_content
+        assert list(claude_dir.glob(f".{claude_config.name}.*.tmp")) == []
+        fsync.assert_called_once()
+        success.assert_not_called()
+        warning.assert_called_once()
+        assert "Could not write" in warning.call_args.args[0]
+
     def test_setup_claude_removes_legacy_timeout_override(self, tmp_path: Path) -> None:
         """Claude setup should no longer persist the legacy 600s MCP timeout."""
         config_dir = tmp_path / ".ouroboros"
