@@ -2687,6 +2687,178 @@ def test_scalar_contract_is_not_advertised(tmp_path: Any) -> None:
     assert out["contract_violations"] == []
 
 
+def test_null_content_does_not_count_toward_completion(tmp_path: Any) -> None:
+    """Key presence alone is not a submission (bot-review round-14 probe).
+
+    Two required lanes submitted without usable content previously returned
+    ``complete`` and durably synthesized two ``None`` outputs.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-null-content",
+        payloads=_mixed_advisory_payloads(),
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-null-content",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian"},
+            {"key": "answer_simplifier", "content": None},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["missing_required_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    assert out["malformed_keys"] == ["ambiguity_contrarian", "answer_simplifier"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
+
+
+def test_legacy_violating_required_value_reopens_and_scrubs(tmp_path: Any) -> None:
+    """Accumulated violations fail closed (bot-review round-14 probe).
+
+    A required legacy data value carrying an email/token and
+    ``requires_user_confirmation=false`` previously terminalized as
+    ``complete`` with an empty aggregation while staying durable. The value
+    is now scrubbed and the required lane reopens.
+    """
+    import json as json_module
+
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_QUESTION_ADVISORY, FanoutRecord
+
+    registry = FanoutRegistry(tmp_path)
+    metadata_lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+    data_contract = next(
+        lane["answer_contract"] for lane in metadata_lanes if lane["lane_id"] == "data_context"
+    )
+    violating_legacy_value = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Contact alice@example.com token=sk-live-999",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": False,
+    }
+    # Simulate a legacy record persisted BEFORE door validation existed,
+    # with data_context REQUIRED and already occupied by a violating value.
+    record = FanoutRecord(
+        fanout_id="fanout_legacy_violating",
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-legacy-scrub",
+        correlation_key="context.lane_id",
+        expected_keys=("data_context", "ambiguity_contrarian"),
+        synthesizer_input={
+            "lane_ids": ["data_context", "ambiguity_contrarian"],
+            "lane_answer_contracts": {"data_context": dict(data_contract)},
+        },
+        required_keys=("data_context", "ambiguity_contrarian"),
+        received_results={"data_context": violating_legacy_value},
+    )
+    assert registry.save(record)
+
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-legacy-scrub",
+        correlation_key="context.lane_id",
+        results=[{"key": "ambiguity_contrarian", "content": "contrarian-advice"}],
+        fanout_id="fanout_legacy_violating",
+    )
+    # The violating required lane REOPENS instead of terminalizing empty…
+    assert out["status"] == "partial"
+    assert "data_context" in out["missing_required_keys"]
+    assert "data_context" in out["synthesis_rejected_keys"]
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    # …and the violating value is scrubbed from durable state.
+    persisted = (tmp_path / "fanout_legacy_violating.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-999" not in persisted
+    reloaded = registry.load("fanout_legacy_violating")
+    assert reloaded is not None
+    assert reloaded.completed is False
+    assert "data_context" not in reloaded.received_results
+
+    # A conforming resubmission then completes with the good value.
+    conforming = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    retry = submit_fanout_results(
+        registry,
+        session_id="sess-legacy-scrub",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": conforming},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        ],
+        fanout_id="fanout_legacy_violating",
+    )
+    assert retry["status"] == "complete"
+    aggregated = {item["lane_id"]: item["output"] for item in retry["result"]["aggregated_outputs"]}
+    assert aggregated["data_context"] == conforming
+    assert json_module.loads((tmp_path / "fanout_legacy_violating.json").read_text())["completed"]
+
+
+def test_invalid_legacy_schema_keeps_data_boundary_scan() -> None:
+    """Schema unenforceability never disables the policy scan (round-14).
+
+    A legacy data contract with an unknown schema type previously skipped
+    the boundary scan entirely, accepting email/token content.
+    """
+    from ouroboros.mcp.tools.subagent import _lane_answer_contract_violations
+
+    legacy_contracts = {
+        "data_context": {
+            "contract_id": "data_evidence_answer.v1",
+            "response_model_schema": {"type": "objectt"},
+        }
+    }
+    pii_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Contact alice@example.com token=sk-live-777",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    violations = _lane_answer_contract_violations(legacy_contracts, {"data_context": pii_output})
+    assert [item["lane_id"] for item in violations] == ["data_context"]
+    joined = " ".join(violations[0]["errors"])
+    assert "raw evidence" in joined
+    assert "alice@example.com" not in joined
+
+
+def test_lock_inode_verification_detects_replaced_path(tmp_path: Any) -> None:
+    """A lock on a dead inode excludes nobody (bot-review round-14).
+
+    Both GC helpers verify inode identity after flock; this pins the
+    detection primitive: once the path is unlinked and recreated, the old fd
+    no longer matches and the holder must not act.
+    """
+    import os as os_module
+
+    lock_path = tmp_path / ".fanout_race.lock"
+    lock_path.write_text("")
+    fd = os_module.open(lock_path, os_module.O_RDWR)
+    try:
+        assert FanoutRegistry._lock_inode_matches(fd, lock_path)
+        os_module.unlink(lock_path)
+        assert not FanoutRegistry._lock_inode_matches(fd, lock_path)
+        lock_path.write_text("")
+        assert not FanoutRegistry._lock_inode_matches(fd, lock_path)
+    finally:
+        os_module.close(fd)
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

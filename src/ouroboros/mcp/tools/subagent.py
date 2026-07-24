@@ -3039,6 +3039,12 @@ class FanoutRegistry:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return
+            # The lock path may have been unlinked/recreated by a concurrent
+            # sweep between open and flock (round-14): a lock on a dead inode
+            # excludes nobody, so acting on it could delete a record whose
+            # REPLACEMENT lock a submission currently holds. Skip this sweep.
+            if not self._lock_inode_matches(fd, lock_path):
+                return
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
@@ -3051,8 +3057,8 @@ class FanoutRegistry:
         finally:
             os.close(fd)
 
-    @staticmethod
-    def _unlink_lock_if_unheld(path: Path) -> None:
+    @classmethod
+    def _unlink_lock_if_unheld(cls, path: Path) -> None:
         """Unlink an aged lock file only while holding its flock.
 
         Unlinking a HELD lock reopens the divergent-terminalization race
@@ -3075,6 +3081,10 @@ class FanoutRegistry:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return
+            # Same dead-inode guard as record sweeping (round-14): only the
+            # holder of the LIVE lock inode may unlink the lock path.
+            if not cls._lock_inode_matches(fd, path):
+                return
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -3085,6 +3095,21 @@ class FanoutRegistry:
                 pass
         finally:
             os.close(fd)
+
+    @staticmethod
+    def _lock_inode_matches(fd: int, path: Path) -> bool:
+        """Whether ``fd`` still refers to the live file at ``path``.
+
+        A lock acquired on an inode that was unlinked/recreated between open
+        and flock excludes nobody (bot-review rounds 7 and 14): the holder of
+        such a dead inode must never act on it.
+        """
+        try:
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(path)
+        except OSError:
+            return False
+        return fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev
 
     @classmethod
     def _valid_id(cls, fanout_id: str) -> bool:
@@ -3229,14 +3254,9 @@ class FanoutRegistry:
             except OSError:
                 os.close(fd)
                 break
-            try:
-                fd_stat = os.fstat(fd)
-                path_stat = os.stat(lock_path)
-                if fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev:
-                    locked_fd = fd
-                    break
-            except OSError:
-                pass
+            if self._lock_inode_matches(fd, lock_path):
+                locked_fd = fd
+                break
             # The path was unlinked/recreated while we waited: this lock
             # excludes nobody. Release and retry against the live path.
             try:
@@ -3691,6 +3711,15 @@ def _lane_answer_contract_violations(
                 }
             )
             continue
+        # The data boundary scan runs INDEPENDENTLY of schema validity
+        # (round-14): the data lane's fail-closed guarantee must hold even
+        # for a legacy record whose persisted schema is invalid — schema
+        # unenforceability never disables the policy scan.
+        boundary_errors = (
+            _data_evidence_boundary_violations(output)
+            if contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            else []
+        )
         # Belt for records persisted before registration validated schemas
         # (round-12): an invalid registered schema must degrade to
         # "unenforced" — the child never received an enforceable form — not
@@ -3707,7 +3736,6 @@ def _lane_answer_contract_violations(
                     f"{error.json_path}: violates {error.validator!r}"
                     for error in validator.iter_errors(dict(output))
                 )
-                errors.extend(_data_evidence_boundary_violations(output))
             else:
                 errors = sorted(error.message for error in validator.iter_errors(dict(output)))
         except Exception:
@@ -3716,7 +3744,8 @@ def _lane_answer_contract_violations(
                 lane_id=lane_id,
                 contract_id=contract_id,
             )
-            continue
+            errors = []
+        errors = [*errors, *boundary_errors]
         if errors:
             violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
     return violations
@@ -4072,6 +4101,7 @@ def _submit_fanout_results_locked(
     # terminal record never carry it.
     submitted: dict[str, Any] = {}
     unexpected_keys: list[str] = []
+    malformed_keys: list[str] = []
     for result in results:
         key = result.get("key")
         if key is None:
@@ -4082,8 +4112,17 @@ def _submit_fanout_results_locked(
             if reportable not in unexpected_keys:
                 unexpected_keys.append(reportable)
             continue
+        # A keyed result without usable content is NOT a submission
+        # (bot-review round-14): counting it toward completion would
+        # terminalize a fan-out around None outputs. The lane stays missing
+        # and is reported under malformed_keys.
+        if "content" not in result or result.get("content") is None:
+            if resolved_key not in malformed_keys:
+                malformed_keys.append(resolved_key)
+            continue
         submitted[resolved_key] = result.get("content")
     unexpected_keys.sort()
+    malformed_keys.sort()
 
     # Contract validation happens at the door, BEFORE anything is merged or
     # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
@@ -4134,6 +4173,7 @@ def _submit_fanout_results_locked(
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
             "accumulation_persisted": persisted,
             "note": (
                 "Results accumulated; the fan-out stays open. Submit the "
@@ -4153,6 +4193,7 @@ def _submit_fanout_results_locked(
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
             "accumulation_persisted": persisted,
         }
     # Every remaining missing key is optional: proceed to synthesis without it
@@ -4207,15 +4248,22 @@ def _submit_fanout_results_locked(
             *contract_violations,
             *[item for item in provided_violations if item["lane_id"] not in reported_lanes],
         ]
+        # Accumulated violations FAIL CLOSED (bot-review round-14): a
+        # violating value that reached durable state (legacy records) is
+        # scrubbed from it here — never re-persisted by the terminal write —
+        # and a REQUIRED lane it occupied reopens as missing instead of
+        # terminalizing around an empty aggregation.
+        rejected_keys = sorted(key for key in excluded_lanes if key in provided)
+        provided = {key: value for key, value in provided.items() if key not in excluded_lanes}
+        missing_optional = [key for key in record.expected_keys if key not in provided]
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
             for lane_id in lane_ids
-            if lane_id in provided and lane_id not in excluded_lanes
+            if lane_id in provided
         ]
         outcome = _fanout_identity_synthesis(aggregated)
-        ready = True
-        rejected_keys = []
+        ready = all(key in provided for key in record.required_keys)
         completion_extra["contract_violations"] = contract_violations
     else:
         return {
@@ -4226,7 +4274,7 @@ def _submit_fanout_results_locked(
         }
 
     if not ready:
-        rejected_present = sorted(key for key in rejected_keys if key in provided)
+        rejected_present = sorted(set(rejected_keys))
         retained = {
             key: value for key, value in provided.items() if key not in set(rejected_present)
         }
@@ -4241,6 +4289,7 @@ def _submit_fanout_results_locked(
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
             "synthesis_rejected_keys": rejected_present,
             "result": outcome,
             "accumulation_persisted": persisted,
@@ -4253,6 +4302,7 @@ def _submit_fanout_results_locked(
         "correlation_key": record.correlation_key,
         "missing_optional_keys": missing_optional,
         "unexpected_keys": unexpected_keys,
+        "malformed_keys": malformed_keys,
         **completion_extra,
         "result": outcome,
     }
@@ -4264,7 +4314,9 @@ def _submit_fanout_results_locked(
     # outcome: it is stripped from the persisted terminal response so even a
     # redacted trace of rejected keys never enters durable state.
     terminal_snapshot = {
-        key: value for key, value in completion.items() if key != "unexpected_keys"
+        key: value
+        for key, value in completion.items()
+        if key not in ("unexpected_keys", "malformed_keys")
     }
     terminal_persisted = registry.save(
         replace(
