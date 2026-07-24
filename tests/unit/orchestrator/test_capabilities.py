@@ -5239,6 +5239,13 @@ def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> Non
     assert fanout["synthesis_contract"]["confirmation_overrides"] == {
         "data_context": "user_confirm_only_no_auto_confirm",
     }
+    # The enforceable root grammar is DECLARED in the public contract
+    # (round-24 follow-through): unsupported forms are excluded by contract,
+    # not by undeclared narrowing.
+    lane_props = fanout["request_model_schema"]["properties"]["lanes"]["items"]["properties"]
+    contract_description = lane_props["answer_contract"]["description"]
+    assert "ENFORCEABLE ROOT GRAMMAR" in contract_description
+    assert "by contract, not omission" in contract_description
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:

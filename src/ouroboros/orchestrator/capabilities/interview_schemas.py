@@ -950,7 +950,17 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "Structured lane answer form (data_context ships "
                                 "data_evidence_answer.v1). Lane outputs are "
                                 "validated against response_model_schema at fanout "
-                                "re-entry; violations surface as contract_violations."
+                                "re-entry; violations surface as contract_violations. "
+                                "ENFORCEABLE ROOT GRAMMAR (a contract is advertised "
+                                "and enforced IFF its root provably describes an "
+                                "object through one of): literal type 'object' or "
+                                "['object']; a chain of LOCAL root $refs to one; an "
+                                "allOf with any such branch; a oneOf/anyOf whose "
+                                "branches ALL qualify; a const mapping or all-mapping "
+                                "enum. Every $ref/$dynamicRef must resolve inside the "
+                                "document. Any other form is NOT advertised and the "
+                                "lane falls back to the generic output shape — by "
+                                "contract, not omission."
                             ),
                         },
                     },
