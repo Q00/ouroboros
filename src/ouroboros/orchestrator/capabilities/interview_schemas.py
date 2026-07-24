@@ -681,6 +681,19 @@ def _data_context_answer_contract() -> dict[str, Any]:
                     "required": ["caveats"],
                 },
             },
+            {
+                # The confidence constraint is two-way (round-12): executed
+                # evidence alongside confidence="no_evidence" is contradictory
+                # informed-consent state, just as reported_by_tool without
+                # evidence is.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"confidence": {"enum": ["reported_by_tool", "inferred"]}},
+                },
+            },
         ],
     }
     return {
@@ -694,7 +707,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
         "runtime_instruction": (
             "Fill this form so the confirming user can decide with full "
             "context: what you executed (evidence with source, query_summary, "
-            "value), "
+            "value, and its required observed_at timestamp), "
             "what you deliberately did not execute and why (proposed_queries "
             "with source_class), and point-in-time caveats. Every data answer "
             "requires user confirmation; there is no auto-confirmed grade."
@@ -918,6 +931,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "required": ["contract_id", "response_model_schema"],
                             "properties": {
                                 "contract_id": {"type": "string", "minLength": 1},
+                                # A contract's schema must itself be an object:
+                                # a string (or otherwise malformed) schema is
+                                # unenforceable, and an advertised contract
+                                # that cannot be enforced is a lie (round-12).
+                                # Registration additionally validates it with
+                                # check_schema before enforcement.
+                                "response_model_schema": {"type": "object"},
                             },
                             "description": (
                                 "Structured lane answer form (data_context ships "

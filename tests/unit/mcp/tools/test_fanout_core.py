@@ -2321,6 +2321,206 @@ def test_gc_sweeps_aged_atomic_write_leftovers(tmp_path: Any) -> None:
     assert fresh_tmp.exists(), "fresh temp file (possibly mid-write) survives"
 
 
+def test_unenforceable_contract_shapes_are_never_advertised(tmp_path: Any) -> None:
+    """A contract is enforced IFF its schema is a VALID object (round-12).
+
+    A string schema previously bypassed re-entry validation silently, and an
+    invalid JSON Schema type crashed re-entry with UnknownType. Both shapes
+    are now rejected at registration; a legacy record carrying one degrades
+    to unenforced instead of crashing.
+    """
+    string_schema_lane = {
+        "lane_id": "str_lane",
+        "capability": "future_capability",
+        "required": True,
+        "answer_contract": {
+            "contract_id": "str_contract.v1",
+            "response_model_schema": "just a string",
+        },
+    }
+    invalid_type_lane = {
+        "lane_id": "bad_lane",
+        "capability": "future_capability",
+        "required": True,
+        "answer_contract": {
+            "contract_id": "bad_contract.v1",
+            "response_model_schema": {"type": "objectt"},
+        },
+    }
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id="sess-invalid-schema",
+        lanes=[string_schema_lane, invalid_type_lane],
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.synthesizer_input.get("lane_answer_contracts", {}) == {}
+
+    # Submitting arbitrary content completes cleanly — nothing unenforceable
+    # was advertised, so nothing crashes and nothing is validated against it.
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-invalid-schema",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "str_lane", "content": "generic finding"},
+            {"key": "bad_lane", "content": "generic finding"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+
+    # Belt: a LEGACY record that already persisted an invalid schema must
+    # degrade to unenforced at re-entry, never crash with UnknownType.
+    from ouroboros.mcp.tools.subagent import _lane_answer_contract_violations
+
+    legacy_contracts = {
+        "bad_lane": {
+            "contract_id": "bad_contract.v1",
+            "response_model_schema": {"type": "objectt"},
+        }
+    }
+    assert _lane_answer_contract_violations(legacy_contracts, {"bad_lane": {"x": 1}}) == []
+
+
+def test_contract_budget_and_delivery_share_one_serialization(tmp_path: Any) -> None:
+    """Budgeting and rendering measure the SAME canonical form (round-12).
+
+    A contract that is compact-small but renders large previously passed the
+    budget yet reached the child prompt truncated while re-entry enforced
+    the full schema. With one canonical serialization, any contract that
+    would render torn is excluded from enforcement instead.
+    """
+    import json as json_module
+
+    from ouroboros.mcp.tools.subagent import (
+        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+        _canonical_contract_json,
+        _enforceable_lane_contract,
+    )
+
+    # Grow a deeply-keyed schema until compact fits the budget but the
+    # canonical (sorted+indented) rendering exceeds it — the round-12 shape.
+    properties: dict[str, Any] = {}
+    index = 0
+    contract: dict[str, Any] = {}
+    while True:
+        properties[f"k{index}"] = {"type": "string"}
+        index += 1
+        contract = {
+            "contract_id": "wide_contract.v1",
+            "response_model_schema": {
+                "type": "object",
+                "required": ["lane_id", "tail_field"],
+                "properties": {**properties, "tail_field": {"type": "string"}},
+            },
+        }
+        compact = len(json_module.dumps(contract, ensure_ascii=False))
+        rendered = len(_canonical_contract_json(contract) or "")
+        if rendered > _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS:
+            assert compact < _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS, (
+                "probe must be compact-small but rendered-large"
+            )
+            break
+        assert index < 2000, "failed to construct the probe shape"
+
+    # The round-12 probe shape is now unenforceable — consistently on both
+    # sides — instead of enforced-but-torn.
+    assert not _enforceable_lane_contract(contract)
+
+    lanes = [
+        {
+            "lane_id": "wide_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": contract,
+        }
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-wide", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert "wide_lane" not in record.synthesizer_input.get("lane_answer_contracts", {})
+
+    request = {
+        "session_id": "sess-wide",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": lanes,
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    assert "[truncated]" not in payloads[0].prompt
+
+
+def test_rejected_duplicate_does_not_suppress_accumulated_result(tmp_path: Any) -> None:
+    """A current-call violation must not erase earlier conforming state.
+
+    Bot-review round-12 probe: after accumulating a valid data_context, a
+    finalizing call carrying an invalid duplicate completed but omitted the
+    valid persisted lane from synthesis. Exclusion now judges the value that
+    is actually in the accumulated state.
+    """
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-dup",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-dup", payloads=payloads
+    )
+
+    valid_data = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-dup",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": valid_data}],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert first["status"] == "accumulated"
+
+    invalid_duplicate = {**valid_data, "requires_user_confirmation": False}
+    closing = submit_fanout_results(
+        registry,
+        session_id="sess-dup",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": invalid_duplicate},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert closing["status"] == "complete"
+    # The rejected duplicate is reported…
+    assert [item["lane_id"] for item in closing["contract_violations"]] == ["data_context"]
+    # …but the earlier CONFORMING value still reaches synthesis.
+    aggregated = {
+        item["lane_id"]: item["output"] for item in closing["result"]["aggregated_outputs"]
+    }
+    assert aggregated["data_context"] == valid_data
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

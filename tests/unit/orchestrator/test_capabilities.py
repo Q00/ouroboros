@@ -5154,6 +5154,10 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
         "evidence": [{**executed["evidence"][0], "value": "aggregate token-counts by plan tier"}],
     }
     validator.validate(vocabulary_value)
+    # The confidence constraint is two-way (round-12): executed evidence
+    # alongside confidence="no_evidence" is contradictory consent state.
+    contradictory_confidence = {**executed, "confidence": "no_evidence"}
+    assert list(validator.iter_errors(contradictory_confidence))
     # An unexecuted proposal with empty tool/query/decision fields is not a
     # proposal the parent session can run and judge.
     empty_proposal = {

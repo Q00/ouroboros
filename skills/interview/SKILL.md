@@ -265,7 +265,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    is not durable yet, so resubmit the same results. A completed fanout is
    terminal — late submissions return `status="already_complete"` carrying
    the persisted terminal outcome, so a lost completion response is
-   recoverable by resubmitting. Only
+   recoverable by resubmitting. Recovery has a retention limit: records
+   (completed ones included) are kept 7 days after their last update, after
+   which the id returns `unknown_fanout_id`. Only
    `required: true` lanes gate completion: once every required lane is
    submitted the fanout completes, and optional lanes that never arrived are
    listed as `missing_optional_keys` on the complete outcome — proceed to

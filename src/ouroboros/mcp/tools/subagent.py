@@ -1190,18 +1190,18 @@ def _plugin_advisory_contract_section(
         lane_contract = lane.get("answer_contract")
         if isinstance(lane_contract, Mapping):
             contract_id = str(lane_contract.get("contract_id") or "unversioned")
-            if _contract_within_delivery_budget(lane_contract):
+            if _enforceable_lane_contract(lane_contract):
                 contract_blocks.append(
                     f"{lane_id} answer contract ({contract_id}, complete — fill this "
                     "form exactly; it is validated server-side at re-entry):\n"
-                    + json.dumps(lane_contract, ensure_ascii=False)
+                    + (_canonical_contract_json(lane_contract) or "{}")
                 )
             else:
                 contract_blocks.append(
                     f"{lane_id} answer contract ({contract_id}): OMITTED — it "
-                    "exceeds the whole-form delivery budget and is therefore "
-                    "NOT enforced at re-entry; return the generic output shape "
-                    "for this lane."
+                    "exceeds the whole-form delivery budget or carries an "
+                    "invalid schema, and is therefore NOT enforced at "
+                    "re-entry; return the generic output shape for this lane."
                 )
         if lane_id == "data_context":
             data_policy = lane.get("data_policy")
@@ -1561,7 +1561,7 @@ def build_interview_question_advisory_subagents(
             # torn (round-11): registration skips it too, so the lane falls
             # back to the generic shape consistently on both sides.
             if isinstance(lane_answer_contract, Mapping):
-                if _contract_within_delivery_budget(lane_answer_contract):
+                if _enforceable_lane_contract(lane_answer_contract):
                     unknown_contract_json = _bounded_json(
                         lane_answer_contract,
                         _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
@@ -1578,9 +1578,9 @@ def build_interview_question_advisory_subagents(
                     extra = (
                         "## Answer Contract\n"
                         "This lane declared an answer contract that exceeds the "
-                        "whole-form delivery budget; it is OMITTED and NOT "
-                        "enforced at re-entry. Return the generic Output shape "
-                        "below."
+                        "whole-form delivery budget or carries an invalid "
+                        "schema; it is OMITTED and NOT enforced at re-entry. "
+                        "Return the generic Output shape below."
                     )
 
         prompt = f"""## Task
@@ -3332,20 +3332,42 @@ def _mutating_tool_verb(tool_name: str) -> str | None:
     return next((token for token in tokens if token in verbs), None)
 
 
-def _contract_within_delivery_budget(contract: Mapping[str, Any]) -> bool:
-    """Whether a lane answer contract can be delivered to a child WHOLE.
+def _canonical_contract_json(contract: Mapping[str, Any]) -> str | None:
+    """THE serialization for lane contracts — budgeting, delivery, plugin.
 
-    Invariant (bot-review round-11): a contract is enforced at re-entry IFF
-    it was delivered untorn to the child. An oversized contract is rejected
-    explicitly on BOTH sides — not rendered truncated (an unsatisfiable
-    form) and not registered for enforcement — so the lane falls back to
-    the generic output shape consistently.
+    Budget and delivery previously used different serializations (compact vs
+    sorted+indented), so a contract could pass the budget yet render torn
+    (bot-review round-12). One canonical form, measured and delivered
+    identically everywhere, removes that class of drift.
     """
     try:
-        rendered = json.dumps(contract, ensure_ascii=False)
+        return json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)
     except (TypeError, ValueError):
+        return None
+
+
+def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
+    """Whether a lane answer contract may be enforced at re-entry.
+
+    Invariant (bot-review rounds 11-12): a contract is enforced IFF it was
+    deliverable to the child WHOLE and its ``response_model_schema`` is a
+    VALID JSON Schema object. An oversized or invalid contract is rejected
+    explicitly on both sides — never rendered truncated, never registered
+    for enforcement (an advertised contract that cannot be enforced, or
+    enforced against a form the child never received, is a lie) — so the
+    lane falls back to the generic output shape consistently.
+    """
+    rendered = _canonical_contract_json(contract)
+    if rendered is None or len(rendered) > _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS:
         return False
-    return len(rendered) <= _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS
+    schema = contract.get("response_model_schema")
+    if not isinstance(schema, Mapping):
+        return False
+    try:
+        Draft202012Validator.check_schema(dict(schema))
+    except Exception:
+        return False
+    return True
 
 
 def _mutating_source_identifier_verb(source: str) -> str | None:
@@ -3632,19 +3654,32 @@ def _lane_answer_contract_violations(
                 }
             )
             continue
-        validator = Draft202012Validator(dict(schema))
-        if contract_id == _DATA_EVIDENCE_CONTRACT_ID:
-            # Redacted messages: jsonschema echoes the offending instance value
-            # into ``error.message``, and for a data lane that instance can BE
-            # the leak (PII/credential-shaped evidence). Report the location
-            # and the violated keyword, never the content.
-            errors = sorted(
-                f"{error.json_path}: violates {error.validator!r}"
-                for error in validator.iter_errors(dict(output))
+        # Belt for records persisted before registration validated schemas
+        # (round-12): an invalid registered schema must degrade to
+        # "unenforced" — the child never received an enforceable form — not
+        # crash re-entry with UnknownType.
+        try:
+            validator = Draft202012Validator(dict(schema))
+            if contract_id == _DATA_EVIDENCE_CONTRACT_ID:
+                # Redacted messages: jsonschema echoes the offending instance
+                # value into ``error.message``, and for a data lane that
+                # instance can BE the leak (PII/credential-shaped evidence).
+                # Report the location and the violated keyword, never the
+                # content.
+                errors = sorted(
+                    f"{error.json_path}: violates {error.validator!r}"
+                    for error in validator.iter_errors(dict(output))
+                )
+                errors.extend(_data_evidence_boundary_violations(output))
+            else:
+                errors = sorted(error.message for error in validator.iter_errors(dict(output)))
+        except Exception:
+            log.warning(
+                "fanout.lane_contract.invalid_schema_not_enforced",
+                lane_id=lane_id,
+                contract_id=contract_id,
             )
-            errors.extend(_data_evidence_boundary_violations(output))
-        else:
-            errors = sorted(error.message for error in validator.iter_errors(dict(output)))
+            continue
         if errors:
             violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
     return violations
@@ -3816,11 +3851,11 @@ def register_question_advisory_fanout_from_lanes(
             # Enforced IFF deliverable whole (round-11): an oversized
             # contract is skipped here so re-entry never validates against a
             # schema the child could only have received torn.
-            if _contract_within_delivery_budget(answer_contract):
+            if _enforceable_lane_contract(answer_contract):
                 lane_answer_contracts[lane_id] = dict(answer_contract)
             else:
                 log.warning(
-                    "fanout.lane_contract.oversized_not_enforced",
+                    "fanout.lane_contract.unenforceable_not_enforced",
                     lane_id=lane_id,
                     contract_id=str(answer_contract.get("contract_id") or ""),
                 )
@@ -4093,17 +4128,21 @@ def _submit_fanout_results_locked(
     elif record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize. This batch was
-        # already contract-validated at the door; re-check the accumulated set
-        # as a belt against records persisted before door validation existed,
-        # so no violating output ever reaches the aggregation.
-        legacy_violations = [
-            item
-            for item in _lane_answer_contract_violations(contracts, provided)
-            if item["lane_id"] not in violating_lanes
+        # order and hand them back for the host to synthesize. Exclusion from
+        # the aggregation is decided by validating what is ACTUALLY in the
+        # accumulated state (bot-review round-12): a rejected duplicate in the
+        # current call is reported under contract_violations, but it must not
+        # suppress an earlier CONFORMING value already accumulated for that
+        # lane — door validation kept the bad duplicate out of ``provided``,
+        # so the provided value is the one to judge. This same pass is the
+        # belt against records persisted before door validation existed.
+        provided_violations = _lane_answer_contract_violations(contracts, provided)
+        excluded_lanes = {item["lane_id"] for item in provided_violations}
+        reported_lanes = {item["lane_id"] for item in contract_violations}
+        contract_violations = [
+            *contract_violations,
+            *[item for item in provided_violations if item["lane_id"] not in reported_lanes],
         ]
-        contract_violations = [*contract_violations, *legacy_violations]
-        excluded_lanes = {item["lane_id"] for item in contract_violations}
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
