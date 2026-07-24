@@ -210,6 +210,9 @@ def serialize_runtime_message_metadata(
     from ouroboros.orchestrator.workflow_state import resolve_ac_marker_update
 
     metadata: dict[str, Any] = {}
+    message_runtime_event_type = runtime_event_type(message)
+    if message_runtime_event_type is not None:
+        metadata["runtime_event_type"] = message_runtime_event_type
     if runtime_signal is None or runtime_status is None:
         runtime_signal, runtime_status = derive_runtime_signal(
             message_type=normalized_message_type(message),
@@ -224,7 +227,11 @@ def serialize_runtime_message_metadata(
         metadata["runtime"] = runtime_handle.to_session_state_dict()
         metadata["runtime_backend"] = runtime_handle.backend
         handle_runtime_event_type = runtime_handle.metadata.get("runtime_event_type")
-        if isinstance(handle_runtime_event_type, str) and handle_runtime_event_type:
+        if (
+            "runtime_event_type" not in metadata
+            and isinstance(handle_runtime_event_type, str)
+            and handle_runtime_event_type
+        ):
             metadata["runtime_event_type"] = handle_runtime_event_type
         tool_catalog = runtime_handle_tool_catalog(runtime_handle)
         if tool_catalog is not None:

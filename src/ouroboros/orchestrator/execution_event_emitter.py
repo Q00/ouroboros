@@ -392,7 +392,7 @@ class ExecutionEventEmitter:
         projected: Any,
     ) -> Any:
         """Create a shared session tool-call event from an AC runtime message."""
-        if projected.tool_name is None:
+        if not projected.is_tool_call or projected.tool_name is None:
             return None
 
         event = create_tool_called_event(

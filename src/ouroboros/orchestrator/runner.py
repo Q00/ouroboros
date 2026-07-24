@@ -4317,7 +4317,11 @@ class OrchestratorRunner:
             progress["runtime"] = runtime_handle.to_session_state_dict()
             progress["runtime_backend"] = runtime_handle.backend
             runtime_event_type = runtime_handle.metadata.get("runtime_event_type")
-            if isinstance(runtime_event_type, str) and runtime_event_type:
+            if (
+                "runtime_event_type" not in progress
+                and isinstance(runtime_event_type, str)
+                and runtime_event_type
+            ):
                 progress["runtime_event_type"] = runtime_event_type
             if runtime_handle.backend == "claude" and runtime_handle.native_session_id:
                 progress["agent_session_id"] = runtime_handle.native_session_id
@@ -4373,6 +4377,8 @@ class OrchestratorRunner:
     ):
         """Create an enriched tool-called event from a normalized runtime message."""
         projected = project_runtime_message(message)
+        if not projected.is_tool_call:
+            return None
         tool_name = projected.tool_name
         if tool_name is None:
             return None

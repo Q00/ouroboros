@@ -882,6 +882,151 @@ class TestCodexCliRuntime:
         assert message.tool_name == "Bash"
         assert message.data["tool_input"]["command"] == "pytest -q"
 
+    def test_convert_command_completion_emits_correlated_tool_receipt(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-42",
+                    "type": "command_execution",
+                    "command": "pytest -q tests/test_example.py",
+                    "stdout": "1 passed in 0.01s",
+                    "stderr": "",
+                    "exit_code": 0,
+                    "is_error": False,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        started, completed = messages
+        assert started.type == "assistant"
+        assert started.tool_name == "Bash"
+        assert started.data["tool_call_id"] == "cmd-42"
+        assert started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
+        assert completed.type == "tool_result"
+        assert completed.tool_name == "Bash"
+        assert completed.data["tool_call_id"] == "cmd-42"
+        assert completed.data["is_error"] is False
+        assert completed.data["tool_result"]["is_error"] is False
+        assert completed.data["tool_result"]["meta"]["exit_status"] == 0
+        assert completed.data["tool_result"]["meta"]["stdout"] == "1 passed in 0.01s"
+
+    def test_convert_command_failure_emits_correlated_failed_receipt(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-failed",
+                    "type": "command_execution",
+                    "command": "pytest -q tests/test_example.py",
+                    "stderr": "1 failed in 0.01s",
+                    "exit_code": 1,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        completed = messages[1]
+        assert completed.type == "tool_result"
+        assert completed.data["tool_call_id"] == "cmd-failed"
+        assert completed.data["is_error"] is True
+        assert completed.data["tool_result"]["is_error"] is True
+        assert completed.data["tool_result"]["meta"]["exit_status"] == 1
+
+    def test_convert_command_without_terminal_result_fails_closed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-incomplete",
+                    "type": "command_execution",
+                    "command": "pytest -q tests/test_example.py",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["tool_call_id"] == "cmd-incomplete"
+        assert messages[1].data["is_error"] is True
+
+    def test_convert_command_conflicting_terminal_status_fails_closed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-conflicted",
+                    "type": "command_execution",
+                    "command": "pytest -q tests/test_example.py",
+                    "exit_code": 0,
+                    "status": "failed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["is_error"] is True
+
+    @pytest.mark.parametrize("item_type", ("command_execution", "file_change"))
+    def test_convert_nested_conflicting_terminal_metadata_fails_closed(
+        self,
+        item_type: str,
+    ) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+        item: dict[str, object] = {
+            "id": f"{item_type}-conflicted",
+            "type": item_type,
+            "status": "completed",
+            "exit_code": 0,
+            "result": {"status": "failed", "exit_code": 1},
+        }
+        if item_type == "command_execution":
+            item["command"] = "pytest -q tests/test_example.py"
+        else:
+            item["path"] = "src/example.py"
+
+        messages = runtime._convert_event(
+            {"type": "item.completed", "item": item},
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["is_error"] is True
+
+    @pytest.mark.parametrize("item_type", ("command_execution", "file_change"))
+    def test_convert_unknown_terminal_status_fails_closed(self, item_type: str) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+        item: dict[str, object] = {
+            "id": f"{item_type}-cancelled",
+            "type": item_type,
+            "status": "cancelled",
+            "exit_code": 0,
+        }
+        if item_type == "command_execution":
+            item["command"] = "pytest -q tests/test_example.py"
+        else:
+            item["path"] = "src/example.py"
+
+        messages = runtime._convert_event(
+            {"type": "item.completed", "item": item},
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["is_error"] is True
+
     def test_convert_command_execution_preserves_output_metadata(self) -> None:
         """Command output must remain available for fat-harness verification."""
         runtime = CodexCliRuntime(cli_path="codex")
@@ -961,8 +1106,7 @@ class TestCodexCliRuntime:
         assert message.data["status"] == "completed"
         assert message.data["subtype"] == "success"
 
-    def test_convert_file_change_event_emits_each_changed_file(self) -> None:
-        """Multi-file Codex changes should create one proof message per path."""
+    def test_convert_idless_file_change_fails_closed(self) -> None:
         runtime = CodexCliRuntime(cli_path="codex")
 
         messages = runtime._convert_event(
@@ -984,8 +1128,114 @@ class TestCodexCliRuntime:
             "/tmp/project/hello.py",
             "/tmp/project/test_hello.py",
         ]
-        assert all(message.data["subtype"] == "success" for message in messages)
-        assert all(message.data["runtime_event_type"] == "tool.completed" for message in messages)
+        assert all(message.data["is_error"] is True for message in messages)
+
+    def test_convert_idless_cancelled_command_fails_closed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "pytest",
+                    "status": "cancelled",
+                    "exit_code": 0,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        assert messages[0].data["is_error"] is True
+
+    def test_convert_file_change_completion_emits_correlated_receipts(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "change-7",
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [
+                        {"path": "src/example.py"},
+                        {"path": "tests/test_example.py"},
+                    ],
+                },
+            },
+            current_handle=None,
+        )
+
+        assert [message.type for message in messages] == [
+            "assistant",
+            "tool_result",
+            "assistant",
+            "tool_result",
+        ]
+        assert [message.data["tool_call_id"] for message in messages] == [
+            "change-7:0",
+            "change-7:0",
+            "change-7:1",
+            "change-7:1",
+        ]
+        assert [message.data["tool_input"]["file_path"] for message in messages[::2]] == [
+            "src/example.py",
+            "tests/test_example.py",
+        ]
+        assert all(message.data["is_error"] is False for message in messages[1::2])
+
+    @pytest.mark.parametrize(
+        "metadata",
+        (
+            {},
+            {"status": "failed"},
+            {"exit_code": True},
+            {"status": "completed", "exit_code": 1},
+        ),
+    )
+    def test_convert_failed_or_malformed_file_change_fails_closed(
+        self,
+        metadata: dict[str, object],
+    ) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "change-failed",
+                    "type": "file_change",
+                    "path": "src/example.py",
+                    **metadata,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["is_error"] is True
+
+    def test_convert_nested_failed_file_change_exit_code_fails_closed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "change-nested-failed",
+                    "type": "file_change",
+                    "path": "src/example.py",
+                    "status": "completed",
+                    "result": {"exit_code": 1},
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2
+        assert messages[1].data["is_error"] is True
 
     def test_convert_turn_completed_with_usage_emits_system_usage_message(self) -> None:
         """turn.completed with token usage surfaces a non-final system message."""
