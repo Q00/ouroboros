@@ -1870,6 +1870,35 @@ class CodexCliRuntime:
         return None
 
     @staticmethod
+    def _extract_mcp_result_text(item: dict[str, Any]) -> str:
+        """Normalize MCP result/error envelopes into result text."""
+        error_envelope = item.get("error")
+        if isinstance(error_envelope, dict):
+            message = error_envelope.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        if isinstance(error_envelope, str) and error_envelope.strip():
+            return error_envelope.strip()
+        result = item.get("result")
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                texts = [
+                    block.get("text", "").strip()
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("text"), str)
+                ]
+                joined = "\n".join(text for text in texts if text)
+                if joined:
+                    return joined
+            structured = result.get("structured_content")
+            if isinstance(structured, str) and structured.strip():
+                return structured.strip()
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        return ""
+
+    @staticmethod
     def _extract_web_search_query(item: dict[str, Any]) -> str:
         """Extract exactly the search query from a web_search thread item."""
         query = item.get("query")
@@ -2024,6 +2053,12 @@ class CodexCliRuntime:
                     if item_type != "command_execution":
                         has_success = True
 
+            error_envelope = source.get("error")
+            if (isinstance(error_envelope, dict) and error_envelope) or (
+                isinstance(error_envelope, str) and error_envelope.strip()
+            ):
+                has_failure = True
+
             for key in ("success", "ok"):
                 flag = source.get(key)
                 if flag is True:
@@ -2092,6 +2127,13 @@ class CodexCliRuntime:
         extra_data: dict[str, Any] = {
             key: value for key, value in metadata.items() if key != "subtype"
         }
+        if is_error is None:
+            status = extra_data.get("status")
+            if isinstance(status, str) and status.strip().lower() in _ITEM_SUCCESS_STATUSES:
+                # An unknown verdict must not forward a bare success-implying
+                # status: downstream consumers would read it as authoritative
+                # success while the journal gate fails closed (round five).
+                extra_data["reported_status"] = extra_data.pop("status")
         extra_data["subtype"] = "tool_result"
         if call.tool_call_id is not None:
             extra_data["tool_call_id"] = call.tool_call_id
@@ -2147,6 +2189,13 @@ class CodexCliRuntime:
                 return []
             scope.completed_item_ids.add(item_id)
         metadata = self._extract_command_metadata(item)
+        if item_type == "mcp_tool_call" and not any(
+            isinstance(metadata.get(key), str) and metadata[key].strip()
+            for key in ("output", "stdout", "result_preview", "stderr")
+        ):
+            normalized = self._extract_mcp_result_text(item)
+            if normalized:
+                metadata["output"] = normalized
         is_error = self._resolve_item_completion_is_error(item_type, item)
         has_started = self._consume_item_started(item_type, item, scope)
         if not has_started and item_id is not None:

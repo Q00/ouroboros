@@ -24,6 +24,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.harness.deliver_gate import _event_has_explicit_tool_success
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.evidence.claims import _runtime_message_has_success_signal
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 
@@ -600,6 +601,81 @@ class TestCodexCompletionReviewRoundOne:
             ["start", "tool_result"],
             ["start", "tool_result"],
         ], f"id-less completed-only lifecycles must never emit orphan results: {shapes}"
+
+    def test_unknown_command_verdict_never_reads_as_success_signal(self) -> None:
+        """Every consumer must honor the tri-state verdict, not raw status."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_uv",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "exit_code": "1",
+                    "aggregated_output": ". [100%]\n1 passed in 0.01s\n",
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert _runtime_message_has_success_signal(results[0]) is False, (
+            "the in-memory verifier read an unvalidated completed status as success"
+        )
+        assert results[0].data.get("status") is None, (
+            "an unknown verdict must not forward a bare success-implying status"
+        )
+        assert results[0].data.get("reported_status") == "completed"
+
+    def test_mcp_error_envelope_is_failure_with_reason(self) -> None:
+        """An MCP error envelope wins over a completed status and keeps the reason."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_mcp1",
+                    "type": "mcp_tool_call",
+                    "name": "filesystem.write",
+                    "status": "completed",
+                    "error": {"message": "permission denied"},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+        tool_result = results[0].data.get("tool_result") or {}
+        assert "permission denied" in (tool_result.get("text_content") or "")
+
+    def test_mcp_result_content_is_extracted_on_success(self) -> None:
+        """A successful MCP result's content blocks become the result text."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_mcp2",
+                    "type": "mcp_tool_call",
+                    "name": "calculator.add",
+                    "status": "completed",
+                    "result": {"content": [{"type": "text", "text": "42"}]},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is False
+        tool_result = results[0].data.get("tool_result") or {}
+        assert "42" in (tool_result.get("text_content") or "")
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
