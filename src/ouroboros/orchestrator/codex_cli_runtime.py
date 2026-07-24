@@ -2052,10 +2052,6 @@ class CodexCliRuntime:
                         tool_input={"file_path": file_path},
                         content=f"Calling tool: Edit: {file_path}",
                         handle=current_handle,
-                        # This branch is reached only for Codex's
-                        # ``item.completed`` file_change event. Preserve that
-                        # source completion status so evidence validation does
-                        # not mistake it for an unconfirmed Edit dispatch.
                         extra_data=completion_data,
                     )
                     for file_path in file_paths
