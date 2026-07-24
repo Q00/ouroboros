@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 import structlog
@@ -227,38 +227,40 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        default = p.default if p.default is not None else None
         if p.description or p.enum is not None or p.items is not None:
             schema_extra: dict[str, Any] = {}
             if p.enum is not None:
                 schema_extra["enum"] = list(p.enum)
             if p.items is not None:
                 schema_extra["items"] = p.items
-            annotation = Annotated[
-                python_type,
-                Field(
-                    description=p.description or None,
-                    json_schema_extra=schema_extra or None,
-                ),
-            ]
-        else:
-            annotation = python_type
+            field_default: Any = ... if p.required else default
+            default = Field(
+                default=field_default,
+                description=p.description or None,
+                json_schema_extra=schema_extra or None,
+            )
 
         if p.required:
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
-                    annotation=annotation,
+                    annotation=python_type,
+                    default=(
+                        default
+                        if p.description or p.enum is not None or p.items is not None
+                        else inspect.Parameter.empty
+                    ),
                 )
             )
         else:
-            default = p.default if p.default is not None else None
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     default=default,
-                    annotation=annotation,
+                    annotation=python_type,
                 )
             )
 

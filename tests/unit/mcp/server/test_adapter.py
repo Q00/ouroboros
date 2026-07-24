@@ -1355,8 +1355,8 @@ class TestServeTransport:
         from unittest.mock import patch
 
         fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
-        from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
         from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+        from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
         from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 
         adapter = MCPServerAdapter()
