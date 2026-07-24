@@ -14,7 +14,7 @@ configuration fail closed before a provider boundary is entered.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set, Sized
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
@@ -27,8 +27,8 @@ MAX_ROUTE_CANDIDATES = 128
 MAX_ADVISOR_ORDER = 128
 MAX_REJECTION_REASONS = 16
 
-_SAFE_ROUTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
-_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}$")
+_SAFE_ROUTE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_ID_CHARS - 1}}}$")
+_SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_FIELD_CHARS - 1}}}$")
 
 
 class RouteDecisionDisposition(StrEnum):
@@ -154,8 +154,12 @@ class RouteCandidate:
         if set(value) != expected:
             raise ValueError("route candidate has an unsupported shape")
         capabilities = value["capabilities"]
-        if not isinstance(capabilities, Sequence) or isinstance(capabilities, str | bytes):
+        if not isinstance(capabilities, Sequence) or isinstance(
+            capabilities, str | bytes | bytearray
+        ):
             raise ValueError("route candidate capabilities must be a list")
+        if len(capabilities) > MAX_ROUTE_CAPABILITIES:
+            raise ValueError("capabilities exceeds its bound")
         return cls(
             route_id=value["route_id"],  # type: ignore[arg-type]
             model=value["model"],  # type: ignore[arg-type]
@@ -181,11 +185,15 @@ class RouteRegistry:
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != ROUTE_CONTRACT_VERSION:
             raise ValueError(f"unsupported route registry version: {self.version!r}")
-        candidates = tuple(self.candidates)
+        candidates = tuple(
+            _bounded_iterable(
+                self.candidates,
+                field="route registry candidates",
+                max_count=MAX_ROUTE_CANDIDATES,
+            )
+        )
         if not candidates:
             raise ValueError("route registry must contain at least one candidate")
-        if len(candidates) > MAX_ROUTE_CANDIDATES:
-            raise ValueError("route registry exceeds the bounded candidate count")
         if not all(isinstance(candidate, RouteCandidate) for candidate in candidates):
             raise ValueError("route registry candidates must be RouteCandidate values")
         route_ids = [candidate.route_id for candidate in candidates]
@@ -208,8 +216,12 @@ class RouteRegistry:
         if value.get("version") != ROUTE_CONTRACT_VERSION:
             raise ValueError("unsupported route registry version")
         raw_candidates = value.get("candidates")
-        if not isinstance(raw_candidates, Sequence) or isinstance(raw_candidates, str | bytes):
+        if not isinstance(raw_candidates, Sequence) or isinstance(
+            raw_candidates, str | bytes | bytearray
+        ):
             raise ValueError("route registry candidates must be a list")
+        if len(raw_candidates) > MAX_ROUTE_CANDIDATES:
+            raise ValueError("route registry exceeds the bounded candidate count")
         return cls(
             candidates=tuple(RouteCandidate.from_contract_data(item) for item in raw_candidates),
             version=value["version"],  # type: ignore[arg-type]
@@ -424,15 +436,17 @@ def _advisor_rank(
     advisor_order: Sequence[str],
     registry: RouteRegistry,
 ) -> dict[str, int]:
-    if not isinstance(advisor_order, Sequence) or isinstance(advisor_order, str | bytes):
-        raise TypeError("advisor_order must be a sequence of route IDs")
+    if not isinstance(advisor_order, Sequence) or isinstance(
+        advisor_order, str | bytes | bytearray
+    ):
+        return {}
     if len(advisor_order) > MAX_ADVISOR_ORDER:
-        raise ValueError("advisor_order exceeds the bounded route count")
+        return {}
     known = {candidate.route_id for candidate in registry.candidates}
     ranks: dict[str, int] = {}
     for value in advisor_order:
         if not isinstance(value, str):
-            continue
+            return {}
         route_id = value.strip()
         if route_id in known and route_id not in ranks:
             ranks[route_id] = len(ranks)
@@ -458,17 +472,37 @@ def _normalize_tokens(
     field: str,
     max_count: int,
 ) -> tuple[str, ...]:
-    if isinstance(values, str | bytes):
-        raise ValueError(f"{field} must be a sequence")
     normalized: list[str] = []
-    for value in values:
+    seen: set[str] = set()
+    for value in _bounded_iterable(values, field=field, max_count=max_count):
         token = _bounded_token(value, field=field, pattern=_SAFE_TOKEN)
-        if token in normalized:
+        if token in seen:
             raise ValueError(f"{field} contains duplicate values")
         normalized.append(token)
-    if len(normalized) > max_count:
-        raise ValueError(f"{field} exceeds its bound")
+        seen.add(token)
     return tuple(normalized)
+
+
+def _bounded_iterable(
+    values: Iterable[object],
+    *,
+    field: str,
+    max_count: int,
+) -> Iterable[object]:
+    """Yield a bounded, ordered input without materializing untrusted tails."""
+
+    if isinstance(values, str | bytes | bytearray):
+        raise ValueError(f"{field} must be an ordered sequence")
+    if isinstance(values, (Set, Mapping)):
+        raise ValueError(f"{field} must be ordered")
+    if not isinstance(values, Iterable):
+        raise ValueError(f"{field} must be an ordered sequence")
+    if isinstance(values, Sized) and len(values) > max_count:
+        raise ValueError(f"{field} exceeds its bound")
+    for index, value in enumerate(values):
+        if index >= max_count:
+            raise ValueError(f"{field} exceeds its bound")
+        yield value
 
 
 __all__ = [

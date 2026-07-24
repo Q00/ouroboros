@@ -90,6 +90,26 @@ def test_unknown_and_repeated_advisor_ids_cannot_authorize_or_reorder_routes() -
     assert decision.selected.route_id == "cheap"
 
 
+def test_oversized_or_malformed_advisor_order_falls_back_to_kernel_order() -> None:
+    registry = _registry(
+        _route("first", cost=5, ordinal=0),
+        _route("second", cost=5, ordinal=1),
+    )
+
+    oversized = ("second",) * 129
+    oversized_decision = admit_route(registry, RouteRequirements(), advisor_order=oversized)
+    malformed_decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=(object(), "second"),  # type: ignore[arg-type]
+    )
+
+    assert oversized_decision.selected is not None
+    assert malformed_decision.selected is not None
+    assert oversized_decision.selected.route_id == "first"
+    assert malformed_decision.selected.route_id == "first"
+
+
 def test_required_capabilities_and_harness_allowlist_are_hard_constraints() -> None:
     registry = _registry(
         _route("cheap", cost=1, harness="unsafe", capabilities=("read",)),
@@ -195,12 +215,53 @@ def test_registry_rejects_duplicate_ids_and_empty_candidates() -> None:
         RouteRegistry(candidates=(duplicate, duplicate))
     with pytest.raises(ValueError, match="at least one"):
         RouteRegistry(candidates=())
-    with pytest.raises(ValueError, match="bounded candidate"):
+    with pytest.raises(ValueError, match="exceeds its bound"):
         RouteRegistry(
             candidates=tuple(
                 _route(f"route-{index}", cost=index) for index in range(MAX_ROUTE_CANDIDATES + 1)
             )
         )
+
+
+def test_contract_rejects_oversized_registry_before_nested_candidate_parsing() -> None:
+    oversized = {"version": 1, "candidates": [{}] * (MAX_ROUTE_CANDIDATES + 1)}
+
+    with pytest.raises(ValueError, match="bounded candidate"):
+        RouteRegistry.from_contract_data(oversized)
+
+
+def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
+    with pytest.raises(ValueError, match="ordered"):
+        RouteCandidate(
+            route_id="set-capabilities",
+            model="model",
+            harness="harness",
+            effort="medium",
+            cost_units=1,
+            persona="persona",
+            tool_policy="tools",
+            authority_identity="authority",
+            capabilities={"read"},  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="ordered"):
+        RouteRequirements(required_capabilities={"read"})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="ordered"):
+        RouteRegistry(candidates={_route("unordered", cost=1)})  # type: ignore[arg-type]
+
+
+def test_streaming_capability_input_stops_at_the_bound() -> None:
+    consumed = 0
+
+    def capabilities():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield f"cap-{consumed}"
+
+    with pytest.raises(ValueError, match="exceeds its bound"):
+        RouteRequirements(required_capabilities=capabilities())  # type: ignore[arg-type]
+
+    assert consumed == 33
 
 
 def test_contract_round_trip_is_stable_and_rejects_unknown_shapes() -> None:

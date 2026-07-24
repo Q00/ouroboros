@@ -66,10 +66,17 @@ codes. Eligible routes are sorted by:
 cost_units → Advisor rank (equal-cost ties only) → ordinal → route_id
 ```
 
-An unknown or repeated Advisor ID is ignored. Therefore an Advisor cannot make
-an expensive route win over a cheaper eligible route, and cannot dispatch a
-route absent from the registry. Repeating the same registry, requirements, and
-Advisor order produces byte-equivalent contract data.
+An unknown or repeated Advisor ID is ignored. If the ranking itself is
+malformed or exceeds its bound, the complete ranking is discarded and the
+Kernel uses its non-Advisor deterministic order; advisory input can therefore
+never veto admission. An Advisor cannot make an expensive route win over a
+cheaper eligible route, and cannot dispatch a route absent from the registry.
+Repeating the same registry, requirements, and Advisor order produces
+byte-equivalent contract data.
+
+Registry candidates and capability lists are bounded before nested parsing, and
+streaming ordered inputs stop at the first item beyond their bound. Unordered
+collections are rejected rather than serialized in process-dependent order.
 
 The returned `RouteAdmission` is an authorization boundary for a later
 executor: only `selected` on an `admitted` result may be passed to dispatch.
