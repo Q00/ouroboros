@@ -923,9 +923,11 @@ def test_code_investigation_wrong_session_does_not_terminalize(tmp_path: Any) ->
         fanout_id=fanout_id,
     )
     assert wrong["status"] == "partial"
+    # Since round-20 the kind-specific rejection happens BEFORE the first
+    # durable write (early partial branch), so no synthesis result rides the
+    # response — the rejected key and reopened requirement are the signal.
     assert wrong["synthesis_rejected_keys"] == ["code_facts"]
     assert wrong["missing_required_keys"] == ["code_facts"]
-    assert wrong["result"]["ready_for_synthesis"] is False
     record = registry.load(fanout_id)
     assert record is not None
     assert record.completed is False
@@ -3258,6 +3260,168 @@ def test_assignment_style_failure_envelopes_are_not_evidence() -> None:
 
     clean = "status updated for 1,204 accounts; error rate 0.2%"
     assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_repeated_leading_token_records_are_rejected() -> None:
+    """Segments sharing their first token are records (round-20 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "acct u1 premium 34 \\ acct u2 free 12"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("row-shaped" in error for error in errors)
+
+    # Grouped aggregates lead each segment with a DIFFERENT category.
+    for clean in (
+        "free: 78%; pro: 15%; enterprise: 7%",
+        "read/write split 80/20 across 3 regions",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == [], clean
+
+
+def test_unaggregated_select_projection_is_rejected() -> None:
+    """A SELECT projection without aggregation returns rows (round-20)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    errors = _data_evidence_boundary_violations(
+        proposal("SELECT account_id, plan, seats FROM accounts")
+    )
+    assert any("without aggregation" in error for error in errors)
+
+    for aggregate in (
+        "SELECT plan, count(*) FROM accounts GROUP BY plan",
+        "SELECT DISTINCT plan FROM accounts",
+        "SELECT max_seats FROM config LIMIT 1",
+        "count calls per user last 30d",
+    ):
+        assert _data_evidence_boundary_violations(proposal(aggregate)) == [], aggregate
+
+
+def test_colon_form_failure_envelopes_are_rejected() -> None:
+    """Failure envelopes reject in both = and : spellings (round-20)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "status: failed; code: 502; 0 records returned"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("error-shaped" in error for error in errors)
+
+    clean = "job status green across 14 runs, error rate 0.2%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_root_ref_object_contract_is_enforceable(tmp_path: Any) -> None:
+    """A valid object contract expressed through a root $ref is advertised.
+
+    Bot-review round-20 probe: requiring a literal root type silently
+    dropped valid local-root-ref contracts, after which {"ok": false}
+    completed with no violation.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    root_ref_contract = {
+        "contract_id": "root_ref.v1",
+        "response_model_schema": {
+            "$ref": "#/$defs/root",
+            "$defs": {
+                "root": {
+                    "type": "object",
+                    "required": ["lane_id", "verdict"],
+                    "properties": {
+                        "lane_id": {"const": "ref_root_lane"},
+                        "verdict": {"type": "string"},
+                    },
+                }
+            },
+        },
+    }
+    assert _enforceable_lane_contract(root_ref_contract)
+
+    # A root ref resolving to a NON-object stays unenforceable.
+    scalar_root_ref = {
+        "contract_id": "root_ref_scalar.v1",
+        "response_model_schema": {
+            "$ref": "#/$defs/root",
+            "$defs": {"root": {"type": "string"}},
+        },
+    }
+    assert not _enforceable_lane_contract(scalar_root_ref)
+
+    # End-to-end: the advertised root-ref contract IS enforced at re-entry.
+    lanes = [
+        {
+            "lane_id": "ref_root_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": root_ref_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-root-ref", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-root-ref",
+        correlation_key="context.lane_id",
+        results=[{"key": "ref_root_lane", "content": {"ok": False}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["ref_root_lane"]
+
+
+def test_code_partial_never_persists_invalid_content(tmp_path: Any) -> None:
+    """Kind validation precedes even partial persistence (round-20 follow-up)."""
+    registry = FanoutRegistry(tmp_path)
+    question = "Which manifest declares the package?"
+    session_id = "sess-code-early"
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id=session_id,
+        question=question,
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    fanout_id = register_code_investigation_fanout(
+        registry,
+        session_id=session_id,
+        request=meta["code_investigation_request"],
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key="code_facts",
+        results=[
+            {"key": "code_facts", "content": _code_fact_output("some-other-session", question)}
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert out["synthesis_rejected_keys"] == ["code_facts"]
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:

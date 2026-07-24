@@ -3420,8 +3420,11 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     # Answer forms are OBJECTS: re-entry rejects non-object outputs before
     # schema validation, so a valid scalar schema ({"type": "string"}) would
     # be advertised yet unsatisfiable — a required lane following it would
-    # stay permanently partial (bot-review round-13).
-    if schema.get("type") != "object":
+    # stay permanently partial (bot-review round-13). The root may be
+    # expressed through a LOCAL $ref (round-20): the effective root after
+    # bounded resolution is what must declare the object type.
+    effective_root = _resolve_local_root(schema)
+    if not isinstance(effective_root, Mapping) or effective_root.get("type") != "object":
         return False
     try:
         Draft202012Validator.check_schema(dict(schema))
@@ -3434,6 +3437,32 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     # External/anchor refs are rejected conservatively (contracts must be
     # self-contained; nothing resolves over the network at re-entry).
     return _schema_local_refs_resolve(schema)
+
+
+def _resolve_local_root(schema: Mapping[str, Any]) -> Any:
+    """Follow a chain of LOCAL root ``$ref``s to the effective root schema.
+
+    Bounded and cycle-safe; returns the schema itself when the root carries
+    no ``$ref``, and ``None`` when a hop cannot be resolved locally.
+    """
+    node: Any = schema
+    for _hop in range(8):
+        if not isinstance(node, Mapping) or "$ref" not in node:
+            return node
+        ref = node.get("$ref")
+        if not isinstance(ref, str) or not ref.startswith("#/"):
+            return None
+        target: Any = schema
+        for raw_part in ref[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(target, Mapping) and part in target:
+                target = target[part]
+            elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
+                target = target[int(part)]
+            else:
+                return None
+        node = target
+    return None
 
 
 def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
@@ -3531,6 +3560,15 @@ def _is_row_shaped_value(value: str) -> bool:
         and not any(char.isdigit() for char in stripped)
     ):
         return True
+    # Segments sharing their FIRST token are repeated records (round-20:
+    # "acct u1 premium 34 \\ acct u2 free 12") — grouped aggregates lead each
+    # segment with a DIFFERENT category ("free: 78%; pro: 15%") and stay
+    # valid.
+    record_segments = [seg.strip() for seg in re.split(r"[;\\|/]", stripped) if seg.strip()]
+    if len(record_segments) >= 2:
+        first_tokens = [seg.split()[0].lower().rstrip(":,=") for seg in record_segments]
+        if len(set(first_tokens)) < len(first_tokens):
+            return True
     # Two or more capitalized word-pairs are a person/entity roster
     # (bot-review round-19: digit-bearing Alice/Bob rows) — one aggregate
     # names at most one entity; aggregate by count instead.
@@ -3557,8 +3595,9 @@ def _is_row_shaped_value(value: str) -> bool:
 _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
     r"|\btraceback \(most recent call last\)"
-    # Assignment-style failure envelopes (round-19: "status=failed code=502").
-    r"|\bstatus\s*=\s*(failed|error)\b|\bcode\s*=\s*[45]\d{2}\b",
+    # Assignment-style failure envelopes, = and : forms (rounds 19-20:
+    # "status=failed code=502", "status: failed; code: 502").
+    r"|\bstatus\s*[:=]\s*(failed|error)\b|\bcode\s*[:=]\s*[45]\d{2}\b",
     re.IGNORECASE,
 )
 
@@ -3736,6 +3775,23 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 "(SELECT *); propose an aggregate projection "
                 "(COUNT/AVG/GROUP BY) instead"
             )
+        # A SELECT projection WITHOUT any aggregate marker returns rows by
+        # construction (round-20: "SELECT account_id, plan, seats FROM
+        # accounts"): the aggregate policy binds confirmable payload, so it
+        # must aggregate, deduplicate to categories, or fetch a scalar.
+        elif isinstance(query, str) and re.match(r"\s*select\b", query, re.IGNORECASE):
+            has_aggregate_marker = re.search(
+                r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
+                r"|\bgroup\s+by\b|\bdistinct\b|\blimit\s+1\b",
+                query,
+                re.IGNORECASE,
+            )
+            if not has_aggregate_marker:
+                errors.append(
+                    f"proposed_queries[{index}].query: a SELECT projection "
+                    "without aggregation returns raw rows; use "
+                    "COUNT/AVG/GROUP BY/DISTINCT (or LIMIT 1 for a scalar)"
+                )
         if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
             errors.append(
                 f"proposed_queries[{index}].query: embedded serialized rows "
@@ -4262,6 +4318,21 @@ def _submit_fanout_results_locked(
         provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
         contract_violations = [*contract_violations, *accumulated_violations]
 
+    # Kind-specific content validation runs before even PARTIAL persistence
+    # for code investigations (round-20 follow-up, dormant-hardening): a
+    # wrong-session code_facts result never rides an early partial into
+    # durable state. Lateral personas are content-blind, and advisory lanes
+    # are door-validated above.
+    early_rejected: list[str] = []
+    if record.kind == FANOUT_KIND_CODE_INVESTIGATION and provided:
+        code_request = record.synthesizer_input.get("request") or {}
+        probe = synthesize_code_investigation_when_complete(
+            code_request, provided, _fanout_identity_synthesis
+        )
+        valid_ids = {str(item["result_id"]) for item in probe.get("aggregated_outputs") or ()}
+        early_rejected = sorted(key for key in provided if key not in valid_ids)
+        provided = {key: value for key, value in provided.items() if key in valid_ids}
+
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
     if finalize is False and record.kind != FANOUT_KIND_QUESTION_ADVISORY:
@@ -4317,6 +4388,7 @@ def _submit_fanout_results_locked(
             "contract_violations": contract_violations,
             "unexpected_keys": unexpected_keys,
             "malformed_keys": malformed_keys,
+            "synthesis_rejected_keys": early_rejected,
             "accumulation_persisted": persisted,
         }
     # Every remaining missing key is optional: proceed to synthesis without it
