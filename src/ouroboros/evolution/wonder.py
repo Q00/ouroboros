@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
@@ -403,13 +404,10 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         """Parse LLM response into WonderOutput."""
         total_acs = len(seed.acceptance_criteria) if seed else None
         try:
-            # Strip markdown fences if present
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
-
-            data = json.loads(cleaned)
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            data = json.loads(json_str if json_str is not None else content)
             grounded = self._parse_grounded_questions(data.get("questions", []), total_acs)
             return WonderOutput(
                 # ``questions`` stays a flat string tuple for events, lineage, and

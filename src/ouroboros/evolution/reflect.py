@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
@@ -632,12 +633,10 @@ Guidelines:
         can retry or propagate error.
         """
         try:
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
-
-            data = json.loads(cleaned)
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            data = json.loads(json_str if json_str is not None else content)
 
             mutations: list[OntologyMutation] = []
             for m in data.get("ontology_mutations", []):
