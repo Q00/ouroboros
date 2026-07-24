@@ -1196,6 +1196,15 @@ def _plugin_advisory_contract_section(
                     "form exactly; it is validated server-side at re-entry):\n"
                     + (_canonical_contract_json(lane_contract) or "{}")
                 )
+            elif lane_id == "data_context":
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}): full form "
+                    "OMITTED (oversized or invalid) — its schema is not "
+                    "enforced, but the data_policy above still binds and IS "
+                    "enforced at re-entry: return one JSON object with "
+                    "aggregates-only, PII-scrubbed evidence and "
+                    "requires_user_confirmation: true."
+                )
             else:
                 contract_blocks.append(
                     f"{lane_id} answer contract ({contract_id}): OMITTED — it "
@@ -1498,10 +1507,38 @@ def build_interview_question_advisory_subagents(
                 "skip returning a result."
             )
             data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
-            answer_contract_json = _bounded_json(
-                lane_answer_contract,
-                _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
-            )
+            # Rendering uses the SAME enforceability decision as registration
+            # (bot-review round-13): an undeliverable contract is never
+            # rendered truncated while claiming to supersede the generic
+            # shape — instead the child is told the schema is unenforced but
+            # the data policy still binds (registration keeps a minimal
+            # object contract, so the boundary scan stays active).
+            if isinstance(lane_answer_contract, Mapping) and _enforceable_lane_contract(
+                lane_answer_contract
+            ):
+                answer_contract_json = _canonical_contract_json(lane_answer_contract) or "{}"
+                contract_block = f"## Answer Contract\n```json\n{answer_contract_json}\n```\n"
+                output_rule = (
+                    "For this lane the generic Output section below is superseded: "
+                    "return EXACTLY one JSON object matching the answer contract's "
+                    "response_model_schema. It exists so the confirming user can "
+                    "decide with full context — executed evidence, deliberately "
+                    "unexecuted proposed_queries with their source_class, and "
+                    "caveats."
+                )
+            else:
+                contract_block = (
+                    "## Answer Contract\n"
+                    "The declared data answer contract could not be delivered "
+                    "whole (oversized or invalid), so its full schema is NOT "
+                    "enforced at re-entry.\n"
+                )
+                output_rule = (
+                    "The Data Access Policy above still binds and IS enforced "
+                    "at re-entry: return ONE JSON object with aggregates-only, "
+                    "PII-scrubbed evidence, point-in-time caveats, and "
+                    "requires_user_confirmation: true."
+                )
             raw_known_tools = raw_lane.get("known_data_tools")
             known_tools = (
                 [str(tool) for tool in raw_known_tools if str(tool).strip()]
@@ -1520,15 +1557,9 @@ def build_interview_question_advisory_subagents(
             extra = (
                 "## Data Access Policy\n"
                 f"```json\n{data_policy_json}\n```\n"
-                "## Answer Contract\n"
-                f"```json\n{answer_contract_json}\n```\n"
+                f"{contract_block}"
                 f"{known_tools_hint}"
-                "For this lane the generic Output section below is superseded: "
-                "return EXACTLY one JSON object matching the answer contract's "
-                "response_model_schema. It exists so the confirming user can "
-                "decide with full context — executed evidence, deliberately "
-                "unexecuted proposed_queries with their source_class, and "
-                "caveats."
+                f"{output_rule}"
             )
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
@@ -3363,6 +3394,12 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     schema = contract.get("response_model_schema")
     if not isinstance(schema, Mapping):
         return False
+    # Answer forms are OBJECTS: re-entry rejects non-object outputs before
+    # schema validation, so a valid scalar schema ({"type": "string"}) would
+    # be advertised yet unsatisfiable — a required lane following it would
+    # stay permanently partial (bot-review round-13).
+    if schema.get("type") != "object":
+        return False
     try:
         Draft202012Validator.check_schema(dict(schema))
     except Exception:
@@ -3859,6 +3896,17 @@ def register_question_advisory_fanout_from_lanes(
                     lane_id=lane_id,
                     contract_id=str(answer_contract.get("contract_id") or ""),
                 )
+                if lane_id == "data_context":
+                    # The data lane FAILS CLOSED (bot-review round-13):
+                    # dropping its unenforceable contract entirely would also
+                    # drop the contract-id-keyed evidence boundary scan,
+                    # letting PII/credential content persist unvalidated. A
+                    # minimal object contract keeps the policy scan active
+                    # while the undeliverable full schema stays unenforced.
+                    lane_answer_contracts[lane_id] = {
+                        "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
+                        "response_model_schema": {"type": "object"},
+                    }
     if not expected_keys:
         return None
     synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
@@ -4054,6 +4102,22 @@ def _submit_fanout_results_locked(
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
+    if finalize is False and record.kind != FANOUT_KIND_QUESTION_ADVISORY:
+        # Non-advisory kinds validate content only at synthesis (e.g. a
+        # code_facts result is checked against its embedded session there), so
+        # accumulating them early would persist unvalidated content
+        # (bot-review round-13). Advisory lanes are door-validated, which is
+        # why they alone support sequential accumulation.
+        return {
+            "status": "finalize_unsupported",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": (
+                "finalize=false accumulation is supported only for question-"
+                "advisory fan-outs; this kind validates content at synthesis, "
+                "so submit the full result set in one finalizing call."
+            ),
+        }
     if finalize is False:
         # Sequential accumulation (bot-review round-7): the host is still
         # submitting lanes one at a time, so even a required-complete set

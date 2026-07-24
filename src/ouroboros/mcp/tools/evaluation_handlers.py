@@ -2013,12 +2013,15 @@ class SubmitFanoutResultsHandler:
                     name="finalize",
                     type=ToolInputType.BOOLEAN,
                     description=(
-                        "Sequential-submission control: pass false to accumulate "
-                        "this batch WITHOUT completing the fan-out (status="
-                        "'accumulated'), so optional lanes submitted after the "
-                        "required set are not discarded. Omit (or pass true) on "
-                        "the last submission to complete. Single-batch "
-                        "submissions omit it."
+                        "Sequential-submission control (question-advisory "
+                        "fan-outs only): pass false to accumulate this batch "
+                        "WITHOUT completing the fan-out (status='accumulated'), "
+                        "so optional lanes submitted after the required set are "
+                        "not discarded. Omit (or pass true) on the last "
+                        "submission to complete. Single-batch submissions omit "
+                        "it; other fan-out kinds validate content at synthesis "
+                        "and reject finalize=false (status="
+                        "'finalize_unsupported')."
                     ),
                     required=False,
                 ),

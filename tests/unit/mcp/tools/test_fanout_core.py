@@ -2521,6 +2521,172 @@ def test_rejected_duplicate_does_not_suppress_accumulated_result(tmp_path: Any) 
     assert aggregated["data_context"] == valid_data
 
 
+def test_finalize_accumulation_is_advisory_only(tmp_path: Any) -> None:
+    """finalize=false must not persist synthesis-validated kinds (round-13).
+
+    A wrong-session code_facts result previously accumulated as
+    ``accumulation_persisted=true`` before its kind-specific validation ever
+    ran. Non-advisory kinds now reject non-finalizing accumulation before
+    any durable write.
+    """
+    registry = FanoutRegistry(tmp_path)
+    question = "Which manifest declares the package?"
+    session_id = "sess-code-finalize"
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id=session_id,
+        question=question,
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+    )
+    fanout_id = register_code_investigation_fanout(
+        registry,
+        session_id=session_id,
+        request=meta["code_investigation_request"],
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key="code_facts",
+        results=[
+            {"key": "code_facts", "content": _code_fact_output("some-other-session", question)}
+        ],
+        fanout_id=fanout_id,
+        finalize=False,
+    )
+    assert out["status"] == "finalize_unsupported"
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.received_results == {}
+
+
+def test_unenforceable_data_contract_fails_closed(tmp_path: Any) -> None:
+    """The data lane keeps its boundary scan when its contract is dropped.
+
+    Bot-review round-13 probe: an oversized data contract was skipped at
+    registration, after which email/token content completed with no
+    violations and persisted. The lane now registers a minimal object
+    contract so the contract-id-keyed policy scan stays active.
+    """
+    oversized_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            f"field_{i}": {"type": "string", "description": "x" * 200} for i in range(120)
+        },
+    }
+    lanes = [
+        {
+            "lane_id": "data_context",
+            "capability": "call_mcp",
+            "required": False,
+            "data_policy": {"read_only": True, "aggregate_only": True},
+            "answer_contract": {
+                "contract_id": "data_evidence_answer.v1",
+                "response_model_schema": oversized_schema,
+            },
+        },
+        {
+            "lane_id": "ambiguity_contrarian",
+            "capability": "run_lateral_review",
+            "persona": "contrarian",
+            "required": True,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-data-closed", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    fallback = record.synthesizer_input["lane_answer_contracts"]["data_context"]
+    assert fallback["contract_id"] == "data_evidence_answer.v1"
+    assert fallback["response_model_schema"] == {"type": "object"}
+
+    pii_output = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Contact alice@example.com with token=sk-live-321.",
+        "confidence": "reported_by_tool",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-data-closed",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": pii_output},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["data_context"]
+    persisted = (tmp_path / f"{fanout_id}.json").read_text()
+    assert "alice@example.com" not in persisted
+    assert "sk-live-321" not in persisted
+
+    # The host-driven renderer uses the same enforceability decision: no
+    # truncated form claiming to supersede the generic shape.
+    request = {
+        "session_id": "sess-data-closed",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": [lanes[0]],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    prompt = payloads[0].prompt
+    assert "[truncated]" not in prompt
+    assert "NOT enforced" in prompt
+    assert "still binds" in prompt
+
+
+def test_scalar_contract_is_not_advertised(tmp_path: Any) -> None:
+    """A valid-but-scalar schema is unsatisfiable, so it is never advertised.
+
+    Bot-review round-13 probe: re-entry rejects non-object outputs before
+    schema validation, so a required lane following its advertised
+    {"type": "string"} contract stayed permanently partial.
+    """
+    lanes = [
+        {
+            "lane_id": "scalar_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": {
+                "contract_id": "scalar_contract.v1",
+                "response_model_schema": {"type": "string"},
+            },
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-scalar", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.synthesizer_input.get("lane_answer_contracts", {}) == {}
+
+    # Following the generic shape (a plain string finding) completes — the
+    # lane is not trapped behind an unsatisfiable advertised contract.
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-scalar",
+        correlation_key="context.lane_id",
+        results=[{"key": "scalar_lane", "content": "a plain string finding"}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

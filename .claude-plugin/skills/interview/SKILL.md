@@ -246,8 +246,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    fan-out was registered with them, omitting them is a
    `correlation_mismatch`, not a skipped check. Submissions are bounded
    (at most 32 results / 256 KB serialized per call): submit findings, not
-   raw child transcripts. Submitting lanes one at a time? Pass
-   `finalize: false` on every intermediate call (`status="accumulated"`,
+   raw child transcripts. Submitting advisory lanes one at a time?
+   Pass `finalize: false` on every intermediate call (question-advisory
+   fan-outs only — other kinds validate content at synthesis and reject it) (`status="accumulated"`,
    the fan-out stays open even when all required lanes are in) and close
    with a final `finalize`-omitted or `finalize: true` call — otherwise
    completion fires as soon as the required set is present and later
