@@ -1,0 +1,271 @@
+"""Deterministic Routing B route contract and Admission Kernel tests."""
+
+from __future__ import annotations
+
+import copy
+
+import pytest
+
+from ouroboros.orchestrator.route_policy import (
+    MAX_ROUTE_CANDIDATES,
+    RouteCandidate,
+    RouteDecisionDisposition,
+    RouteRegistry,
+    RouteRejectionCode,
+    RouteRequirements,
+    admit_route,
+)
+
+
+def _route(
+    route_id: str,
+    *,
+    cost: int,
+    model: str = "model-a",
+    harness: str = "harness-a",
+    effort: str | None = "medium",
+    persona: str = "default-persona",
+    tool_policy: str = "default-tools",
+    authority_identity: str = "authority-default",
+    capabilities: tuple[str, ...] = (),
+    enabled: bool = True,
+    ordinal: int = 0,
+) -> RouteCandidate:
+    return RouteCandidate(
+        route_id=route_id,
+        model=model,
+        harness=harness,
+        effort=effort,
+        cost_units=cost,
+        persona=persona,
+        tool_policy=tool_policy,
+        authority_identity=authority_identity,
+        capabilities=capabilities,
+        enabled=enabled,
+        ordinal=ordinal,
+    )
+
+
+def _registry(*routes: RouteCandidate) -> RouteRegistry:
+    return RouteRegistry(candidates=routes)
+
+
+def test_cheapest_eligible_route_wins_even_when_advisor_prefers_expensive_route() -> None:
+    registry = _registry(_route("cheap", cost=1, ordinal=1), _route("expensive", cost=10))
+
+    decision = admit_route(registry, RouteRequirements(), advisor_order=("expensive", "cheap"))
+
+    assert decision.admitted is True
+    assert decision.selected is not None
+    assert decision.selected.route_id == "cheap"
+    assert decision.eligible_route_ids == ("cheap", "expensive")
+
+
+def test_advisor_order_breaks_only_equal_cost_ties() -> None:
+    registry = _registry(
+        _route("first", cost=5, ordinal=0),
+        _route("second", cost=5, ordinal=1),
+    )
+
+    decision = admit_route(registry, RouteRequirements(), advisor_order=("second", "first"))
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "second"
+    assert decision.eligible_route_ids == ("second", "first")
+
+
+def test_unknown_and_repeated_advisor_ids_cannot_authorize_or_reorder_routes() -> None:
+    registry = _registry(
+        _route("cheap", cost=1, ordinal=0),
+        _route("expensive", cost=10, ordinal=1),
+    )
+
+    decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=("unknown", "expensive", "expensive", "unknown"),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "cheap"
+
+
+def test_required_capabilities_and_harness_allowlist_are_hard_constraints() -> None:
+    registry = _registry(
+        _route("cheap", cost=1, harness="unsafe", capabilities=("read",)),
+        _route("eligible", cost=2, harness="safe", capabilities=("read", "write")),
+    )
+
+    decision = admit_route(
+        registry,
+        RouteRequirements(required_capabilities=("write",), allowed_harnesses=("safe",)),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "eligible"
+    assert decision.rejections[0].reasons == (
+        RouteRejectionCode.HARNESS_NOT_ALLOWED,
+        RouteRejectionCode.MISSING_CAPABILITIES,
+    )
+
+
+def test_pins_are_hard_constraints() -> None:
+    registry = _registry(
+        _route("model-a-safe", cost=1, model="model-a", harness="safe"),
+        _route("model-b-safe", cost=2, model="model-b", harness="safe"),
+        _route("model-b-other", cost=3, model="model-b", harness="other"),
+    )
+
+    decision = admit_route(
+        registry,
+        RouteRequirements(pinned_model="model-b", pinned_harness="safe"),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "model-b-safe"
+    assert RouteRejectionCode.MODEL_PIN_MISMATCH in decision.rejections[0].reasons
+    assert RouteRejectionCode.HARNESS_PIN_MISMATCH in decision.rejections[1].reasons
+
+
+def test_persona_tool_policy_and_authority_pins_are_hard_constraints() -> None:
+    registry = _registry(
+        _route(
+            "wrong-context",
+            cost=1,
+            persona="researcher",
+            tool_policy="read-only",
+            authority_identity="session-a",
+        ),
+        _route(
+            "eligible",
+            cost=2,
+            persona="builder",
+            tool_policy="workspace-write",
+            authority_identity="session-a",
+        ),
+    )
+
+    decision = admit_route(
+        registry,
+        RouteRequirements(
+            pinned_persona="builder",
+            pinned_tool_policy="workspace-write",
+            pinned_authority_identity="session-a",
+        ),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "eligible"
+    assert decision.rejections[0].reasons == (
+        RouteRejectionCode.PERSONA_PIN_MISMATCH,
+        RouteRejectionCode.TOOL_POLICY_PIN_MISMATCH,
+    )
+
+
+def test_disabled_and_effort_mismatch_routes_are_rejected() -> None:
+    registry = _registry(
+        _route("disabled", cost=1, enabled=False),
+        _route("wrong-effort", cost=2, effort="low"),
+        _route("eligible", cost=3),
+    )
+
+    decision = admit_route(registry, RouteRequirements(required_effort="medium"))
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "eligible"
+    assert decision.rejections[0].reasons == (RouteRejectionCode.DISABLED,)
+    assert decision.rejections[1].reasons == (RouteRejectionCode.EFFORT_MISMATCH,)
+
+
+def test_no_eligible_route_is_blocked_without_a_selected_route() -> None:
+    registry = _registry(_route("only", cost=1, enabled=False))
+
+    decision = admit_route(registry, RouteRequirements())
+
+    assert decision.disposition is RouteDecisionDisposition.BLOCKED
+    assert decision.selected is None
+    assert decision.eligible_route_ids == ()
+    assert decision.reason == "no_eligible_route"
+
+
+def test_registry_rejects_duplicate_ids_and_empty_candidates() -> None:
+    duplicate = _route("same", cost=1)
+
+    with pytest.raises(ValueError, match="unique"):
+        RouteRegistry(candidates=(duplicate, duplicate))
+    with pytest.raises(ValueError, match="at least one"):
+        RouteRegistry(candidates=())
+    with pytest.raises(ValueError, match="bounded candidate"):
+        RouteRegistry(
+            candidates=tuple(
+                _route(f"route-{index}", cost=index) for index in range(MAX_ROUTE_CANDIDATES + 1)
+            )
+        )
+
+
+def test_contract_round_trip_is_stable_and_rejects_unknown_shapes() -> None:
+    registry = _registry(
+        _route("cheap", cost=1, capabilities=("read", "write"), ordinal=3),
+        _route("other", cost=2, effort=None, enabled=False, ordinal=4),
+    )
+
+    encoded = registry.to_contract_data()
+    decoded = RouteRegistry.from_contract_data(copy.deepcopy(encoded))
+
+    assert decoded == registry
+    assert decoded.to_contract_data() == encoded
+
+    unknown_field = copy.deepcopy(encoded)
+    unknown_field["unexpected"] = True
+    with pytest.raises(ValueError, match="unsupported shape"):
+        RouteRegistry.from_contract_data(unknown_field)
+
+    bad_version = copy.deepcopy(encoded)
+    bad_version["version"] = 99
+    with pytest.raises(ValueError, match="version"):
+        RouteRegistry.from_contract_data(bad_version)
+
+
+def test_repeated_admission_is_deterministic() -> None:
+    registry = _registry(
+        _route("z", cost=4, ordinal=2),
+        _route("a", cost=4, ordinal=2),
+        _route("cheap", cost=1, ordinal=9),
+    )
+    requirements = RouteRequirements(required_capabilities=())
+
+    first = admit_route(registry, requirements, advisor_order=("z", "a"))
+    second = admit_route(registry, requirements, advisor_order=("z", "a"))
+
+    assert first == second
+    assert first.to_contract_data() == second.to_contract_data()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("route_id", "not valid"),
+        ("model", ""),
+        ("harness", 12),
+        ("effort", "not valid"),
+        ("cost_units", -1),
+    ],
+)
+def test_route_candidate_rejects_malformed_contract_values(field: str, value: object) -> None:
+    values: dict[str, object] = {
+        "route_id": "valid",
+        "model": "model",
+        "harness": "harness",
+        "effort": "medium",
+        "cost_units": 1,
+        "persona": "persona",
+        "tool_policy": "tools",
+        "authority_identity": "authority",
+        "capabilities": (),
+        "enabled": True,
+        "ordinal": 0,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError):
+        RouteCandidate(**values)  # type: ignore[arg-type]
