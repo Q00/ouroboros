@@ -1351,6 +1351,42 @@ class TestServeTransport:
         assert "before Ouroboros receives it" in description
 
     @pytest.mark.asyncio
+    async def test_real_fastmcp_tools_list_preserves_parameter_schema_metadata(self) -> None:
+        from unittest.mock import patch
+
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
+        from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+        from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(BrownfieldHandler())
+        adapter.register_tool(GenerateSeedHandler())
+        adapter.register_tool(StartEvolveStepHandler())
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+
+        tools = {tool.name: tool for tool in await adapter._mcp_server.list_tools()}
+
+        brownfield_action = tools["ouroboros_brownfield"].inputSchema["properties"]["action"]
+        assert brownfield_action["enum"] == ["scan", "register", "query", "set_default", "set_defaults"]
+
+        authoring_client_gates = tools["ouroboros_generate_seed"].inputSchema["properties"][
+            "client_gates"
+        ]
+        assert authoring_client_gates["items"] == {"type": "string"}
+
+        evolve_tool = tools["ouroboros_start_evolve_step"]
+        execute_schema = evolve_tool.inputSchema["properties"]["execute"]
+        assert execute_schema["type"] == "boolean"
+        assert "null" not in execute_schema.get("type", [])
+
+    @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
         """FastMCP tool wrapper routes through call_tool to enforce security checks."""
         from unittest.mock import MagicMock, patch

@@ -227,9 +227,21 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
-        annotation: Any = python_type if p.required else python_type | None
-        if p.description:
-            annotation = Annotated[annotation, Field(description=p.description)]
+        if p.description or p.enum is not None or p.items is not None:
+            schema_extra: dict[str, Any] = {}
+            if p.enum is not None:
+                schema_extra["enum"] = list(p.enum)
+            if p.items is not None:
+                schema_extra["items"] = p.items
+            annotation = Annotated[
+                python_type,
+                Field(
+                    description=p.description or None,
+                    json_schema_extra=schema_extra or None,
+                ),
+            ]
+        else:
+            annotation = python_type
 
         if p.required:
             sig_params.append(
