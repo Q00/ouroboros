@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import re
 
+from ouroboros.core.security import is_credential_shaped
+
 ROUTE_CONTRACT_VERSION = 1
 MAX_ROUTE_ID_CHARS = 160
 MAX_ROUTE_FIELD_CHARS = 240
@@ -28,26 +30,6 @@ MAX_ADVISOR_ORDER = 128
 MAX_REJECTION_REASONS = 16
 MAX_ROUTE_COST_UNITS = 1_000_000_000
 MAX_ROUTE_ORDINAL = 1_000_000_000
-
-_CREDENTIAL_PREFIXES = (
-    "ghp_",
-    "github_pat_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "sk-",
-    "pk-",
-    "api-",
-    "bearer ",
-    "token ",
-    "secret_",
-    "xoxb-",
-    "xoxp-",
-    "xapp-",
-    "npm_",
-    "pypi-",
-)
 
 _SAFE_ROUTE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_ID_CHARS - 1}}}$")
 _SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_FIELD_CHARS - 1}}}$")
@@ -500,7 +482,7 @@ def _bounded_token(value: object, *, field: str, pattern: re.Pattern[str]) -> st
 
 def _bounded_identity(value: object, *, field: str) -> str:
     normalized = _bounded_token(value, field=field, pattern=_SAFE_TOKEN)
-    if normalized.lower().startswith(_CREDENTIAL_PREFIXES):
+    if is_credential_shaped(normalized):
         raise ValueError(f"{field} is credential-shaped")
     return normalized
 

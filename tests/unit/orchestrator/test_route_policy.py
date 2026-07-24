@@ -254,10 +254,17 @@ def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
 
 
 def test_credential_shaped_authority_identity_is_rejected_before_serialization() -> None:
-    with pytest.raises(ValueError, match="credential-shaped"):
-        _route("credential", cost=1, authority_identity="ghp_not-a-route-identity")
-    with pytest.raises(ValueError, match="credential-shaped"):
-        RouteRequirements(pinned_authority_identity="ghp_secret-value")
+    credential_shapes = (
+        "ghp_not-a-route-identity",
+        "AIza" + "A" * 35,
+        "AKIA" + "A" * 16,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+    )
+    for identity in credential_shapes:
+        with pytest.raises(ValueError, match="credential-shaped"):
+            _route("credential", cost=1, authority_identity=identity)
+        with pytest.raises(ValueError, match="credential-shaped"):
+            RouteRequirements(pinned_authority_identity=identity)
 
 
 def test_numeric_contract_fields_are_bounded_and_json_serializable() -> None:
