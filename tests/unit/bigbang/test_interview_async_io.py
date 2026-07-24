@@ -217,9 +217,7 @@ class TestSaveStateUsesThread:
 
     @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
     @pytest.mark.asyncio
-    async def test_save_state_reports_success_when_post_replace_fsync_fails(
-        self, tmp_path
-    ) -> None:
+    async def test_save_state_reports_success_when_post_replace_fsync_fails(self, tmp_path) -> None:
         engine = _make_engine(tmp_path)
         state = _make_state()
 
