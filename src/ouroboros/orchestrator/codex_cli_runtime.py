@@ -6,7 +6,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
 import contextlib
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -138,6 +138,32 @@ _RUNTIME_CODEX_PROFILE_METADATA_KEYS = (
     "codex_cli_profile",
 )
 
+# Codex thread-item types that map onto the shared tool lifecycle
+# (``item.started`` → tool start, ``item.completed`` → tool result). See
+# issues #1690/#1724: both halves must be projected as a correlated pair so
+# the deliver gate can prove tool completions.
+_TOOL_LIFECYCLE_ITEM_TYPES = frozenset(
+    {"command_execution", "mcp_tool_call", "file_change", "web_search"}
+)
+_TOOL_STARTED_RUNTIME_EVENT_TYPE = "tool.started"
+# Containers that may hold nested command-result metadata on a thread item.
+# Shared by ``_extract_command_metadata`` and the fail-closed success resolver.
+_ITEM_METADATA_CONTAINER_KEYS = ("output", "result", "metadata", "data")
+# Explicit status strings. Anything outside both sets is treated as unknown
+# and produces no success claim (fail closed, #1692 review blocker 1).
+_ITEM_FAILURE_STATUSES = frozenset({"failed", "failure", "error", "errored"})
+_ITEM_SUCCESS_STATUSES = frozenset({"completed", "success", "succeeded"})
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexToolCall:
+    """One normalized tool invocation derived from a Codex thread item."""
+
+    tool_name: str
+    start_content: str
+    tool_call_id: str | None
+    tool_input: dict[str, Any] = field(default_factory=dict)
+
 
 class CodexCliRuntime:
     """Agent runtime that shells out to the locally installed Codex CLI."""
@@ -215,6 +241,12 @@ class CodexCliRuntime:
             self._profile_resolution_fingerprint = None
             self._codex_config_fingerprint = None
         self._builtin_mcp_handlers: dict[str, Any] | None = None
+        # Item-lifecycle correlation state (#1690): item ids whose
+        # ``item.started`` was already projected as a tool start, so the
+        # matching ``item.completed`` never duplicates the start. Id-less
+        # legacy items are tracked by (item_type, signature) counts instead.
+        self._started_item_ids: set[str] = set()
+        self._started_unkeyed_item_counts: dict[tuple[str, str], int] = {}
         if startup_output_timeout_seconds is not None:
             self._startup_output_timeout_seconds = (
                 None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
@@ -1728,12 +1760,19 @@ class CodexCliRuntime:
     def _extract_command_metadata(self, item: dict[str, Any]) -> dict[str, Any]:
         """Extract command result fields that can support verifier evidence."""
         data: dict[str, Any] = {}
-        self._merge_command_metadata(data, item)
-        for container_key in ("output", "result", "metadata", "data"):
+        for source in self._iter_item_metadata_sources(item):
+            self._merge_command_metadata(data, source)
+        return data
+
+    @staticmethod
+    def _iter_item_metadata_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the item plus any nested containers that may carry results."""
+        sources = [item]
+        for container_key in _ITEM_METADATA_CONTAINER_KEYS:
             nested = item.get(container_key)
             if isinstance(nested, dict):
-                self._merge_command_metadata(data, nested)
-        return data
+                sources.append(nested)
+        return sources
 
     def _merge_command_metadata(self, data: dict[str, Any], source: dict[str, Any]) -> None:
         """Merge known command-result fields from one Codex event object."""
@@ -1780,6 +1819,271 @@ class CodexCliRuntime:
             resume_handle=handle,
         )
 
+    @staticmethod
+    def _item_lifecycle_id(item: dict[str, Any]) -> str | None:
+        """Return the correlation id of a Codex thread item, if present."""
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id.strip():
+            return item_id.strip()
+        return None
+
+    def _item_lifecycle_signature(self, item_type: str, item: dict[str, Any]) -> str:
+        """Build a best-effort identity for id-less legacy thread items."""
+        if item_type == "command_execution":
+            return self._extract_command(item)
+        if item_type == "mcp_tool_call":
+            name = item.get("name")
+            return name.strip() if isinstance(name, str) else ""
+        if item_type == "file_change":
+            return "\n".join(self._extract_paths(item))
+        return self._extract_text(item)
+
+    def _item_tool_calls(self, item_type: str, item: dict[str, Any]) -> list[_CodexToolCall]:
+        """Normalize one Codex thread item into shared tool-call descriptors."""
+        item_id = self._item_lifecycle_id(item)
+
+        if item_type == "command_execution":
+            command = self._extract_command(item)
+            if not command:
+                return []
+            return [
+                _CodexToolCall(
+                    tool_name="Bash",
+                    tool_input={"command": command},
+                    start_content=f"Calling tool: Bash: {command}",
+                    tool_call_id=item_id,
+                )
+            ]
+
+        if item_type == "mcp_tool_call":
+            raw_name = item.get("name")
+            tool_name = raw_name if isinstance(raw_name, str) else "mcp_tool"
+            return [
+                _CodexToolCall(
+                    tool_name=tool_name,
+                    tool_input=self._extract_tool_input(item),
+                    start_content=f"Calling tool: {tool_name}",
+                    tool_call_id=item_id,
+                )
+            ]
+
+        if item_type == "file_change":
+            # Per-path correlation ids ("{item_id}:{path}") let the deliver
+            # gate match each Edit start with its own completion when one
+            # Codex item mutates multiple files (#1690).
+            return [
+                _CodexToolCall(
+                    tool_name="Edit",
+                    tool_input={"file_path": file_path},
+                    start_content=f"Calling tool: Edit: {file_path}",
+                    tool_call_id=f"{item_id}:{file_path}" if item_id is not None else None,
+                )
+                for file_path in self._extract_paths(item)
+            ]
+
+        if item_type == "web_search":
+            query = self._extract_text(item)
+            return [
+                _CodexToolCall(
+                    tool_name="WebSearch",
+                    tool_input={"query": query},
+                    start_content=f"Calling tool: WebSearch: {query}"
+                    if query
+                    else "Calling tool: WebSearch",
+                    tool_call_id=item_id,
+                )
+            ]
+
+        return []
+
+    def _remember_item_started(self, item_type: str, item: dict[str, Any]) -> None:
+        """Record that a thread item's tool start was already projected."""
+        item_id = self._item_lifecycle_id(item)
+        if item_id is not None:
+            self._started_item_ids.add(item_id)
+            return
+        key = (item_type, self._item_lifecycle_signature(item_type, item))
+        self._started_unkeyed_item_counts[key] = self._started_unkeyed_item_counts.get(key, 0) + 1
+
+    def _consume_item_started(self, item_type: str, item: dict[str, Any]) -> bool:
+        """Return True when this completion's tool start was already emitted."""
+        item_id = self._item_lifecycle_id(item)
+        if item_id is not None:
+            # Keep the id recorded: a duplicate completion for the same item
+            # must not resynthesize a second start (#1692 review blocker 2).
+            return item_id in self._started_item_ids
+        key = (item_type, self._item_lifecycle_signature(item_type, item))
+        count = self._started_unkeyed_item_counts.get(key, 0)
+        if count <= 0:
+            return False
+        if count == 1:
+            del self._started_unkeyed_item_counts[key]
+        else:
+            self._started_unkeyed_item_counts[key] = count - 1
+        return True
+
+    def _resolve_item_completion_is_error(
+        self,
+        item: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> bool | None:
+        """Resolve tri-state completion status, failing closed on ambiguity.
+
+        Returns ``False`` (success) only on explicit machine-readable signals
+        (``exit_code == 0``, completed/success status, ``success``/``ok`` true),
+        ``True`` on explicit failure signals, and ``None`` when the item
+        carries no trustworthy verdict — an unknown or malformed completion
+        must never become success evidence (#1692 review blocker 1).
+        """
+        has_failure = False
+        has_success = False
+
+        exit_code = metadata.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            if exit_code == 0:
+                has_success = True
+            else:
+                has_failure = True
+
+        status = metadata.get("status")
+        if isinstance(status, str):
+            normalized_status = status.strip().lower()
+            if normalized_status in _ITEM_FAILURE_STATUSES:
+                has_failure = True
+            elif normalized_status in _ITEM_SUCCESS_STATUSES:
+                has_success = True
+
+        for source in self._iter_item_metadata_sources(item):
+            for key in ("success", "ok"):
+                flag = source.get(key)
+                if flag is True:
+                    has_success = True
+                elif flag is False:
+                    has_failure = True
+
+        if has_failure:
+            return True
+        if has_success:
+            return False
+        return None
+
+    def _build_tool_start_message(
+        self,
+        call: _CodexToolCall,
+        handle: RuntimeHandle | None,
+    ) -> AgentMessage:
+        """Build the tool-start half of an item lifecycle pair."""
+        extra_data: dict[str, Any] = {"runtime_event_type": _TOOL_STARTED_RUNTIME_EVENT_TYPE}
+        if call.tool_call_id is not None:
+            extra_data["tool_call_id"] = call.tool_call_id
+        return self._build_tool_message(
+            tool_name=call.tool_name,
+            tool_input=call.tool_input,
+            content=call.start_content,
+            handle=handle,
+            extra_data=extra_data,
+        )
+
+    def _build_tool_result_message(
+        self,
+        call: _CodexToolCall,
+        *,
+        metadata: dict[str, Any],
+        is_error: bool | None,
+        handle: RuntimeHandle | None,
+    ) -> AgentMessage:
+        """Build the tool-result half of an item lifecycle pair."""
+        result_text = next(
+            (
+                metadata[key]
+                for key in ("output", "stdout", "result_preview", "stderr")
+                if isinstance(metadata.get(key), str) and metadata[key].strip()
+            ),
+            "",
+        )
+
+        tool_result_meta: dict[str, Any] = {}
+        if call.tool_call_id is not None:
+            tool_result_meta["tool_call_id"] = call.tool_call_id
+        exit_code = metadata.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            tool_result_meta["exit_status"] = exit_code
+
+        tool_result: dict[str, Any] = {
+            "content": [],
+            "text_content": result_text,
+            "meta": tool_result_meta,
+        }
+        if is_error is not None:
+            tool_result["is_error"] = is_error
+
+        # The completion verdict is carried exclusively by the tri-state
+        # ``is_error`` — never forward a metadata-derived "success" subtype.
+        extra_data: dict[str, Any] = {
+            key: value for key, value in metadata.items() if key != "subtype"
+        }
+        extra_data["subtype"] = "tool_result"
+        if call.tool_call_id is not None:
+            extra_data["tool_call_id"] = call.tool_call_id
+        if is_error is not None:
+            extra_data["is_error"] = is_error
+        extra_data["tool_result"] = tool_result
+
+        return self._build_tool_message(
+            tool_name=call.tool_name,
+            tool_input=call.tool_input,
+            content=result_text,
+            handle=handle,
+            extra_data=extra_data,
+        )
+
+    def _convert_tool_item_started(
+        self,
+        item_type: str,
+        item: dict[str, Any],
+        current_handle: RuntimeHandle | None,
+    ) -> list[AgentMessage]:
+        """Project ``item.started`` as correlated tool-start messages."""
+        calls = self._item_tool_calls(item_type, item)
+        if not calls:
+            return []
+        self._remember_item_started(item_type, item)
+        return [self._build_tool_start_message(call, current_handle) for call in calls]
+
+    def _convert_tool_item_completed(
+        self,
+        item_type: str,
+        item: dict[str, Any],
+        current_handle: RuntimeHandle | None,
+    ) -> list[AgentMessage]:
+        """Project ``item.completed`` as correlated tool-result messages.
+
+        When no matching ``item.started`` was projected (completed-only legacy
+        streams), synthesize the start+result pair so the deliver gate keeps
+        both invocation and completion evidence — but never duplicate a start
+        that already happened (#1692 review blocker 2).
+        """
+        calls = self._item_tool_calls(item_type, item)
+        if not calls:
+            return []
+        metadata = self._extract_command_metadata(item)
+        is_error = self._resolve_item_completion_is_error(item, metadata)
+        has_started = self._consume_item_started(item_type, item)
+
+        messages: list[AgentMessage] = []
+        for call in calls:
+            if not has_started:
+                messages.append(self._build_tool_start_message(call, current_handle))
+            messages.append(
+                self._build_tool_result_message(
+                    call,
+                    metadata=metadata,
+                    is_error=is_error,
+                    handle=current_handle,
+                )
+            )
+        return messages
+
     def _convert_event(
         self,
         event: dict[str, Any],
@@ -1804,6 +2108,15 @@ class CodexCliRuntime:
                 ]
             return []
 
+        if event_type == "item.started":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                return []
+            item_type = item.get("type")
+            if not isinstance(item_type, str) or item_type not in _TOOL_LIFECYCLE_ITEM_TYPES:
+                return []
+            return self._convert_tool_item_started(item_type, item, current_handle)
+
         if event_type == "item.completed":
             item = event.get("item")
             if not isinstance(item, dict):
@@ -1812,6 +2125,9 @@ class CodexCliRuntime:
             item_type = item.get("type")
             if not isinstance(item_type, str):
                 return []
+
+            if item_type in _TOOL_LIFECYCLE_ITEM_TYPES:
+                return self._convert_tool_item_completed(item_type, item, current_handle)
 
             if item_type == "agent_message":
                 content = self._extract_text(item)
@@ -1831,67 +2147,6 @@ class CodexCliRuntime:
                         content=content,
                         data={"thinking": content},
                         resume_handle=current_handle,
-                    )
-                ]
-
-            if item_type == "command_execution":
-                command = self._extract_command(item)
-                if not command:
-                    return []
-                return [
-                    self._build_tool_message(
-                        tool_name="Bash",
-                        tool_input={"command": command},
-                        content=f"Calling tool: Bash: {command}",
-                        handle=current_handle,
-                        extra_data=self._extract_command_metadata(item),
-                    )
-                ]
-
-            if item_type == "mcp_tool_call":
-                tool_name = item.get("name") if isinstance(item.get("name"), str) else "mcp_tool"
-                tool_input = self._extract_tool_input(item)
-                return [
-                    self._build_tool_message(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        content=f"Calling tool: {tool_name}",
-                        handle=current_handle,
-                    )
-                ]
-
-            if item_type == "file_change":
-                file_paths = self._extract_paths(item)
-                if not file_paths:
-                    return []
-                return [
-                    self._build_tool_message(
-                        tool_name="Edit",
-                        tool_input={"file_path": file_path},
-                        content=f"Calling tool: Edit: {file_path}",
-                        handle=current_handle,
-                        # This branch is reached only for Codex's
-                        # ``item.completed`` file_change event. Preserve that
-                        # source completion status so evidence validation does
-                        # not mistake it for an unconfirmed Edit dispatch.
-                        extra_data={
-                            "subtype": "success",
-                            "runtime_event_type": "tool.completed",
-                        },
-                    )
-                    for file_path in file_paths
-                ]
-
-            if item_type == "web_search":
-                query = self._extract_text(item)
-                return [
-                    self._build_tool_message(
-                        tool_name="WebSearch",
-                        tool_input={"query": query},
-                        content=f"Calling tool: WebSearch: {query}"
-                        if query
-                        else "Calling tool: WebSearch",
-                        handle=current_handle,
                     )
                 ]
 
