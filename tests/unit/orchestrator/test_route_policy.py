@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
 from ouroboros.orchestrator.route_policy import (
     MAX_ROUTE_CANDIDATES,
+    MAX_ROUTE_COST_UNITS,
+    MAX_ROUTE_ORDINAL,
+    RouteAdmission,
     RouteCandidate,
     RouteDecisionDisposition,
     RouteRegistry,
@@ -247,6 +251,36 @@ def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
         RouteRequirements(required_capabilities={"read"})  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="ordered"):
         RouteRegistry(candidates={_route("unordered", cost=1)})  # type: ignore[arg-type]
+
+
+def test_credential_shaped_authority_identity_is_rejected_before_serialization() -> None:
+    with pytest.raises(ValueError, match="credential-shaped"):
+        _route("credential", cost=1, authority_identity="ghp_not-a-route-identity")
+    with pytest.raises(ValueError, match="credential-shaped"):
+        RouteRequirements(pinned_authority_identity="ghp_secret-value")
+
+
+def test_numeric_contract_fields_are_bounded_and_json_serializable() -> None:
+    registry = _registry(_route("json-safe", cost=MAX_ROUTE_COST_UNITS, ordinal=MAX_ROUTE_ORDINAL))
+    encoded = registry.to_contract_data()
+
+    assert json.loads(json.dumps(encoded, sort_keys=True)) == encoded
+
+    with pytest.raises(ValueError, match="cost_units exceeds"):
+        _route("huge-cost", cost=10**5000)
+    with pytest.raises(ValueError, match="ordinal exceeds"):
+        _route("huge-ordinal", cost=1, ordinal=10**5000)
+
+
+def test_admission_rejects_non_route_selected_values() -> None:
+    with pytest.raises(ValueError, match="RouteCandidate"):
+        RouteAdmission(
+            disposition=RouteDecisionDisposition.ADMITTED,
+            selected=object(),  # type: ignore[arg-type]
+            eligible_route_ids=(),
+            rejections=(),
+            reason="test",
+        )
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:

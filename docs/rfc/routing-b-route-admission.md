@@ -37,10 +37,16 @@ Each candidate has:
 - `model`, `harness`, and optional `effort`;
 - `cost_units`: non-negative configured relative cost;
 - `persona`, `tool_policy`, and `authority_identity`: explicit route identity
-  dimensions, never inferred from a provider name;
+  dimensions, never inferred from a provider name. Authority identities are
+  opaque non-secret identifiers; credential-shaped values are rejected before
+  serialization;
 - `capabilities`: bounded unique capability tokens;
 - `enabled`: configuration kill switch;
 - `ordinal`: stable configuration order for the final deterministic tie-break.
+
+Cost and ordinal integers have finite bounds so the contract remains safe for
+ordinary JSON serialization and future fingerprints, including hostile numeric
+inputs.
 
 The serialized contract is intentionally strict: unknown fields, unsupported
 versions, duplicate route IDs, malformed tokens, and an empty registry fail

@@ -26,6 +26,28 @@ MAX_ROUTE_CAPABILITIES = 32
 MAX_ROUTE_CANDIDATES = 128
 MAX_ADVISOR_ORDER = 128
 MAX_REJECTION_REASONS = 16
+MAX_ROUTE_COST_UNITS = 1_000_000_000
+MAX_ROUTE_ORDINAL = 1_000_000_000
+
+_CREDENTIAL_PREFIXES = (
+    "ghp_",
+    "github_pat_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "sk-",
+    "pk-",
+    "api-",
+    "bearer ",
+    "token ",
+    "secret_",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "npm_",
+    "pypi-",
+)
 
 _SAFE_ROUTE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_ID_CHARS - 1}}}$")
 _SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_FIELD_CHARS - 1}}}$")
@@ -86,19 +108,22 @@ class RouteCandidate:
         )
         persona = _bounded_token(self.persona, field="persona", pattern=_SAFE_TOKEN)
         tool_policy = _bounded_token(self.tool_policy, field="tool_policy", pattern=_SAFE_TOKEN)
-        authority_identity = _bounded_token(
+        authority_identity = _bounded_identity(
             self.authority_identity,
             field="authority_identity",
-            pattern=_SAFE_TOKEN,
         )
         if isinstance(self.cost_units, bool) or not isinstance(self.cost_units, int):
             raise ValueError("cost_units must be an integer")
         if self.cost_units < 0:
             raise ValueError("cost_units must be >= 0")
+        if self.cost_units > MAX_ROUTE_COST_UNITS:
+            raise ValueError("cost_units exceeds its bound")
         if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int):
             raise ValueError("ordinal must be an integer")
         if self.ordinal < 0:
             raise ValueError("ordinal must be >= 0")
+        if self.ordinal > MAX_ROUTE_ORDINAL:
+            raise ValueError("ordinal exceeds its bound")
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be a boolean")
         capabilities = _normalize_tokens(
@@ -272,14 +297,19 @@ class RouteRequirements:
         ):
             value = getattr(self, field_name)
             if value is not None:
-                object.__setattr__(
-                    self,
-                    field_name,
-                    _bounded_token(
+                normalized = (
+                    _bounded_identity(value, field=field_name)
+                    if field_name == "pinned_authority_identity"
+                    else _bounded_token(
                         value,
                         field=field_name,
                         pattern=_SAFE_ROUTE_ID if field_name == "pinned_route_id" else _SAFE_TOKEN,
-                    ),
+                    )
+                )
+                object.__setattr__(
+                    self,
+                    field_name,
+                    normalized,
                 )
 
 
@@ -319,6 +349,8 @@ class RouteAdmission:
             raise ValueError("admitted route decision requires a selected candidate")
         if self.disposition is RouteDecisionDisposition.BLOCKED and self.selected is not None:
             raise ValueError("blocked route decision must not select a candidate")
+        if self.selected is not None and not isinstance(self.selected, RouteCandidate):
+            raise ValueError("selected route must be a RouteCandidate")
         if not isinstance(self.reason, str) or not self.reason.strip():
             raise ValueError("route admission reason must be non-empty")
 
@@ -466,6 +498,13 @@ def _bounded_token(value: object, *, field: str, pattern: re.Pattern[str]) -> st
     return normalized
 
 
+def _bounded_identity(value: object, *, field: str) -> str:
+    normalized = _bounded_token(value, field=field, pattern=_SAFE_TOKEN)
+    if normalized.lower().startswith(_CREDENTIAL_PREFIXES):
+        raise ValueError(f"{field} is credential-shaped")
+    return normalized
+
+
 def _normalize_tokens(
     values: Iterable[object],
     *,
@@ -507,7 +546,9 @@ def _bounded_iterable(
 
 __all__ = [
     "ROUTE_CONTRACT_VERSION",
+    "MAX_ROUTE_COST_UNITS",
     "MAX_ROUTE_CANDIDATES",
+    "MAX_ROUTE_ORDINAL",
     "RouteAdmission",
     "RouteCandidate",
     "RouteDecisionDisposition",
