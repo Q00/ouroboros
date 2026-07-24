@@ -6551,6 +6551,52 @@ class TestZombieJobReconciliation:
 
         assert await manager._derive_completed_execution_result(snapshot) is None
 
+    async def test_completion_recovery_uses_newest_terminal_projection(self) -> None:
+        session_id = "orch_newest_terminal_session"
+        execution_id = "exec_newest_terminal_projection"
+        current_start = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={"execution_id": execution_id, "seed_id": "seed-current"},
+        )
+        older_failed = BaseEvent(
+            type="execution.terminal",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            timestamp=datetime(2026, 7, 23, 0, 0, tzinfo=UTC),
+            data={"session_id": session_id, "status": "failed"},
+        )
+        newest_completed = BaseEvent(
+            type="execution.terminal",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            timestamp=datetime(2026, 7, 23, 0, 1, tzinfo=UTC),
+            data={"session_id": session_id, "status": "completed"},
+        )
+        store = MagicMock()
+        store.replay = AsyncMock(return_value=[current_start])
+        store.query_events = AsyncMock(
+            side_effect=lambda **kwargs: (
+                [newest_completed, older_failed]
+                if kwargs.get("event_type") == "execution.terminal"
+                else []
+            )
+        )
+        manager = JobManager(store)
+        now = datetime.now(UTC)
+        snapshot = JobSnapshot(
+            job_id="job-newest-terminal-projection",
+            job_type="run",
+            status=JobStatus.RUNNING,
+            message="running",
+            created_at=now,
+            updated_at=now,
+            links=JobLinks(session_id=session_id, execution_id=execution_id),
+        )
+
+        assert await manager._derive_completed_execution_result(snapshot) == "Execution complete"
+
     async def test_failure_recovery_ignores_attempt_judgment_from_other_session(self) -> None:
         session_id = "orch_current_attempt_session"
         execution_id = "exec_shared_attempts"

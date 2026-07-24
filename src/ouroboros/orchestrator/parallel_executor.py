@@ -1283,6 +1283,77 @@ class _VerifyGateOutcome:
     workspace_digest: str | None = None
 
 
+def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
+    """Encode verify evidence into the JSON-safe checkpoint state."""
+    if not isinstance(outcome, _VerifyGateOutcome):
+        return None
+    return {
+        "passed": outcome.passed,
+        "reason": outcome.reason,
+        "output_tail": outcome.output_tail,
+        "missing_artifacts": list(outcome.missing_artifacts),
+        "workspace_mutated": outcome.workspace_mutated,
+        "workspace_digest": outcome.workspace_digest,
+    }
+
+
+def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None:
+    """Decode checkpointed verify evidence, rejecting malformed payloads."""
+    if not isinstance(value, Mapping):
+        return None
+    passed = value.get("passed")
+    reason = value.get("reason")
+    output_tail = value.get("output_tail")
+    raw_missing = value.get("missing_artifacts", ())
+    workspace_mutated = value.get("workspace_mutated", False)
+    workspace_digest = value.get("workspace_digest")
+    if not isinstance(passed, bool) or not isinstance(output_tail, str):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    if not isinstance(raw_missing, (list, tuple)) or not all(
+        isinstance(item, str) for item in raw_missing
+    ):
+        return None
+    if not isinstance(workspace_mutated, bool):
+        return None
+    if workspace_digest is not None and not isinstance(workspace_digest, str):
+        return None
+    return _VerifyGateOutcome(
+        passed=passed,
+        reason=reason,
+        output_tail=output_tail,
+        missing_artifacts=tuple(raw_missing),
+        workspace_mutated=workspace_mutated,
+        workspace_digest=workspace_digest,
+    )
+
+
+def _checkpoint_result_retry_attempts(
+    results: list[ACExecutionResult],
+) -> dict[str, int]:
+    """Persist each result's actual attempt identity, not scheduler counters."""
+    return {
+        str(result.ac_index): result.retry_attempt
+        for result in results
+        if isinstance(result.retry_attempt, int)
+        and not isinstance(result.retry_attempt, bool)
+        and result.retry_attempt >= 0
+    }
+
+
+def _checkpoint_verify_gate_outcomes(
+    results: list[ACExecutionResult],
+) -> dict[str, dict[str, object]]:
+    """Persist all available per-result verify evidence for crash replay."""
+    serialized: dict[str, dict[str, object]] = {}
+    for result in results:
+        outcome = _serialize_verify_gate_outcome(result.verify_gate_outcome)
+        if outcome is not None:
+            serialized[str(result.ac_index)] = outcome
+    return serialized
+
+
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
     """Return the expected artifacts absent relative to ``cwd``.
 
@@ -2529,6 +2600,10 @@ class ParallelACExecutor:
                                 and retry_attempt >= 0
                             ):
                                 ac_retry_attempts[int(idx)] = retry_attempt
+                        raw_result_retry_attempts = checkpoint_state.get(
+                            "result_retry_attempts", {}
+                        )
+                        raw_verify_gate_outcomes = checkpoint_state.get("verify_gate_outcomes", {})
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         for idx in checkpoint_state.get("blocked_indices", []):
@@ -2589,6 +2664,23 @@ class ParallelACExecutor:
                                 )
                                 is_completed = outcome in {"succeeded", "satisfied_externally"}
                                 is_skipped = status == "skipped"
+                                raw_result_retry_attempt = (
+                                    raw_result_retry_attempts.get(str(ac_idx))
+                                    if isinstance(raw_result_retry_attempts, Mapping)
+                                    else None
+                                )
+                                restored_retry_attempt = (
+                                    raw_result_retry_attempt
+                                    if isinstance(raw_result_retry_attempt, int)
+                                    and not isinstance(raw_result_retry_attempt, bool)
+                                    and raw_result_retry_attempt >= 0
+                                    else ac_retry_attempts.get(ac_idx, 0)
+                                )
+                                raw_verify_gate = (
+                                    raw_verify_gate_outcomes.get(str(ac_idx))
+                                    if isinstance(raw_verify_gate_outcomes, Mapping)
+                                    else None
+                                )
                                 all_results.append(
                                     ACExecutionResult(
                                         ac_index=ac_idx,
@@ -2604,8 +2696,11 @@ class ParallelACExecutor:
                                             if is_completed
                                             else "Failed (restored from checkpoint)"
                                         ),
-                                        retry_attempt=ac_retry_attempts.get(ac_idx, 0),
+                                        retry_attempt=restored_retry_attempt,
                                         outcome=ACExecutionOutcome(outcome),
+                                        verify_gate_outcome=_deserialize_verify_gate_outcome(
+                                            raw_verify_gate
+                                        ),
                                     )
                                 )
                         self._console.print(
@@ -3211,6 +3306,12 @@ class ParallelACExecutor:
                                 "ac_retry_attempts": {
                                     str(k): v for k, v in ac_retry_attempts.items()
                                 },
+                                "result_retry_attempts": _checkpoint_result_retry_attempts(
+                                    all_results
+                                ),
+                                "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(
+                                    all_results
+                                ),
                                 "ac_outcomes": {
                                     str(result.ac_index): (
                                         result.outcome.value
@@ -3267,9 +3368,9 @@ class ParallelACExecutor:
         ) or (post_coordinator_revalidation_required and not post_coordinator_revalidated)
         if needs_post_coordinator_revalidation:
             # The coordinator may have edited files after a worker's verify
-            # gate passed.  Re-run every success contract against the settled
-            # workspace; contract-less successes fail closed because there is
-            # no deterministic post-mutation evidence to bind to acceptance.
+            # gate passed.  Reconcile every success contract against the
+            # settled workspace; arbitrary verify_command contracts are not
+            # replayed because no deterministic external-effect boundary exists.
             all_results = await self._revalidate_results_after_coordinator(
                 seed=seed,
                 results=all_results,
@@ -3347,6 +3448,8 @@ class ParallelACExecutor:
                             "completed_levels": total_levels,
                             "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                             "ac_retry_attempts": {str(k): v for k, v in ac_retry_attempts.items()},
+                            "result_retry_attempts": _checkpoint_result_retry_attempts(all_results),
+                            "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(all_results),
                             "ac_outcomes": {
                                 str(result.ac_index): (
                                     result.outcome.value
@@ -3534,11 +3637,13 @@ class ParallelACExecutor:
     ) -> list[ACExecutionResult]:
         """Bind successful ACs to the workspace settled by the coordinator.
 
-        A cached verify result is intentionally not reused here.  The
+        A cached command result is intentionally not replayed here.  The
         coordinator is an effectful writer and can invalidate a previously
-        passing command after the worker-level gate.  Re-running the explicit
-        success contract is deterministic; description-only ACs fail closed
-        because no independent post-mutation contract exists.
+        passing command after the worker-level gate, while an unrestricted
+        shell replay could duplicate external effects.  Command-bearing ACs
+        therefore fail closed; artifact-only contracts are checked against the
+        settled workspace and description-only ACs fail closed because no
+        independent post-mutation contract exists.
         """
         from ouroboros.events.base import BaseEvent
 
@@ -3670,8 +3775,11 @@ class ParallelACExecutor:
 
         Verify gates run as each AC completes, while later ACs can still touch
         the same workspace.  Before terminal acceptance, re-check every
-        successful contract's artifact leg and invalidate the complete success
-        set when any verify command was observed mutating the workspace.
+        successful contract's artifact leg and cached workspace identity. A
+        stale command result is rejected rather than replayed because an
+        unrestricted shell command may have effects outside the workspace.
+        Invalidate the complete success set when any verify command was
+        observed mutating the workspace.
         """
         from ouroboros.events.base import BaseEvent
         from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -3779,25 +3887,16 @@ class ParallelACExecutor:
 
                 if cached_digest != final_digest:
                     # A later worker changed the workspace after this command
-                    # passed.  Re-run the explicit contract exactly once at the
-                    # final boundary, where its result can be bound to the
-                    # settled workspace.  Coordinator-triggered revalidation is
-                    # excluded above because arbitrary commands may have
-                    # external effects that cannot be safely replayed.
-                    rerun = await _invoke_execution_authority_entry(
-                        self,
-                        _FOUNDATION_A_ENTRY_RUN_AC_VERIFY_GATE,
-                        spec=spec,
-                        cwd=cwd,
+                    # passed.  Do not replay an unrestricted shell contract:
+                    # effects outside the workspace (DB/API/deployment writes)
+                    # cannot be detected by the digest.  The stale evidence is
+                    # therefore rejected at the final boundary.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because the workspace changed "
+                        "after verify_command completed; replaying verify_command "
+                        "is not permitted.",
+                        outcome,
                     )
-                    result = replace(result, verify_gate_outcome=rerun)
-                    if rerun.workspace_mutated:
-                        verify_mutated_workspace = True
-                    if not rerun.passed:
-                        individual_failures[result.ac_index] = (
-                            f"Final workspace verify gate failed: {rerun.reason}",
-                            rerun,
-                        )
                     settled.append(result)
                     continue
 
@@ -7008,7 +7107,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=ACExecutionOutcome.SUCCEEDED,
                     verify_gate_outcome=outcome,
                 )
-            return result
+            if cached_outcome is outcome:
+                return result
+            return replace(result, verify_gate_outcome=outcome)
         if not result.success:
             return result
 

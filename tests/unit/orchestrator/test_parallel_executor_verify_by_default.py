@@ -31,6 +31,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
+    _VerifyGateOutcome,
 )
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
@@ -1276,13 +1277,14 @@ async def test_apply_verify_gate_fails_artifacts_only_ac(tmp_path: Any) -> None:
     assert gated.atomic_verifier_verdict is not None
     assert gated.atomic_verifier_verdict.failure_class == "EVIDENCE_MISSING"
 
-    # And with the artifact present the same AC passes untouched.
+    # And with the artifact present the same AC passes with durable evidence.
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "out.md").write_text("done\n")
     passed = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
-    assert passed is result
+    assert passed.success is True
+    assert passed.verify_gate_outcome is not None
 
 
 @pytest.mark.asyncio
@@ -1366,7 +1368,7 @@ async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) 
 
 
 @pytest.mark.asyncio
-async def test_final_settlement_reruns_stale_command_once_and_rejects_failure(
+async def test_final_settlement_rejects_stale_command_without_replay(
     tmp_path: Any,
 ) -> None:
     counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
@@ -1399,10 +1401,76 @@ async def test_final_settlement_reruns_stale_command_once_and_rejects_failure(
         execution_id="e",
     )
 
-    assert counter.read_text(encoding="utf-8") == "2"
+    assert counter.read_text(encoding="utf-8") == "1"
     assert settled[0].success is False
     assert settled[0].outcome is ACExecutionOutcome.FAILED
-    assert "Final workspace verify gate failed" in (settled[0].error or "")
+    assert "replaying verify_command is not permitted" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    plan = DependencyGraph(
+        nodes=(ACNode(index=0, content="ac", depends_on=()),),
+        execution_levels=((0,),),
+    ).to_execution_plan()
+    checkpoint_store = MagicMock()
+    checkpoint_store.load.return_value = type("LoadResult", (), {"is_ok": False})()
+    checkpoint_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
+    executor = _make_executor(working_directory=str(tmp_path))
+    executor._checkpoint_store = checkpoint_store
+    gate = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    executor._execute_ac_batch = AsyncMock(
+        return_value=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                retry_attempt=3,
+                verify_gate_outcome=gate,
+            )
+        ]
+    )
+
+    first = await executor.execute_parallel(
+        seed=seed,
+        execution_plan=plan,
+        session_id="session-checkpoint-verify",
+        execution_id="execution-checkpoint-verify",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+    assert first.results[0].success is True
+    checkpoint = checkpoint_store.save.call_args.args[0]
+    assert checkpoint.state["result_retry_attempts"] == {"0": 3}
+    assert checkpoint.state["verify_gate_outcomes"]["0"]["workspace_digest"] == (
+        gate.workspace_digest
+    )
+
+    restore_store = MagicMock()
+    restore_store.load.return_value = type("LoadResult", (), {"is_ok": True, "value": checkpoint})()
+    restore_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
+    restored = _make_executor(working_directory=str(tmp_path))
+    restored._checkpoint_store = restore_store
+    restored._execute_ac_batch = AsyncMock()
+
+    recovered = await restored.execute_parallel(
+        seed=seed,
+        execution_plan=plan,
+        session_id="session-checkpoint-verify",
+        execution_id="execution-checkpoint-verify",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+
+    assert recovered.results[0].success is True
+    assert recovered.results[0].retry_attempt == 3
+    assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
+    restored._execute_ac_batch.assert_not_awaited()
 
 
 def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:

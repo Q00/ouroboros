@@ -1570,7 +1570,7 @@ class JobManager:
         terminal_event = next(
             (
                 event
-                for event in reversed(terminal_events)
+                for event in terminal_events
                 if _event_belongs_to_linked_session(event, snapshot)
             ),
             None,
@@ -1589,7 +1589,7 @@ class JobManager:
         workflow_event = next(
             (
                 event
-                for event in reversed(workflow_events)
+                for event in workflow_events
                 if _event_belongs_to_linked_session(event, snapshot)
             ),
             None,
@@ -1620,7 +1620,7 @@ class JobManager:
         terminal_event = next(
             (
                 event
-                for event in reversed(terminal_events)
+                for event in terminal_events
                 if _event_belongs_to_linked_session(event, snapshot)
             ),
             None,
@@ -1636,7 +1636,7 @@ class JobManager:
         workflow_event = next(
             (
                 event
-                for event in reversed(workflow_events)
+                for event in workflow_events
                 if _event_belongs_to_linked_session(event, snapshot)
             ),
             None,
@@ -1712,7 +1712,7 @@ class JobManager:
             terminal_event = next(
                 (
                     event
-                    for event in reversed(terminal_events)
+                    for event in terminal_events
                     if _event_belongs_to_linked_session(event, snapshot)
                 ),
                 None,
