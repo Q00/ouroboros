@@ -31,6 +31,8 @@ MAX_REJECTION_REASONS = 16
 MAX_ROUTE_COST_UNITS = 1_000_000_000
 MAX_ROUTE_ORDINAL = 1_000_000_000
 
+_ADMISSION_KERNEL_TOKEN = object()
+
 _SAFE_ROUTE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_ID_CHARS - 1}}}$")
 _SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_FIELD_CHARS - 1}}}$")
 
@@ -323,18 +325,52 @@ class RouteAdmission:
     eligible_route_ids: tuple[str, ...]
     rejections: tuple[RouteRejection, ...]
     reason: str
+    _kernel_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.disposition, RouteDecisionDisposition):
             raise ValueError("disposition must be a RouteDecisionDisposition")
+        if self.selected is not None and not isinstance(self.selected, RouteCandidate):
+            raise ValueError("selected route must be a RouteCandidate")
         if self.disposition is RouteDecisionDisposition.ADMITTED and self.selected is None:
             raise ValueError("admitted route decision requires a selected candidate")
         if self.disposition is RouteDecisionDisposition.BLOCKED and self.selected is not None:
             raise ValueError("blocked route decision must not select a candidate")
-        if self.selected is not None and not isinstance(self.selected, RouteCandidate):
-            raise ValueError("selected route must be a RouteCandidate")
+        if not isinstance(self.eligible_route_ids, tuple):
+            raise ValueError("eligible route IDs must be an ordered tuple")
+        if len(self.eligible_route_ids) > MAX_ROUTE_CANDIDATES:
+            raise ValueError("eligible route IDs exceed their bound")
+        if any(
+            not isinstance(route_id, str) or not _SAFE_ROUTE_ID.fullmatch(route_id)
+            for route_id in self.eligible_route_ids
+        ):
+            raise ValueError("eligible route IDs are invalid")
+        if len(set(self.eligible_route_ids)) != len(self.eligible_route_ids):
+            raise ValueError("eligible route IDs must be unique")
+        if self.disposition is RouteDecisionDisposition.ADMITTED:
+            if not self.eligible_route_ids:
+                raise ValueError("admitted route decision requires eligible routes")
+            if self.selected.route_id not in self.eligible_route_ids:  # type: ignore[union-attr]
+                raise ValueError("selected route must be eligible")
+        elif self.eligible_route_ids:
+            raise ValueError("blocked route decision must not contain eligible routes")
+        if not isinstance(self.rejections, tuple):
+            raise ValueError("route rejections must be an ordered tuple")
+        if len(self.rejections) > MAX_ROUTE_CANDIDATES:
+            raise ValueError("route rejections exceed their bound")
+        if not all(isinstance(rejection, RouteRejection) for rejection in self.rejections):
+            raise ValueError("route rejections are invalid")
+        rejection_ids = tuple(rejection.route_id for rejection in self.rejections)
+        if len(set(rejection_ids)) != len(rejection_ids):
+            raise ValueError("route rejections must be unique")
+        if set(rejection_ids).intersection(self.eligible_route_ids):
+            raise ValueError("route cannot be both eligible and rejected")
+        if self._kernel_token is not _ADMISSION_KERNEL_TOKEN:
+            raise ValueError("route admission must be produced by the Admission Kernel")
         if not isinstance(self.reason, str) or not self.reason.strip():
             raise ValueError("route admission reason must be non-empty")
+        if len(self.reason) > MAX_ROUTE_FIELD_CHARS:
+            raise ValueError("route admission reason exceeds its bound")
 
     @property
     def admitted(self) -> bool:
@@ -435,6 +471,7 @@ def admit_route(
             eligible_route_ids=(),
             rejections=tuple(rejections),
             reason="no_eligible_route",
+            _kernel_token=_ADMISSION_KERNEL_TOKEN,
         )
     selected = eligible[0]
     return RouteAdmission(
@@ -443,6 +480,7 @@ def admit_route(
         eligible_route_ids=tuple(candidate.route_id for candidate in eligible),
         rejections=tuple(rejections),
         reason="cheapest_eligible_route",
+        _kernel_token=_ADMISSION_KERNEL_TOKEN,
     )
 
 

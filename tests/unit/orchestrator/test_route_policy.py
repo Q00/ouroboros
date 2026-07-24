@@ -258,6 +258,8 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "ghp_not-a-route-identity",
         "AIza" + "A" * 35,
         "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
+        "github:ghp_namespaced-credential",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
     )
     for identity in credential_shapes:
@@ -287,6 +289,15 @@ def test_admission_rejects_non_route_selected_values() -> None:
             eligible_route_ids=(),
             rejections=(),
             reason="test",
+        )
+
+    with pytest.raises(ValueError, match="Admission Kernel"):
+        RouteAdmission(
+            disposition=RouteDecisionDisposition.ADMITTED,
+            selected=_route("fabricated", cost=1),
+            eligible_route_ids=("fabricated",),
+            rejections=(),
+            reason="fabricated",
         )
 
 

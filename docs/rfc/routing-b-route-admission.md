@@ -86,8 +86,10 @@ collections are rejected rather than serialized in process-dependent order.
 
 The returned `RouteAdmission` is an authorization boundary for a later
 executor: only `selected` on an `admitted` result may be passed to dispatch.
-The module deliberately has no provider calls, retry/escalation policy, or
-Final Gate behavior.
+Admission results are Kernel-produced and validate disposition, selected-route
+membership, eligible/rejected-set coherence, bounded ordered collections, and
+the internal provenance marker. The module deliberately has no provider calls,
+retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 

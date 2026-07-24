@@ -124,10 +124,13 @@ class TestSensitiveDetection:
             "sk_live_credential-shaped-value",
             "AIza" + "A" * 35,
             "AKIA" + "A" * 16,
+            "ASIA" + "A" * 16,
+            "github:ghp_namespaced-credential",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         ):
             assert is_credential_shaped(value) is True
         assert is_credential_shaped("authority-session-123") is False
+        assert is_credential_shaped("github:read") is False
 
 
 class TestMaskSensitiveValue:
