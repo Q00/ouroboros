@@ -1037,9 +1037,10 @@ def validate_admission(
     """Validate an admission at the effect boundary.
 
     ``RouteAdmission`` is an immutable result value, not a self-authenticating
-    capability.  Python object/closure introspection can manufacture an
+    capability. Python object/closure introspection can manufacture an
     object-shaped value, so a dispatcher must recompute the Kernel result from
-    the live registry and exact requirements before applying side effects.
+    the live registry and exact requirements before applying side effects; this
+    function is the mandatory check at that boundary.
     """
 
     if not isinstance(registry, RouteRegistry):
