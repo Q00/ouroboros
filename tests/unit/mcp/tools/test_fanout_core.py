@@ -4462,6 +4462,66 @@ def test_root_recursive_ref_is_declared_unsupported() -> None:
     assert not _enforceable_lane_contract(recursive_contract)
 
 
+def test_word_laundered_credential_identifier_is_rejected() -> None:
+    """A word segment cannot launder gibberish segments (round-32 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    leak = _minimal_data_output("78% of MAU are on the free tier")
+    leak["evidence"][0]["source"] = "api_key_prod_123abc"
+    assert any(
+        "credential" in error or "secret" in error
+        for error in _data_evidence_boundary_violations(leak)
+    )
+
+    legit = _minimal_data_output("premium plans average 12,400 tokens/day")
+    legit["evidence"][0]["source"] = "token_usage_v2"
+    assert _data_evidence_boundary_violations(legit) == []
+
+
+def test_noop_caveat_is_not_a_failure_and_timeouts_reject(tmp_path: Any) -> None:
+    """Both directions of the round-32 error-contract probe.
+
+    "upstream timeout; 3 attempts" as executed evidence rejects, while a
+    no-op's caveat narrating that no lookup was needed stays valid — the
+    failed-lookup contradiction requires executed evidence to exist.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    timeout_evidence = _minimal_data_output("upstream timeout; 3 attempts")
+    errors = _data_evidence_boundary_violations(timeout_evidence)
+    assert any("error-shaped" in error for error in errors)
+
+    noop = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+        "caveats": ["No data was returned because no lookup was needed."],
+    }
+    assert _data_evidence_boundary_violations(noop) == []
+
+
+def test_dynamic_ref_cycles_are_rejected() -> None:
+    """Cycle detection follows every reference keyword (round-32 probe)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    dynamic_cycle = {
+        "contract_id": "dynamic_cycle.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"child": {"$ref": "#/$defs/a"}},
+            "$defs": {
+                "a": {"$dynamicRef": "#/$defs/b"},
+                "b": {"$ref": "#/$defs/a"},
+            },
+        },
+    }
+    assert not _enforceable_lane_contract(dynamic_cycle)
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

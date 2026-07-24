@@ -3656,7 +3656,12 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
                 return False
             if not isinstance(target, Mapping):
                 break
-            next_ref = target.get("$ref")
+            next_ref = None
+            for chain_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+                candidate = target.get(chain_key)
+                if isinstance(candidate, str):
+                    next_ref = candidate
+                    break
             if not isinstance(next_ref, str):
                 break
             if next_ref == "#" or not next_ref.startswith("#/") or next_ref in seen_pointers:
@@ -3839,6 +3844,7 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # after 3 attempts"); PLURAL forms are metrics ABOUT failures ("1,240
     # requests timed out: 0.8%") and stay valid.
     r"|\b(request|query|connection|call|lookup)\s+timed\s+out\b"
+    r"|\b(upstream|gateway|connection|request|query|read|write)\s+timeout\b"
     r"|\bafter\s+\d+\s+(attempts?|retries)\b"
     # Availability narratives and bare status codes (round-29: "database
     # unavailable, code 503").
@@ -3983,10 +3989,17 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"caveats[{index}]: row-shaped (serialized-record) content is "
                 "raw evidence and may not ride any persisted field"
             )
-        # A caveat admitting the call produced nothing contradicts any
-        # executed evidence it accompanies (round-31): that is a failed
-        # lookup narrated as a caveat.
-        if isinstance(caveat, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat):
+        # A caveat admitting the call produced nothing contradicts EXECUTED
+        # evidence it accompanies (rounds 31-32): the contradiction requires
+        # evidence to exist — a no-op (data_needed=false, empty evidence)
+        # legitimately narrates "no data was returned because no lookup was
+        # needed" and must not be rejected for saying so.
+        if (
+            isinstance(caveat, str)
+            and isinstance(evidence_items, list)
+            and evidence_items
+            and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat)
+        ):
             errors.append(
                 f"caveats[{index}]: describes a failed lookup; a failed call "
                 "is a no-evidence finding, not evidence with a caveat"
@@ -4201,8 +4214,18 @@ def _identifier_looks_secret(value: str) -> bool:
     match = _CREDENTIAL_WORD_PREFIX.match(value)
     if not match:
         return False
+    # ANY gibberish segment marks the credential (round-32:
+    # api_key_prod_123abc — the word "prod" must not launder "123abc").
+    # Short version tags (v2, v12) stay words, so token_usage_v2 keeps its
+    # exemption.
     suffix_tokens = [tok for tok in re.split(r"[-_.]", value[match.end() :]) if tok]
-    return bool(suffix_tokens) and all(re.fullmatch(r"[0-9a-fA-F]+", tok) for tok in suffix_tokens)
+
+    def _gibberish(tok: str) -> bool:
+        if re.fullmatch(r"\d{4,}", tok):
+            return True
+        return bool(re.fullmatch(r"[0-9a-fA-F]{4,}", tok) and re.search(r"\d", tok))
+
+    return any(_gibberish(tok) for tok in suffix_tokens)
 
 
 # Lane ids (and correlation values generally) are short identifiers; an
