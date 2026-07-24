@@ -3442,10 +3442,11 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     """Whether the effective root necessarily describes an OBJECT.
 
     Covers every object form the public lane schema accepts (bot-review
-    rounds 20-21): a literal root ``type: object``, a LOCAL root ``$ref`` to
-    one, and an ``allOf`` conjunction any branch of which declares one —
-    an allOf conjunct with ``type: object`` forces object instances.
-    Bounded recursion keeps this cycle-safe.
+    rounds 20-22): a literal root ``type: object``, a LOCAL root ``$ref`` to
+    one, an ``allOf`` conjunction ANY branch of which declares one (a
+    conjunct forces object instances), and a ``oneOf``/``anyOf`` disjunction
+    ALL of whose branches declare one (a disjunction forces objects only
+    when every alternative does). Bounded recursion keeps this cycle-safe.
     """
     if depth > 6:
         return False
@@ -3457,6 +3458,10 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     all_of = resolved.get("allOf")
     if isinstance(all_of, list):
         return any(_declares_object_root(schema, branch, depth + 1) for branch in all_of)
+    for disjunction_key in ("oneOf", "anyOf"):
+        branches = resolved.get(disjunction_key)
+        if isinstance(branches, list) and branches:
+            return all(_declares_object_root(schema, branch, depth + 1) for branch in branches)
     return False
 
 

@@ -3543,6 +3543,82 @@ def test_allof_object_root_contract_is_enforceable(tmp_path: Any) -> None:
     assert [item["lane_id"] for item in out["contract_violations"]] == ["allof_lane"]
 
 
+def test_oneof_object_root_contract_is_enforceable(tmp_path: Any) -> None:
+    """oneOf/anyOf all-object roots are advertised and enforced (round-22).
+
+    A disjunction forces object instances only when EVERY branch declares an
+    object — a valid all-object oneOf was previously dropped, after which a
+    required lane completed with invalid content unvalidated.
+    """
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    oneof_contract = {
+        "contract_id": "oneof_root.v1",
+        "response_model_schema": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["lane_id", "verdict"],
+                    "properties": {
+                        "lane_id": {"const": "oneof_lane"},
+                        "verdict": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "required": ["lane_id", "noop"],
+                    "properties": {
+                        "lane_id": {"const": "oneof_lane"},
+                        "noop": {"const": True},
+                    },
+                    "additionalProperties": False,
+                },
+            ]
+        },
+    }
+    assert _enforceable_lane_contract(oneof_contract)
+
+    # A disjunction with a NON-object alternative cannot force objects.
+    mixed_oneof = {
+        "contract_id": "oneof_mixed.v1",
+        "response_model_schema": {"oneOf": [{"type": "object"}, {"type": "string"}]},
+    }
+    assert not _enforceable_lane_contract(mixed_oneof)
+
+    lanes = [
+        {
+            "lane_id": "oneof_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": oneof_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-oneof", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-oneof",
+        correlation_key="context.lane_id",
+        results=[{"key": "oneof_lane", "content": {"invalid": True}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["oneof_lane"]
+
+    conforming = submit_fanout_results(
+        registry,
+        session_id="sess-oneof",
+        correlation_key="context.lane_id",
+        results=[{"key": "oneof_lane", "content": {"lane_id": "oneof_lane", "noop": True}}],
+        fanout_id=fanout_id,
+    )
+    assert conforming["status"] == "complete"
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
