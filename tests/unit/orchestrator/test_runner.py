@@ -878,6 +878,7 @@ class TestOrchestratorRunner:
                 "fat_harness_mode": False,
                 "cause": "store unavailable",
             },
+            acceptance_finalizations=[],
         )
 
     @pytest.mark.asyncio
@@ -5213,7 +5214,11 @@ class TestCancellationPolling:
         # Return no cancellation at startup, then return a cancellation event
         # at the first periodic message-loop checkpoint.
         cancel_event = create_session_cancelled_event("session_123", "User requested")
-        mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event]])
+        # Cancellation now performs two fail-closed telemetry scans before the
+        # terminal CAS and two more during legacy reconciliation.  Only the
+        # session-cancelled poll should report the request; all acceptance
+        # scans are empty for this fixture.
+        mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event], [], [], [], []])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
             return Result.ok(
@@ -5309,7 +5314,9 @@ class TestCancellationPolling:
         mock_adapter.execute_task = mock_execute
 
         cancel_event = create_session_cancelled_event("sess_resume_cancelled", "User requested")
-        mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
+        # The periodic cancellation poll sees the request; the subsequent
+        # attempt/outcome scans are intentionally empty for this fixture.
+        mock_event_store.query_events = AsyncMock(side_effect=[[cancel_event], [], []])
 
         running_tracker = SessionTracker.create("exec_resume", "seed_1").with_status(
             SessionStatus.PAUSED

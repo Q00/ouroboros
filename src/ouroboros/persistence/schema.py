@@ -18,6 +18,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -89,6 +90,26 @@ session_start_guards_table = Table(
     Column("session_id", String(128), primary_key=True),
     Column("start_event_id", String(36), nullable=False),
     Column("execution_id", String(128), nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
+# One durable compare-and-set guard for the Foundation B final acceptance
+# decision.  Attempt judgments remain append-only telemetry; this table makes
+# the Final Gate decision one-winner per process-local authority generation and
+# root AC without changing the event stream's append-only shape.
+ac_acceptance_guards_table = Table(
+    "ac_acceptance_guards",
+    metadata,
+    Column("acceptance_generation_id", String(128), primary_key=True),
+    Column("root_ac_index", Integer, primary_key=True),
+    Column("final_event_id", String(36), nullable=False),
+    Column("payload_digest", String(64), nullable=False),
     Column(
         "created_at",
         DateTime(timezone=True),

@@ -31,18 +31,24 @@ cannot enter a proof row yet.
 
 The gate (`frugality_proof.py`, shipped in #1478) reads these event types and fields.
 Producers must emit them keyed by the same `ac_id` the model event uses, and must
-carry the **run anchor** (`seed_run_id`, or `execution_id`) on every event: the proof
-spans runs and the same logical `ac_id` recurs each run, so `assemble_triads()` keys
-rows by `(run, ac_id)`. An axis event without the run anchor cannot be attributed to
-the right run's row.
+carry the **run anchor** (`seed_run_id`, or `execution_id`) plus the orchestration
+`session_id` on every event: the proof spans runs and the same logical `ac_id` recurs
+each run, while multiple sessions may share one execution id. `assemble_triads()`
+therefore keys rows by `(run, session, ac_id)`. An axis event without the run anchor
+or session identity is legacy evidence and can be attached only when the matching
+run/root has one unambiguous session; otherwise it remains uncounted.
 
 | Event type | Producer | Required fields | Seed AC |
 |---|---|---|---|
-| `execution.ac.model_routed` | **done** | `model_tier`, `model`, `model_mode`, `is_decomposed_child`, `root_ac_index`, `retry_attempt`, `ac_id`, run anchor | routing contract |
-| `execution.ac.token_attribution.reported` | **implemented on this branch** | `ac_id`, run anchor, `root_ac_index`, `retry_attempt`, `token_spend` | AC2 |
-| `execution.ac.deliver_verdict` | **implemented on this branch** | `ac_id`, run anchor, `root_ac_index`, `retry_attempt`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
-| `execution.ac.shadow_replay` | **implemented, fail-closed without an isolation-attested runtime** | `ac_id`, run anchor, `root_ac_index`, `retry_attempt`, `baseline_token_spend`, `baseline_mode`, `baseline_tier`, `baseline_model`, `decomposition_trustworthy` | AC5 |
-| `execution.ac.outcome_finalized` | **implemented in the outer verify/retry layer** | run anchor, `root_ac_index`, `retry_attempt`, `success`, `is_decomposed` | admission |
+| `execution.ac.model_routed` | **done** | `model_tier`, `model`, `model_mode`, `is_decomposed_child`, `root_ac_index`, `retry_attempt`, `ac_id`, run anchor, `session_id` | routing contract |
+| `execution.ac.token_attribution.reported` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `token_spend` | AC2 |
+| `execution.ac.deliver_verdict` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
+| `execution.ac.shadow_replay` | **implemented, fail-closed without an isolation-attested runtime** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `baseline_token_spend`, `baseline_mode`, `baseline_tier`, `baseline_model`, `decomposition_trustworthy` | AC5 |
+| `execution.ac.attempt_judged` | **implemented in the outer verify/retry layer** | run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `attempt_number`, `success`, `outcome`, `is_decomposed` | provisional attempt telemetry |
+| `execution.ac.acceptance_finalized` | **implemented by the terminal Final Gate** | run anchor, `session_id`, `acceptance_generation_id`, `root_ac_index`, `final_retry_attempt`, `accepted`, `disposition`, `outcome`, `terminal_status` | final admission |
+
+`execution.ac.outcome_finalized` remains readable as a historical alias for
+attempt telemetry. It is not a final-admission signal.
 
 All retry attempts for a logical child are paired before aggregation. Token spend
 and baseline spend are summed attempt-for-attempt, while grounding regression is an

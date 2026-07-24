@@ -754,11 +754,28 @@ def create_execution_terminal_event(
 def create_frugality_retrospective_event(
     execution_id: str,
     data: dict[str, Any],
+    *,
+    session_id: str | None = None,
 ) -> BaseEvent:
-    """Create the deterministic v1 execution-finalized frugality evidence event."""
+    """Create a deterministic, session-scoped v1 retrospective event.
+
+    Execution ids can be intentionally shared by multiple orchestration
+    sessions.  Include the session (and, when present, acceptance generation)
+    in the event identity so one session's retrospective cannot deduplicate or
+    overwrite another's.
+    """
+    resolved_session_id = session_id or (
+        data.get("session_id") if isinstance(data.get("session_id"), str) else None
+    )
+    generation = (
+        data.get("acceptance_generation_id")
+        if isinstance(data.get("acceptance_generation_id"), str)
+        else None
+    )
+    identity_scope = "\x00".join((execution_id, resolved_session_id or "", generation or ""))
     event_id = uuid5(
         NAMESPACE_URL,
-        f"ouroboros:{FRUGALITY_RETROSPECTIVE_EVENT_TYPE}:v1:{execution_id}",
+        f"ouroboros:{FRUGALITY_RETROSPECTIVE_EVENT_TYPE}:v1:{identity_scope}",
     )
     return BaseEvent(
         id=str(event_id),

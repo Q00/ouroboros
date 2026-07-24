@@ -19,8 +19,10 @@ A triad row joins three measured axes by ``ac_id``:
   accepted-leaf journal evidence (seed AC4).
 * **baseline** — ``execution.ac.shadow_replay`` (baseline_token_spend at parent
   model tier), emitted only by the opt-in isolated replay experiment (seed AC5).
-* **acceptance** — ``execution.ac.outcome_finalized``. Proof rows remain provisional
-  until the seed-level verify/retry layer authoritatively accepts their root AC.
+* **attempt judgment** — ``execution.ac.attempt_judged`` (with
+  ``execution.ac.outcome_finalized`` retained as a historical read alias).
+* **acceptance** — ``execution.ac.acceptance_finalized``. Proof rows remain
+  provisional until the Final Gate authoritatively accepts their root AC.
 
 A row only ``counts_in_proof`` when the lower model tier was ENFORCED, every retry
 attempt has a paired token/deliver/shadow measurement, the root AC was finally
@@ -50,6 +52,7 @@ from ouroboros.orchestrator.evidence.common import (
     execution_run_anchor,
     parse_retry_attempt,
     parse_root_ac_index,
+    validate_attempt_judgment_payload,
 )
 from ouroboros.orchestrator.evidence.common import (
     finite_number as _finite_number,
@@ -57,6 +60,7 @@ from ouroboros.orchestrator.evidence.common import (
 from ouroboros.orchestrator.evidence.common import (
     strict_bool as _strict_bool,
 )
+from ouroboros.persistence.event_store import validate_acceptance_finalization_payload
 
 # -- Event-type contract the producers must emit -----------------------------
 EVENT_EFFORT_ROUTED = "execution.ac.effort_routed"
@@ -64,7 +68,9 @@ EVENT_MODEL_ROUTED = "execution.ac.model_routed"
 EVENT_TOKEN_ATTRIBUTION = "execution.ac.token_attribution.reported"
 EVENT_DELIVER_VERDICT = "execution.ac.deliver_verdict"
 EVENT_SHADOW_REPLAY = "execution.ac.shadow_replay"
+EVENT_AC_ATTEMPT_JUDGED = "execution.ac.attempt_judged"
 EVENT_AC_OUTCOME_FINALIZED = "execution.ac.outcome_finalized"
+EVENT_AC_ACCEPTANCE_FINALIZED = "execution.ac.acceptance_finalized"
 
 EFFORT_MODE_ENFORCED = "enforced"
 MODEL_MODE_ENFORCED = "enforced"
@@ -95,6 +101,10 @@ class FrugalityTriadRow:
 
     ac_id: str
     seed_run_id: str | None = None
+    # Acceptance authority is scoped to the orchestration session (and its
+    # deterministic generation), not merely to a caller-supplied execution id.
+    session_id: str | None = None
+    acceptance_generation_id: str | None = None
     root_ac_index: int | None = None
     is_decomposed_child: bool = False
     decomposition_trustworthy: bool = True
@@ -227,20 +237,28 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
     missing-axis rows; only the parallel executor's per-AC events (which carry
     ``ac_id``) contribute.
 
-    Rows are keyed by ``(run, ac_id)`` — **not** ``ac_id`` alone — because the proof
+    Rows are keyed by ``(run, session, ac_id)`` — **not** ``ac_id`` alone — because the proof
     spans runs (``min_runs``) and the same logical AC id recurs every run. Keying by
     ``ac_id`` only would let a later run's events overwrite an earlier run's in the
-    same slot, collapsing valid cross-run evidence to the last run. The run anchor is
+    same slot, collapsing valid cross-run evidence to the last run. The session anchor
+    additionally prevents two legitimate sessions that share an execution id from
+    contaminating one another. The run anchor is
     each event's ``seed_run_id`` (falling back to ``execution_id``); a logical AC
     therefore yields one row per run it ran in. Events carrying no run anchor share a
     single implicit run — the original single-run behavior, preserved.
     """
-    acc: dict[tuple[str | None, str], dict] = {}
-    finalized: dict[
-        tuple[str | None, int],
+    acc: dict[tuple[str | None, str | None, str], dict] = {}
+    judged: dict[
+        tuple[str | None, str | None, int],
         dict[int, list[tuple[bool | None, bool | None]]],
     ] = {}
-    finalized_invalid: set[tuple[str | None, int]] = set()
+    judged_invalid: set[tuple[str | None, str | None, int]] = set()
+    acceptance: dict[tuple[str | None, str | None, int], list[tuple[str, int, bool, str, str]]] = {}
+    acceptance_invalid: set[tuple[str | None, str | None, int]] = set()
+
+    def session_anchor(data: Mapping) -> str | None:
+        value = data.get("session_id")
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     def merge_root(row: dict, data: Mapping) -> None:
         observed = parse_root_ac_index(data)
@@ -268,31 +286,89 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         if not ac_id:
             return None
         run_key = execution_run_anchor(data)
-        return acc.setdefault((run_key, str(ac_id)), {"ac_id": str(ac_id), "seed_run_id": run_key})
+        session_id = session_anchor(data)
+        return acc.setdefault(
+            (run_key, session_id, str(ac_id)),
+            {"ac_id": str(ac_id), "seed_run_id": run_key, "session_id": session_id},
+        )
 
     for event in events:
         etype = _event_type(event)
         data = _event_data(event)
-        if etype == EVENT_AC_OUTCOME_FINALIZED:
+        if etype in {EVENT_AC_ATTEMPT_JUDGED, EVENT_AC_OUTCOME_FINALIZED}:
             run_key = execution_run_anchor(data)
+            session_id = session_anchor(data)
             root_index = parse_root_ac_index(data)
-            attempt = parse_retry_attempt(data)
-            success = _strict_bool(data.get("success"))
-            is_decomposed = _strict_bool(data.get("is_decomposed"))
             if root_index is None:
                 continue
-            if attempt is None:
+            aggregate_id = (
+                event.get("aggregate_id")
+                if isinstance(event, Mapping)
+                else getattr(event, "aggregate_id", None)
+            )
+            try:
+                judgment = validate_attempt_judgment_payload(
+                    data,
+                    event_type=etype,
+                    aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                )
+            except ValueError:
                 # A malformed marker for a known root must poison admission for
                 # that root. Ignoring it would let the assembler fall back to an
                 # older successful marker and potentially PASS after the producer
                 # emitted a newer-but-corrupt authoritative outcome.
-                finalized_invalid.add((run_key, root_index))
+                judged_invalid.add((run_key, session_id, root_index))
                 continue
+            attempt = judgment.retry_attempt
             # Preserve malformed booleans as ``None`` instead of dropping the
             # marker. If this is the latest root attempt, admission must fail closed
             # rather than falling back to an older successful marker.
-            finalized.setdefault((run_key, root_index), {}).setdefault(attempt, []).append(
-                (success, is_decomposed)
+            judged.setdefault((run_key, session_id, root_index), {}).setdefault(attempt, []).append(
+                (judgment.success, judgment.is_decomposed)
+            )
+        elif etype == EVENT_AC_ACCEPTANCE_FINALIZED:
+            run_key = execution_run_anchor(data)
+            session_id = session_anchor(data)
+            root_index = parse_root_ac_index(data)
+            final_attempt = data.get("final_retry_attempt")
+            accepted = _strict_bool(data.get("accepted"))
+            disposition = data.get("disposition")
+            terminal_status = data.get("terminal_status")
+            aggregate_id = (
+                event.get("aggregate_id")
+                if isinstance(event, Mapping)
+                else getattr(event, "aggregate_id", None)
+            )
+            try:
+                acceptance_generation, _ = validate_acceptance_finalization_payload(
+                    data,
+                    aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                )
+            except Exception:
+                acceptance_generation = None
+            if (
+                root_index is None
+                or acceptance_generation is None
+                or isinstance(final_attempt, bool)
+                or not isinstance(final_attempt, int)
+                or final_attempt < 0
+                or accepted is None
+                or not isinstance(disposition, str)
+                or not disposition.strip()
+                or not isinstance(terminal_status, str)
+                or not terminal_status.strip()
+            ):
+                if root_index is not None:
+                    acceptance_invalid.add((run_key, session_id, root_index))
+                continue
+            acceptance.setdefault((run_key, session_id, root_index), []).append(
+                (
+                    acceptance_generation,
+                    final_attempt,
+                    accepted,
+                    disposition.strip(),
+                    terminal_status.strip(),
+                )
             )
         elif etype == EVENT_EFFORT_ROUTED:
             row = slot(data)
@@ -429,6 +505,70 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
                 # on the denominator can turn an ordinary row into a false PASS.
                 row["baseline_invalid"] = True
 
+    # A few historical producers emitted execution-scoped axis telemetry
+    # without ``session_id``. If exactly one explicit session row exists for the
+    # same run/AC, attach that legacy evidence to it. With multiple sessions the
+    # evidence is ambiguous and remains isolated (and therefore cannot count).
+    def merge_legacy_row(target: dict, source: dict) -> None:
+        for key, value in source.items():
+            if key in {"ac_id", "seed_run_id", "session_id"}:
+                continue
+            if key.endswith("_invalid"):
+                if value:
+                    target[key] = True
+                continue
+            if isinstance(value, set):
+                target.setdefault(key, set()).update(value)
+                continue
+            if isinstance(value, dict):
+                destination = target.setdefault(key, {})
+                duplicate_flag = {
+                    "models_by_attempt": "model_invalid",
+                    "tokens_by_attempt": "token_spend_invalid",
+                    "deliveries_by_attempt": "deliver_invalid",
+                    "baselines_by_attempt": "baseline_invalid",
+                }.get(key)
+                for item_key, item_value in value.items():
+                    if item_key in destination:
+                        if duplicate_flag is not None:
+                            target[duplicate_flag] = True
+                    else:
+                        destination[item_key] = item_value
+                continue
+            if key not in target:
+                target[key] = value
+            elif target[key] != value and key in {"root_ac_index", "is_decomposed_child"}:
+                target[
+                    "root_index_invalid" if key == "root_ac_index" else "decomposition_flag_invalid"
+                ] = True
+
+    for legacy_key in [key for key in acc if key[1] is None]:
+        run_key, _session_id, ac_id = legacy_key
+        candidates = [
+            key for key in acc if key[0] == run_key and key[1] is not None and key[2] == ac_id
+        ]
+        if len(candidates) != 1:
+            continue
+        target_key = candidates[0]
+        target = acc[target_key]
+        target_root = target.get("root_ac_index")
+        scoped_acceptance_sessions = {
+            key[1]
+            for key in acceptance
+            if key[0] == run_key
+            and (target_root is None or key[2] == target_root)
+            and key[1] is not None
+        }
+        # Legacy axis telemetry may be attached only when the matching run/root
+        # has one unambiguous acceptance session.  Sessions from other runs or
+        # unrelated roots must not poison this row, while two sessions sharing
+        # the same run/root remain fail-closed.
+        if len(scoped_acceptance_sessions) <= 1 and (
+            not scoped_acceptance_sessions or target_key[1] in scoped_acceptance_sessions
+        ):
+            merge_legacy_row(acc[target_key], acc[legacy_key])
+            del acc[legacy_key]
+
     rows: list[FrugalityTriadRow] = []
     for v in acc.values():
         models = v.get("models_by_attempt", {})
@@ -469,26 +609,60 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
         )
 
         root_index = v.get("root_ac_index")
-        final_markers = (
-            finalized.get((v.get("seed_run_id"), root_index), {})
-            if isinstance(root_index, int)
-            else {}
-        )
         authoritatively_accepted = False
-        if final_markers:
-            final_attempt = max(final_markers)
-            final_records = final_markers[final_attempt]
-            # The outer marker is authoritative only when there is exactly one
-            # unambiguous result for its latest attempt, that result is a successful
-            # decomposition, and this child actually participated in that final
-            # attempt. This prevents failed/stale child rows from hitchhiking on a
-            # later atomic root success.
-            authoritatively_accepted = (
-                (v.get("seed_run_id"), root_index) not in finalized_invalid
-                and len(final_records) == 1
-                and final_records[0] == (True, True)
-                and final_attempt in attempt_sets[0]
-            )
+        run_key = v.get("seed_run_id")
+        row_session_id = v.get("session_id")
+        acceptance_key: tuple[str | None, str | None, int] | None = None
+        acceptance_records: list[tuple[str, int, bool, str, str]] = []
+        if isinstance(root_index, int):
+            if row_session_id is not None:
+                acceptance_key = (run_key, row_session_id, root_index)
+                acceptance_records = acceptance.get(acceptance_key, [])
+            else:
+                # Legacy axis telemetry predates the explicit session field. It
+                # may be associated only when exactly one session/generation is
+                # present for this run/root; multiple sessions are ambiguous and
+                # therefore fail closed instead of being merged.
+                candidates = [
+                    (key, records)
+                    for key, records in acceptance.items()
+                    if key[0] == run_key and key[2] == root_index
+                ]
+                candidate_sessions = {key[1] for key, _records in candidates}
+                if len(candidate_sessions) == 1 and len(candidates) == 1:
+                    acceptance_key, acceptance_records = candidates[0]
+        if acceptance_records:
+            unique_acceptance = set(acceptance_records)
+            if (
+                acceptance_key is not None
+                and acceptance_key not in acceptance_invalid
+                and len(unique_acceptance) == 1
+            ):
+                authority, final_attempt, accepted, disposition, terminal_status = next(
+                    iter(unique_acceptance)
+                )
+                judged_key = (acceptance_key[0], acceptance_key[1], root_index)
+                judged_records = judged.get(judged_key, {})
+                judged_latest = max(judged_records) if judged_records else None
+                judged_latest_records = (
+                    judged_records.get(judged_latest, []) if judged_latest is not None else []
+                )
+                # Final acceptance is authoritative only when the Final Gate
+                # explicitly accepted the root after its last observed attempt.
+                # Attempt judgments remain telemetry and cannot substitute for it.
+                authoritatively_accepted = (
+                    accepted
+                    and disposition == "accepted"
+                    and terminal_status == "completed"
+                    and final_attempt in attempt_sets[0]
+                    and final_attempt == max(attempt_sets[0])
+                    and judged_key not in judged_invalid
+                    and judged_latest == final_attempt
+                    and len(judged_latest_records) == 1
+                    and judged_latest_records[0] == (True, True)
+                )
+                v["session_id"] = acceptance_key[1]
+                v["acceptance_generation_id"] = authority
 
         delivery_values = list(deliveries.values())
         grounding_regression = (
@@ -509,6 +683,8 @@ def assemble_triads(events: Iterable[object]) -> list[FrugalityTriadRow]:
             FrugalityTriadRow(
                 ac_id=v["ac_id"],
                 seed_run_id=v.get("seed_run_id"),
+                session_id=v.get("session_id"),
+                acceptance_generation_id=v.get("acceptance_generation_id"),
                 root_ac_index=root_index if isinstance(root_index, int) else None,
                 is_decomposed_child=(
                     bool(v.get("is_decomposed_child"))

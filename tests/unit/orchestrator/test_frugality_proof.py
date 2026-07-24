@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -16,6 +17,7 @@ from ouroboros.orchestrator.frugality_proof import (
     assemble_triads,
     evaluate_proof,
 )
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 def _evt(etype: str, **data) -> dict:
@@ -29,6 +31,7 @@ def _triad_events(
     retry_attempt: int = 0,
     root_ac_index: int = 0,
     final_success: bool = True,
+    include_acceptance: bool = True,
     **effort_overrides,
 ) -> list[dict]:
     """A full, accepted model/token/grounding/baseline row for one attempt."""
@@ -42,7 +45,7 @@ def _triad_events(
         "is_decomposed_child": True,
     }
     effort.update(effort_overrides)
-    return [
+    events = [
         _evt(EVENT_EFFORT_ROUTED, **effort),
         _evt(
             EVENT_MODEL_ROUTED,
@@ -86,14 +89,36 @@ def _triad_events(
             grounding_regression=False,
         ),
         _evt(
-            EVENT_AC_OUTCOME_FINALIZED,
+            EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id=run,
+            execution_id=run,
+            session_id=f"session-{run}",
             root_ac_index=root_ac_index,
             retry_attempt=retry_attempt,
+            attempt_number=retry_attempt + 1,
             success=final_success,
+            outcome="succeeded" if final_success else "failed",
             is_decomposed=True,
         ),
     ]
+    if include_acceptance:
+        events.append(
+            _evt(
+                EVENT_AC_ACCEPTANCE_FINALIZED,
+                execution_id=run,
+                session_id=f"session-{run}",
+                acceptance_generation_id=acceptance_generation_id_for_session(
+                    f"session-{run}", run
+                ),
+                root_ac_index=root_ac_index,
+                final_retry_attempt=retry_attempt,
+                accepted=final_success,
+                disposition="accepted" if final_success else "rejected",
+                outcome="succeeded" if final_success else "failed",
+                terminal_status="completed" if final_success else "failed",
+            )
+        )
+    return events
 
 
 def _full_row(ac_id: str, *, run: str, token: float, baseline: float, regression: bool = False):
@@ -135,6 +160,30 @@ class TestAssembleTriads:
         assert r.grounding_regression is False
         assert r.authoritatively_accepted and r.attempts_paired
         assert r.has_all_axes and r.counts_in_proof
+
+    def test_shared_execution_keeps_sessions_and_acceptance_generations_separate(self) -> None:
+        """A caller-supplied execution id is not an acceptance authority."""
+        session_a = "session-a"
+        session_b = "session-b"
+        events: list[dict] = []
+        for session_id in (session_a, session_b):
+            scoped = _triad_events("ac1", "shared-execution")
+            for event in scoped:
+                data = event["data"]
+                data["execution_id"] = "shared-execution"
+                data["session_id"] = session_id
+                if event["type"] == EVENT_AC_ACCEPTANCE_FINALIZED:
+                    data["acceptance_generation_id"] = acceptance_generation_id_for_session(
+                        session_id, "shared-execution"
+                    )
+            events.extend(scoped)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 2
+        assert {row.session_id for row in rows} == {session_a, session_b}
+        assert all(row.authoritatively_accepted for row in rows)
+        assert all(row.counts_in_proof for row in rows)
 
     def test_effort_only_row_does_not_count(self) -> None:
         rows = assemble_triads(
@@ -255,6 +304,45 @@ class TestAssembleTriads:
         assert v.status is ProofStatus.PASS
         assert v.runs == 3 and v.counted_rows == 6
 
+    def test_legacy_axis_merge_is_scoped_to_run_and_root(self) -> None:
+        """Independent runs must not poison each other's legacy compatibility."""
+        events: list[dict] = []
+        for run in ("r1", "r2"):
+            mixed = _triad_events(f"ac-{run}", run)
+            # One explicit current-format axis makes the remaining legacy axes
+            # eligible for attachment to this run/session row.
+            next(event for event in mixed if event["type"] == EVENT_MODEL_ROUTED)["data"][
+                "session_id"
+            ] = f"session-{run}"
+            events.extend(mixed)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 2
+        assert {row.session_id for row in rows} == {"session-r1", "session-r2"}
+        assert all(row.counts_in_proof for row in rows)
+
+    def test_legacy_axis_merge_stays_fail_closed_for_two_sessions_same_root(self) -> None:
+        """Two sessions for one run/root keep unscoped axes ambiguous."""
+        events: list[dict] = []
+        for session_id in ("session-a", "session-b"):
+            mixed = _triad_events("ac-shared", "run-shared")
+            next(event for event in mixed if event["type"] == EVENT_MODEL_ROUTED)["data"][
+                "session_id"
+            ] = session_id
+            for event in mixed:
+                if event["type"] == EVENT_AC_ACCEPTANCE_FINALIZED:
+                    event["data"]["session_id"] = session_id
+                    event["data"]["acceptance_generation_id"] = (
+                        acceptance_generation_id_for_session(session_id, "run-shared")
+                    )
+            events.extend(mixed)
+
+        rows = assemble_triads(events)
+
+        assert len(rows) == 3
+        assert not any(row.counts_in_proof for row in rows)
+
     def test_execution_id_used_as_run_anchor_when_no_seed_run_id(self) -> None:
         # The effort event carries execution_id even before seed_run_id is wired;
         # it serves as the run anchor so two executions of the same AC stay distinct.
@@ -319,7 +407,7 @@ class TestAssembleTriads:
         assert rows[0].has_all_axes is False
 
     def test_retry_spend_cannot_false_pass_frugality_gate(self) -> None:
-        events = _triad_events("ac1", "r1", retry_attempt=0)
+        events = _triad_events("ac1", "r1", retry_attempt=0, include_acceptance=False)
         retry_events = _triad_events("ac1", "r1", retry_attempt=1)
         for event in retry_events:
             if event["type"] == EVENT_TOKEN_ATTRIBUTION:
@@ -348,11 +436,15 @@ class TestAssembleTriads:
         )
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=True,
             )
         )
@@ -364,7 +456,7 @@ class TestAssembleTriads:
 
     @pytest.mark.parametrize("newest_first", [False, True])
     def test_retry_grounding_regression_is_order_independent(self, newest_first: bool) -> None:
-        initial = _triad_events("ac1", "r1", retry_attempt=0)
+        initial = _triad_events("ac1", "r1", retry_attempt=0, include_acceptance=False)
         retry = _triad_events("ac1", "r1", retry_attempt=1)
         for event in retry:
             if event["type"] == EVENT_DELIVER_VERDICT:
@@ -393,7 +485,7 @@ class TestAssembleTriads:
         events = [
             event
             for event in _triad_events("ac1", "r1")
-            if event["type"] != EVENT_AC_OUTCOME_FINALIZED
+            if event["type"] != EVENT_AC_ACCEPTANCE_FINALIZED
         ]
 
         row = assemble_triads(events)[0]
@@ -407,7 +499,7 @@ class TestAssembleTriads:
         self, latest_is_decomposed: object
     ) -> None:
         events = _triad_events("ac1", "r1")
-        marker = next(event for event in events if event["type"] == EVENT_AC_OUTCOME_FINALIZED)
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
         marker["data"]["is_decomposed"] = latest_is_decomposed
 
         row = assemble_triads(events)[0]
@@ -420,11 +512,15 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1", retry_attempt=0)
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=True,
             )
         )
@@ -441,11 +537,15 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1", retry_attempt=0)
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=1,
+                attempt_number=2,
                 success=True,
+                outcome="succeeded",
                 is_decomposed=False,
             )
         )
@@ -462,11 +562,15 @@ class TestAssembleTriads:
         events = _triad_events("ac1", "r1")
         events.append(
             _evt(
-                EVENT_AC_OUTCOME_FINALIZED,
+                EVENT_AC_ATTEMPT_JUDGED,
                 seed_run_id="r1",
+                execution_id="r1",
+                session_id="session-r1",
                 root_ac_index=0,
                 retry_attempt=0,
+                attempt_number=1,
                 success=duplicate_success,
+                outcome="succeeded" if duplicate_success else "failed",
                 is_decomposed=True,
             )
         )
@@ -480,16 +584,44 @@ class TestAssembleTriads:
     def test_malformed_outcome_marker_poisons_known_root(self, malformed_attempt: object) -> None:
         events = _triad_events("ac1", "r1")
         malformed = _evt(
-            EVENT_AC_OUTCOME_FINALIZED,
+            EVENT_AC_ATTEMPT_JUDGED,
             seed_run_id="r1",
+            execution_id="r1",
+            session_id="session-r1",
             root_ac_index=0,
             retry_attempt=malformed_attempt,
+            attempt_number=2,
             success=True,
+            outcome="succeeded",
             is_decomposed=True,
         )
         if malformed_attempt is None:
             malformed["data"].pop("retry_attempt")
         events.append(malformed)
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    @pytest.mark.parametrize("missing_field", ["attempt_number", "is_decomposed"])
+    def test_missing_current_attempt_contract_field_fails_closed(
+        self,
+        missing_field: str,
+    ) -> None:
+        events = _triad_events("ac1", "r1")
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
+        marker["data"].pop(missing_field)
+
+        row = assemble_triads(events)[0]
+
+        assert row.authoritatively_accepted is False
+        assert not row.counts_in_proof
+
+    def test_contradictory_attempt_success_and_outcome_fails_closed(self) -> None:
+        events = _triad_events("ac1", "r1")
+        marker = next(event for event in events if event["type"] == EVENT_AC_ATTEMPT_JUDGED)
+        marker["data"].update(success=True, outcome="failed")
 
         row = assemble_triads(events)[0]
 

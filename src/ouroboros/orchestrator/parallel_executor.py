@@ -33,6 +33,7 @@ import contextlib
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
+import hashlib
 import json
 import math
 import os
@@ -260,6 +261,7 @@ from ouroboros.orchestrator.evidence_schema import (
 from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ExecutionAuthorityLiveBinding,
+    canonical_workspace_authority,
 )
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
@@ -1277,6 +1279,79 @@ class _VerifyGateOutcome:
     reason: str | None
     output_tail: str
     missing_artifacts: tuple[str, ...] = ()
+    workspace_mutated: bool = False
+    workspace_digest: str | None = None
+
+
+def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
+    """Encode verify evidence into the JSON-safe checkpoint state."""
+    if not isinstance(outcome, _VerifyGateOutcome):
+        return None
+    return {
+        "passed": outcome.passed,
+        "reason": outcome.reason,
+        "output_tail": outcome.output_tail,
+        "missing_artifacts": list(outcome.missing_artifacts),
+        "workspace_mutated": outcome.workspace_mutated,
+        "workspace_digest": outcome.workspace_digest,
+    }
+
+
+def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None:
+    """Decode checkpointed verify evidence, rejecting malformed payloads."""
+    if not isinstance(value, Mapping):
+        return None
+    passed = value.get("passed")
+    reason = value.get("reason")
+    output_tail = value.get("output_tail")
+    raw_missing = value.get("missing_artifacts", ())
+    workspace_mutated = value.get("workspace_mutated", False)
+    workspace_digest = value.get("workspace_digest")
+    if not isinstance(passed, bool) or not isinstance(output_tail, str):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    if not isinstance(raw_missing, (list, tuple)) or not all(
+        isinstance(item, str) for item in raw_missing
+    ):
+        return None
+    if not isinstance(workspace_mutated, bool):
+        return None
+    if workspace_digest is not None and not isinstance(workspace_digest, str):
+        return None
+    return _VerifyGateOutcome(
+        passed=passed,
+        reason=reason,
+        output_tail=output_tail,
+        missing_artifacts=tuple(raw_missing),
+        workspace_mutated=workspace_mutated,
+        workspace_digest=workspace_digest,
+    )
+
+
+def _checkpoint_result_retry_attempts(
+    results: list[ACExecutionResult],
+) -> dict[str, int]:
+    """Persist each result's actual attempt identity, not scheduler counters."""
+    return {
+        str(result.ac_index): result.retry_attempt
+        for result in results
+        if isinstance(result.retry_attempt, int)
+        and not isinstance(result.retry_attempt, bool)
+        and result.retry_attempt >= 0
+    }
+
+
+def _checkpoint_verify_gate_outcomes(
+    results: list[ACExecutionResult],
+) -> dict[str, dict[str, object]]:
+    """Persist all available per-result verify evidence for crash replay."""
+    serialized: dict[str, dict[str, object]] = {}
+    for result in results:
+        outcome = _serialize_verify_gate_outcome(result.verify_gate_outcome)
+        if outcome is not None:
+            serialized[str(result.ac_index)] = outcome
+    return serialized
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -1323,6 +1398,8 @@ def _revalidate_cached_verify_gate_outcome(
         reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
         output_tail=outcome.output_tail,
         missing_artifacts=missing_artifacts,
+        workspace_mutated=outcome.workspace_mutated,
+        workspace_digest=outcome.workspace_digest,
     )
 
 
@@ -2242,6 +2319,7 @@ class ParallelACExecutor:
         runtime_handle: RuntimeHandle | None,
         execution_id: str | None = None,
         session_id: str | None = None,
+        orchestrator_session_id: str | None = None,
         result_summary: str | None = None,
         success: bool | None = None,
         error: str | None = None,
@@ -2253,6 +2331,7 @@ class ParallelACExecutor:
             runtime_handle=runtime_handle,
             execution_id=execution_id,
             session_id=session_id,
+            orchestrator_session_id=orchestrator_session_id,
             result_summary=result_summary,
             success=success,
             error=error,
@@ -2435,6 +2514,13 @@ class ParallelACExecutor:
         blocked_indices: set[int] = set()
         stage_results: list[ParallelExecutionStageResult] = []
         level_contexts = list(reconciled_level_contexts or [])
+        # A coordinator is an effectful writer.  Acceptance evidence collected
+        # before that writer runs is not authoritative until the settled
+        # workspace has been checked again at the final boundary.
+        coordinator_mutated_workspace = False
+        post_coordinator_revalidation_required = False
+        post_coordinator_revalidated = False
+        post_coordinator_revalidation_workspace_digest: str | None = None
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
@@ -2457,12 +2543,71 @@ class ParallelACExecutor:
                 load_result = self._checkpoint_store.load(seed_id)
                 if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
                     cp = load_result.value
-                    if cp.phase == "parallel_execution":
+                    checkpoint_state = cp.state if isinstance(cp.state, Mapping) else {}
+                    current_workspace_identity = canonical_workspace_authority(
+                        self._task_cwd
+                        or getattr(self._adapter, "working_directory", None)
+                        or os.getcwd()
+                    )
+                    checkpoint_matches_invocation = (
+                        cp.seed_id == seed_id
+                        and cp.phase == "parallel_execution"
+                        and checkpoint_state.get("session_id") == session_id
+                        and checkpoint_state.get("execution_id") == execution_id
+                        and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                    )
+                    if checkpoint_matches_invocation:
+                        coordinator_mutated_workspace = bool(
+                            checkpoint_state.get("coordinator_mutated_workspace", False)
+                        )
+                        post_coordinator_revalidation_required = bool(
+                            checkpoint_state.get("post_coordinator_revalidation_required", False)
+                        )
+                        post_coordinator_revalidated = bool(
+                            checkpoint_state.get("post_coordinator_revalidated", False)
+                        )
+                        raw_final_digest = checkpoint_state.get(
+                            "final_workspace_digest",
+                            checkpoint_state.get("post_coordinator_revalidation_workspace_digest"),
+                        )
+                        if isinstance(raw_final_digest, str) and raw_final_digest:
+                            post_coordinator_revalidation_workspace_digest = raw_final_digest
+                        # A checkpoint may have been written before the final
+                        # revalidation.  Never let its provisional successes be
+                        # accepted on recovery without replaying that boundary.
+                        if post_coordinator_revalidation_required:
+                            current_digest = self._workspace_content_digest(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            )
+                            if (
+                                not post_coordinator_revalidated
+                                or current_digest is None
+                                or current_digest != post_coordinator_revalidation_workspace_digest
+                            ):
+                                coordinator_mutated_workspace = True
+                                post_coordinator_revalidated = False
                         resume_from_level = cp.state.get("completed_levels", 0)
                         for idx, status in cp.state.get("ac_statuses", {}).items():
                             ac_statuses[int(idx)] = status
+                        for idx, retry_attempt in checkpoint_state.get(
+                            "ac_retry_attempts", {}
+                        ).items():
+                            if (
+                                isinstance(retry_attempt, int)
+                                and not isinstance(retry_attempt, bool)
+                                and retry_attempt >= 0
+                            ):
+                                ac_retry_attempts[int(idx)] = retry_attempt
+                        raw_result_retry_attempts = checkpoint_state.get(
+                            "result_retry_attempts", {}
+                        )
+                        raw_verify_gate_outcomes = checkpoint_state.get("verify_gate_outcomes", {})
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
+                        for idx in checkpoint_state.get("blocked_indices", []):
+                            blocked_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
                         # Restore level contexts so subsequent levels
                         # have access to completed levels' output
@@ -2484,13 +2629,58 @@ class ParallelACExecutor:
                             restored_contexts=len(level_contexts),
                         )
                         # Reconstruct all_results for completed/failed/skipped ACs.
+                        restored_outcomes = checkpoint_state.get(
+                            "revalidated_ac_outcomes",
+                            checkpoint_state.get("ac_outcomes", {}),
+                        )
                         for prev_stage in execution_plan.stages[:resume_from_level]:
                             for ac_idx in self._get_stage_ac_indices(prev_stage):
                                 if ac_idx >= total_acs:
                                     continue
                                 status = ac_statuses.get(ac_idx, "pending")
-                                is_completed = status == "completed"
+                                raw_outcome = (
+                                    restored_outcomes.get(str(ac_idx))
+                                    if isinstance(restored_outcomes, Mapping)
+                                    else None
+                                )
+                                outcome = (
+                                    raw_outcome
+                                    if isinstance(raw_outcome, str)
+                                    and raw_outcome
+                                    in {
+                                        "succeeded",
+                                        "satisfied_externally",
+                                        "failed",
+                                        "blocked",
+                                        "invalid",
+                                    }
+                                    else (
+                                        "succeeded"
+                                        if status == "completed"
+                                        else "blocked"
+                                        if status == "skipped"
+                                        else "failed"
+                                    )
+                                )
+                                is_completed = outcome in {"succeeded", "satisfied_externally"}
                                 is_skipped = status == "skipped"
+                                raw_result_retry_attempt = (
+                                    raw_result_retry_attempts.get(str(ac_idx))
+                                    if isinstance(raw_result_retry_attempts, Mapping)
+                                    else None
+                                )
+                                restored_retry_attempt = (
+                                    raw_result_retry_attempt
+                                    if isinstance(raw_result_retry_attempt, int)
+                                    and not isinstance(raw_result_retry_attempt, bool)
+                                    and raw_result_retry_attempt >= 0
+                                    else ac_retry_attempts.get(ac_idx, 0)
+                                )
+                                raw_verify_gate = (
+                                    raw_verify_gate_outcomes.get(str(ac_idx))
+                                    if isinstance(raw_verify_gate_outcomes, Mapping)
+                                    else None
+                                )
                                 all_results.append(
                                     ACExecutionResult(
                                         ac_index=ac_idx,
@@ -2501,18 +2691,29 @@ class ParallelACExecutor:
                                         ),
                                         error=(
                                             "Skipped: dependency failed"
-                                            if is_skipped
+                                            if outcome == "blocked" or is_skipped
                                             else None
                                             if is_completed
                                             else "Failed (restored from checkpoint)"
                                         ),
-                                        retry_attempt=ac_retry_attempts.get(ac_idx, 0),
+                                        retry_attempt=restored_retry_attempt,
+                                        outcome=ACExecutionOutcome(outcome),
+                                        verify_gate_outcome=_deserialize_verify_gate_outcome(
+                                            raw_verify_gate
+                                        ),
                                     )
                                 )
                         self._console.print(
                             f"[cyan]Resuming from level {resume_from_level + 1} "
                             f"(checkpoint recovered, "
                             f"{len(level_contexts)} level context(s) restored)[/cyan]"
+                        )
+                    elif cp.phase == "parallel_execution":
+                        log.info(
+                            "parallel_executor.recovery.checkpoint_identity_mismatch",
+                            seed_id=seed_id,
+                            session_id=session_id,
+                            execution_id=execution_id,
                         )
             except Exception as e:
                 log.warning(
@@ -2665,6 +2866,7 @@ class ParallelACExecutor:
                     # failure, execute the AC normally instead.
                     spec = seed.acceptance_criteria[ac_idx]
                     verification_status = "assumed"
+                    gate: _VerifyGateOutcome | None = None
                     if (
                         self._run_verify_commands
                         and isinstance(spec, AcceptanceCriterionSpec)
@@ -2704,9 +2906,16 @@ class ParallelACExecutor:
                         final_message="\n".join(notes),
                         retry_attempt=ac_retry_attempts[ac_idx],
                         outcome=ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        verify_gate_outcome=gate,
                     )
                     all_results.append(satisfied_result)
                     stage_ac_results.append(satisfied_result)
+                    await self._emit_ac_attempt_judged(
+                        result=satisfied_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     ac_statuses[ac_idx] = "completed"
                     completed_count += 1
                     level_success += 1
@@ -2730,6 +2939,12 @@ class ParallelACExecutor:
                     )
                     all_results.append(blocked_result)
                     stage_ac_results.append(blocked_result)
+                    await self._emit_ac_attempt_judged(
+                        result=blocked_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
                     blocked_indices.add(ac_idx)
                     ac_statuses[ac_idx] = "skipped"
                     log.info(
@@ -2838,6 +3053,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
 
                             log.error(
                                 "parallel_executor.ac.exception",
@@ -2873,6 +3094,12 @@ class ParallelACExecutor:
                             failed_indices.add(ac_idx)
                             level_failed += 1
                             ac_statuses[ac_idx] = "failed"
+                            await self._emit_ac_attempt_judged(
+                                result=ac_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
                             log.error(
                                 "parallel_executor.ac.stall_abandoned",
                                 session_id=session_id,
@@ -2995,12 +3222,31 @@ class ParallelACExecutor:
                             conflicts=conflicts,
                         )
                         _invoke_execution_authority_guard(self)
+                        workspace_root = (
+                            self._task_cwd or self._adapter.working_directory or os.getcwd()
+                        )
+                        workspace_before = self._workspace_content_digest(workspace_root)
                         review = await self._authority_coordinator_review(
                             execution_id=execution_id,
                             conflicts=conflicts,
                             level_context=level_ctx,
                             level_number=level_num,
                         )
+                        workspace_after = self._workspace_content_digest(workspace_root)
+                        workspace_changed = (
+                            workspace_before is None
+                            or workspace_after is None
+                            or workspace_before != workspace_after
+                        )
+                        coordinator_mutated_workspace = (
+                            coordinator_mutated_workspace
+                            or workspace_changed
+                            or self._coordinator_review_may_mutate_workspace(review)
+                        )
+                        if coordinator_mutated_workspace:
+                            post_coordinator_revalidation_required = True
+                            post_coordinator_revalidated = False
+                            post_coordinator_revalidation_workspace_digest = None
                         await self._emit_coordinator_runtime_events(
                             execution_id=execution_id,
                             session_id=session_id,
@@ -3039,9 +3285,43 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "workspace_identity": canonical_workspace_authority(
+                                    self._task_cwd
+                                    or getattr(self._adapter, "working_directory", None)
+                                    or os.getcwd()
+                                ),
+                                "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                                "post_coordinator_revalidation_required": (
+                                    post_coordinator_revalidation_required
+                                ),
+                                "post_coordinator_revalidated": post_coordinator_revalidated,
+                                "post_coordinator_revalidation_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
+                                ),
+                                "final_workspace_digest": (
+                                    post_coordinator_revalidation_workspace_digest
+                                ),
                                 "completed_levels": level_idx + 1,
                                 "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                                "ac_retry_attempts": {
+                                    str(k): v for k, v in ac_retry_attempts.items()
+                                },
+                                "result_retry_attempts": _checkpoint_result_retry_attempts(
+                                    all_results
+                                ),
+                                "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(
+                                    all_results
+                                ),
+                                "ac_outcomes": {
+                                    str(result.ac_index): (
+                                        result.outcome.value
+                                        if result.outcome is not None
+                                        else ("succeeded" if result.success else "failed")
+                                    )
+                                    for result in all_results
+                                },
                                 "failed_indices": sorted(failed_indices),
+                                "blocked_indices": sorted(blocked_indices),
                                 "completed_count": completed_count,
                                 "level_contexts": serialize_level_contexts(level_contexts),
                                 "decomposition_decisions": {
@@ -3083,6 +3363,153 @@ class ParallelACExecutor:
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
 
+        needs_post_coordinator_revalidation = (
+            coordinator_mutated_workspace and not post_coordinator_revalidated
+        ) or (post_coordinator_revalidation_required and not post_coordinator_revalidated)
+        if needs_post_coordinator_revalidation:
+            # The coordinator may have edited files after a worker's verify
+            # gate passed.  Reconcile every success contract against the
+            # settled workspace; arbitrary verify_command contracts are not
+            # replayed because no deterministic external-effect boundary exists.
+            all_results = await self._revalidate_results_after_coordinator(
+                seed=seed,
+                results=all_results,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            post_coordinator_revalidation_required = True
+            post_coordinator_revalidated = True
+            post_coordinator_revalidation_workspace_digest = self._workspace_content_digest(
+                self._task_cwd or self._adapter.working_directory or os.getcwd()
+            )
+            if post_coordinator_revalidation_workspace_digest is None:
+                # The final evidence must be bound to a readable workspace. A
+                # successful command without a final digest is not durable
+                # acceptance evidence.
+                final_digest_error = (
+                    "Final workspace digest unavailable after coordinator revalidation."
+                )
+                all_results = [
+                    replace(
+                        result,
+                        success=False,
+                        error=final_digest_error,
+                        final_message=final_digest_error,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                    if result.success
+                    and result.outcome
+                    in {
+                        ACExecutionOutcome.SUCCEEDED,
+                        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                    }
+                    else result
+                    for result in all_results
+                ]
+            by_index = {result.ac_index: result for result in all_results}
+            stage_results = [
+                replace(
+                    stage,
+                    results=tuple(
+                        by_index.get(result.ac_index, result) for result in stage.results
+                    ),
+                )
+                for stage in stage_results
+            ]
+
+            # Persist the post-coordinator verdict after, not before, the
+            # revalidation.  A crash after the old checkpoint write therefore
+            # resumes through this same boundary instead of reviving stale ACs.
+            if self._checkpoint_store:
+                try:
+                    from ouroboros.persistence.checkpoint import CheckpointData
+
+                    seed_id = getattr(seed, "id", session_id)
+                    checkpoint = CheckpointData.create(
+                        seed_id=seed_id,
+                        phase="parallel_execution",
+                        state={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "workspace_identity": canonical_workspace_authority(
+                                self._task_cwd
+                                or getattr(self._adapter, "working_directory", None)
+                                or os.getcwd()
+                            ),
+                            "coordinator_mutated_workspace": coordinator_mutated_workspace,
+                            "post_coordinator_revalidation_required": (
+                                post_coordinator_revalidation_required
+                            ),
+                            "post_coordinator_revalidated": post_coordinator_revalidated,
+                            "post_coordinator_revalidation_workspace_digest": (
+                                post_coordinator_revalidation_workspace_digest
+                            ),
+                            "final_workspace_digest": post_coordinator_revalidation_workspace_digest,
+                            "completed_levels": total_levels,
+                            "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                            "ac_retry_attempts": {str(k): v for k, v in ac_retry_attempts.items()},
+                            "result_retry_attempts": _checkpoint_result_retry_attempts(all_results),
+                            "verify_gate_outcomes": _checkpoint_verify_gate_outcomes(all_results),
+                            "ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "revalidated_ac_outcomes": {
+                                str(result.ac_index): (
+                                    result.outcome.value
+                                    if result.outcome is not None
+                                    else ("succeeded" if result.success else "failed")
+                                )
+                                for result in all_results
+                            },
+                            "failed_indices": sorted(failed_indices),
+                            "blocked_indices": sorted(blocked_indices),
+                            "completed_count": completed_count,
+                            "level_contexts": serialize_level_contexts(level_contexts),
+                            "decomposition_decisions": {
+                                node_id: record.to_dict()
+                                for node_id, record in self._decomposition_decisions.items()
+                            },
+                        },
+                    )
+                    save_result = self._checkpoint_store.save(checkpoint)
+                    if not getattr(save_result, "is_ok", False):
+                        log.warning(
+                            "parallel_executor.final_revalidation_checkpoint_save_failed",
+                            seed_id=seed_id,
+                            error=str(getattr(save_result, "error", "unknown error")),
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "parallel_executor.final_revalidation_checkpoint_save_failed",
+                        error=str(exc),
+                    )
+
+        # All ACs have now finished (including any coordinator reconciliation).
+        # Reconcile verify evidence against the settled shared workspace before
+        # the runner constructs the terminal acceptance plan.
+        all_results = await self._settle_verify_gate_results(
+            seed=seed,
+            results=all_results,
+            session_id=session_id,
+            execution_id=execution_id,
+            coordinator_revalidated=post_coordinator_revalidated,
+        )
+        settled_by_index = {result.ac_index: result for result in all_results}
+        stage_results = [
+            replace(
+                stage,
+                results=tuple(
+                    settled_by_index.get(result.ac_index, result) for result in stage.results
+                ),
+            )
+            for stage in stage_results
+        ]
+
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -3122,6 +3549,421 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
         )
+
+    @staticmethod
+    def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
+        """Return whether a coordinator review could have changed the workspace.
+
+        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
+        structured review summary is not treated as proof of a mutation: a
+        model can report a proposed fix without applying one.  The caller also
+        compares workspace digests around the review, so direct writes remain
+        observable even when a runtime omits tool messages.
+        """
+        if review is None:
+            return False
+        for message in getattr(review, "messages", ()) or ():
+            if getattr(message, "tool_name", None) in {"Write", "Edit", "Bash"}:
+                return True
+        return False
+
+    @staticmethod
+    def _workspace_content_digest(cwd: str) -> str | None:
+        """Hash the observable workspace tree for coordinator mutation checks.
+
+        The digest intentionally excludes runtime/cache directories that are
+        not part of the task workspace contract.  Read failures return
+        ``None`` so the caller fails closed instead of trusting pre-coordinator
+        evidence it could not compare.
+        """
+        ignored_directories = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "node_modules",
+        }
+        try:
+            root = Path(cwd).expanduser().resolve(strict=False)
+            if not root.is_dir():
+                return hashlib.sha256(
+                    f"missing-workspace\0{root}".encode("utf-8", "surrogateescape")
+                ).hexdigest()
+            digest = hashlib.sha256()
+            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            for path in paths:
+                relative = path.relative_to(root)
+                if any(part in ignored_directories for part in relative.parts):
+                    continue
+                try:
+                    stat = path.lstat()
+                    if path.is_symlink():
+                        digest.update(b"L\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+                    elif path.is_dir():
+                        # Empty-directory creation/removal is observable workspace
+                        # state.  Hash a directory marker as well as its mode so a
+                        # coordinator cannot evade revalidation by only changing
+                        # the tree shape.
+                        digest.update(b"D\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
+                    elif path.is_file():
+                        digest.update(b"F\0")
+                        digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
+                        digest.update(b"\0")
+                        digest.update(str(stat.st_mode).encode("ascii"))
+                        digest.update(b"\0")
+                        with path.open("rb") as handle:
+                            while chunk := handle.read(1024 * 1024):
+                                digest.update(chunk)
+                except (OSError, ValueError):
+                    return None
+            return digest.hexdigest()
+        except (OSError, ValueError):
+            return None
+
+    async def _revalidate_results_after_coordinator(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+    ) -> list[ACExecutionResult]:
+        """Bind successful ACs to the workspace settled by the coordinator.
+
+        A cached command result is intentionally not replayed here.  The
+        coordinator is an effectful writer and can invalidate a previously
+        passing command after the worker-level gate, while an unrestricted
+        shell replay could duplicate external effects.  Command-bearing ACs
+        therefore fail closed; artifact-only contracts are checked against the
+        settled workspace and description-only ACs fail closed because no
+        independent post-mutation contract exists.
+        """
+        from ouroboros.events.base import BaseEvent
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        revalidated: list[ACExecutionResult] = []
+        for result in results:
+            if not result.success or result.outcome not in {
+                ACExecutionOutcome.SUCCEEDED,
+                ACExecutionOutcome.SATISFIED_EXTERNALLY,
+            }:
+                revalidated.append(result)
+                continue
+
+            spec = (
+                seed.acceptance_criteria[result.ac_index]
+                if 0 <= result.ac_index < len(seed.acceptance_criteria)
+                else None
+            )
+            has_contract = isinstance(spec, AcceptanceCriterionSpec) and bool(
+                spec.verify_command or spec.expected_artifacts
+            )
+            if not self._run_verify_commands or not has_contract:
+                reason = (
+                    "Final workspace changed during coordinator reconciliation; "
+                    "the AC has no deterministic post-coordinator success contract."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                        },
+                    )
+                )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            if spec.verify_command:
+                # A verify command is an arbitrary shell contract and may have
+                # external effects that the workspace digest cannot observe.
+                # Never replay it after a coordinator mutation; fail closed at
+                # this boundary instead of executing an effectful command twice.
+                reason = (
+                    "Final acceptance rejected because the coordinator changed the "
+                    "workspace and replaying verify_command is not permitted."
+                )
+                await self._safe_emit_event(
+                    BaseEvent(
+                        type="execution.verify.failed",
+                        aggregate_type="execution",
+                        aggregate_id=execution_id or session_id,
+                        data={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "ac_index": result.ac_index,
+                            "verify_command": spec.verify_command,
+                            "expected_artifacts": list(spec.expected_artifacts),
+                            "reason": reason,
+                            "failure_class": "evidence_missing",
+                            "final_workspace_revalidation": True,
+                            "verify_replay_blocked": True,
+                        },
+                    )
+                )
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if missing_artifacts:
+                reason = "Final expected_artifacts missing: " + ", ".join(missing_artifacts)
+                revalidated.append(
+                    replace(
+                        result,
+                        success=False,
+                        error=reason,
+                        final_message=reason,
+                        outcome=ACExecutionOutcome.FAILED,
+                    )
+                )
+                continue
+
+            revalidated.append(
+                replace(
+                    result,
+                    verify_gate_outcome=_VerifyGateOutcome(
+                        passed=True,
+                        reason=None,
+                        output_tail="",
+                        workspace_digest=self._workspace_content_digest(cwd),
+                    ),
+                )
+            )
+
+        return revalidated
+
+    async def _settle_verify_gate_results(
+        self,
+        *,
+        seed: Seed,
+        results: list[ACExecutionResult],
+        session_id: str,
+        execution_id: str,
+        coordinator_revalidated: bool = False,
+    ) -> list[ACExecutionResult]:
+        """Fail closed when final shared-workspace evidence is no longer valid.
+
+        Verify gates run as each AC completes, while later ACs can still touch
+        the same workspace.  Before terminal acceptance, re-check every
+        successful contract's artifact leg and cached workspace identity. A
+        stale command result is rejected rather than replayed because an
+        unrestricted shell command may have effects outside the workspace.
+        Invalidate the complete success set when any verify command was
+        observed mutating the workspace.
+        """
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        if not self._run_verify_commands:
+            return results
+
+        successful_contracts: dict[int, AcceptanceCriterionSpec] = {}
+        verify_mutated_workspace = False
+        for result in results:
+            outcome = result.verify_gate_outcome
+            verify_mutated_workspace = verify_mutated_workspace or bool(
+                isinstance(outcome, _VerifyGateOutcome) and outcome.workspace_mutated
+            )
+            if not result.success or not (0 <= result.ac_index < len(seed.acceptance_criteria)):
+                continue
+            spec = seed.acceptance_criteria[result.ac_index]
+            if isinstance(spec, AcceptanceCriterionSpec) and (
+                spec.verify_command or spec.expected_artifacts
+            ):
+                successful_contracts[result.ac_index] = spec
+
+        if not successful_contracts and not verify_mutated_workspace:
+            return results
+
+        cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
+        final_digest = self._workspace_content_digest(cwd)
+        settled: list[ACExecutionResult] = []
+        individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
+
+        for result in results:
+            if not result.success:
+                settled.append(result)
+                continue
+
+            spec = successful_contracts.get(result.ac_index)
+            if spec is None:
+                # A mutating final verifier invalidates all successes, including
+                # description-only ACs.  Defer the replacement until every
+                # final verifier has been inspected.
+                settled.append(result)
+                continue
+
+            if verify_mutated_workspace:
+                # Once one final verifier has changed (or made unreadable) the
+                # workspace, do not execute any additional arbitrary commands.
+                # The complete success set will be invalidated below.
+                settled.append(result)
+                continue
+
+            outcome = result.verify_gate_outcome
+            if not isinstance(outcome, _VerifyGateOutcome):
+                individual_failures[result.ac_index] = (
+                    "Final verify gate evidence is unavailable for acceptance.",
+                    None,
+                )
+                settled.append(result)
+                continue
+
+            if not outcome.passed:
+                individual_failures[result.ac_index] = (
+                    f"Final workspace verify gate failed: {outcome.reason}",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            if final_digest is None:
+                individual_failures[result.ac_index] = (
+                    "Final workspace digest unavailable for acceptance evidence.",
+                    outcome,
+                )
+                settled.append(result)
+                continue
+            if missing_artifacts:
+                individual_failures[result.ac_index] = (
+                    "Final expected_artifacts missing: " + ", ".join(missing_artifacts),
+                    outcome,
+                )
+                settled.append(result)
+                continue
+
+            if spec.verify_command:
+                if coordinator_revalidated:
+                    # Coordinator revalidation deliberately refuses to replay
+                    # arbitrary shell contracts.  A command-bearing success
+                    # that survived that boundary is therefore not admissible.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because coordinator revalidation "
+                        "did not replay verify_command.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                cached_digest = outcome.workspace_digest
+                if cached_digest is None:
+                    individual_failures[result.ac_index] = (
+                        "Final verify gate workspace digest unavailable for acceptance.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+                if cached_digest != final_digest:
+                    # A later worker changed the workspace after this command
+                    # passed.  Do not replay an unrestricted shell contract:
+                    # effects outside the workspace (DB/API/deployment writes)
+                    # cannot be detected by the digest.  The stale evidence is
+                    # therefore rejected at the final boundary.
+                    individual_failures[result.ac_index] = (
+                        "Final acceptance rejected because the workspace changed "
+                        "after verify_command completed; replaying verify_command "
+                        "is not permitted.",
+                        outcome,
+                    )
+                    settled.append(result)
+                    continue
+
+            settled.append(result)
+
+        if verify_mutated_workspace:
+            # A verifier is an observation boundary, not another writer.  If
+            # any final verifier changed the shared workspace (or its digest
+            # became unreadable), every success observed before or after that
+            # command is stale.  Fail closed for the complete finalization set.
+            mutation_reason = (
+                "Final acceptance rejected because a verify_command mutated the "
+                "workspace or its digest could not be revalidated."
+            )
+            individual_failures = {
+                result.ac_index: (mutation_reason, result.verify_gate_outcome)
+                for result in settled
+                if result.success
+            }
+
+        finalized: list[ACExecutionResult] = []
+        for result in settled:
+            failure = individual_failures.get(result.ac_index)
+            if failure is None:
+                finalized.append(result)
+                continue
+            reason, outcome = failure
+            spec = successful_contracts.get(result.ac_index)
+            missing_artifacts = (
+                list(outcome.missing_artifacts) if isinstance(outcome, _VerifyGateOutcome) else []
+            )
+            await self._safe_emit_event(
+                BaseEvent(
+                    type="execution.verify.failed",
+                    aggregate_type="execution",
+                    aggregate_id=execution_id or session_id,
+                    data={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "ac_index": result.ac_index,
+                        "ac_content": result.ac_content,
+                        "verify_command": spec.verify_command if spec is not None else None,
+                        "expected_artifacts": (
+                            list(spec.expected_artifacts) if spec is not None else []
+                        ),
+                        "missing_artifacts": missing_artifacts,
+                        "reason": reason,
+                        "failure_class": FailureClass.EVIDENCE_MISSING.value,
+                        "final_workspace_revalidation": True,
+                    },
+                )
+            )
+            finalized.append(
+                replace(
+                    result,
+                    success=False,
+                    error=reason,
+                    final_message=reason,
+                    outcome=ACExecutionOutcome.FAILED,
+                    atomic_verifier_verdict=VerifierVerdict(
+                        passed=False,
+                        reasons=(reason,),
+                        failure_class=FailureClass.EVIDENCE_MISSING.value,
+                    ),
+                )
+            )
+        return finalized
 
     def _coerce_decomposition_decision(
         self,
@@ -5715,6 +6557,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=runtime_handle,
                 execution_id=execution_context_id,
                 session_id=ac_session_id,
+                orchestrator_session_id=session_id,
                 result_summary=result_final_message or None,
                 success=success,
                 error=(
@@ -5783,6 +6626,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_handle=dispatch_state.runtime_handle,
                 execution_id=execution_context_id,
                 session_id=dispatch_state.ac_session_id,
+                orchestrator_session_id=session_id,
                 success=False,
                 error=str(e),
             )
@@ -6077,11 +6921,38 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
                 output_tail="",
                 missing_artifacts=missing_artifacts,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         command = spec.verify_command
         if not command:
-            return _VerifyGateOutcome(passed=True, reason=None, output_tail="")
+            return _VerifyGateOutcome(
+                passed=True,
+                reason=None,
+                output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
+            )
+        workspace_before = self._workspace_content_digest(cwd)
+
+        def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
+            workspace_after = self._workspace_content_digest(cwd)
+            if (
+                workspace_before is None
+                or workspace_after is None
+                or workspace_before != workspace_after
+            ):
+                return _VerifyGateOutcome(
+                    passed=False,
+                    reason=(
+                        "verify_command mutated the workspace or its digest could not be "
+                        "revalidated"
+                    ),
+                    output_tail=output_tail,
+                    workspace_mutated=True,
+                    workspace_digest=workspace_after,
+                )
+            return None
+
         subprocess_kwargs: dict[str, Any] = {}
         if os.name != "nt":
             subprocess_kwargs["start_new_session"] = True
@@ -6115,20 +6986,28 @@ Respond with either ATOMIC or the structured JSON object only.
                     proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
+            mutated = workspace_mutation_outcome("")
+            if mutated is not None:
+                return mutated
             return _VerifyGateOutcome(
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
                 output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
             )
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
         tail = combined[-_VERIFY_OUTPUT_TAIL_CHARS:]
+        mutated = workspace_mutation_outcome(tail)
+        if mutated is not None:
+            return mutated
         returncode = proc.returncode
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -6137,8 +7016,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     f"output_assertion {spec.output_assertion!r} not found in verify_command output"
                 ),
                 output_tail=tail,
+                workspace_digest=self._workspace_content_digest(cwd),
             )
-        return _VerifyGateOutcome(passed=True, reason=None, output_tail=tail)
+        return _VerifyGateOutcome(
+            passed=True,
+            reason=None,
+            output_tail=tail,
+            workspace_digest=self._workspace_content_digest(cwd),
+        )
 
     async def _apply_verify_gate(
         self,
@@ -6222,7 +7107,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     outcome=ACExecutionOutcome.SUCCEEDED,
                     verify_gate_outcome=outcome,
                 )
-            return result
+            if cached_outcome is outcome:
+                return result
+            return replace(result, verify_gate_outcome=outcome)
         if not result.success:
             return result
 
@@ -6273,7 +7160,7 @@ Respond with either ATOMIC or the structured JSON object only.
             verify_gate_outcome=outcome,
         )
 
-    async def _emit_ac_outcome_finalized(
+    async def _emit_ac_attempt_judged(
         self,
         *,
         result: ACExecutionResult,
@@ -6281,19 +7168,19 @@ Respond with either ATOMIC or the structured JSON object only.
         session_id: str,
         execution_id: str,
     ) -> None:
-        """Persist the outer verify/retry layer's authoritative AC outcome.
+        """Persist one provisional outer verify/retry attempt judgment.
 
         Leaf-level deliver and shadow events are provisional because they are
-        emitted before the seed-level success contract runs.  The deterministic
-        frugality proof requires this marker and admits only roots whose latest
-        retry was finally accepted.  Event persistence remains observe-only: if
-        the marker is dropped, the proof fails closed by excluding the rows.
+        emitted before the seed-level success contract runs.  This marker is
+        deliberately telemetry only: it never grants acceptance or dispatch
+        authority.  ``execution.ac.outcome_finalized`` remains readable as a
+        historical alias, but new producers use ``attempt_judged``.
         """
         from ouroboros.events.base import BaseEvent
 
         await self._safe_emit_event(
             BaseEvent(
-                type="execution.ac.outcome_finalized",
+                type="execution.ac.attempt_judged",
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
@@ -6302,9 +7189,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     "root_ac_index": root_ac_index,
                     "ac_index": root_ac_index,
                     "retry_attempt": result.retry_attempt,
+                    "attempt_number": result.attempt_number,
                     "success": result.success,
-                    "outcome": result.outcome.value if result.outcome is not None else None,
+                    "outcome": result.outcome.value if result.outcome is not None else "failed",
                     "is_decomposed": result.is_decomposed,
+                    "is_decomposed_child": result.is_decomposed,
                 },
             )
         )
@@ -6511,7 +7400,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                 )
                 results[position] = gated
-                await self._emit_ac_outcome_finalized(
+                await self._emit_ac_attempt_judged(
                     result=gated,
                     root_ac_index=ac_idx,
                     session_id=session_id,
@@ -6602,7 +7491,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                 results[position_by_idx[ac_idx]] = gated
                 if isinstance(gated, ACExecutionResult):
-                    await self._emit_ac_outcome_finalized(
+                    await self._emit_ac_attempt_judged(
                         result=gated,
                         root_ac_index=ac_idx,
                         session_id=session_id,
@@ -6726,7 +7615,7 @@ Respond with either ATOMIC or the structured JSON object only.
                                 execution_id=execution_id,
                             )
                             results[position_by_idx[ac_idx]] = finalized_alt
-                            await self._emit_ac_outcome_finalized(
+                            await self._emit_ac_attempt_judged(
                                 result=finalized_alt,
                                 root_ac_index=ac_idx,
                                 session_id=session_id,

@@ -31,6 +31,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     _build_success_contract_block,
     _complete_sibling_acs_from_evidence,
+    _VerifyGateOutcome,
 )
 from ouroboros.orchestrator.verifier import VerifierVerdict
 
@@ -120,6 +121,20 @@ async def test_verify_gate_output_assertion_match_and_mismatch(tmp_path: Any) ->
 
 
 @pytest.mark.asyncio
+async def test_verify_gate_rejects_commands_that_mutate_the_workspace(tmp_path: Any) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(description="read-only", verify_command="rm target.txt")
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.workspace_mutated is True
+    assert "mutated the workspace" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_verify_gate_ignores_normalized_exit_code_output_assertion(
     tmp_path: Any,
 ) -> None:
@@ -161,14 +176,8 @@ async def test_apply_verify_gate_flips_success_to_failed(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) -> None:
-    counter = tmp_path / "verify-count.txt"
-    command = (
-        "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
-        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
-        'raise SystemExit(0 if n == 0 else 7)"'
-    )
     executor = _make_executor(working_directory=str(tmp_path))
-    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
     cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
     result = ACExecutionResult(
         ac_index=0,
@@ -176,14 +185,12 @@ async def test_apply_verify_gate_reuses_cached_success_outcome(tmp_path: Any) ->
         success=True,
         verify_gate_outcome=cached,
     )
-    assert counter.read_text(encoding="utf-8") == "1"
 
     gated = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
 
     assert gated is result
-    assert counter.read_text(encoding="utf-8") == "1"
 
 
 @pytest.mark.asyncio
@@ -192,17 +199,11 @@ async def test_apply_verify_gate_rechecks_artifacts_without_replaying_cached_com
 ) -> None:
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("ready", encoding="utf-8")
-    counter = tmp_path / "verify-count.txt"
-    command = (
-        "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
-        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
-        'raise SystemExit(0 if n == 0 else 7)"'
-    )
     executor = _make_executor(working_directory=str(tmp_path))
     seed = _seed_with_specs(
         AcceptanceCriterionSpec(
             description="ac",
-            verify_command=command,
+            verify_command="exit 0",
             expected_artifacts=("artifact.txt",),
         )
     )
@@ -222,7 +223,56 @@ async def test_apply_verify_gate_rechecks_artifacts_without_replaying_cached_com
     assert gated.success is False
     assert gated.verify_gate_outcome is not None
     assert gated.verify_gate_outcome.missing_artifacts == ("artifact.txt",)
-    assert counter.read_text(encoding="utf-8") == "1"
+
+
+@pytest.mark.asyncio
+async def test_final_verify_settlement_invalidates_prior_success_after_mutation(
+    tmp_path: Any,
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="artifact", expected_artifacts=("target.txt",)),
+        AcceptanceCriterionSpec(description="mutator", verify_command="rm target.txt"),
+        "contractless",
+    )
+    first_outcome = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[0], cwd=str(tmp_path)
+    )
+    mutating_outcome = await executor._run_ac_verify_gate(
+        spec=seed.acceptance_criteria[1], cwd=str(tmp_path)
+    )
+    results = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="artifact",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=first_outcome,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="mutator",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=mutating_outcome,
+            ),
+            ACExecutionResult(
+                ac_index=2,
+                ac_content="contractless",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            ),
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert [result.success for result in results] == [False, False, False]
+    assert all(result.outcome is ACExecutionOutcome.FAILED for result in results)
 
 
 @pytest.mark.asyncio
@@ -301,7 +351,7 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
     assert isinstance(results[0], ACExecutionResult)
     assert results[0].success is False
     emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
-    markers = [event for event in emitted if event.type == "execution.ac.outcome_finalized"]
+    markers = [event for event in emitted if event.type == "execution.ac.attempt_judged"]
     assert len(markers) == 1
     assert markers[0].data == {
         "execution_id": "e",
@@ -309,9 +359,11 @@ async def test_batch_emits_outer_outcome_marker_after_verify_failure(tmp_path: A
         "root_ac_index": 0,
         "ac_index": 0,
         "retry_attempt": 0,
+        "attempt_number": 1,
         "success": False,
         "outcome": "failed",
         "is_decomposed": True,
+        "is_decomposed_child": True,
     }
 
 
@@ -1225,13 +1277,231 @@ async def test_apply_verify_gate_fails_artifacts_only_ac(tmp_path: Any) -> None:
     assert gated.atomic_verifier_verdict is not None
     assert gated.atomic_verifier_verdict.failure_class == "EVIDENCE_MISSING"
 
-    # And with the artifact present the same AC passes untouched.
+    # And with the artifact present the same AC passes with durable evidence.
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "out.md").write_text("done\n")
     passed = await executor._apply_verify_gate(
         seed=seed, ac_index=0, result=result, session_id="s", execution_id="e"
     )
-    assert passed is result
+    assert passed.success is True
+    assert passed.verify_gate_outcome is not None
+
+
+@pytest.mark.asyncio
+async def test_final_workspace_revalidation_does_not_reuse_cached_command_result(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path / "final-verify-count.txt"
+    command = (
+        "python3 -c \"from pathlib import Path; p=Path('final-verify-count.txt'); "
+        "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
+        'raise SystemExit(0 if n == 0 else 7)"'
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ac",
+        success=True,
+        verify_gate_outcome=cached,
+    )
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[result],
+        session_id="s",
+        execution_id="e",
+    )
+
+    # Coordinator revalidation must not replay an arbitrary shell command;
+    # external effects are not observable through the workspace digest.
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert revalidated[0].success is False
+    assert revalidated[0].outcome is ACExecutionOutcome.FAILED
+    assert "replaying verify_command is not permitted" in (revalidated[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_final_verify_mutation_invalidates_prior_successes(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(
+        AcceptanceCriterionSpec(description="stable", verify_command="exit 0"),
+        AcceptanceCriterionSpec(
+            description="mutating verifier",
+            verify_command=(
+                'python3 -c "from pathlib import Path; '
+                "Path('verify-side-effect.txt').write_text('side effect')\""
+            ),
+        ),
+    )
+    results = [
+        ACExecutionResult(
+            ac_index=0,
+            ac_content="stable",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        ),
+        ACExecutionResult(
+            ac_index=1,
+            ac_content="mutating verifier",
+            success=True,
+            outcome=ACExecutionOutcome.SUCCEEDED,
+        ),
+    ]
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=results,
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert [result.outcome for result in revalidated] == [
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.FAILED,
+    ]
+    assert all(
+        "replaying verify_command is not permitted" in (result.error or "")
+        for result in revalidated
+    )
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_rejects_stale_command_without_replay(
+    tmp_path: Any,
+) -> None:
+    counter = tmp_path.parent / f"final-settlement-count-{tmp_path.name}.txt"
+    target = tmp_path / "condition.txt"
+    target.write_text("before", encoding="utf-8")
+    command = (
+        'python3 -c "from pathlib import Path; '
+        f"counter=Path({str(counter)!r}); "
+        "n=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(n+1)); "
+        "raise SystemExit(0 if Path('condition.txt').read_text() == 'before' else 7)\""
+    )
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command=command))
+    cached = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    target.write_text("after", encoding="utf-8")
+
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                verify_gate_outcome=cached,
+            )
+        ],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert counter.read_text(encoding="utf-8") == "1"
+    assert settled[0].success is False
+    assert settled[0].outcome is ACExecutionOutcome.FAILED
+    assert "replaying verify_command is not permitted" in (settled[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restores_verify_evidence_and_result_retry_identity(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+    seed = _seed_with_specs(AcceptanceCriterionSpec(description="ac", verify_command="exit 0"))
+    plan = DependencyGraph(
+        nodes=(ACNode(index=0, content="ac", depends_on=()),),
+        execution_levels=((0,),),
+    ).to_execution_plan()
+    checkpoint_store = MagicMock()
+    checkpoint_store.load.return_value = type("LoadResult", (), {"is_ok": False})()
+    checkpoint_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
+    executor = _make_executor(working_directory=str(tmp_path))
+    executor._checkpoint_store = checkpoint_store
+    gate = await executor._run_ac_verify_gate(spec=seed.acceptance_criteria[0], cwd=str(tmp_path))
+    executor._execute_ac_batch = AsyncMock(
+        return_value=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ac",
+                success=True,
+                retry_attempt=3,
+                verify_gate_outcome=gate,
+            )
+        ]
+    )
+
+    first = await executor.execute_parallel(
+        seed=seed,
+        execution_plan=plan,
+        session_id="session-checkpoint-verify",
+        execution_id="execution-checkpoint-verify",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+    assert first.results[0].success is True
+    checkpoint = checkpoint_store.save.call_args.args[0]
+    assert checkpoint.state["result_retry_attempts"] == {"0": 3}
+    assert checkpoint.state["verify_gate_outcomes"]["0"]["workspace_digest"] == (
+        gate.workspace_digest
+    )
+
+    restore_store = MagicMock()
+    restore_store.load.return_value = type("LoadResult", (), {"is_ok": True, "value": checkpoint})()
+    restore_store.save.return_value = type("SaveResult", (), {"is_ok": True})()
+    restored = _make_executor(working_directory=str(tmp_path))
+    restored._checkpoint_store = restore_store
+    restored._execute_ac_batch = AsyncMock()
+
+    recovered = await restored.execute_parallel(
+        seed=seed,
+        execution_plan=plan,
+        session_id="session-checkpoint-verify",
+        execution_id="execution-checkpoint-verify",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+
+    assert recovered.results[0].success is True
+    assert recovered.results[0].retry_attempt == 3
+    assert isinstance(recovered.results[0].verify_gate_outcome, _VerifyGateOutcome)
+    restored._execute_ac_batch.assert_not_awaited()
+
+
+def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:
+    empty_directory = tmp_path / "expected-artifact-directory"
+    empty_directory.mkdir()
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    empty_directory.rmdir()
+
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
+@pytest.mark.asyncio
+async def test_final_workspace_revalidation_fails_closed_without_contract(tmp_path: Any) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    seed = _seed_with_specs("description-only AC")
+    result = ACExecutionResult(ac_index=0, ac_content="description-only AC", success=True)
+
+    revalidated = await executor._revalidate_results_after_coordinator(
+        seed=seed,
+        results=[result],
+        session_id="s",
+        execution_id="e",
+    )
+
+    assert revalidated[0].success is False
+    assert revalidated[0].outcome is ACExecutionOutcome.FAILED
+    assert "no deterministic post-coordinator success contract" in (revalidated[0].error or "")
 
 
 @pytest.mark.asyncio

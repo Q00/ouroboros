@@ -29,7 +29,9 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
         "execution.decomposition.level_completed",
         "execution.ac.model_routed",
         "execution.ac.alt_harness_redispatched",
+        "execution.ac.attempt_judged",
         "execution.ac.outcome_finalized",
+        "execution.ac.acceptance_finalized",
         "control.session.signal.queued",
         "control.session.signal.applied",
         "control.session.signal.completed",
@@ -64,12 +66,37 @@ def _strings(value: object, *, limit: int = _MAX_LIST) -> list[str]:
     return result
 
 
+def _is_session_scoped_event(event: BaseEvent) -> bool:
+    return event.type.startswith(("execution.", "control.session.signal."))
+
+
+def _event_session_id(event: BaseEvent) -> str | None:
+    """Return the authoritative orchestration session carried by an event.
+
+    Execution and Synapse control events can share an aggregate across
+    concurrent orchestration sessions.  New events carry the explicit
+    ``orchestrator_session_id`` field; older execution projections used
+    ``session_id``.  An explicit field always wins so a stale fallback cannot
+    make a foreign event look local.
+    """
+    if not _is_session_scoped_event(event):
+        return None
+    data = event.data
+    explicit = data.get("orchestrator_session_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    legacy = data.get("session_id")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
 def _scope(event: BaseEvent, *, job_id: str | None) -> dict[str, object]:
     data = event.data
     return {
         "job_id": job_id,
         "execution_id": _text(data.get("execution_id"), limit=96),
-        "session_id": _text(data.get("session_id"), limit=96),
+        "session_id": _text(_event_session_id(event), limit=96),
         "lineage_id": _text(data.get("lineage_id"), limit=96),
         "semantic_ac_key": _text(data.get("semantic_ac_key"), limit=96),
         "root_ac_index": (
@@ -207,6 +234,25 @@ def _event_order(events: Iterable[BaseEvent]) -> list[BaseEvent]:
     return sorted(events, key=lambda event: (event.timestamp, event.id))
 
 
+def _history_for_session(
+    history_events: Iterable[BaseEvent], *, session_id: str | None
+) -> list[BaseEvent]:
+    """Drop unscoped/foreign execution evidence before any relay correlation.
+
+    Job and lineage events remain available because those aggregates are the
+    relay's own scope.  Execution events, however, may be interleaved for
+    several sessions under one execution id and must be fail-closed when a
+    linked session is known.
+    """
+    if session_id is None:
+        return list(history_events)
+    return [
+        event
+        for event in history_events
+        if not _is_session_scoped_event(event) or _event_session_id(event) == session_id
+    ]
+
+
 def _latest_configuration_before(
     history: Sequence[BaseEvent],
     target: BaseEvent,
@@ -225,6 +271,7 @@ def _proactive_relays(
     new_event_ids: set[str],
     *,
     job_id: str | None,
+    session_id: str | None,
 ) -> list[dict[str, object]]:
     relays: list[dict[str, object]] = []
     last_route_by_ac: dict[str, tuple[object, ...]] = {}
@@ -379,17 +426,43 @@ def _proactive_relays(
                     },
                 )
             )
-        elif event.type == "execution.ac.outcome_finalized" and data.get("success") is True:
+        elif event.type in {
+            "execution.ac.attempt_judged",
+            "execution.ac.outcome_finalized",
+        }:
             relays.append(
                 _progress(
                     event,
                     kind="progress_advanced",
-                    subtype="ac_verified",
+                    subtype="ac_attempt_judged",
                     job_id=job_id,
                     evidence={
                         "root_ac_index": data.get("root_ac_index"),
                         "retry_attempt": data.get("retry_attempt"),
+                        "attempt_number": data.get("attempt_number"),
                         "outcome": data.get("outcome"),
+                    },
+                )
+            )
+        elif event.type == "execution.ac.acceptance_finalized":
+            # A linked execution stream may contain multiple orchestration
+            # sessions. Final acceptance is authority-bearing and must only be
+            # relayed for the job's linked session; exposing another session's
+            # acceptance under this job is a false progress claim.
+            if session_id is not None and data.get("session_id") != session_id:
+                continue
+            relays.append(
+                _progress(
+                    event,
+                    kind="progress_advanced",
+                    subtype=("ac_accepted" if data.get("accepted") is True else "ac_rejected"),
+                    job_id=job_id,
+                    evidence={
+                        "root_ac_index": data.get("root_ac_index"),
+                        "final_retry_attempt": data.get("final_retry_attempt"),
+                        "accepted": data.get("accepted"),
+                        "disposition": data.get("disposition"),
+                        "terminal_status": data.get("terminal_status"),
                     },
                 )
             )
@@ -422,6 +495,7 @@ def classify_relay_events(
     *,
     new_event_ids: set[str] | None = None,
     job_id: str | None = None,
+    session_id: str | None = None,
     available_tools: Set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Classify bounded proactive and attention relay envelopes.
@@ -430,10 +504,18 @@ def classify_relay_events(
     ``new_event_ids`` limits emission to the current cursor page; omitting it
     performs the terminal full-history scan.
     """
-    history = _event_order(history_events)
+    # A linked execution aggregate can contain evidence from more than one
+    # orchestration session.  Filter before building route/recovery streaks so
+    # foreign events cannot create actionable or progress relays for this job.
+    history = _event_order(_history_for_session(history_events, session_id=session_id))
     registered = available_tools or frozenset()
     new_ids = new_event_ids if new_event_ids is not None else {event.id for event in history}
-    relays = _proactive_relays(history, new_ids, job_id=job_id)
+    relays = _proactive_relays(
+        history,
+        new_ids,
+        job_id=job_id,
+        session_id=session_id,
+    )
 
     recovery_by_key: dict[str, BaseEvent] = {}
     for event in history:

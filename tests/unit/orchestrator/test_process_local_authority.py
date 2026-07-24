@@ -55,7 +55,7 @@ from ouroboros.orchestrator.runner import (
 )
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.persistence.checkpoint import CheckpointStore
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 from ouroboros.persistence.uow import UnitOfWork
 
 
@@ -136,7 +136,9 @@ def _seed() -> Seed:
 
 
 def _runner(runtime: _CountingRuntime | None = None) -> OrchestratorRunner:
-    return OrchestratorRunner(runtime or _CountingRuntime(), AsyncMock(), MagicMock())
+    event_store = AsyncMock()
+    event_store.replay = AsyncMock(return_value=[])
+    return OrchestratorRunner(runtime or _CountingRuntime(), event_store, MagicMock())
 
 
 async def _prepare(
@@ -173,6 +175,38 @@ async def _prepare(
 
 def _paused(tracker: SessionTracker) -> SessionTracker:
     return tracker.with_status(SessionStatus.PAUSED)
+
+
+def _terminal_plan(
+    session_id: str,
+    execution_id: str,
+    terminal_status: str,
+    *,
+    root_ac_index: int = 0,
+) -> list[dict[str, object]]:
+    """Synthetic one-root plan for lifecycle-only tests."""
+    outcome = {
+        "completed": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }[terminal_status]
+    accepted = terminal_status == "completed"
+    disposition = "accepted" if accepted else terminal_status
+    return [
+        {
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "acceptance_generation_id": acceptance_generation_id_for_session(
+                session_id, execution_id
+            ),
+            "root_ac_index": root_ac_index,
+            "final_retry_attempt": 0,
+            "accepted": accepted,
+            "disposition": disposition,
+            "outcome": outcome,
+            "terminal_status": terminal_status,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -381,6 +415,9 @@ async def test_sequential_pause_reconciles_preexisting_terminal_winner(tmp_path)
         cancelled = await runner._session_repo.mark_cancelled(
             tracker.session_id,
             reason="terminal wins before pause",
+            acceptance_finalizations=_terminal_plan(
+                tracker.session_id, tracker.execution_id, "cancelled"
+            ),
         )
         assert cancelled.is_ok and cancelled.value is True
         return await original_mark_paused(*args, **kwargs)
@@ -460,6 +497,9 @@ async def test_parallel_pause_reconciles_preexisting_terminal_winner(tmp_path) -
         cancelled = await runner._session_repo.mark_cancelled(
             tracker.session_id,
             reason="terminal wins before parallel pause",
+            acceptance_finalizations=_terminal_plan(
+                tracker.session_id, tracker.execution_id, "cancelled"
+            ),
         )
         assert cancelled.is_ok and cancelled.value is True
         return await original_mark_paused(*args, **kwargs)
@@ -529,6 +569,9 @@ async def test_resume_pause_reconciles_preexisting_terminal_winner(tmp_path) -> 
         cancelled = await runner._session_repo.mark_cancelled(
             tracker.session_id,
             reason="terminal wins before resumed pause",
+            acceptance_finalizations=_terminal_plan(
+                tracker.session_id, tracker.execution_id, "cancelled"
+            ),
         )
         assert cancelled.is_ok and cancelled.value is True
         return await original_mark_paused(*args, **kwargs)
@@ -891,6 +934,7 @@ async def test_lost_paused_authority_precedes_current_policy_gate(policy_gate: s
         MagicMock(),
         fat_harness_mode=policy_gate == "fat_harness",
     )
+    restarted._event_store.replay = AsyncMock(return_value=[])
     restarted._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(paused))
     restarted._session_repo.mark_failed_if_active = AsyncMock(return_value=Result.ok(True))
 
@@ -1816,7 +1860,11 @@ async def test_prepare_rejects_reused_terminal_session_id(tmp_path) -> None:
         session_id=session_id,
     )
     assert original.is_ok
-    completed = await original_runner._session_repo.mark_completed(session_id, {"done": True})
+    completed = await original_runner._session_repo.mark_completed(
+        session_id,
+        {"done": True},
+        acceptance_finalizations=_terminal_plan(session_id, original_execution_id, "completed"),
+    )
     assert completed.is_ok
     original_runner._retire_process_local_authority(
         session_id=session_id,
@@ -2202,7 +2250,11 @@ async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_pa
         session_id=session_id,
     )
     assert prepared.is_ok
-    terminal = await runner._session_repo.mark_completed(session_id, {"done": True})
+    terminal = await runner._session_repo.mark_completed(
+        session_id,
+        {"done": True},
+        acceptance_finalizations=_terminal_plan(session_id, execution_id, "completed"),
+    )
     assert terminal.is_ok
 
     try:
@@ -2289,6 +2341,7 @@ async def test_failure_cleanup_commit_then_cancel_reconciles_owner(tmp_path) -> 
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 error=RuntimeError("runtime failed"),
+                seed=_seed(),
             )
 
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
@@ -2417,6 +2470,7 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
         *,
         reason: str,
         cancelled_by: str,
+        acceptance_finalizations: list[dict[str, object]] | None = None,
     ) -> Result[None, object]:
         assert runner._has_live_process_local_authority(
             tracker.session_id,
@@ -2426,6 +2480,7 @@ async def test_cooperative_cancellation_persists_terminal_before_retiring_author
         assert heartbeat.is_holder_alive(tracker.session_id)
         assert reason == "CLI requested a careful stop"
         assert cancelled_by == "user"
+        assert acceptance_finalizations == []
         return Result.ok(None)
 
     runner._session_repo.mark_cancelled = mark_cancelled
@@ -3267,10 +3322,16 @@ async def test_concurrent_conditional_terminal_writes_have_one_durable_winner(tm
             SessionRepository(first_store).mark_failed_if_active(
                 tracker.session_id,
                 "concurrent failure",
+                acceptance_finalizations=_terminal_plan(
+                    tracker.session_id, tracker.execution_id, "failed"
+                ),
             ),
             SessionRepository(second_store).mark_cancelled_if_active(
                 tracker.session_id,
                 "concurrent cancellation",
+                acceptance_finalizations=_terminal_plan(
+                    tracker.session_id, tracker.execution_id, "cancelled"
+                ),
             ),
         )
 
@@ -3504,7 +3565,11 @@ async def test_claimed_owner_completion_racing_cancel_publication_clears_signal(
         reason: str,
         cancelled_by: str,
     ) -> None:
-        completed = await runner._session_repo.mark_completed(session_id, {"done": True})
+        completed = await runner._session_repo.mark_completed(
+            session_id,
+            {"done": True},
+            acceptance_finalizations=_terminal_plan(session_id, tracker.execution_id, "completed"),
+        )
         assert completed.is_ok
         runner._retire_process_local_authority(
             session_id=session_id,
@@ -3938,6 +4003,9 @@ async def test_foreign_owner_terminal_racing_cancel_publication_clears_signal(tm
     completed = await runner._session_repo.mark_completed(
         stale_tracker.session_id,
         {"done": True},
+        acceptance_finalizations=_terminal_plan(
+            stale_tracker.session_id, stale_tracker.execution_id, "completed"
+        ),
     )
     assert completed.is_ok
 
@@ -3978,6 +4046,8 @@ async def test_public_cancel_interruption_reconciles_committed_terminal_state() 
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
     cancelled_tracker = tracker.with_status(SessionStatus.CANCELLED)
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(side_effect=asyncio.CancelledError)
     session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(cancelled_tracker))
 
@@ -4100,6 +4170,8 @@ async def test_public_cancel_retry_reclaims_nonterminal_reservation() -> None:
     )
     contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(side_effect=asyncio.CancelledError)
     session_repo.reconstruct_session = AsyncMock(
         return_value=Result.err(PersistenceError("winner temporarily unreadable"))
@@ -4422,6 +4494,8 @@ async def test_public_terminal_finalizer_cancellation_acknowledges_marker() -> N
     )
     authority = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]["foundation_a_authority"]
     session_repo = MagicMock()
+    session_repo._event_store = MagicMock()
+    session_repo._event_store.query_events = AsyncMock(return_value=[])
     session_repo.mark_cancelled_if_active = AsyncMock(return_value=Result.ok(True))
 
     async def _self_cancelling_finalizer() -> None:

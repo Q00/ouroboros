@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -27,6 +29,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.schema import (
+    ac_acceptance_guards_table,
     events_table,
     metadata,
     session_start_guards_table,
@@ -70,6 +73,39 @@ _SESSION_TERMINAL_EVENT_TYPES = frozenset(
     }
 )
 
+_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE = "execution.ac.acceptance_finalized"
+_ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
+_AC_ACCEPTANCE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_AC_ACCEPTANCE_OUTCOMES = frozenset(
+    {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
+)
+_AC_ACCEPTANCE_DISPOSITIONS = frozenset(
+    {
+        "accepted",
+        "rejected",
+        "cancelled",
+        "failed",
+        "blocked",
+        "invalid",
+    }
+)
+
+
+def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
+    """Return a durable B generation independent of A's live correlation."""
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or not isinstance(execution_id, str)
+        or not execution_id.strip()
+    ):
+        raise PersistenceError(
+            "Acceptance generation requires non-empty session and execution IDs.",
+            operation="acceptance_generation_id_for_session",
+        )
+    digest = hashlib.sha256(f"{session_id.strip()}\x00{execution_id.strip()}".encode()).hexdigest()
+    return f"foundation-b/v1:{digest}"
+
 
 def _is_session_terminal_event(event: object) -> bool:
     """Return whether one event must use the durable terminal transition CAS."""
@@ -87,6 +123,287 @@ def _is_session_start_event(event: object) -> bool:
         and event.aggregate_type == "session"
         and event.type == "orchestrator.session.started"
     )
+
+
+def _is_ac_acceptance_finalized_event(event: object) -> bool:
+    """Return whether ``event`` requires the Foundation B acceptance CAS."""
+    return (
+        isinstance(event, BaseEvent)
+        and event.aggregate_type == "execution"
+        and event.type == _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE
+    )
+
+
+def _is_ac_acceptance_finalized_type(event: object) -> bool:
+    """Return whether a value uses the reserved final-acceptance event type."""
+    return isinstance(event, BaseEvent) and event.type == _AC_ACCEPTANCE_FINALIZED_EVENT_TYPE
+
+
+def _acceptance_payload_digest(event: BaseEvent) -> str:
+    """Hash the complete canonical payload for idempotent replay.
+
+    The authority/root guard is only idempotent for an equivalent final event.
+    Hashing a hand-picked subset silently treats a payload with additional
+    semantics as a duplicate, which is unsafe for fail-closed replay.
+    """
+    payload = {
+        "event_version": event.event_version,
+        "data": event.data,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _acceptance_key_fields(event: BaseEvent) -> tuple[str, int]:
+    """Validate and return the durable Foundation B acceptance key."""
+    data = event.data
+    generation = data.get("acceptance_generation_id")
+    root_index = data.get("root_ac_index")
+    if isinstance(root_index, bool) or not isinstance(root_index, int) or root_index < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative root AC index.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    required_strings = (
+        "execution_id",
+        "session_id",
+        "disposition",
+        "outcome",
+        "terminal_status",
+    )
+    for key in required_strings:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise PersistenceError(
+                f"Final acceptance requires a non-empty {key}.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                details={"event_type": event.type, "event_id": event.id, "field": key},
+            )
+    execution_id = data["execution_id"]
+    if event.aggregate_id != execution_id:
+        raise PersistenceError(
+            "Final acceptance aggregate_id must match payload execution_id.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={
+                "event_type": event.type,
+                "event_id": event.id,
+                "aggregate_id": event.aggregate_id,
+                "execution_id": execution_id,
+            },
+        )
+    expected_generation = acceptance_generation_id_for_session(
+        data["session_id"],
+        execution_id,
+    )
+    if not isinstance(generation, str) or not generation.strip():
+        raise PersistenceError(
+            "Final acceptance requires a non-empty acceptance generation ID.",
+            operation="validate_acceptance_finalization",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if generation != expected_generation:
+        raise PersistenceError(
+            "Final acceptance generation does not match the session/execution identity.",
+            operation="validate_acceptance_finalization",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    accepted = data.get("accepted")
+    if not isinstance(accepted, bool):
+        raise PersistenceError(
+            "Final acceptance requires a boolean accepted field.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    disposition = data.get("disposition")
+    outcome = data.get("outcome")
+    terminal_status = data.get("terminal_status")
+    if terminal_status not in _AC_ACCEPTANCE_TERMINAL_STATUSES:
+        raise PersistenceError(
+            "Final acceptance requires a canonical terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if disposition not in _AC_ACCEPTANCE_DISPOSITIONS:
+        raise PersistenceError(
+            "Final acceptance requires a canonical disposition.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if outcome not in _AC_ACCEPTANCE_OUTCOMES:
+        raise PersistenceError(
+            "Final acceptance requires a canonical outcome.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if accepted and (disposition != "accepted" or terminal_status != "completed"):
+        raise PersistenceError(
+            "Accepted final acceptance requires accepted disposition and completed terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if accepted and outcome not in {"succeeded", "satisfied_externally"}:
+        raise PersistenceError(
+            "Accepted final acceptance requires a successful outcome.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if terminal_status == "completed" and not accepted:
+        raise PersistenceError(
+            "Completed final acceptance must be accepted.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    expected_disposition = (
+        "accepted"
+        if accepted
+        else (
+            "cancelled"
+            if terminal_status == "cancelled"
+            else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+        )
+    )
+    if disposition != expected_disposition:
+        raise PersistenceError(
+            "Final acceptance disposition is inconsistent with its outcome and terminal status.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    if terminal_status == "failed" and accepted:
+        raise PersistenceError(
+            "Failed final acceptance cannot be accepted.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    retry_attempt = data.get("final_retry_attempt")
+    if isinstance(retry_attempt, bool) or not isinstance(retry_attempt, int) or retry_attempt < 0:
+        raise PersistenceError(
+            "Final acceptance requires a non-negative final retry attempt.",
+            operation="append_ac_acceptance_finalized_if_absent",
+            details={"event_type": event.type, "event_id": event.id},
+        )
+    return generation, root_index
+
+
+def validate_acceptance_finalization_payload(
+    data: Mapping[str, Any],
+    *,
+    aggregate_id: str | None = None,
+) -> tuple[str, int]:
+    """Validate a finalization payload with the same rules used at write time."""
+    execution_id = data.get("execution_id")
+    event = BaseEvent(
+        type=_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=(
+            aggregate_id
+            if isinstance(aggregate_id, str)
+            else (execution_id if isinstance(execution_id, str) else "")
+        ),
+        data=dict(data),
+    )
+    return _acceptance_key_fields(event)
+
+
+def _acceptance_event_from_terminal_payload(payload: object) -> BaseEvent:
+    """Reconstruct one acceptance event carried by a terminalization plan."""
+    if not isinstance(payload, Mapping):
+        raise PersistenceError(
+            "Terminal acceptance plan entries must be mappings.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    data = dict(payload)
+    execution_id = data.get("execution_id")
+    if not isinstance(execution_id, str) or not execution_id.strip():
+        raise PersistenceError(
+            "Terminal acceptance plan requires an execution_id.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    return BaseEvent(
+        type=_AC_ACCEPTANCE_FINALIZED_EVENT_TYPE,
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
+
+
+def _validated_terminal_acceptance_events(event: BaseEvent) -> tuple[BaseEvent, ...]:
+    """Validate a terminal envelope before acquiring either durable CAS guard."""
+    acceptance_plan = event.data.get("acceptance_finalizations", ())
+    if acceptance_plan is None:
+        acceptance_plan = ()
+    if not isinstance(acceptance_plan, (list, tuple)):
+        raise PersistenceError(
+            "Terminal acceptance plan must be a list.",
+            operation="append_session_terminal_if_active",
+            details={"acceptance_plan_invalid": True},
+        )
+    expected_terminal_status = {
+        "orchestrator.session.completed": "completed",
+        "orchestrator.session.failed": "failed",
+        "orchestrator.session.cancelled": "cancelled",
+    }[event.type]
+    validated: list[BaseEvent] = []
+    for payload in acceptance_plan:
+        if not isinstance(payload, Mapping):
+            raise PersistenceError(
+                "Terminal acceptance plan entries must be mappings.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        if payload.get("session_id") != event.aggregate_id:
+            raise PersistenceError(
+                "Terminal acceptance plan session_id must match the terminal session.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        if payload.get("terminal_status") != expected_terminal_status:
+            raise PersistenceError(
+                "Terminal acceptance plan status must match the terminal session event.",
+                operation="append_session_terminal_if_active",
+                details={"acceptance_plan_invalid": True},
+            )
+        acceptance_event = _acceptance_event_from_terminal_payload(payload)
+        _acceptance_key_fields(acceptance_event)
+        validated.append(acceptance_event)
+    return tuple(validated)
+
+
+def _normalize_durable_acceptance_root_indices(
+    value: object,
+    *,
+    session_id: str,
+    operation: str,
+) -> frozenset[int]:
+    """Validate the immutable root set stored by a current-format session."""
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, (list, tuple)):
+        raise PersistenceError(
+            "Durable acceptance root set must be a list of non-negative integers.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    normalized: set[int] = set()
+    for raw_root in value:
+        if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+            raise PersistenceError(
+                "Durable acceptance root set contains an invalid root index.",
+                operation=operation,
+                details={
+                    "session_id": session_id,
+                    "root_ac_index": raw_root,
+                    "acceptance_root_set_invalid": True,
+                },
+            )
+        normalized.add(raw_root)
+    if len(normalized) != len(value):
+        raise PersistenceError(
+            "Durable acceptance root set contains duplicate root indices.",
+            operation=operation,
+            details={"session_id": session_id, "acceptance_root_set_invalid": True},
+        )
+    return frozenset(normalized)
 
 
 def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
@@ -437,6 +754,13 @@ class EventStore:
         # cannot accidentally bypass the conditional terminal CAS.
         if _is_session_terminal_event(event):
             return await self.append_session_terminal_if_active(event)
+        if _is_ac_acceptance_finalized_type(event):
+            raise PersistenceError(
+                "Final acceptance events must be carried by a terminal session plan; "
+                "use append_session_terminal_if_active().",
+                operation="append",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
         await self.append_with_rowid(event, _skip_workflow_ir_guard=_skip_workflow_ir_guard)
         return None
 
@@ -583,6 +907,77 @@ class EventStore:
                 },
             )
 
+        # Validate the complete plan before taking the terminal guard.  A
+        # malformed envelope must not even transiently acquire a terminal or
+        # acceptance winner that a caller could mistake for a committed CAS.
+        acceptance_events = _validated_terminal_acceptance_events(event)
+        durable_root_indices = await self._resolve_acceptance_root_indices_for_session(
+            event.aggregate_id
+        )
+        if durable_root_indices is not None:
+            if (
+                "acceptance_finalizations" not in event.data
+                or event.data.get("acceptance_finalizations") is None
+            ):
+                raise PersistenceError(
+                    "Current-format terminal sessions require an explicit acceptance plan.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_plan_missing": True,
+                    },
+                )
+            plan_root_indices = {
+                int(acceptance_event.data["root_ac_index"])
+                for acceptance_event in acceptance_events
+            }
+            if plan_root_indices != durable_root_indices:
+                raise PersistenceError(
+                    "Terminal acceptance plan must exactly match the durable session root set.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "durable_root_indices": sorted(durable_root_indices),
+                        "plan_root_indices": sorted(plan_root_indices),
+                        "acceptance_root_set_conflict": True,
+                    },
+                )
+        if acceptance_events:
+            # The payload's self-consistent session/execution pair is not
+            # sufficient: bind it to the immutable durable session-start
+            # identity before either CAS can win.  Without this check a caller
+            # could finalize ``exec_other`` under a session that started
+            # ``exec_real`` and permanently consume the wrong root guard.
+            started_execution_id = await self._resolve_execution_id_for_session(event.aggregate_id)
+            if started_execution_id is None:
+                raise PersistenceError(
+                    "Final acceptance requires a durable session-start execution identity.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "acceptance_identity_missing": True,
+                    },
+                )
+            mismatched = next(
+                (
+                    acceptance_event.data.get("execution_id")
+                    for acceptance_event in acceptance_events
+                    if acceptance_event.data.get("execution_id") != started_execution_id
+                ),
+                None,
+            )
+            if mismatched is not None:
+                raise PersistenceError(
+                    "Final acceptance execution_id does not match the durable session start.",
+                    operation="append_session_terminal_if_active",
+                    details={
+                        "session_id": event.aggregate_id,
+                        "started_execution_id": started_execution_id,
+                        "acceptance_execution_id": mismatched,
+                        "acceptance_identity_conflict": True,
+                    },
+                )
+
         for attempt in range(3):
             try:
                 async with self._engine.connect() as conn:
@@ -634,6 +1029,9 @@ class EventStore:
                                 await conn.rollback()
                             return False
 
+                        for acceptance_event in acceptance_events:
+                            await self._append_ac_acceptance_in_transaction(conn, acceptance_event)
+
                         await conn.execute(events_table.insert().values(**event.to_db_dict()))
                         if sqlite:
                             await conn.commit()
@@ -664,6 +1062,70 @@ class EventStore:
             table="events",
             details={"event_id": event.id, "event_type": event.type},
         )
+
+    async def _append_ac_acceptance_in_transaction(
+        self,
+        conn: Any,
+        event: BaseEvent,
+    ) -> bool:
+        """Append one acceptance event using an already-open transaction."""
+        acceptance_generation_id, root_ac_index = _acceptance_key_fields(event)
+        payload_digest = _acceptance_payload_digest(event)
+        existing = await conn.execute(
+            select(ac_acceptance_guards_table.c.payload_digest).where(
+                ac_acceptance_guards_table.c.acceptance_generation_id == acceptance_generation_id,
+                ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+            )
+        )
+        existing_digest = existing.scalar_one_or_none()
+        if existing_digest is not None:
+            if existing_digest != payload_digest:
+                raise PersistenceError(
+                    "Conflicting final acceptance already exists for authority/root.",
+                    operation="append_ac_acceptance_finalized_if_absent",
+                    table="ac_acceptance_guards",
+                    details={
+                        "acceptance_generation_id": acceptance_generation_id,
+                        "root_ac_index": root_ac_index,
+                        "acceptance_conflict": True,
+                    },
+                )
+            return False
+
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    ac_acceptance_guards_table.insert().values(
+                        acceptance_generation_id=acceptance_generation_id,
+                        root_ac_index=root_ac_index,
+                        final_event_id=event.id,
+                        payload_digest=payload_digest,
+                    )
+                )
+        except IntegrityError:
+            existing = await conn.execute(
+                select(ac_acceptance_guards_table.c.payload_digest).where(
+                    ac_acceptance_guards_table.c.acceptance_generation_id
+                    == acceptance_generation_id,
+                    ac_acceptance_guards_table.c.root_ac_index == root_ac_index,
+                )
+            )
+            existing_digest = existing.scalar_one_or_none()
+            if existing_digest == payload_digest:
+                return False
+            raise PersistenceError(
+                "Conflicting concurrent final acceptance exists for authority/root.",
+                operation="append_ac_acceptance_finalized_if_absent",
+                table="ac_acceptance_guards",
+                details={
+                    "acceptance_generation_id": acceptance_generation_id,
+                    "root_ac_index": root_ac_index,
+                    "acceptance_conflict": True,
+                },
+            )
+
+        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+        return True
 
     async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
         """Append PAUSED only while no explicit terminal session event exists.
@@ -762,6 +1224,11 @@ class EventStore:
         """Return whether ``event`` publishes immutable session identity."""
         return _is_session_start_event(event)
 
+    @staticmethod
+    def is_ac_acceptance_finalized_event(event: object) -> bool:
+        """Return whether ``event`` requires the Foundation B final gate CAS."""
+        return _is_ac_acceptance_finalized_event(event)
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
@@ -787,6 +1254,13 @@ class EventStore:
             raise PersistenceError(
                 "Session start lifecycle events must be persisted via append() "
                 "or append_session_start_if_absent() to preserve immutable identity.",
+                operation="append_with_rowid",
+                details={"event_type": event.type, "aggregate_id": event.aggregate_id},
+            )
+        if _is_ac_acceptance_finalized_type(event):
+            raise PersistenceError(
+                "Final acceptance events must be carried by a terminal session plan "
+                "to preserve the one-winner guard.",
                 operation="append_with_rowid",
                 details={"event_type": event.type, "aggregate_id": event.aggregate_id},
             )
@@ -924,6 +1398,15 @@ class EventStore:
                 "use append() so each session transition takes the one-winner guard.",
                 operation="append_batch",
                 details={"count": len(terminal_session_events)},
+            )
+
+        acceptance_events = [event for event in events if _is_ac_acceptance_finalized_type(event)]
+        if acceptance_events:
+            raise PersistenceError(
+                "Final acceptance events cannot be appended in a batch; carry them "
+                "inside a terminal session plan.",
+                operation="append_batch",
+                details={"count": len(acceptance_events)},
             )
 
         for attempt in range(3):
@@ -1840,6 +2323,53 @@ class EventStore:
                 if isinstance(execution_id, str) and execution_id:
                     return execution_id
             return None
+
+    async def _resolve_acceptance_root_indices_for_session(
+        self,
+        session_id: str,
+    ) -> set[int] | None:
+        """Return the immutable root set for current-format sessions.
+
+        A missing field is deliberately returned as ``None`` for historical
+        sessions.  Current sessions persist the field at publication time,
+        including an explicit empty set for a zero-AC execution; terminal CAS
+        then requires an exact plan match before it can win.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="resolve_acceptance_root_indices_for_session",
+            )
+
+        async with self._engine.begin() as conn:
+            query = (
+                select(events_table.c.payload)
+                .where(events_table.c.aggregate_type == "session")
+                .where(events_table.c.aggregate_id == session_id)
+                .where(events_table.c.event_type == "orchestrator.session.started")
+                .order_by(events_table.c.timestamp.asc())
+                .limit(1)
+            )
+            result = await conn.execute(query)
+            row = result.first()
+            if row is None:
+                return None
+            payload = row[0]
+            if not isinstance(payload, Mapping):
+                raise PersistenceError(
+                    "Durable session-start payload is malformed.",
+                    operation="resolve_acceptance_root_indices_for_session",
+                    details={"session_id": session_id},
+                )
+            if "acceptance_root_indices" not in payload:
+                return None
+            return set(
+                _normalize_durable_acceptance_root_indices(
+                    payload["acceptance_root_indices"],
+                    session_id=session_id,
+                    operation="resolve_acceptance_root_indices_for_session",
+                )
+            )
 
     async def _resolve_session_started_at(self, session_id: str) -> Any | None:
         """Return the persisted start timestamp for a session, if available."""

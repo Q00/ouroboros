@@ -129,8 +129,9 @@ Interpret observer `relay_events` semantically:
 - `discovery_summary`: bounded targets and purpose only—never raw commands,
   searches, tool output, or model reasoning;
 - `level_started` / `level_completed`, `ac_routing`, `harness_changed`, and
-  `ac_verified`: report only material changes and say "currently running with"
-  because routing can escalate;
+  `ac_attempt_judged`: report only material changes and say "currently running
+  with" because routing can escalate; treat `ac_accepted` and `ac_rejected` as
+  terminal root decisions, not provisional attempt evidence;
 - `attention_required`: surface immediately;
 - Synapse `queued`/`delivering`: pending or claimed, not applied;
   `applied`/`completed`: runtime-proven and may contain a bounded AC reply;
