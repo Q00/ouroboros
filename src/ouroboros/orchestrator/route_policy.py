@@ -167,8 +167,6 @@ class RouteCandidate:
             capabilities, str | bytes | bytearray
         ):
             raise ValueError("route candidate capabilities must be a list")
-        if len(capabilities) > MAX_ROUTE_CAPABILITIES:
-            raise ValueError("capabilities exceeds its bound")
         return cls(
             route_id=value["route_id"],  # type: ignore[arg-type]
             model=value["model"],  # type: ignore[arg-type]
@@ -178,7 +176,13 @@ class RouteCandidate:
             persona=value["persona"],  # type: ignore[arg-type]
             tool_policy=value["tool_policy"],  # type: ignore[arg-type]
             authority_identity=value["authority_identity"],  # type: ignore[arg-type]
-            capabilities=tuple(capabilities),  # type: ignore[arg-type]
+            capabilities=tuple(
+                _bounded_iterable(
+                    capabilities,
+                    field="capabilities",
+                    max_count=MAX_ROUTE_CAPABILITIES,
+                )
+            ),  # type: ignore[arg-type]
             enabled=value["enabled"],  # type: ignore[arg-type]
             ordinal=value["ordinal"],  # type: ignore[arg-type]
         )
@@ -229,10 +233,15 @@ class RouteRegistry:
             raw_candidates, str | bytes | bytearray
         ):
             raise ValueError("route registry candidates must be a list")
-        if len(raw_candidates) > MAX_ROUTE_CANDIDATES:
-            raise ValueError("route registry exceeds the bounded candidate count")
         return cls(
-            candidates=tuple(RouteCandidate.from_contract_data(item) for item in raw_candidates),
+            candidates=tuple(
+                RouteCandidate.from_contract_data(item)
+                for item in _bounded_iterable(
+                    raw_candidates,
+                    field="route registry candidates",
+                    max_count=MAX_ROUTE_CANDIDATES,
+                )
+            ),
             version=value["version"],  # type: ignore[arg-type]
         )
 
@@ -680,6 +689,344 @@ def admit_route(
     )
 
 
+def _build_admission_kernel() -> tuple[type[object], object]:
+    """Build the public type and kernel with closure-private publication state."""
+
+    class AdmissionState(NamedTuple):
+        disposition: RouteDecisionDisposition
+        selected: RouteCandidate | None
+        selected_fingerprint: tuple[object, ...] | None
+        eligible_route_ids: tuple[str, ...]
+        rejections: tuple[RouteRejection, ...]
+        rejection_fingerprints: tuple[tuple[object, ...], ...]
+        reason: str
+
+    trusted: dict[int, tuple[weakref.ReferenceType[object], AdmissionState]] = {}
+
+    def candidate_fingerprint(candidate: RouteCandidate | None) -> tuple[object, ...] | None:
+        if candidate is None:
+            return None
+        return (
+            candidate.route_id,
+            candidate.model,
+            candidate.harness,
+            candidate.effort,
+            candidate.cost_units,
+            candidate.persona,
+            candidate.tool_policy,
+            candidate.authority_identity,
+            tuple(candidate.capabilities),
+            candidate.enabled,
+            candidate.ordinal,
+        )
+
+    def rejection_fingerprint(rejection: RouteRejection) -> tuple[object, ...]:
+        return (rejection.route_id, tuple(reason.value for reason in rejection.reasons))
+
+    class KernelRouteAdmission:
+        """Immutable result whose publication authority lives in this closure."""
+
+        __slots__ = ("_sealed_state", "__weakref__")
+
+        def __new__(cls, *_args: object, **_kwargs: object) -> KernelRouteAdmission:
+            raise TypeError("route admission must be produced by the Admission Kernel")
+
+        def __init__(
+            self,
+            disposition: RouteDecisionDisposition,
+            selected: RouteCandidate | None,
+            eligible_route_ids: tuple[str, ...],
+            rejections: tuple[RouteRejection, ...],
+            reason: str,
+        ) -> None:
+            raise TypeError("route admission must be produced by the Admission Kernel")
+
+        @staticmethod
+        def _trusted_state(instance: KernelRouteAdmission) -> AdmissionState:
+            try:
+                state = object.__getattribute__(instance, "_sealed_state")
+            except AttributeError as exc:
+                raise TypeError("unpublished route admission") from exc
+            entry = trusted.get(id(instance))
+            if entry is None or entry[0]() is not instance or entry[1] is not state:
+                raise TypeError("unpublished route admission")
+            if state.selected is not None and candidate_fingerprint(state.selected) != (
+                state.selected_fingerprint
+            ):
+                raise TypeError("route admission state was mutated")
+            if tuple(rejection_fingerprint(item) for item in state.rejections) != (
+                state.rejection_fingerprints
+            ):
+                raise TypeError("route admission state was mutated")
+            return state
+
+        @staticmethod
+        def _validate(
+            disposition: RouteDecisionDisposition,
+            selected: RouteCandidate | None,
+            eligible_route_ids: tuple[str, ...],
+            rejections: tuple[RouteRejection, ...],
+            reason: str,
+        ) -> None:
+            if not isinstance(disposition, RouteDecisionDisposition):
+                raise ValueError("disposition must be a RouteDecisionDisposition")
+            if selected is not None and not isinstance(selected, RouteCandidate):
+                raise ValueError("selected route must be a RouteCandidate")
+            if disposition is RouteDecisionDisposition.ADMITTED and selected is None:
+                raise ValueError("admitted route decision requires a selected candidate")
+            if disposition is RouteDecisionDisposition.BLOCKED and selected is not None:
+                raise ValueError("blocked route decision must not select a candidate")
+            if not isinstance(eligible_route_ids, tuple):
+                raise ValueError("eligible route IDs must be an ordered tuple")
+            if len(eligible_route_ids) > MAX_ROUTE_CANDIDATES:
+                raise ValueError("eligible route IDs exceed their bound")
+            if any(
+                not isinstance(route_id, str) or not _SAFE_ROUTE_ID.fullmatch(route_id)
+                for route_id in eligible_route_ids
+            ):
+                raise ValueError("eligible route IDs are invalid")
+            if len(set(eligible_route_ids)) != len(eligible_route_ids):
+                raise ValueError("eligible route IDs must be unique")
+            if disposition is RouteDecisionDisposition.ADMITTED:
+                if not eligible_route_ids:
+                    raise ValueError("admitted route decision requires eligible routes")
+                if selected.route_id not in eligible_route_ids:  # type: ignore[union-attr]
+                    raise ValueError("selected route must be eligible")
+            elif eligible_route_ids:
+                raise ValueError("blocked route decision must not contain eligible routes")
+            if not isinstance(rejections, tuple):
+                raise ValueError("route rejections must be an ordered tuple")
+            if len(rejections) > MAX_ROUTE_CANDIDATES:
+                raise ValueError("route rejections exceed their bound")
+            if not all(isinstance(rejection, RouteRejection) for rejection in rejections):
+                raise ValueError("route rejections are invalid")
+            rejection_ids = tuple(rejection.route_id for rejection in rejections)
+            if len(set(rejection_ids)) != len(rejection_ids):
+                raise ValueError("route rejections must be unique")
+            if set(rejection_ids).intersection(eligible_route_ids):
+                raise ValueError("route cannot be both eligible and rejected")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("route admission reason must be non-empty")
+            if len(reason) > MAX_ROUTE_FIELD_CHARS:
+                raise ValueError("route admission reason exceeds its bound")
+
+        @property
+        def disposition(self) -> RouteDecisionDisposition:
+            return self._trusted_state(self).disposition
+
+        @property
+        def selected(self) -> RouteCandidate | None:
+            return self._trusted_state(self).selected
+
+        @property
+        def eligible_route_ids(self) -> tuple[str, ...]:
+            return self._trusted_state(self).eligible_route_ids
+
+        @property
+        def rejections(self) -> tuple[RouteRejection, ...]:
+            return self._trusted_state(self).rejections
+
+        @property
+        def reason(self) -> str:
+            return self._trusted_state(self).reason
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise AttributeError("RouteAdmission is immutable")
+
+        def __delattr__(self, name: str) -> None:
+            raise AttributeError("RouteAdmission is immutable")
+
+        def __copy__(self) -> KernelRouteAdmission:
+            self._trusted_state(self)
+            return self
+
+        def __deepcopy__(self, memo: dict[int, object]) -> KernelRouteAdmission:
+            self._trusted_state(self)
+            memo[id(self)] = self
+            return self
+
+        def __reduce__(self) -> object:
+            raise TypeError("RouteAdmission cannot be pickled")
+
+        def __reduce_ex__(self, protocol: int) -> object:
+            raise TypeError("RouteAdmission cannot be pickled")
+
+        def __repr__(self) -> str:
+            state = self._trusted_state(self)
+            return (
+                "RouteAdmission("
+                f"disposition={state.disposition!r}, selected={state.selected!r}, "
+                f"eligible_route_ids={state.eligible_route_ids!r}, "
+                f"rejections={state.rejections!r}, reason={state.reason!r})"
+            )
+
+        def __eq__(self, other: object) -> bool:
+            if not isinstance(other, KernelRouteAdmission):
+                return NotImplemented
+            try:
+                return self._trusted_state(self) == self._trusted_state(other)
+            except TypeError:
+                return False
+
+        def __hash__(self) -> int:
+            state = self._trusted_state(self)
+            return hash(
+                (
+                    state.disposition,
+                    state.selected_fingerprint,
+                    state.eligible_route_ids,
+                    state.rejection_fingerprints,
+                    state.reason,
+                )
+            )
+
+        @property
+        def admitted(self) -> bool:
+            return self._trusted_state(self).disposition is RouteDecisionDisposition.ADMITTED
+
+        def to_contract_data(self) -> dict[str, object]:
+            state = self._trusted_state(self)
+            return {
+                "disposition": state.disposition.value,
+                "selected_route_id": state.selected.route_id if state.selected else None,
+                "eligible_route_ids": list(state.eligible_route_ids),
+                "rejections": [item.to_contract_data() for item in state.rejections],
+                "reason": state.reason,
+            }
+
+    def admit(
+        registry: RouteRegistry,
+        requirements: RouteRequirements,
+        *,
+        advisor_order: Sequence[str] = (),
+    ) -> KernelRouteAdmission:
+        if not isinstance(registry, RouteRegistry):
+            raise TypeError("registry must be a RouteRegistry")
+        if not isinstance(requirements, RouteRequirements):
+            raise TypeError("requirements must be RouteRequirements")
+        advisor_rank = _advisor_rank(advisor_order, registry)
+        eligible: list[RouteCandidate] = []
+        rejections: list[RouteRejection] = []
+
+        def publish(
+            disposition: RouteDecisionDisposition,
+            selected: RouteCandidate | None,
+            eligible_route_ids: tuple[str, ...],
+            rejected: tuple[RouteRejection, ...],
+            reason: str,
+        ) -> KernelRouteAdmission:
+            KernelRouteAdmission._validate(
+                disposition, selected, eligible_route_ids, rejected, reason
+            )
+            instance = object.__new__(KernelRouteAdmission)
+            state = AdmissionState(
+                disposition,
+                selected,
+                candidate_fingerprint(selected),
+                eligible_route_ids,
+                rejected,
+                tuple(rejection_fingerprint(item) for item in rejected),
+                reason,
+            )
+            object.__setattr__(instance, "_sealed_state", state)
+            identifier = id(instance)
+
+            def remove(reference: weakref.ReferenceType[object]) -> None:
+                current = trusted.get(identifier)
+                if current is not None and current[0] is reference:
+                    trusted.pop(identifier, None)
+
+            trusted[identifier] = (weakref.ref(instance, remove), state)
+            return instance
+
+        required_capabilities = set(requirements.required_capabilities)
+        allowed_harnesses = set(requirements.allowed_harnesses)
+        for candidate in registry.candidates:
+            reasons: list[RouteRejectionCode] = []
+            if not candidate.enabled:
+                reasons.append(RouteRejectionCode.DISABLED)
+            pin_checks = (
+                (
+                    requirements.pinned_route_id,
+                    candidate.route_id,
+                    RouteRejectionCode.ROUTE_PIN_MISMATCH,
+                ),
+                (requirements.pinned_model, candidate.model, RouteRejectionCode.MODEL_PIN_MISMATCH),
+                (
+                    requirements.pinned_harness,
+                    candidate.harness,
+                    RouteRejectionCode.HARNESS_PIN_MISMATCH,
+                ),
+                (
+                    requirements.pinned_persona,
+                    candidate.persona,
+                    RouteRejectionCode.PERSONA_PIN_MISMATCH,
+                ),
+                (
+                    requirements.pinned_tool_policy,
+                    candidate.tool_policy,
+                    RouteRejectionCode.TOOL_POLICY_PIN_MISMATCH,
+                ),
+                (
+                    requirements.pinned_authority_identity,
+                    candidate.authority_identity,
+                    RouteRejectionCode.AUTHORITY_IDENTITY_PIN_MISMATCH,
+                ),
+            )
+            reasons.extend(
+                code
+                for expected, actual, code in pin_checks
+                if expected is not None and actual != expected
+            )
+            if allowed_harnesses and candidate.harness not in allowed_harnesses:
+                reasons.append(RouteRejectionCode.HARNESS_NOT_ALLOWED)
+            if (
+                requirements.required_effort is not None
+                and candidate.effort != requirements.required_effort
+            ):
+                reasons.append(RouteRejectionCode.EFFORT_MISMATCH)
+            if required_capabilities.difference(candidate.capabilities):
+                reasons.append(RouteRejectionCode.MISSING_CAPABILITIES)
+            if reasons:
+                rejections.append(RouteRejection(candidate.route_id, tuple(reasons)))
+            else:
+                eligible.append(candidate)
+        eligible.sort(
+            key=lambda candidate: (
+                candidate.cost_units,
+                advisor_rank.get(candidate.route_id, len(registry.candidates) + 1),
+                candidate.ordinal,
+                candidate.route_id,
+            )
+        )
+        if not eligible:
+            return publish(
+                RouteDecisionDisposition.BLOCKED, None, (), tuple(rejections), "no_eligible_route"
+            )
+        return publish(
+            RouteDecisionDisposition.ADMITTED,
+            eligible[0],
+            tuple(candidate.route_id for candidate in eligible),
+            tuple(rejections),
+            "cheapest_eligible_route",
+        )
+
+    return KernelRouteAdmission, admit
+
+
+_kernel_route_admission, _kernel_admit_route = _build_admission_kernel()
+globals()["RouteAdmission"] = _kernel_route_admission
+globals()["admit_route"] = _kernel_admit_route
+for _private_name in (
+    "_AdmissionState",
+    "_TRUSTED_ADMISSIONS",
+    "_candidate_fingerprint",
+    "_rejection_fingerprint",
+):
+    globals().pop(_private_name, None)
+del _build_admission_kernel, _kernel_route_admission, _kernel_admit_route, _private_name
+
+
 def _advisor_rank(
     advisor_order: Sequence[str],
     registry: RouteRegistry,
@@ -764,9 +1111,24 @@ def _bounded_iterable(
         raise ValueError(f"{field} must be ordered")
     if not isinstance(values, Iterable):
         raise ValueError(f"{field} must be an ordered sequence")
-    if isinstance(values, Sized) and len(values) > max_count:
-        raise ValueError(f"{field} exceeds its bound")
-    for index, value in enumerate(values):
+    if isinstance(values, Sized):
+        try:
+            size = len(values)
+        except Exception:
+            size = None
+        if size is not None and size > max_count:
+            raise ValueError(f"{field} exceeds its bound")
+    try:
+        iterator = iter(values)
+    except Exception as exc:
+        raise ValueError(f"{field} could not be iterated") from exc
+    for index in range(max_count + 1):
+        try:
+            value = next(iterator)
+        except StopIteration:
+            return
+        except Exception as exc:
+            raise ValueError(f"{field} could not be iterated") from exc
         if index >= max_count:
             raise ValueError(f"{field} exceeds its bound")
         yield value

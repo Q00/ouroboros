@@ -106,7 +106,7 @@ _CREDENTIAL_COMPOUND_PREFIX = re.compile(
 # every provider's credential prefix (for example SendGrid or Vault tokens).
 _STABLE_AUTHORITY_IDENTITY = re.compile(
     r"^(?:authority|session|runtime|workspace|process|execution|project|tenant|system|default)"
-    r"(?:[-_:/\.][A-Za-z0-9][A-Za-z0-9._:/-]{0,238})?$",
+    r"(?:[-_:/\.][a-z0-9]+(?:[-_.][a-z0-9]+)*)*$",
 )
 
 

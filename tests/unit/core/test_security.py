@@ -164,6 +164,7 @@ class TestSensitiveDetection:
             "SG." + "A" * 22 + "." + "B" * 43,
             "hvs." + "A" * 24,
             "runtime:SG." + "A" * 22 + "." + "B" * 43,
+            "runtime:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         ):
             assert is_stable_authority_identity(value) is False
 

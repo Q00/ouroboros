@@ -10,8 +10,10 @@ import pickle
 
 import pytest
 
+import ouroboros.orchestrator.route_policy as route_policy
 from ouroboros.orchestrator.route_policy import (
     MAX_ROUTE_CANDIDATES,
+    MAX_ROUTE_CAPABILITIES,
     MAX_ROUTE_COST_UNITS,
     MAX_ROUTE_ORDINAL,
     RouteAdmission,
@@ -301,8 +303,52 @@ def test_registry_rejects_duplicate_ids_and_empty_candidates() -> None:
 def test_contract_rejects_oversized_registry_before_nested_candidate_parsing() -> None:
     oversized = {"version": 1, "candidates": [{}] * (MAX_ROUTE_CANDIDATES + 1)}
 
-    with pytest.raises(ValueError, match="bounded candidate"):
+    with pytest.raises(ValueError, match="exceeds its bound"):
         RouteRegistry.from_contract_data(oversized)
+
+
+def test_contract_parser_bounds_lying_and_infinite_sequences_before_nested_parsing() -> None:
+    route_data = _route("candidate", cost=1).to_contract_data()
+
+    consumed_candidates = 0
+
+    class InfiniteCandidates(Sequence[dict[str, object]]):
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, index: int) -> dict[str, object]:
+            return route_data
+
+        def __iter__(self):
+            nonlocal consumed_candidates
+            while True:
+                consumed_candidates += 1
+                yield route_data
+
+    with pytest.raises(ValueError, match="exceeds its bound"):
+        RouteRegistry.from_contract_data({"version": 1, "candidates": InfiniteCandidates()})
+    assert consumed_candidates == MAX_ROUTE_CANDIDATES + 1
+
+    consumed_capabilities = 0
+
+    class InfiniteCapabilities(Sequence[str]):
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, index: int) -> str:
+            return "read"
+
+        def __iter__(self):
+            nonlocal consumed_capabilities
+            while True:
+                consumed_capabilities += 1
+                yield "read"
+
+    route_data_with_capabilities = dict(route_data)
+    route_data_with_capabilities["capabilities"] = InfiniteCapabilities()
+    with pytest.raises(ValueError, match="exceeds its bound"):
+        RouteCandidate.from_contract_data(route_data_with_capabilities)
+    assert consumed_capabilities == MAX_ROUTE_CAPABILITIES + 1
 
 
 def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
@@ -429,6 +475,14 @@ def test_object_protocol_cannot_forge_or_rewrite_admission_state() -> None:
     object.__setattr__(decision, "_sealed_state", state._replace(selected=outside))
     with pytest.raises(TypeError, match="unpublished"):
         _ = decision.selected
+
+    for private_name in (
+        "_AdmissionState",
+        "_TRUSTED_ADMISSIONS",
+        "_candidate_fingerprint",
+        "_rejection_fingerprint",
+    ):
+        assert not hasattr(route_policy, private_name)
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:
