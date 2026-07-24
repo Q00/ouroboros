@@ -38,7 +38,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.backends import backend_supports_tool_envelope, get_backend_capability
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
@@ -4009,9 +4009,28 @@ class OrchestratorRunner:
             if isinstance(llm_backend, str) and llm_backend
             else (self._adapter.runtime_backend)
         )
-        cli_path = getattr(self._adapter, "cli_path", None)
-        resolved_cli_path = cli_path if isinstance(cli_path, str) and cli_path else None
         try:
+            resolved_backend = resolve_llm_backend(backend)
+            cli_path = getattr(self._adapter, "cli_path", None)
+            runtime_backend = self._adapter.runtime_backend
+            runtime_capability = (
+                get_backend_capability(runtime_backend)
+                if isinstance(runtime_backend, str)
+                else None
+            )
+            llm_capability = get_backend_capability(resolved_backend)
+            resolved_cli_path = (
+                cli_path
+                if (
+                    isinstance(cli_path, str)
+                    and cli_path
+                    and runtime_capability is not None
+                    and runtime_capability.cli_name is not None
+                    and llm_capability is not None
+                    and runtime_capability.cli_name == llm_capability.cli_name
+                )
+                else None
+            )
             # ``allowed_tools=[]`` paired with ``max_turns=1``: see issue #781.
             llm_adapter = create_llm_adapter(
                 backend=backend,
@@ -4019,9 +4038,7 @@ class OrchestratorRunner:
                 cli_path=resolved_cli_path,
                 cwd=self._effective_cwd(),
                 max_turns=1,
-                allowed_tools=(
-                    [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
-                ),
+                allowed_tools=([] if backend_supports_tool_envelope(resolved_backend) else None),
             )
         except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(

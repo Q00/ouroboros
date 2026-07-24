@@ -133,6 +133,10 @@ class ClaudeWorkerTransport:
         # command builder just appends the flags. Empty ⇒ no ``--add-dir`` at all.
         self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=cwd)
 
+    @property
+    def cli_path(self) -> str:
+        return self._cli_path
+
     @staticmethod
     def _permission_args(permission_mode: str | None) -> list[str]:
         normalized = (permission_mode or "").strip().lower()
