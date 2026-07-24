@@ -115,9 +115,7 @@ def _fsync_parent_directory(file_path: Path) -> bool:
     try:
         directory_fd = os.open(file_path.parent, flags)
     except OSError as error:
-        if error.errno in (errno.EINVAL, errno.ENOTSUP):
-            return True
-        return False
+        return error.errno in (errno.EINVAL, errno.ENOTSUP)
     durability_confirmed = True
     try:
         try:
