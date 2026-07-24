@@ -3540,36 +3540,57 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
     return None
 
 
-# Keys whose VALUES are data (never subschemas): property NAMES and literal
-# payloads must not be mistaken for schema keywords (round-26: a schema
-# requiring a property literally named "$id" is valid and enforceable).
-_SCHEMA_DATA_VALUED_KEYWORDS = frozenset({"const", "enum", "default", "examples"})
+# Schema traversal is WHITELIST-based (bot-review rounds 26-28): only
+# keywords that actually carry subschemas are descended into. Everything
+# else — const/enum/default/examples payloads, property NAMES, and unknown
+# extension annotations like x-output-example — is data and must never be
+# mistaken for schema content.
 _SCHEMA_NAME_MAP_KEYWORDS = frozenset(
     {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
 )
+_SCHEMA_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "items",
+        "prefixItems",
+        "unevaluatedItems",
+        "contains",
+        "contentSchema",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+    }
+)
 
 
-def _schema_uses_keyword(node: Any, needle: str, *, in_schema: bool = True) -> bool:
+def _iter_subschemas(node: Mapping[str, Any]) -> list[Any]:
+    """Return every DIRECT subschema of a schema object (whitelist walk)."""
+    subs: list[Any] = []
+    for key, value in node.items():
+        if key in _SCHEMA_NAME_MAP_KEYWORDS:
+            if isinstance(value, Mapping):
+                subs.extend(value.values())
+        elif key in _SCHEMA_SUBSCHEMA_KEYWORDS:
+            if isinstance(value, list):
+                subs.extend(value)
+            else:
+                subs.append(value)
+    return subs
+
+
+def _schema_uses_keyword(node: Any, needle: str) -> bool:
     """Whether ``needle`` appears as a SCHEMA KEYWORD (not as data)."""
-    if isinstance(node, Mapping):
-        if in_schema and needle in node:
-            return True
-        for key, value in node.items():
-            if in_schema and key in _SCHEMA_DATA_VALUED_KEYWORDS:
-                continue
-            if in_schema and key in _SCHEMA_NAME_MAP_KEYWORDS:
-                # The map's KEYS are names; its VALUES are subschemas.
-                if isinstance(value, Mapping) and any(
-                    _schema_uses_keyword(sub, needle, in_schema=True) for sub in value.values()
-                ):
-                    return True
-                continue
-            if _schema_uses_keyword(value, needle, in_schema=in_schema):
-                return True
+    if not isinstance(node, Mapping):
         return False
-    if isinstance(node, list):
-        return any(_schema_uses_keyword(value, needle, in_schema=in_schema) for value in node)
-    return False
+    if needle in node:
+        return True
+    return any(_schema_uses_keyword(sub, needle) for sub in _iter_subschemas(node))
 
 
 def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
@@ -3582,28 +3603,21 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
     """
     refs: list[str] = []
 
-    def _walk(node: Any, in_schema: bool) -> None:
-        if isinstance(node, Mapping):
-            for key, value in node.items():
-                if in_schema:
-                    # Every Draft 2020-12 reference form is preflighted
-                    # (round-18): $dynamicRef (and legacy $recursiveRef)
-                    # explode at validation exactly like $ref.
-                    if key in ("$ref", "$dynamicRef", "$recursiveRef") and isinstance(value, str):
-                        refs.append(value)
-                    if key in _SCHEMA_DATA_VALUED_KEYWORDS:
-                        continue
-                    if key in _SCHEMA_NAME_MAP_KEYWORDS:
-                        if isinstance(value, Mapping):
-                            for sub in value.values():
-                                _walk(sub, True)
-                        continue
-                _walk(value, in_schema)
-        elif isinstance(node, list):
-            for value in node:
-                _walk(value, in_schema)
+    def _walk(node: Any) -> None:
+        if not isinstance(node, Mapping):
+            return
+        # Every Draft 2020-12 reference form is preflighted (round-18):
+        # $dynamicRef (and legacy $recursiveRef) explode at validation
+        # exactly like $ref. Only schema-bearing keywords are descended
+        # (round-28), so annotation payloads never register as refs.
+        for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+            ref_value = node.get(ref_key)
+            if isinstance(ref_value, str):
+                refs.append(ref_value)
+        for sub in _iter_subschemas(node):
+            _walk(sub)
 
-    _walk(schema, True)
+    _walk(schema)
     for ref in refs:
         if ref == "#":
             continue
@@ -3768,6 +3782,9 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # "success=false; status_code=503; retries exhausted").
     r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
     r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b"
+    # Assignment-form error envelopes (round-28: value="error=503"); plural
+    # metric forms ("errors: 12", "error rate 0.2%") stay valid.
+    r"|\berror\s*[:=]\s*\S"
     # Singular-subject failure narratives (round-27: "request timed out
     # after 3 attempts"); PLURAL forms are metrics ABOUT failures ("1,240
     # requests timed out: 0.8%") and stay valid.

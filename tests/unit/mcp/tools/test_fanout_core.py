@@ -4162,6 +4162,46 @@ def test_singular_failure_narrative_is_not_evidence() -> None:
     assert _data_evidence_boundary_violations(_minimal_data_output(metric)) == []
 
 
+def test_extension_annotations_do_not_disable_enforcement() -> None:
+    """Unknown extension keywords are annotations, not schemas (round-28)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    annotated_contract = {
+        "contract_id": "annotated.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["lane_id", "verdict"],
+            "properties": {
+                "lane_id": {"const": "annotated_lane"},
+                "verdict": {"type": "string"},
+            },
+            "x-output-example": {"$ref": "literal-output-value"},
+        },
+    }
+    assert _enforceable_lane_contract(annotated_contract)
+
+    # A real unresolvable ref in a SCHEMA position still rejects.
+    schema_position = {
+        "contract_id": "schema_pos.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/missing"}},
+        },
+    }
+    assert not _enforceable_lane_contract(schema_position)
+
+
+def test_assignment_error_envelope_is_rejected() -> None:
+    """value="error=503" is a failure envelope (round-28 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    errors = _data_evidence_boundary_violations(_minimal_data_output("error=503"))
+    assert any("error-shaped" in error for error in errors)
+
+    clean = "errors: 12 of 155k (0.008%); error rate trending down 17%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
