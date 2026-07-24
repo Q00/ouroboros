@@ -3639,7 +3639,11 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
 
     for ref in refs:
         if ref == "#":
-            continue
+            # Root-recursive "#" is outside the declared grammar (round-31):
+            # our preflight cannot prove the recursion terminates, and an
+            # advertised contract that fails every conforming submission is
+            # worse than one declared unsupported.
+            return False
         if not ref.startswith("#/"):
             return False
         # The target must BE a schema (round-30: "#/description" resolves to
@@ -3840,7 +3844,11 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # unavailable, code 503").
     r"|\b(service|database|db|api|endpoint|server|tool|warehouse)\s+"
     r"(unavailable|unreachable|down)\b"
-    r"|\bcode\s+[45]\d{2}\b",
+    r"|\bcode\s+[45]\d{2}\b"
+    # No-result admissions (round-31: a caveat narrating that nothing came
+    # back alongside "executed" evidence).
+    r"|\bno\s+(result|results|records|rows|data)\s+(was\s+|were\s+)?"
+    r"(returned|found|available)\b",
     re.IGNORECASE,
 )
 
@@ -3907,7 +3915,11 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         if not isinstance(item, Mapping):
             return item
         value = item.get(field)
-        if isinstance(value, str) and _SAFE_IDENTIFIER_SYNTAX.match(value):
+        if (
+            isinstance(value, str)
+            and _SAFE_IDENTIFIER_SYNTAX.match(value)
+            and not _identifier_looks_secret(value)
+        ):
             return {**item, field: ""}
         return item
 
@@ -3971,6 +3983,14 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"caveats[{index}]: row-shaped (serialized-record) content is "
                 "raw evidence and may not ride any persisted field"
             )
+        # A caveat admitting the call produced nothing contradicts any
+        # executed evidence it accompanies (round-31): that is a failed
+        # lookup narrated as a caveat.
+        if isinstance(caveat, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat):
+            errors.append(
+                f"caveats[{index}]: describes a failed lookup; a failed call "
+                "is a no-evidence finding, not evidence with a caveat"
+            )
     forbidden = _data_forbidden_operation_pattern()
     evidence = output.get("evidence")
     for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
@@ -3982,13 +4002,18 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"evidence[{index}].value: row-shaped (list/object/multi-record) "
                 "content is raw evidence, not an aggregate"
             )
-        if isinstance(value, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(value):
-            # An error envelope means the tool call FAILED: the policy's
-            # error_shaped_tool_output rule requires a no-evidence finding.
-            errors.append(
-                f"evidence[{index}].value: error-shaped tool output is not "
-                "evidence; return a no-evidence finding instead"
-            )
+        # Error semantics bind the WHOLE evidence item (round-31): a failure
+        # narrative in query_summary or source is the same failed call as
+        # one in value — the policy's error_shaped_tool_output rule requires
+        # a no-evidence finding either way.
+        for error_field in ("value", "source", "query_summary"):
+            field_text = item.get(error_field)
+            if isinstance(field_text, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(field_text):
+                errors.append(
+                    f"evidence[{index}].{error_field}: error-shaped tool "
+                    "output is not evidence; return a no-evidence finding "
+                    "instead"
+                )
         observed_at = item.get("observed_at")
         if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
             errors.append(
@@ -4159,6 +4184,26 @@ _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
 # A safe identifier is one token of word/dot/dash characters — no spaces,
 # no '=', no ':' — so a credential can never wear the exemption.
 _SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+# Standalone secrets that ARE syntactically identifiers (round-31):
+# unambiguous vendor prefixes, or a credential word whose suffix tokens are
+# all hex/digit gibberish. token_usage_v2 keeps its exemption — "usage" is
+# a word, not entropy.
+_VENDOR_SECRET_PREFIX = re.compile(
+    r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
+)
+_CREDENTIAL_WORD_PREFIX = re.compile(r"^(token|secret|key|bearer|api_?key)[-_]", re.IGNORECASE)
+
+
+def _identifier_looks_secret(value: str) -> bool:
+    if _VENDOR_SECRET_PREFIX.match(value):
+        return True
+    match = _CREDENTIAL_WORD_PREFIX.match(value)
+    if not match:
+        return False
+    suffix_tokens = [tok for tok in re.split(r"[-_.]", value[match.end() :]) if tok]
+    return bool(suffix_tokens) and all(re.fullmatch(r"[0-9a-fA-F]+", tok) for tok in suffix_tokens)
+
 
 # Lane ids (and correlation values generally) are short identifiers; an
 # unexpected key that does not look like one is untrusted freeform content.

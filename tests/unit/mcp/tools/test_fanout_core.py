@@ -4414,6 +4414,54 @@ def test_known_lane_contract_reaches_its_child_prompt(tmp_path: Any) -> None:
     assert "code_extra.v1" in section
 
 
+def test_standalone_secret_identifiers_are_not_exempt() -> None:
+    """A secret that IS an identifier keeps full scanning (round-31)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for secret_name in ("ghp_abcdef123456", "sk_live_123456", "token_abcdef123456"):
+        output = _minimal_data_output("78% of MAU are on the free tier")
+        output["evidence"][0]["source"] = secret_name
+        assert any(
+            "credential" in error or "secret" in error
+            for error in _data_evidence_boundary_violations(output)
+        ), secret_name
+
+    # Word-suffixed tool names keep the exemption.
+    legit = _minimal_data_output("premium plans average 12,400 tokens/day")
+    legit["evidence"][0]["source"] = "token_usage_v2"
+    assert _data_evidence_boundary_violations(legit) == []
+
+
+def test_error_semantics_bind_the_whole_evidence_item() -> None:
+    """Failure narratives reject in any evidence field or caveat (round-31)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = _minimal_data_output("retry count: 3")
+    probe["evidence"][0]["query_summary"] = "request timed out after 3 attempts"
+    probe["caveats"] = ["no result was returned"]
+    errors = _data_evidence_boundary_violations(probe)
+    assert any("query_summary" in error and "error-shaped" in error for error in errors)
+    assert any("caveats[0]" in error for error in errors)
+
+    clean = _minimal_data_output("78% of MAU are on the free tier")
+    clean["caveats"] = ["Point-in-time aggregate; may change after re-query."]
+    assert _data_evidence_boundary_violations(clean) == []
+
+
+def test_root_recursive_ref_is_declared_unsupported() -> None:
+    """ "$ref": "#" cannot be advertised (round-31 probe)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    recursive_contract = {
+        "contract_id": "recursive_root.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"child": {"$ref": "#"}},
+        },
+    }
+    assert not _enforceable_lane_contract(recursive_contract)
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
