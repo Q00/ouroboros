@@ -4300,6 +4300,120 @@ def test_plugin_child_prompt_carries_from_data_glossary() -> None:
     assert "point-in-time description" in p.prompt
 
 
+def test_credential_wearing_identifier_field_is_rejected() -> None:
+    """The identifier exemption requires identifier SYNTAX (round-30 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    source_leak = _minimal_data_output("78% of MAU are on the free tier")
+    source_leak["evidence"][0]["source"] = "token=sk-live-123"
+    assert any("credential" in error for error in _data_evidence_boundary_violations(source_leak))
+
+    tool_leak = {
+        "lane_id": "data_context",
+        "data_needed": True,
+        "finding": "Needs a query.",
+        "confidence": "inferred",
+        "evidence": [],
+        "proposed_queries": [
+            {
+                "tool_name": "token=sk-live-456",
+                "query": "count users grouped by plan",
+                "expected_decision": "n/a",
+                "source_class": "external",
+            }
+        ],
+        "requires_user_confirmation": True,
+    }
+    assert any("credential" in error for error in _data_evidence_boundary_violations(tool_leak))
+
+    # A genuine identifier stays exempt.
+    legit = _minimal_data_output("premium plans average 12,400 tokens/day")
+    legit["evidence"][0]["source"] = "token_usage_v2"
+    assert _data_evidence_boundary_violations(legit) == []
+
+
+def test_non_schema_ref_targets_and_cycles_are_rejected() -> None:
+    """A ref must target a SCHEMA and chains must progress (round-30)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    prose_target = {
+        "contract_id": "prose_target.v1",
+        "response_model_schema": {
+            "type": "object",
+            "description": "just prose",
+            "properties": {"payload": {"$ref": "#/description"}},
+        },
+    }
+    assert not _enforceable_lane_contract(prose_target)
+
+    self_cycle = {
+        "contract_id": "self_cycle.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/a"}},
+            "$defs": {"a": {"$ref": "#/$defs/a"}},
+        },
+    }
+    assert not _enforceable_lane_contract(self_cycle)
+
+    # A ref chain that terminates in a real schema stays enforceable.
+    chained = {
+        "contract_id": "chained.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/a"}},
+            "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"type": "string"}},
+        },
+    }
+    assert _enforceable_lane_contract(chained)
+
+
+def test_known_lane_contract_reaches_its_child_prompt(tmp_path: Any) -> None:
+    """Contract rendering is lane-agnostic (round-30 probe).
+
+    An additive contract attached to a RECOGNIZED lane (code_context) was
+    enforced at re-entry but never rendered to its child, which then
+    followed the generic prompt and was rejected indefinitely.
+    """
+    code_contract = {
+        "contract_id": "code_extra.v1",
+        "response_model_schema": {
+            "type": "object",
+            "required": ["lane_id", "verdict"],
+            "properties": {
+                "lane_id": {"const": "code_context"},
+                "verdict": {"type": "string"},
+            },
+        },
+    }
+    request = {
+        "session_id": "sess-known-contract",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": [
+            {
+                "lane_id": "code_context",
+                "capability": "inspect_code",
+                "required": True,
+                "answer_contract": code_contract,
+            },
+        ],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    prompt = payloads[0].prompt
+    assert "code_extra.v1" in prompt
+    assert "generic Output section below is superseded" in prompt
+
+    # And the plugin recipe renders it too (shared lane loop).
+    from ouroboros.mcp.tools.subagent import _plugin_advisory_contract_section
+
+    section = _plugin_advisory_contract_section(
+        "fanout_x", {"lanes": request["lanes"]}, "sess-known-contract"
+    )
+    assert "code_extra.v1" in section
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

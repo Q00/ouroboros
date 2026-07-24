@@ -1586,36 +1586,38 @@ def build_interview_question_advisory_subagents(
         else:
             lane_task = "Help the parent session answer this interview question."
             extra = ""
-            # v1 forward compatibility is executable, not just declared
-            # (bot-review round-8): an unknown lane carrying an answer
-            # contract gets that contract rendered — re-entry validates
-            # against it, so a child answering the generic Output shape
-            # would land in contract_violations through no fault of its own.
-            # An OVERSIZED contract is rejected whole instead of rendered
-            # torn (round-11): registration skips it too, so the lane falls
-            # back to the generic shape consistently on both sides.
-            if isinstance(lane_answer_contract, Mapping):
-                if _enforceable_lane_contract(lane_answer_contract):
-                    unknown_contract_json = _bounded_json(
-                        lane_answer_contract,
-                        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
-                    )
-                    extra = (
-                        "## Answer Contract\n"
-                        f"```json\n{unknown_contract_json}\n```\n"
-                        "This lane carries an answer contract: the generic Output "
-                        "section below is superseded — return EXACTLY one JSON "
-                        "object matching the contract's response_model_schema; it "
-                        "is validated server-side at re-entry."
-                    )
-                else:
-                    extra = (
-                        "## Answer Contract\n"
-                        "This lane declared an answer contract that exceeds the "
-                        "whole-form delivery budget or carries an invalid "
-                        "schema; it is OMITTED and NOT enforced at re-entry. "
-                        "Return the generic Output shape below."
-                    )
+
+        # EVERY enforceable lane contract is rendered irrespective of lane id
+        # (bot-review rounds 8 and 30): re-entry enforcement is lane-agnostic,
+        # so an additive contract attached to a RECOGNIZED lane (code_context,
+        # web_context, ...) must reach its child exactly like an unknown
+        # lane's. The data lane keeps its custom rendering above. Oversized or
+        # invalid contracts are rejected whole instead of rendered torn
+        # (round-11): registration skips them too, so the lane falls back to
+        # the generic shape consistently on both sides.
+        if lane_id != "data_context" and isinstance(lane_answer_contract, Mapping):
+            if _enforceable_lane_contract(lane_answer_contract):
+                lane_contract_json = _bounded_json(
+                    lane_answer_contract,
+                    _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+                )
+                contract_extra = (
+                    "## Answer Contract\n"
+                    f"```json\n{lane_contract_json}\n```\n"
+                    "This lane carries an answer contract: the generic Output "
+                    "section below is superseded — return EXACTLY one JSON "
+                    "object matching the contract's response_model_schema; it "
+                    "is validated server-side at re-entry."
+                )
+            else:
+                contract_extra = (
+                    "## Answer Contract\n"
+                    "This lane declared an answer contract that exceeds the "
+                    "whole-form delivery budget or carries an invalid "
+                    "schema; it is OMITTED and NOT enforced at re-entry. "
+                    "Return the generic Output shape below."
+                )
+            extra = f"{extra}\n\n{contract_extra}" if extra else contract_extra
 
         prompt = f"""## Task
 You are an Ouroboros interview advisory subagent.
@@ -3622,11 +3624,8 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
             _walk(sub)
 
     _walk(schema)
-    for ref in refs:
-        if ref == "#":
-            continue
-        if not ref.startswith("#/"):
-            return False
+
+    def _resolve_pointer(ref: str) -> Any:
         node: Any = schema
         for raw_part in ref[2:].split("/"):
             part = raw_part.replace("~1", "/").replace("~0", "~")
@@ -3635,8 +3634,35 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
             elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
                 node = node[int(part)]
             else:
+                return _UNRESOLVED
+        return node
+
+    for ref in refs:
+        if ref == "#":
+            continue
+        if not ref.startswith("#/"):
+            return False
+        # The target must BE a schema (round-30: "#/description" resolves to
+        # prose and explodes at validation), and pure $ref chains must make
+        # progress — a self-referential chain never terminates validation.
+        seen_pointers = {ref}
+        target = _resolve_pointer(ref)
+        while True:
+            if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
                 return False
+            if not isinstance(target, Mapping):
+                break
+            next_ref = target.get("$ref")
+            if not isinstance(next_ref, str):
+                break
+            if next_ref == "#" or not next_ref.startswith("#/") or next_ref in seen_pointers:
+                return False
+            seen_pointers.add(next_ref)
+            target = _resolve_pointer(next_ref)
     return True
+
+
+_UNRESOLVED = object()
 
 
 def _strip_sql_comments(query: str) -> str:
@@ -3869,22 +3895,32 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         serialized = json.dumps(output, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return ["data evidence output is not JSON-serializable"]
+
     # Identifier FIELDS (evidence source, proposal tool_name) are exempt
-    # from the credential-shape scan (round-29: a legitimate tool named
-    # token_usage_v2 is not a secret) — they are already guarded by the
-    # mutating-verb identifier checks, and every other pattern still scans
-    # the full output.
+    # from the credential-shape scan ONLY when they actually look like
+    # identifiers (rounds 29-30): token_usage_v2 is a tool name, but a
+    # value like "token=sk-live-123" in the source field is a credential
+    # wearing the field, so anything failing the identifier syntax stays
+    # fully scanned. Exempted identifiers remain guarded by the
+    # mutating-verb checks, and every other pattern scans the full output.
+    def _blank_if_identifier(item: Any, field: str) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        value = item.get(field)
+        if isinstance(value, str) and _SAFE_IDENTIFIER_SYNTAX.match(value):
+            return {**item, field: ""}
+        return item
+
     identifier_scrubbed = dict(output)
     raw_evidence = identifier_scrubbed.get("evidence")
     if isinstance(raw_evidence, list):
         identifier_scrubbed["evidence"] = [
-            {**item, "source": ""} if isinstance(item, Mapping) else item for item in raw_evidence
+            _blank_if_identifier(item, "source") for item in raw_evidence
         ]
     raw_proposals = identifier_scrubbed.get("proposed_queries")
     if isinstance(raw_proposals, list):
         identifier_scrubbed["proposed_queries"] = [
-            {**item, "tool_name": ""} if isinstance(item, Mapping) else item
-            for item in raw_proposals
+            _blank_if_identifier(item, "tool_name") for item in raw_proposals
         ]
     try:
         serialized_sans_identifiers = json.dumps(
@@ -4119,6 +4155,10 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
 
 
 _DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
+
+# A safe identifier is one token of word/dot/dash characters — no spaces,
+# no '=', no ':' — so a credential can never wear the exemption.
+_SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 # Lane ids (and correlation values generally) are short identifiers; an
 # unexpected key that does not look like one is untrusted freeform content.
