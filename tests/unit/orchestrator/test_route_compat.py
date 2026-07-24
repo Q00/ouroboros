@@ -140,6 +140,56 @@ def test_projection_bounds_hostile_capability_iterables() -> None:
     assert blocked.disposition is RouteDecisionDisposition.BLOCKED
 
 
+def test_projection_rejects_unordered_capabilities_and_invalid_router_bounds() -> None:
+    assert (
+        build_route_compat_projection(
+            _economics(),
+            model_router=_router(),
+            runtime_backend="claude",
+            capabilities={"model-override"},
+        )
+        is None
+    )
+    invalid_router = ModelRouter(
+        tier_models=_router().tier_models,
+        runtime_backend="claude",
+        child_tier="unknown",
+        base_tier="standard",
+        escalation_retry_threshold=2,
+    )
+    assert (
+        build_route_compat_projection(
+            _economics(), model_router=invalid_router, runtime_backend="claude"
+        )
+        is None
+    )
+    huge_threshold_router = ModelRouter(
+        tier_models=_router().tier_models,
+        runtime_backend="claude",
+        child_tier="frugal",
+        base_tier="standard",
+        escalation_retry_threshold=10**9 + 1,
+    )
+    assert (
+        build_route_compat_projection(
+            _economics(), model_router=huge_threshold_router, runtime_backend="claude"
+        )
+        is None
+    )
+
+
+def test_projection_does_not_turn_explicit_empty_authority_into_default() -> None:
+    assert (
+        build_route_compat_projection(
+            _economics(),
+            model_router=_router(),
+            runtime_backend="claude",
+            authority_identity="",
+        )
+        is None
+    )
+
+
 def test_projection_keeps_snapshot_after_router_mapping_mutation() -> None:
     router = _router()
     projection = build_route_compat_projection(
@@ -257,6 +307,12 @@ def test_projection_contract_round_trip_and_tamper_rejection() -> None:
         model_router=_router(),
         runtime_backend="claude",
     )
+
+    oversized_tiers = projection.to_contract_data()
+    oversized_tiers["tier_route_ids"] = [
+        {"tier": "frugal", "route_id": "compat:claude:frugal"}
+    ] * 129
+    assert deserialize_route_compat_projection(oversized_tiers) is None
 
 
 class _CountingRuntime:

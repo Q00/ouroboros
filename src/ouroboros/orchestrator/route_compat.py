@@ -16,7 +16,7 @@ No provider calls, retry policy, or Final Gate behavior belongs here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -47,6 +47,9 @@ DEFAULT_ROUTE_TOOL_POLICY = "default"
 DEFAULT_ROUTE_AUTHORITY_PREFIX = "runtime:"
 UNRESOLVED_ROUTE_ID = "compat:unresolved"
 INVALID_CAPABILITY = "compat:invalid-capability"
+# Keep the persisted retry control finite while allowing ordinary user config
+# values well beyond the shipped defaults.
+MAX_ROUTE_ESCALATION_THRESHOLD = 1_000_000_000
 
 
 def _bounded_tuple(values: Iterable[object], *, max_count: int) -> tuple[object, ...]:
@@ -54,6 +57,8 @@ def _bounded_tuple(values: Iterable[object], *, max_count: int) -> tuple[object,
 
     if isinstance(values, (str, bytes, bytearray)):
         raise ValueError("compatibility values must be an ordered iterable")
+    if isinstance(values, (Set, Mapping)):
+        raise ValueError("compatibility values must be ordered")
     try:
         iterator = iter(values)
     except Exception as exc:
@@ -217,7 +222,19 @@ def build_route_compat_projection(
     if routed != configured or not routed:
         return None
 
-    identity = authority_identity or f"{DEFAULT_ROUTE_AUTHORITY_PREFIX}{runtime_backend}"
+    identity = (
+        f"{DEFAULT_ROUTE_AUTHORITY_PREFIX}{runtime_backend}"
+        if authority_identity is None
+        else authority_identity
+    )
+    if (
+        model_router.child_tier not in MODEL_TIER_LADDER
+        or model_router.base_tier not in MODEL_TIER_LADDER
+        or isinstance(model_router.escalation_retry_threshold, bool)
+        or not isinstance(model_router.escalation_retry_threshold, int)
+        or not 1 <= model_router.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
+    ):
+        return None
     try:
         # Materialize once so an untrusted iterable cannot change between
         # candidate construction and the registry's duplicate/bounds checks.
@@ -387,9 +404,10 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         or base_tier not in MODEL_TIER_LADDER
         or isinstance(threshold, bool)
         or not isinstance(threshold, int)
-        or threshold < 1
+        or not 1 <= threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
         or (effort is not None and not isinstance(effort, str))
         or not isinstance(raw_tiers, list)
+        or len(raw_tiers) > MAX_ROUTE_CANDIDATES
     ):
         return None
     try:
@@ -495,6 +513,7 @@ __all__ = [
     "DEFAULT_ROUTE_PERSONA",
     "DEFAULT_ROUTE_TOOL_POLICY",
     "INVALID_CAPABILITY",
+    "MAX_ROUTE_ESCALATION_THRESHOLD",
     "ROUTE_COMPAT_VERSION",
     "RouteCompatProjection",
     "admit_compat_route",
