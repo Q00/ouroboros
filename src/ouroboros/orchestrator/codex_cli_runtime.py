@@ -160,6 +160,7 @@ _ITEM_FAILURE_STATUSES = frozenset(
         # Non-success terminal states: a cancelled or interrupted item must
         # never be laundered into success by a stale nested completed status.
         "cancelled",
+        "declined",
         "canceled",
         "aborted",
         "interrupted",
@@ -193,10 +194,12 @@ class _CodexItemCorrelationScope:
 
     started_item_ids: set[str] = field(default_factory=set)
     started_unkeyed_item_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    completed_item_ids: set[str] = field(default_factory=set)
 
     def clear(self) -> None:
         self.started_item_ids.clear()
         self.started_unkeyed_item_counts.clear()
+        self.completed_item_ids.clear()
 
 
 class CodexCliRuntime:
@@ -1623,6 +1626,7 @@ class CodexCliRuntime:
         returncode = control_state.get("returncode")
         if control_state.get("terminated") is True and handle.lifecycle_state not in {
             "cancelled",
+            "declined",
             "terminated",
         }:
             metadata = dict(handle.metadata)
@@ -1826,9 +1830,15 @@ class CodexCliRuntime:
                 data.setdefault(target_key, value.strip())
         for key in ("exit_code", "exitCode", "returncode", "return_code"):
             value = source.get(key)
-            if isinstance(value, int):
-                data.setdefault("exit_code", value)
-                break
+            if isinstance(value, int) and not isinstance(value, bool):
+                stored = data.get("exit_code")
+                if stored is None:
+                    data["exit_code"] = value
+                elif stored == 0 and value != 0:
+                    # Conflicting aliases must persist one verdict-consistent
+                    # value: the failing code wins over a stale zero so the
+                    # journal never contradicts is_error (round three warning).
+                    data["exit_code"] = value
         if source.get("success") is True:
             data.setdefault("subtype", "success")
         if source.get("ok") is True:
@@ -2122,9 +2132,21 @@ class CodexCliRuntime:
         calls = self._item_tool_calls(item_type, item)
         if not calls:
             return []
+        item_id = self._item_lifecycle_id(item)
+        if item_id is not None:
+            if item_id in scope.completed_item_ids:
+                # A replayed keyed completion must not emit a second lifecycle
+                # pair: downstream exact correlation would see two starts
+                # sharing one id (review round three, blocker 1).
+                return []
+            scope.completed_item_ids.add(item_id)
         metadata = self._extract_command_metadata(item)
         is_error = self._resolve_item_completion_is_error(item)
         has_started = self._consume_item_started(item_type, item, scope)
+        if not has_started:
+            # Record the synthesized start so the lifecycle state stays
+            # consistent for any later event referencing the same identity.
+            self._remember_item_started(item_type, item, scope)
 
         messages: list[AgentMessage] = []
         for call in calls:

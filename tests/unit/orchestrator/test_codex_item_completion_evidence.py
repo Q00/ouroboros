@@ -492,6 +492,62 @@ class TestCodexCompletionReviewRoundOne:
         assert conflict_results[0].data.get("is_error") is True, (
             "failure precedence must win over a conflicting success alias"
         )
+        conflict_meta = (conflict_results[0].data.get("tool_result") or {}).get("meta") or {}
+        assert conflict_meta.get("exit_status") == 1, (
+            "persisted exit_status must carry the failing code, not the stale zero alias"
+        )
+
+    def test_replayed_keyed_completion_is_suppressed(self) -> None:
+        """Replaying one keyed item.completed must not emit a second pair."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        first = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+        replay = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        assert len(first) == 2, "completed-only must synthesize exactly one start+result pair"
+        assert replay == [], (
+            "a replayed keyed completion emitted duplicate lifecycle messages; "
+            "downstream exact correlation would see two starts sharing the id"
+        )
+
+    def test_replayed_completion_after_real_lifecycle_is_suppressed(self) -> None:
+        """A duplicate completion after a real started/completed pair emits nothing."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(_COMMAND_ITEM_STARTED, current_handle=None)
+        runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        replay = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        assert replay == []
+
+    def test_declined_status_is_error_even_with_stale_nested_completed(self) -> None:
+        """Codex's declined terminal status must resolve to failure with precedence."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for item in (
+            {
+                "id": "item_d1",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "declined",
+            },
+            {
+                "id": "item_d2",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "declined",
+                "result": {"status": "completed"},
+            },
+        ):
+            messages = runtime._convert_event(
+                {"type": "item.completed", "item": item}, current_handle=None
+            )
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert len(results) == 1, item["id"]
+            assert results[0].data.get("is_error") is True, item["id"]
+            assert (
+                _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+                is False
+            ), item["id"]
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
