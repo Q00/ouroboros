@@ -3455,6 +3455,14 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
         return False
     if resolved.get("type") == "object":
         return True
+    # A const (or an enum whose members are all mappings) NECESSARILY
+    # describes an object without declaring a type (round-23).
+    if isinstance(resolved.get("const"), Mapping):
+        return True
+    enum_values = resolved.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        if all(isinstance(value, Mapping) for value in enum_values):
+            return True
     all_of = resolved.get("allOf")
     if isinstance(all_of, list):
         return any(_declares_object_root(schema, branch, depth + 1) for branch in all_of)
@@ -3601,9 +3609,10 @@ def _is_row_shaped_value(value: str) -> bool:
         if len(set(first_tokens)) < len(first_tokens):
             return True
     # Two or more capitalized word-pairs are a person/entity roster
-    # (bot-review round-19: digit-bearing Alice/Bob rows) — one aggregate
-    # names at most one entity; aggregate by count instead.
-    if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b", stripped)) >= 2:
+    # (round-19: digit-bearing Alice/Bob rows; round-23: acronym-suffixed
+    # company names like "Beta LLC") — one aggregate names at most one
+    # entity; aggregate by count instead.
+    if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][A-Za-z]*\b", stripped)) >= 2:
         return True
     # A REPEATED field label is a record list, independent of punctuation
     # (rounds 15-16 probes: "customer=Alice ...; customer=Bob ..." and
@@ -3808,9 +3817,12 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             )
         # A SELECT projection WITHOUT any aggregate marker returns rows by
         # construction (round-20: "SELECT account_id, plan, seats FROM
-        # accounts"): the aggregate policy binds confirmable payload, so it
-        # must aggregate, deduplicate to categories, or fetch a scalar.
-        elif isinstance(query, str) and re.match(r"\s*select\b", query, re.IGNORECASE):
+        # accounts"; round-23: CTE-prefixed "WITH ... SELECT ..."): the
+        # aggregate policy binds confirmable payload, so it must aggregate,
+        # deduplicate to categories, or fetch a scalar. The marker scan runs
+        # over the WHOLE query, so a raw projection OVER an aggregated CTE
+        # stays valid.
+        elif isinstance(query, str) and re.match(r"\s*(with|select)\b", query, re.IGNORECASE):
             # LIMIT 1 is NOT an aggregate marker (round-21): it fetches one
             # ROW of raw columns, not a scalar — a scalar fetch aggregates
             # (max(col)) instead.

@@ -3619,6 +3619,103 @@ def test_oneof_object_root_contract_is_enforceable(tmp_path: Any) -> None:
     assert conforming["status"] == "complete"
 
 
+def test_cte_prefixed_raw_projection_is_rejected() -> None:
+    """CTE-prefixed queries get the same aggregate check (round-23 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    raw_cte = "WITH base AS (SELECT id, plan FROM accounts) SELECT account_id, plan FROM base"
+    errors = _data_evidence_boundary_violations(proposal(raw_cte))
+    assert any("without aggregation" in error for error in errors)
+
+    # A projection OVER an aggregated CTE stays valid — the marker scan runs
+    # over the whole query.
+    aggregated_cte = (
+        "WITH agg AS (SELECT plan, count(*) AS c FROM accounts GROUP BY plan) "
+        "SELECT plan, c FROM agg"
+    )
+    assert _data_evidence_boundary_violations(proposal(aggregated_cte)) == []
+
+
+def test_acronym_entity_roster_is_rejected() -> None:
+    """Acronym-suffixed entity names count as entities (round-23 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "Acme Corp premium 17 / Beta LLC free 12"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("row-shaped" in error for error in errors)
+
+    # Single-entity measurements stay valid.
+    clean = "Acme Corp accounts grew 34% this quarter"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_const_object_root_contract_is_enforceable(tmp_path: Any) -> None:
+    """A const-object schema necessarily describes an object (round-23)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    const_contract = {
+        "contract_id": "const_root.v1",
+        "response_model_schema": {"const": {"ok": True}},
+    }
+    assert _enforceable_lane_contract(const_contract)
+
+    scalar_const = {
+        "contract_id": "const_scalar.v1",
+        "response_model_schema": {"const": "just-a-string"},
+    }
+    assert not _enforceable_lane_contract(scalar_const)
+
+    lanes = [
+        {
+            "lane_id": "const_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": const_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-const", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-const",
+        correlation_key="context.lane_id",
+        results=[{"key": "const_lane", "content": {"ok": False}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["const_lane"]
+
+    conforming = submit_fanout_results(
+        registry,
+        session_id="sess-const",
+        correlation_key="context.lane_id",
+        results=[{"key": "const_lane", "content": {"ok": True}}],
+        fanout_id=fanout_id,
+    )
+    assert conforming["status"] == "complete"
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
