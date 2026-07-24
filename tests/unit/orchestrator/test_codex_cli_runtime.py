@@ -1106,8 +1106,7 @@ class TestCodexCliRuntime:
         assert message.data["status"] == "completed"
         assert message.data["subtype"] == "success"
 
-    def test_convert_file_change_event_emits_each_changed_file(self) -> None:
-        """Multi-file Codex changes should create one proof message per path."""
+    def test_convert_idless_file_change_fails_closed(self) -> None:
         runtime = CodexCliRuntime(cli_path="codex")
 
         messages = runtime._convert_event(
@@ -1129,8 +1128,26 @@ class TestCodexCliRuntime:
             "/tmp/project/hello.py",
             "/tmp/project/test_hello.py",
         ]
-        assert all(message.data["subtype"] == "success" for message in messages)
-        assert all(message.data["runtime_event_type"] == "tool.completed" for message in messages)
+        assert all(message.data["is_error"] is True for message in messages)
+
+    def test_convert_idless_cancelled_command_fails_closed(self) -> None:
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "pytest",
+                    "status": "cancelled",
+                    "exit_code": 0,
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        assert messages[0].data["is_error"] is True
 
     def test_convert_file_change_completion_emits_correlated_receipts(self) -> None:
         runtime = CodexCliRuntime(cli_path="codex")

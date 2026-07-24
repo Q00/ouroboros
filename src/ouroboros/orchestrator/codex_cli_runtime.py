@@ -1845,7 +1845,6 @@ class CodexCliRuntime:
                     data.setdefault("exit_code", value)
             else:
                 data.setdefault("is_error_invalid", True)
-            break
         for key in ("success", "ok", "is_error"):
             if key not in source:
                 continue
@@ -1939,6 +1938,10 @@ class CodexCliRuntime:
                 metadata = self._extract_command_metadata(item)
                 tool_call_id = self._extract_tool_call_id(item)
                 if tool_call_id is None:
+                    metadata["is_error"] = self._completion_failed(
+                        metadata,
+                        require_terminal_evidence=True,
+                    )
                     return [
                         self._build_tool_message(
                             tool_name="Bash",
@@ -1973,13 +1976,17 @@ class CodexCliRuntime:
                     if key in {"output", "stdout", "stderr", "result_preview", "status"}
                 }
                 result_metadata["exit_status"] = exit_code
+                is_error = self._completion_failed(
+                    metadata,
+                    require_terminal_evidence=True,
+                )
                 return [
                     started,
                     self._build_tool_completion_message(
                         tool_name="Bash",
                         tool_call_id=tool_call_id,
                         content=self._command_result_text(metadata),
-                        is_error=self._completion_failed(metadata),
+                        is_error=is_error,
                         handle=current_handle,
                         metadata=result_metadata,
                     ),
@@ -2028,6 +2035,17 @@ class CodexCliRuntime:
                             ),
                         )
                     ]
+                metadata = self._extract_command_metadata(item)
+                is_error = self._completion_failed(
+                    metadata,
+                    require_terminal_evidence=True,
+                )
+                completion_data = {
+                    "runtime_event_type": "tool.completed",
+                    "is_error": is_error,
+                }
+                if not is_error:
+                    completion_data["subtype"] = "success"
                 return [
                     self._build_tool_message(
                         tool_name="Edit",
@@ -2038,10 +2056,7 @@ class CodexCliRuntime:
                         # ``item.completed`` file_change event. Preserve that
                         # source completion status so evidence validation does
                         # not mistake it for an unconfirmed Edit dispatch.
-                        extra_data={
-                            "subtype": "success",
-                            "runtime_event_type": "tool.completed",
-                        },
+                        extra_data=completion_data,
                     )
                     for file_path in file_paths
                 ]
