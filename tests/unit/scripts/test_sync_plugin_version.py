@@ -114,6 +114,8 @@ def test_main_write_fails_when_setup_marker_is_missing(
     bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
     plugin_json.write_text('{"version": "1.2.4"}\n')
     marketplace_json.write_text('{"plugins": [{"version": "1.2.4"}]}\n')
+    original_plugin_json = plugin_json.read_text()
+    original_marketplace_json = marketplace_json.read_text()
 
     monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
@@ -130,5 +132,7 @@ def test_main_write_fails_when_setup_marker_is_missing(
         sync_plugin_version.main()
     except SystemExit as exc:
         assert "expected exactly one version marker" in str(exc)
+        assert plugin_json.read_text() == original_plugin_json
+        assert marketplace_json.read_text() == original_marketplace_json
     else:
         raise AssertionError("missing version marker must fail")

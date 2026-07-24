@@ -159,6 +159,16 @@ def main() -> None:
         (MARKETPLACE_JSON, "plugins.0"),
     ]
 
+    setup_markers: dict[Path, tuple[str, str]] = {}
+    for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
+        if not path.exists():
+            sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
+        text = path.read_text()
+        marker_matches = list(VERSION_MARKER_RE.finditer(text))
+        if len(marker_matches) != 1:
+            sys.exit(f"Error: expected exactly one version marker in {path.relative_to(ROOT)}")
+        setup_markers[path] = (text, marker_matches[0].group(1))
+
     changed = False
     for path, nested in targets:
         if not path.exists():
@@ -184,15 +194,7 @@ def main() -> None:
             print(f"  DRIFT {path.relative_to(ROOT)} ({old} != {version})")
             changed = True
 
-    for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
-        if not path.exists():
-            sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
-
-        text = path.read_text()
-        marker_matches = list(VERSION_MARKER_RE.finditer(text))
-        if len(marker_matches) != 1:
-            sys.exit(f"Error: expected exactly one version marker in {path.relative_to(ROOT)}")
-        old_marker = marker_matches[0].group(1)
+    for path, (_text, old_marker) in setup_markers.items():
         if old_marker == version:
             print(f"  OK    {path.relative_to(ROOT)} ({old_marker})")
         elif write:
