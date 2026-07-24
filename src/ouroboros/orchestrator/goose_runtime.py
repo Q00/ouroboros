@@ -29,7 +29,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
-from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, _CodexItemCorrelationScope
 
 log = get_logger(__name__)
 
@@ -387,6 +387,8 @@ class GooseCliRuntime(CodexCliRuntime):
         self,
         event: dict[str, Any],
         current_handle: RuntimeHandle | None,
+        *,
+        item_scope: _CodexItemCorrelationScope | None = None,
     ) -> list[AgentMessage]:
         """Convert Goose stream-json events into normalized messages."""
         event_type = self._extract_event_type(event)
