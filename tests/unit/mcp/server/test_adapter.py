@@ -1374,7 +1374,13 @@ class TestServeTransport:
         tools = {tool.name: tool for tool in await adapter._mcp_server.list_tools()}
 
         brownfield_action = tools["ouroboros_brownfield"].inputSchema["properties"]["action"]
-        assert brownfield_action["enum"] == ["scan", "register", "query", "set_default", "set_defaults"]
+        assert brownfield_action["enum"] == [
+            "scan",
+            "register",
+            "query",
+            "set_default",
+            "set_defaults",
+        ]
 
         authoring_client_gates = tools["ouroboros_generate_seed"].inputSchema["properties"][
             "client_gates"
