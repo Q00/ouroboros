@@ -379,6 +379,120 @@ class TestCodexCompletionReviewRoundOne:
         )
         assert completion_messages[0].data.get("subtype") == "tool_result"
 
+    def test_keyed_web_search_lifecycle_pairs_without_duplicate_start(self) -> None:
+        """A keyed web_search start/completed pair correlates by id, no duplicate."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        start_messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "w1",
+                    "type": "web_search",
+                    "query": "ouroboros seed contract",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        completion_messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "w1",
+                    "type": "web_search",
+                    "query": "ouroboros seed contract",
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(start_messages) == 1
+        assert start_messages[0].data.get("tool_call_id") == "w1"
+        assert (start_messages[0].data.get("tool_input") or {}).get("query") == (
+            "ouroboros seed contract"
+        )
+        assert len(completion_messages) == 1
+        assert completion_messages[0].data.get("subtype") == "tool_result"
+        assert completion_messages[0].data.get("tool_call_id") == "w1"
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "canceled",
+            "aborted",
+            "interrupted",
+            "killed",
+            "timeout",
+            "timed_out",
+            "Cancelled ",
+            "TIMED_OUT",
+        ],
+    )
+    def test_every_non_success_terminal_status_is_error(self, status: str) -> None:
+        """All non-success terminal statuses resolve to failure, however cased."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_ts",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": status,
+            },
+        }
+
+        messages = runtime._convert_event(event, current_handle=None)
+
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True, status
+
+    def test_nested_and_conflicting_exit_aliases_resolve_consistently(self) -> None:
+        """Nested alias placement and alias conflicts keep verdict and metadata aligned."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        nested = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_na",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "result": {"returncode": 1},
+                },
+            },
+            current_handle=None,
+        )
+        nested_results = [m for m in nested if m.data.get("subtype") == "tool_result"]
+        assert len(nested_results) == 1
+        assert nested_results[0].data.get("is_error") is True
+        tool_result = nested_results[0].data.get("tool_result") or {}
+        assert (tool_result.get("meta") or {}).get("exit_status") == 1, (
+            "verdict and journaled exit_status must not contradict"
+        )
+
+        conflicting = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_cf",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "returncode": 1,
+                },
+            },
+            current_handle=None,
+        )
+        conflict_results = [m for m in conflicting if m.data.get("subtype") == "tool_result"]
+        assert len(conflict_results) == 1
+        assert conflict_results[0].data.get("is_error") is True, (
+            "failure precedence must win over a conflicting success alias"
+        )
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
