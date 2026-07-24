@@ -105,9 +105,9 @@ _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 """
 
 
-def _fsync_parent_directory(file_path: Path) -> None:
+def _fsync_parent_directory(file_path: Path) -> bool:
     if os.name != "posix":
-        return
+        return True
 
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -116,19 +116,24 @@ def _fsync_parent_directory(file_path: Path) -> None:
         directory_fd = os.open(file_path.parent, flags)
     except OSError as error:
         if error.errno in (errno.EINVAL, errno.ENOTSUP):
-            return
-        raise
+            return True
+        return False
+    durability_confirmed = True
     try:
         try:
             os.fsync(directory_fd)
         except OSError as error:
             if error.errno not in (errno.EINVAL, errno.ENOTSUP):
-                raise
+                durability_confirmed = False
     finally:
-        os.close(directory_fd)
+        try:
+            os.close(directory_fd)
+        except OSError:
+            durability_confirmed = False
+    return durability_confirmed
 
 
-def _atomic_write_text(file_path: Path, content: str) -> None:
+def _atomic_write_text(file_path: Path, content: str) -> bool:
     try:
         existing_mode = stat.S_IMODE(file_path.stat().st_mode)
     except FileNotFoundError:
@@ -155,7 +160,7 @@ def _atomic_write_text(file_path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, file_path)
-        _fsync_parent_directory(file_path)
+        return _fsync_parent_directory(file_path)
     finally:
         if raw_fd is not None:
             try:
@@ -1104,11 +1109,18 @@ class InterviewEngine:
             # Serialize while still on the event-loop (CPU-bound, not I/O)
             content = state.model_dump_json(indent=2)
 
-            def _sync_write() -> None:
+            def _sync_write() -> bool:
                 with _file_lock(file_path, exclusive=True):
-                    _atomic_write_text(file_path, content)
+                    return _atomic_write_text(file_path, content)
 
-            await asyncio.to_thread(_sync_write)
+            durability_confirmed = await asyncio.to_thread(_sync_write)
+
+            if not durability_confirmed:
+                log.warning(
+                    "interview.state_save_durability_uncertain",
+                    interview_id=state.interview_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "interview.state_saved",

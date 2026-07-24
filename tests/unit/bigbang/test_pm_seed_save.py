@@ -230,6 +230,22 @@ class TestPMSeedSaveJSON:
         assert result.exists()
         assert mock_fsync.call_count == 2
 
+    @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
+    def test_reports_success_when_post_replace_fsync_fails(self, tmp_path: Path) -> None:
+        engine = _make_engine(tmp_path)
+        seed = _make_seed()
+        seeds_dir = tmp_path / "seeds"
+
+        with patch(
+            "os.fsync",
+            side_effect=(None, OSError(errno.EIO, "directory fsync failed")),
+        ) as mock_fsync:
+            result = engine.save_pm_seed(seed, output_dir=seeds_dir)
+
+        assert result.exists()
+        assert json.loads(result.read_text(encoding="utf-8"))["pm_id"] == seed.pm_id
+        assert mock_fsync.call_count == 2
+
     def test_default_output_dir_is_ouroboros_seeds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

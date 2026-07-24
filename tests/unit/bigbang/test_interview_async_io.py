@@ -215,6 +215,26 @@ class TestSaveStateUsesThread:
         assert result.is_ok
         assert mock_fsync.call_count == 2
 
+    @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
+    @pytest.mark.asyncio
+    async def test_save_state_reports_success_when_post_replace_fsync_fails(
+        self, tmp_path
+    ) -> None:
+        engine = _make_engine(tmp_path)
+        state = _make_state()
+
+        with patch(
+            "os.fsync",
+            side_effect=(None, OSError(errno.EIO, "directory fsync failed")),
+        ) as mock_fsync:
+            result = await engine.save_state(state)
+
+        assert result.is_ok
+        assert mock_fsync.call_count == 2
+        load_result = await engine.load_state(state.interview_id)
+        assert load_result.is_ok
+        assert load_result.value.interview_id == state.interview_id
+
     @pytest.mark.asyncio
     async def test_save_state_roundtrip(self, tmp_path) -> None:
         """save_state writes valid JSON that load_state can read back."""

@@ -1181,7 +1181,14 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        _atomic_write_text(filepath, json_content)
+        durability_confirmed = _atomic_write_text(filepath, json_content)
+
+        if not durability_confirmed:
+            log.warning(
+                "pm.seed_save_durability_uncertain",
+                path=str(filepath),
+                pm_id=seed.pm_id,
+            )
 
         log.info(
             "pm.seed_saved",
