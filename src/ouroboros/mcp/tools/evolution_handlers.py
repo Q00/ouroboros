@@ -272,7 +272,11 @@ class EvolveStepHandler(BridgeAwareMixin):
                     name="seed_content",
                     type=ToolInputType.STRING,
                     description=(
-                        "Seed YAML content for Gen 1. "
+                        "Seed YAML text for Gen 1. Pass a YAML-formatted string "
+                        "(for example, newline-delimited 'goal: ...' fields), not "
+                        "JSON-shaped text or an object literal; some MCP clients may "
+                        "otherwise coerce the value to an object before Ouroboros "
+                        "receives it. "
                         "Omit for Gen 2+ (seed reconstructed from events)."
                     ),
                     required=False,

@@ -27,6 +27,7 @@ from ouroboros.mcp.server.adapter import (
     _project_dir_from_seed,
     _safe_cwd,
     _to_fastmcp_tool_result,
+    _validate_parameter_constraints,
     validate_transport,
 )
 from ouroboros.mcp.tools import job_handlers as job_handlers_module
@@ -183,6 +184,26 @@ class TestMCPServerAdapter:
             "max_tokens": "max.tokens",
             "_class": "class",
         }
+
+    def test_validate_parameter_constraints_rejects_enum_and_array_items(self) -> None:
+        parameters = (
+            MCPToolParameter(
+                name="mode",
+                type=ToolInputType.STRING,
+                enum=("fast", "safe"),
+            ),
+            MCPToolParameter(
+                name="labels",
+                type=ToolInputType.ARRAY,
+                items={"type": "string"},
+            ),
+        )
+
+        _validate_parameter_constraints(parameters, {"mode": "fast", "labels": ["ok"]})
+        with pytest.raises(ValueError, match="mode"):
+            _validate_parameter_constraints(parameters, {"mode": "unsafe"})
+        with pytest.raises(ValueError, match="labels"):
+            _validate_parameter_constraints(parameters, {"labels": ["ok", 1]})
 
     def test_legacy_execution_report_maps_to_task_results_not_ac_verdicts(self) -> None:
         """Legacy AC PASS/FAIL execution lines are worker task completion signals."""
@@ -1324,6 +1345,155 @@ class TestServeTransport:
 
         route_paths = {getattr(route, "path", None) for route in served.config.app.routes}
         assert "/mcp" in route_paths
+
+    @pytest.mark.asyncio
+    async def test_real_fastmcp_tools_list_preserves_parameter_descriptions(self) -> None:
+        from unittest.mock import patch
+
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        from ouroboros.mcp.tools.definitions import StartEvolveStepHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(StartEvolveStepHandler())
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+
+        tools = await adapter._mcp_server.list_tools()
+        tool = next(item for item in tools if item.name == "ouroboros_start_evolve_step")
+        description = tool.inputSchema["properties"]["seed_content"]["description"]
+
+        assert "YAML-formatted string" in description
+        assert "not JSON-shaped text or an object literal" in description
+        assert "before Ouroboros receives it" in description
+
+    @pytest.mark.asyncio
+    async def test_real_fastmcp_tools_list_preserves_parameter_schema_metadata(self) -> None:
+        from unittest.mock import patch
+
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
+        from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
+        from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(BrownfieldHandler())
+        adapter.register_tool(GenerateSeedHandler())
+        adapter.register_tool(StartEvolveStepHandler())
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await adapter.serve(transport="stdio")
+
+        tools = {tool.name: tool for tool in await adapter._mcp_server.list_tools()}
+
+        brownfield_action = tools["ouroboros_brownfield"].inputSchema["properties"]["action"]
+        assert brownfield_action["enum"] == [
+            "scan",
+            "register",
+            "query",
+            "set_default",
+            "set_defaults",
+        ]
+
+        authoring_client_gates = tools["ouroboros_generate_seed"].inputSchema["properties"][
+            "client_gates"
+        ]
+        assert authoring_client_gates["items"] == {"type": "string"}
+
+        evolve_tool = tools["ouroboros_start_evolve_step"]
+        execute_schema = evolve_tool.inputSchema["properties"]["execute"]
+        assert execute_schema["type"] == "boolean"
+        assert "null" not in execute_schema.get("type", [])
+        seed_schema = evolve_tool.inputSchema["properties"]["seed_content"]
+        assert "default" not in seed_schema
+        assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
+
+    @pytest.mark.asyncio
+    async def test_real_fastmcp_invocation_passes_none_for_omitted_optional_parameter(self) -> None:
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+
+        class OptionalParameterHandler(MockToolHandler):
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="optional_tool",
+                    description="A tool with an omitted optional parameter",
+                    parameters=(
+                        MCPToolParameter(
+                            name="required_input",
+                            type=ToolInputType.STRING,
+                            required=True,
+                        ),
+                        MCPToolParameter(
+                            name="optional_input",
+                            type=ToolInputType.STRING,
+                            default=None,
+                            description="Optional input",
+                        ),
+                        MCPToolParameter(
+                            name="optional_mode",
+                            type=ToolInputType.STRING,
+                            enum=("fast", "safe"),
+                            default=None,
+                        ),
+                        MCPToolParameter(
+                            name="scores",
+                            type=ToolInputType.ARRAY,
+                            items={"type": "number"},
+                        ),
+                    ),
+                )
+
+        from unittest.mock import patch
+
+        adapter = MCPServerAdapter()
+        handler = OptionalParameterHandler(name="optional_tool")
+        adapter.register_tool(handler)
+        with (
+            patch.object(
+                fastmcp_module.FastMCP,
+                "run_stdio_async",
+                new=AsyncMock(),
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        await adapter._mcp_server.call_tool(
+            "optional_tool",
+            {"required_input": "provided", "scores": [1.5]},
+        )
+
+        handler.handle_mock.assert_awaited_once_with(
+            {
+                "required_input": "provided",
+                "optional_input": None,
+                "optional_mode": None,
+                "scores": [1.5],
+            }
+        )
+
+        with pytest.raises(Exception, match="Invalid value for optional_mode"):
+            await adapter._mcp_server.call_tool(
+                "optional_tool",
+                {
+                    "required_input": "provided",
+                    "optional_mode": "unsafe",
+                    "scores": [1.5],
+                },
+            )
+        with pytest.raises(Exception, match="Invalid items for scores"):
+            await adapter._mcp_server.call_tool(
+                "optional_tool",
+                {"required_input": "provided", "scores": [True]},
+            )
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

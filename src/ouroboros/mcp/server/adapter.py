@@ -17,6 +17,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from pydantic import Field
 import structlog
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
@@ -226,26 +227,91 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        default: Any = inspect.Parameter.empty if p.required else p.default
+        if p.description or p.enum is not None or p.items is not None:
+            schema_extra: dict[str, Any] = {}
+            if p.enum is not None:
+                schema_extra["enum"] = list(p.enum)
+            if p.items is not None:
+                schema_extra["items"] = p.items
+            field_kwargs: dict[str, Any] = {
+                "description": p.description or None,
+                "json_schema_extra": schema_extra or None,
+            }
+            if p.required:
+                field_kwargs["default"] = ...
+            else:
+                field_kwargs["default"] = p.default
+                if p.default is None:
+                    field_kwargs["json_schema_extra"] = lambda schema, extra=schema_extra: (
+                        schema.pop("default", None),
+                        schema.update(extra),
+                    )[-1]
+            default = Field(**field_kwargs)
+        elif not p.required and p.default is None:
+            default = Field(
+                default=None,
+                json_schema_extra=lambda schema: schema.pop("default", None),
+            )
+
         if p.required:
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     annotation=python_type,
+                    default=(
+                        default
+                        if p.description or p.enum is not None or p.items is not None
+                        else inspect.Parameter.empty
+                    ),
                 )
             )
         else:
-            default = p.default if p.default is not None else None
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     default=default,
-                    annotation=python_type | None,
+                    annotation=python_type,
                 )
             )
 
     return inspect.Signature(parameters=sig_params), alias_to_original
+
+
+def _validate_parameter_constraints(
+    parameters: tuple[MCPToolParameter, ...],
+    arguments: dict[str, Any],
+) -> None:
+    expected_types: dict[str, type | tuple[type, ...]] = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "object": dict,
+        "array": list,
+    }
+    for parameter in parameters:
+        if parameter.name not in arguments:
+            continue
+        value = arguments[parameter.name]
+        if value is not None and parameter.enum is not None and value not in parameter.enum:
+            raise ValueError(
+                f"Invalid value for {parameter.name}: expected one of {parameter.enum}"
+            )
+        if parameter.items is None or not isinstance(value, list):
+            continue
+        item_type = parameter.items.get("type")
+        expected_type = expected_types.get(item_type or "")
+        if expected_type is None:
+            continue
+        if any(
+            not isinstance(item, expected_type)
+            or (item_type in {"integer", "number"} and isinstance(item, bool))
+            for item in value
+        ):
+            raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
 
 
 _PROJECT_ROOT_MARKERS = (
@@ -1020,6 +1086,11 @@ class MCPServerAdapter:
                             normalized_kwargs[original_key] = kwargs[alias_key]
                     for key, value in kwargs.items():
                         normalized_kwargs.setdefault(key, value)
+
+                    _validate_parameter_constraints(
+                        h.definition.parameters,
+                        normalized_kwargs,
+                    )
 
                     # Route through call_tool() to enforce security checks.
                     # FastMCP does not provide credentials, so:
