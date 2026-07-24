@@ -3481,11 +3481,18 @@ def _is_row_shaped_value(value: str) -> bool:
     segments = [segment for segment in stripped.split(";") if segment.strip()]
     if len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments):
         return True
-    return (
+    if (
         len(segments) >= 2
         and all("," in segment for segment in segments)
         and not any(char.isdigit() for char in stripped)
-    )
+    ):
+        return True
+    # A REPEATED key=value field is a record list (round-15 probe:
+    # "customer=Alice Kim tier=premium; customer=Bob Lee tier=free") — one
+    # aggregate states each field once ("p50=120ms p95=340ms" stays valid,
+    # every key distinct).
+    assignment_keys = re.findall(r"\b(\w+)=", stripped)
+    return len(assignment_keys) >= 2 and len(set(assignment_keys)) < len(assignment_keys)
 
 
 # Error-envelope shapes: a JSON error key or an HTTP 4xx/5xx status inside an
@@ -4138,6 +4145,21 @@ def _submit_fanout_results_locked(
     # completion exactly as the partial-retry contract documents. The latest
     # accepted submission wins on a per-key conflict.
     provided: dict[str, Any] = {**record.received_results, **accepted}
+
+    # Accumulated state is validated BEFORE every durable write, not only at
+    # synthesis (bot-review round-15): a legacy violating value must not ride
+    # a partial or finalize=false re-save. Violations found in the
+    # accumulated mapping are scrubbed here, reported alongside the
+    # current-call ones, and their required lanes reopen as missing.
+    accumulated_violations = [
+        item
+        for item in _lane_answer_contract_violations(contracts, provided)
+        if item["lane_id"] not in violating_lanes
+    ]
+    if accumulated_violations:
+        scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
+        provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
+        contract_violations = [*contract_violations, *accumulated_violations]
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
     missing_required = [key for key in record.required_keys if key not in provided]
