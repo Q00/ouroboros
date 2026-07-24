@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import json
 
 import pytest
@@ -299,6 +300,22 @@ def test_admission_rejects_non_route_selected_values() -> None:
             rejections=(),
             reason="fabricated",
         )
+
+
+def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
+    original = _route("original", cost=1)
+    other = _route("other", cost=2)
+    decision = admit_route(_registry(original, other), RouteRequirements())
+
+    with pytest.raises(TypeError, match="dataclass"):
+        replace(
+            decision,
+            selected=other,
+            eligible_route_ids=(other.route_id,),
+        )
+
+    with pytest.raises(AttributeError, match="immutable"):
+        decision.selected = other  # type: ignore[misc]
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:

@@ -316,61 +316,135 @@ class RouteRejection:
         return {"route_id": self.route_id, "reasons": [reason.value for reason in self.reasons]}
 
 
-@dataclass(frozen=True, slots=True)
 class RouteAdmission:
-    """Deterministic Kernel result; only ``selected`` may enter dispatch."""
+    """Deterministic Kernel result; only ``selected`` may enter dispatch.
+
+    This is intentionally not a dataclass.  Admission is an authority-bearing
+    value, so allowing ``dataclasses.replace`` to copy its private provenance
+    token would let callers alter the selected route while retaining Kernel
+    provenance.  The sealed value object keeps construction private to the
+    Kernel and rejects mutation after validation.
+    """
+
+    __slots__ = (
+        "disposition",
+        "selected",
+        "eligible_route_ids",
+        "rejections",
+        "reason",
+        "_kernel_token",
+        "_sealed",
+    )
 
     disposition: RouteDecisionDisposition
     selected: RouteCandidate | None
     eligible_route_ids: tuple[str, ...]
     rejections: tuple[RouteRejection, ...]
     reason: str
-    _kernel_token: object = field(default=None, repr=False, compare=False)
+    _kernel_token: object
+    _sealed: bool
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.disposition, RouteDecisionDisposition):
+    def __init__(
+        self,
+        disposition: RouteDecisionDisposition,
+        selected: RouteCandidate | None,
+        eligible_route_ids: tuple[str, ...],
+        rejections: tuple[RouteRejection, ...],
+        reason: str,
+        *,
+        _kernel_token: object | None = None,
+    ) -> None:
+        if not isinstance(disposition, RouteDecisionDisposition):
             raise ValueError("disposition must be a RouteDecisionDisposition")
-        if self.selected is not None and not isinstance(self.selected, RouteCandidate):
+        if selected is not None and not isinstance(selected, RouteCandidate):
             raise ValueError("selected route must be a RouteCandidate")
-        if self.disposition is RouteDecisionDisposition.ADMITTED and self.selected is None:
+        if disposition is RouteDecisionDisposition.ADMITTED and selected is None:
             raise ValueError("admitted route decision requires a selected candidate")
-        if self.disposition is RouteDecisionDisposition.BLOCKED and self.selected is not None:
+        if disposition is RouteDecisionDisposition.BLOCKED and selected is not None:
             raise ValueError("blocked route decision must not select a candidate")
-        if not isinstance(self.eligible_route_ids, tuple):
+        if not isinstance(eligible_route_ids, tuple):
             raise ValueError("eligible route IDs must be an ordered tuple")
-        if len(self.eligible_route_ids) > MAX_ROUTE_CANDIDATES:
+        if len(eligible_route_ids) > MAX_ROUTE_CANDIDATES:
             raise ValueError("eligible route IDs exceed their bound")
         if any(
             not isinstance(route_id, str) or not _SAFE_ROUTE_ID.fullmatch(route_id)
-            for route_id in self.eligible_route_ids
+            for route_id in eligible_route_ids
         ):
             raise ValueError("eligible route IDs are invalid")
-        if len(set(self.eligible_route_ids)) != len(self.eligible_route_ids):
+        if len(set(eligible_route_ids)) != len(eligible_route_ids):
             raise ValueError("eligible route IDs must be unique")
-        if self.disposition is RouteDecisionDisposition.ADMITTED:
-            if not self.eligible_route_ids:
+        if disposition is RouteDecisionDisposition.ADMITTED:
+            if not eligible_route_ids:
                 raise ValueError("admitted route decision requires eligible routes")
-            if self.selected.route_id not in self.eligible_route_ids:  # type: ignore[union-attr]
+            if selected.route_id not in eligible_route_ids:  # type: ignore[union-attr]
                 raise ValueError("selected route must be eligible")
-        elif self.eligible_route_ids:
+        elif eligible_route_ids:
             raise ValueError("blocked route decision must not contain eligible routes")
-        if not isinstance(self.rejections, tuple):
+        if not isinstance(rejections, tuple):
             raise ValueError("route rejections must be an ordered tuple")
-        if len(self.rejections) > MAX_ROUTE_CANDIDATES:
+        if len(rejections) > MAX_ROUTE_CANDIDATES:
             raise ValueError("route rejections exceed their bound")
-        if not all(isinstance(rejection, RouteRejection) for rejection in self.rejections):
+        if not all(isinstance(rejection, RouteRejection) for rejection in rejections):
             raise ValueError("route rejections are invalid")
-        rejection_ids = tuple(rejection.route_id for rejection in self.rejections)
+        rejection_ids = tuple(rejection.route_id for rejection in rejections)
         if len(set(rejection_ids)) != len(rejection_ids):
             raise ValueError("route rejections must be unique")
-        if set(rejection_ids).intersection(self.eligible_route_ids):
+        if set(rejection_ids).intersection(eligible_route_ids):
             raise ValueError("route cannot be both eligible and rejected")
-        if self._kernel_token is not _ADMISSION_KERNEL_TOKEN:
+        if _kernel_token is not _ADMISSION_KERNEL_TOKEN:
             raise ValueError("route admission must be produced by the Admission Kernel")
-        if not isinstance(self.reason, str) or not self.reason.strip():
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError("route admission reason must be non-empty")
-        if len(self.reason) > MAX_ROUTE_FIELD_CHARS:
+        if len(reason) > MAX_ROUTE_FIELD_CHARS:
             raise ValueError("route admission reason exceeds its bound")
+
+        object.__setattr__(self, "disposition", disposition)
+        object.__setattr__(self, "selected", selected)
+        object.__setattr__(self, "eligible_route_ids", eligible_route_ids)
+        object.__setattr__(self, "rejections", rejections)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "_kernel_token", _kernel_token)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("RouteAdmission is immutable")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("RouteAdmission is immutable")
+
+    def __repr__(self) -> str:
+        return (
+            "RouteAdmission("
+            f"disposition={self.disposition!r}, "
+            f"selected={self.selected!r}, "
+            f"eligible_route_ids={self.eligible_route_ids!r}, "
+            f"rejections={self.rejections!r}, "
+            f"reason={self.reason!r})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RouteAdmission):
+            return NotImplemented
+        return (
+            self.disposition == other.disposition
+            and self.selected == other.selected
+            and self.eligible_route_ids == other.eligible_route_ids
+            and self.rejections == other.rejections
+            and self.reason == other.reason
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.disposition,
+                self.selected,
+                self.eligible_route_ids,
+                self.rejections,
+                self.reason,
+            )
+        )
 
     @property
     def admitted(self) -> bool:
