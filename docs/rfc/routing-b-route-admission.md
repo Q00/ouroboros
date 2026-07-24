@@ -103,6 +103,11 @@ projection, so an object created or rewritten with `object.__new__` or
 `object.__setattr__` is not an admission. The module deliberately has no
 provider calls, retry/escalation policy, or Final Gate behavior.
 
+The publication registry is an implementation detail of the Kernel closure, not
+a durable capability or a caller-visible factory. A serialized route contract
+is configuration evidence only; it must be rebuilt and compared with the live
+catalog before an effect boundary can dispatch it.
+
 ## Next slices
 
 1. Wire this contract into the existing live model/harness routing path while
