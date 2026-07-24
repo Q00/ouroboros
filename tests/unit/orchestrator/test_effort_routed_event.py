@@ -167,6 +167,7 @@ async def _run_one_ac(
     is_sub_ac: bool,
     retry_attempt: int = 0,
     investment_spec: InvestmentSpec | None = None,
+    sibling_acs: list[tuple[int | None, str]] | None = None,
 ):
     return await executor._execute_atomic_ac(
         ac_index=1,
@@ -183,6 +184,7 @@ async def _run_one_ac(
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
         investment_spec=investment_spec,
+        sibling_acs=sibling_acs,
     )
 
 
@@ -348,6 +350,42 @@ async def test_capsule_authority_fingerprint_changes_with_investment_spec() -> N
     high_capsule = _capsule_events(high_events)
     assert len(low_capsule) == len(high_capsule) == 1
     assert low_capsule[0].data["capsule_fingerprint"] != high_capsule[0].data[
+        "capsule_fingerprint"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capsule_authority_fingerprint_changes_with_sibling_prompt_scope() -> None:
+    first_store, first_events = _capturing_event_store()
+    second_store, second_events = _capturing_event_store()
+    first_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=first_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    second_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=second_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    await _run_one_ac(
+        first_executor,
+        is_sub_ac=False,
+        sibling_acs=[(0, "Implement the API"), (1, "Implement the CLI")],
+    )
+    await _run_one_ac(
+        second_executor,
+        is_sub_ac=False,
+        sibling_acs=[(0, "Implement the API"), (1, "Write the deployment docs")],
+    )
+
+    first_capsule = _capsule_events(first_events)
+    second_capsule = _capsule_events(second_events)
+    assert len(first_capsule) == len(second_capsule) == 1
+    assert first_capsule[0].data["capsule_fingerprint"] != second_capsule[0].data[
         "capsule_fingerprint"
     ]
 

@@ -540,6 +540,13 @@ class ACRuntimeHandleManager:
                 )
                 if not compiled_indices:
                     continue
+                latest_dispatch_id: str | None = None
+                if dispatch_indices:
+                    latest_dispatch_data = events[dispatch_indices[-1]].data
+                    if isinstance(latest_dispatch_data, dict):
+                        raw_latest_dispatch_id = latest_dispatch_data.get("ac_dispatch_id")
+                        if isinstance(raw_latest_dispatch_id, str):
+                            latest_dispatch_id = raw_latest_dispatch_id
                 matching_indices = [
                     index
                     for index, event in enumerate(events)
@@ -606,6 +613,11 @@ class ACRuntimeHandleManager:
                     if persisted_fingerprint != expected_capsule_fingerprint:
                         raise AmbiguousACExecutionError(
                             "persisted runtime handle disagrees with the durable AC capsule"
+                        )
+                    persisted_dispatch_id = runtime_handle.metadata.get("ac_dispatch_id")
+                    if latest_dispatch_id is None or persisted_dispatch_id != latest_dispatch_id:
+                        raise AmbiguousACExecutionError(
+                            "persisted runtime handle does not belong to the latest AC dispatch"
                         )
                     persisted_nonce = runtime_handle.metadata.get("process_local_resume_nonce")
                     if (
