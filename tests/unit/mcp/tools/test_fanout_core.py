@@ -3196,6 +3196,70 @@ def test_evidence_value_requires_numeric_measurement() -> None:
         assert _data_evidence_boundary_violations(_minimal_data_output(measured)) == [], measured
 
 
+def test_digit_bearing_person_roster_is_rejected() -> None:
+    """One aggregate names at most one entity (round-19 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for roster in (
+        "Alice Kim / premium / 3 seats \\ Bob Lee / free / 1 seat",
+        "Alice Kim premium 3 and Bob Lee free 1",
+    ):
+        errors = _data_evidence_boundary_violations(_minimal_data_output(roster))
+        assert any("row-shaped" in error for error in errors), roster
+
+    # Single-entity and entity-free measurements stay valid.
+    for clean in (
+        "Acme Corp accounts grew 34% this quarter",
+        "78% of MAU are on the free tier",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == [], clean
+
+
+def test_select_star_proposal_is_rejected() -> None:
+    """The aggregate policy binds proposals too (round-19 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    for raw in ("SELECT * FROM customers", "select c.* from customers c"):
+        errors = _data_evidence_boundary_violations(proposal(raw))
+        assert any("raw rows" in error for error in errors), raw
+
+    for aggregate in (
+        "SELECT count(*) FROM customers",
+        "SELECT plan, count(*), avg(seats) FROM accounts GROUP BY plan",
+    ):
+        assert _data_evidence_boundary_violations(proposal(aggregate)) == [], aggregate
+
+
+def test_assignment_style_failure_envelopes_are_not_evidence() -> None:
+    """A failed lookup never becomes decision evidence (round-19 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for failure in ("status=failed code=502", "lookup finished with code=404"):
+        errors = _data_evidence_boundary_violations(_minimal_data_output(failure))
+        assert any("error-shaped" in error for error in errors), failure
+
+    clean = "status updated for 1,204 accounts; error rate 0.2%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

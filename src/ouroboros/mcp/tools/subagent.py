@@ -3531,6 +3531,11 @@ def _is_row_shaped_value(value: str) -> bool:
         and not any(char.isdigit() for char in stripped)
     ):
         return True
+    # Two or more capitalized word-pairs are a person/entity roster
+    # (bot-review round-19: digit-bearing Alice/Bob rows) — one aggregate
+    # names at most one entity; aggregate by count instead.
+    if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b", stripped)) >= 2:
+        return True
     # A REPEATED field label is a record list, independent of punctuation
     # (rounds 15-16 probes: "customer=Alice ...; customer=Bob ..." and
     # "customer: Alice ...; customer: Bob ...") — one aggregate states each
@@ -3551,7 +3556,9 @@ def _is_row_shaped_value(value: str) -> bool:
 # only the envelope shapes match).
 _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
-    r"|\btraceback \(most recent call last\)",
+    r"|\btraceback \(most recent call last\)"
+    # Assignment-style failure envelopes (round-19: "status=failed code=502").
+    r"|\bstatus\s*=\s*(failed|error)\b|\bcode\s*=\s*[45]\d{2}\b",
     re.IGNORECASE,
 )
 
@@ -3718,6 +3725,16 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"proposed_queries[{index}].tool_name: names a mutating tool "
                 f"({verb!r}); the data lane is read-only"
+            )
+        # A confirmed proposal is executed by the parent, so the aggregate
+        # policy binds the QUERY too (bot-review round-19): a select-star
+        # projection requests raw rows by construction. count(*)/aggregated
+        # projections stay valid.
+        if isinstance(query, str) and re.search(r"\bselect\s+(?:\w+\.)?\*", query, re.IGNORECASE):
+            errors.append(
+                f"proposed_queries[{index}].query: requests raw rows "
+                "(SELECT *); propose an aggregate projection "
+                "(COUNT/AVG/GROUP BY) instead"
             )
         if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
             errors.append(
