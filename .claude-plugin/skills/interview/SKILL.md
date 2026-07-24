@@ -191,12 +191,25 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
+   - `data_context` — fetch data evidence (metrics, DB/warehouse facts) via
+     the host's own data MCP tools when the answer is a data-driven decision.
+     The payload carries the full rules (`data_policy`, `answer_contract`).
+     Host duties: run returned `proposed_queries` only after the user
+     confirms, and forward user-confirmed data-derived answers prefixed
+     `[from-data]` with their point-in-time caveat.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
      concise draft answer.
    - `architecture_implications` — check whether the answer changes ownership,
      interfaces, rollout, or system shape.
+
+   The lane set can grow within v1 (see `lane_compatibility_rules`): dispatch
+   unknown lanes as-is, skipping only OPTIONAL unknown lanes — a required
+   unknown lane gates completion, so dispatch it generically (or submit its
+   no-op finding), never skip it. Dispatch unsupported capabilities anyway —
+   their no-op finding IS the completion signal, so never silently drop a
+   lane's result.
 
    Synthesize advisory results into a compact helper for the user: 2-3 answer
    options, one recommended draft, or a short "I found these ambiguities" note.
@@ -217,6 +230,56 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    as a prerequisite. The only time you skip spawning is when the host has no
    subagent primitive at all (then use `sequential_fallback`).
    Preserve the original question text while advisory children run.
+
+   **Submitting fan-out results back (re-entry)**:
+   When the originating `meta` carries a `fanout_id` (e.g.
+   `meta.question_advisory_fanout_id`, or a `fanout_id` in a lateral persona
+   panel dispatch), after all advisory/persona subagents return, call
+   `ouroboros_submit_fanout_results` with:
+   - `fanout_id`: the stamped id from that meta,
+   - `correlation_key`: the stamped `result_correlation_key`
+     (`context.lane_id`, `context.persona`, or `code_facts`),
+   - `results`: one `{ "key": <correlation value>, "content": <child output> }`
+     per subagent, where `key` is that child's correlation value (its lane id,
+     persona, or `code_facts`).
+   Always pass the stamped `session_id` and `correlation_key` — when the
+   fan-out was registered with them, omitting them is a
+   `correlation_mismatch`, not a skipped check. Submissions are bounded
+   (at most 32 results / 256 KB serialized per call): submit findings, not
+   raw child transcripts. Submitting advisory lanes one at a time?
+   Pass `finalize: false` on every intermediate call (question-advisory
+   fan-outs only — other kinds validate content at synthesis and reject it) (`status="accumulated"`,
+   the fan-out stays open even when all required lanes are in) and close
+   with a final `finalize`-omitted or `finalize: true` call — otherwise
+   completion fires as soon as the required set is present and later
+   optional results are rejected as `already_complete`.
+   A complete set returns the correlated synthesis to continue with; a partial
+   set returns `status="partial"` with `missing_keys` so you can resubmit the
+   remaining lanes (partial submissions accumulate server-side; if the
+   response carries `accumulation_persisted: false`, resubmit those lanes
+   again together with the remainder). Keys not registered on the fan-out are
+   rejected and echoed back as `unexpected_keys`; keys whose content the
+   synthesizer rejects (e.g. a `code_facts` output bound to the wrong
+   session) come back as `synthesis_rejected_keys` on a `partial` response —
+   fix and resubmit them. `status="completion_not_persisted"` means the
+   synthesis succeeded but the terminal record could not be saved: completion
+   is not durable yet, so resubmit the same results. A completed fanout is
+   terminal — late submissions return `status="already_complete"` carrying
+   the persisted terminal outcome, so a lost completion response is
+   recoverable by resubmitting. Recovery has a retention limit: records
+   (completed ones included) are kept 7 days after their last update, after
+   which the id returns `unknown_fanout_id`. Only
+   `required: true` lanes gate completion: once every required lane is
+   submitted the fanout completes, and optional lanes that never arrived are
+   listed as `missing_optional_keys` on the complete outcome — proceed to
+   synthesis without them. Still submit a no-op finding for every lane you
+   dispatched (including no-op and unsupported-capability lanes) rather than
+   dropping it. Lanes that carry an `answer_contract` are validated at
+   re-entry; violations come back under `contract_violations` and that lane's
+   output is excluded from the returned synthesis. Sequential hosts submit
+   after processing payloads one-by-one — same tool, same contract. Continue
+   the interview from the returned synthesis; keep the user-facing question
+   visible throughout.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

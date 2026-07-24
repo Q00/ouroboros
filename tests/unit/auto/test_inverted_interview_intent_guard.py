@@ -81,6 +81,39 @@ def test_inverted_intent_guard_warns_when_human_changes_to_docs_only() -> None:
     assert any(check.code == "user_contract_change" for check in report.checks)
 
 
+@pytest.mark.parametrize("adopted_source", ["data_fact", "research_fact"])
+def test_user_adopted_external_facts_warn_like_human_never_fail_closed(
+    adopted_source: str,
+) -> None:
+    """[from-data]/[from-research] answers are user-confirmed before forwarding.
+
+    They must get the human-grade "confirm this scope change is intentional"
+    WARN — not the silent repo_fact evidence pass (they are point-in-time and
+    not cheaply re-verifiable), and never the generated fail-closed branch.
+    """
+    report = guard_interview_turn(
+        goal="Build a local CLI and web app that generate reusable review outputs.",
+        question="Should the MVP be a CLI/web implementation or a docs-only handoff package?",
+        answer_text="Use docs-only for this run.",
+        answer_source=adopted_source,
+    )
+
+    assert report.status is IntentGuardStatus.WARN
+    assert any(check.code == "user_contract_change" for check in report.checks)
+    assert not any(check.code == "generated_option_conflict" for check in report.checks)
+
+
+def test_interview_answer_source_classifier_maps_data_and_research_prefixes() -> None:
+    from ouroboros.mcp.tools.authoring_handlers import _classify_interview_answer_source
+
+    assert _classify_interview_answer_source("[from-data] 78% of MAU are free tier") == "data_fact"
+    assert (
+        _classify_interview_answer_source("[from-research] API limit is 100 rps") == "research_fact"
+    )
+    assert _classify_interview_answer_source("[from-code] FastAPI per manifest") == "repo_fact"
+    assert _classify_interview_answer_source("just my preference") == "human"
+
+
 def test_inverted_intent_guard_allows_generated_interview_answer_for_explicit_narrowed_goal() -> (
     None
 ):

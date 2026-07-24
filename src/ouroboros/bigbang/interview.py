@@ -1174,20 +1174,37 @@ class InterviewEngine:
 
         # Answer prefix hints — always present so the question generator
         # can interpret enriched answers regardless of brownfield status.
+        # Under budget pressure the FULL glossary is swapped for the compact
+        # one-liner below (bot-review round-29): hard truncation used to cut
+        # the last entry mid-token ("- [from-d"), silently dropping the
+        # [from-data] semantics while its answers stayed in history. The
+        # compact form preserves EVERY prefix meaning; the retained initial
+        # context is never the victim.
         if self.suppress_tool_use_prompt_cues:
-            dynamic_header += (
-                "\n\nAnswer prefixes the caller may use:\n"
+            answer_prefix_hints = (
+                "Answer prefixes the caller may use:\n"
                 "- [from-code]: Caller-supplied existing-system context (factual).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Caller-supplied external context."
+                "- [from-research]: Caller-supplied external context.\n"
+                "- [from-data]: Caller-supplied data evidence "
+                "(factual at query time, may be stale)."
             )
         else:
-            dynamic_header += (
-                "\n\nAnswer prefixes the caller may use:\n"
+            answer_prefix_hints = (
+                "Answer prefixes the caller may use:\n"
                 "- [from-code]: Existing codebase state (factual, read from files).\n"
                 "- [from-user]: Human decisions/judgments.\n"
-                "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+                "- [from-research]: Externally researched information (API docs, pricing, compatibility).\n"
+                "- [from-data]: Data evidence from metrics/DB/warehouse queries "
+                "(factual at query time, may be stale — treat as description, not decision)."
             )
+        self._answer_prefix_hints_full = answer_prefix_hints
+        self._answer_prefix_hints_compact = (
+            "Prefixes: [from-code]=existing-system fact; [from-user]=human "
+            "decision; [from-research]=external fact; [from-data]=point-in-time "
+            "data description (not a decision, may be stale)."
+        )
+        dynamic_header += f"\n\n{answer_prefix_hints}"
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
             if self.suppress_tool_use_prompt_cues:
@@ -1215,6 +1232,15 @@ class InterviewEngine:
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
         available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
+        if available_after_header <= 0:
+            # Swap the full prefix glossary for its compact one-liner BEFORE
+            # any hard cut (round-29): every prefix keeps its semantics and
+            # the retained initial context keeps priority.
+            full_hints = getattr(self, "_answer_prefix_hints_full", None)
+            compact_hints = getattr(self, "_answer_prefix_hints_compact", None)
+            if full_hints and compact_hints and full_hints in dynamic_header:
+                dynamic_header = dynamic_header.replace(full_hints, compact_hints, 1)
+                available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
             dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
             perspective_panel = ""

@@ -465,6 +465,23 @@ class InputValidator:
         "user_preferences",
     }
 
+    @staticmethod
+    def _is_fanout_result_content_path(key: str) -> bool:
+        """Return True for ``results[i].content...`` paths in fan-out re-entry.
+
+        ``ouroboros_submit_fanout_results.results[*].content`` carries child
+        subagent outputs verbatim — LLM advisory prose and structured findings
+        that legitimately mention ``;``, ``|``, ``subprocess``, or ``../`` (a
+        code_context finding quoting real code is normal). The content subtree
+        is pure data correlated back to synthesis and never reaches a shell,
+        so it is exempt from ALL lexical checks; the routing fields around it
+        (``key``, ``fanout_id``, ``correlation_key``) stay fully validated.
+        Found by live re-entry with real subagents (Q00/ouroboros#1671).
+        """
+        return key.startswith("results[") and (
+            ".content." in key or key.endswith(".content") or ".content[" in key
+        )
+
     def __init__(self) -> None:
         """Initialize validator."""
         self._validators: dict[str, Callable[[dict[str, Any]], Result[None, str]]] = {}
@@ -526,7 +543,13 @@ class InputValidator:
                     pairs.extend(_collect_strings(v, f"{prefix}[{i}]"))
             return pairs
 
+        # The content-subtree exemption is scoped to the one tool with that
+        # shape so future tools with a `results` argument do not silently
+        # inherit the lexical-check bypass.
+        content_exempt_tool = tool_name == "ouroboros_submit_fanout_results"
         for key, value in _collect_strings(arguments):
+            if content_exempt_tool and self._is_fanout_result_content_path(key):
+                continue
             for pattern in dangerous_patterns:
                 if pattern in value:
                     return Result.err(

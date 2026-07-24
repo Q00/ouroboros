@@ -490,7 +490,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_start_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_start_execute_seed": ("workspace_write", "event_store_write"),
     "ouroboros_start_ralph": ("workspace_write", "event_store_write"),
-    "ouroboros_submit_fanout_results": (),
+    "ouroboros_submit_fanout_results": ("session_state_write",),
 }
 
 _EXPECTED_MUTATION_TARGETS_BY_SIDE_EFFECT = {
@@ -798,7 +798,6 @@ _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_query_events",
     "ouroboros_query_projection",
     "ouroboros_session_status",
-    "ouroboros_submit_fanout_results",
 }
 
 _EXPECTED_OUROBOROS_TOOL_RETRY = {
@@ -922,7 +921,10 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_start_evolve_step": _BACKGROUND_INTERRUPT,
     "ouroboros_start_execute_seed": _BACKGROUND_INTERRUPT,
     "ouroboros_start_ralph": _BACKGROUND_INTERRUPT,
-    "ouroboros_submit_fanout_results": _READ_ONLY_INTERRUPT,
+    # Re-entry writes session state, so it carries the soft interrupt of the
+    # other state-writing synchronous handlers instead of claiming the
+    # read-only contract (round-8).
+    "ouroboros_submit_fanout_results": {"supported": True, "mode": "soft"},
 }
 
 _UNSUPPORTED_CANCEL = {
@@ -2831,7 +2833,9 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
-        "ouroboros_submit_fanout_results",
+        # ouroboros_submit_fanout_results is status-mode but NOT read-only:
+        # re-entry accumulates partial submissions and marks completed
+        # fan-outs terminal on the persisted record (Q00/ouroboros#1671).
     }
 
     assert expected_query_status_projection_tools == _EXPECTED_READ_ONLY_OUROBOROS_TOOLS
@@ -4937,6 +4941,8 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "include_recommended_draft": True,
         "preserve_user_agency": True,
         "forward_to_mcp_only_after_user_or_auto_confirm": True,
+        # No-auto-confirm for data output is machine-readable (round-7).
+        "confirmation_overrides": {"data_context": "user_confirm_only_no_auto_confirm"},
     }
     assert fanout["response_payload_refs"]["plugin"] == "parent_runtime.ouroboros_dispatch.children"
     assert fanout["response_payload_refs"]["requires_prose_parsing"] is False
@@ -4947,15 +4953,299 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     assert set(lane_by_id) == {
         "code_context",
         "web_context",
+        "data_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
     }
     assert lane_by_id["code_context"]["capability"] == "inspect_code"
     assert lane_by_id["web_context"]["capability"] == "web_research"
+    assert lane_by_id["data_context"]["capability"] == "call_mcp"
     assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
     assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
     assert lane_by_id["architecture_implications"]["persona"] == "architect"
+
+
+def test_question_advisory_data_context_lane_ships_read_only_proposer_policy() -> None:
+    """The data_context lane is a read-only proposer (Q00/ouroboros#1671).
+
+    The machine-readable ``data_policy`` block is what hosts with permission
+    systems enforce; the lane prompt is the fallback. The evidence policy caps
+    what can flow into persisted interview state (aggregates only, no raw
+    rows, PII scrub) — a ship blocker per the discussion, so pin it here.
+    """
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
+    data_lane = lane_by_id["data_context"]
+
+    assert data_lane["required"] is False
+    policy = data_lane["data_policy"]
+    assert policy["read_only"] is True
+    assert policy["aggregate_only"] is True
+    assert policy["relevance_gate"] == "decide_from_question_text_before_any_tool_call"
+    assert policy["direct_execution_scope"] == "local_free_read_only_lookups_only"
+    assert policy["metered_or_uncertain_sources"] == "return_proposed_queries_without_executing"
+    assert policy["error_shaped_tool_output"] == "return_no_evidence_finding"
+    assert "drop" in policy["forbidden_operation_patterns"]
+    assert "save" in policy["forbidden_operation_patterns"]
+
+    evidence = policy["evidence_policy"]
+    assert evidence["aggregates_only"] is True
+    assert evidence["raw_rows_allowed"] is False
+    assert evidence["pii_scrub_required"] is True
+    assert evidence["max_evidence_items"] == 5
+    assert evidence["max_evidence_chars"] == 2000
+
+    # Host duties ride the wire contract, not skill prose (the skill stays
+    # thin like code_context): proposed-query gating and [from-data]
+    # forwarding are part of the versioned runtime_instruction.
+    instruction = fanout["runtime_instruction"]
+    assert "proposed_queries only after the user confirms" in instruction
+    assert "[from-data]" in instruction
+
+
+def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> None:
+    """The data lane's answer contract has no grade clause (Q00/ouroboros#1671).
+
+    Unlike ``code_fact_investigation_answer.v1`` there is no
+    ``prefix_semantics`` and no auto-confirmed path — every data answer
+    requires user confirmation, and the form exists so the confirming user
+    decides with full context (evidence, unexecuted proposed_queries with
+    source_class, caveats). The serialized contract must also fit WHOLE in
+    the subagent prompt budget: a torn form defeats informed consent.
+    """
+    import json
+
+    from ouroboros.mcp.tools.subagent import (
+        _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+        _bounded_json,
+    )
+
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    lane_by_id = {lane["lane_id"]: lane for lane in fanout["lanes"]}
+    contract = lane_by_id["data_context"]["answer_contract"]
+
+    assert contract["contract_id"] == "data_evidence_answer.v1"
+    # No grade clause: confirmation is unconditional, auto-confirm nonexistent.
+    assert "prefix_semantics" not in contract
+    assert "auto-confirmed" not in json.dumps(contract["response_model_schema"])
+    schema = contract["response_model_schema"]
+    Draft202012Validator.check_schema(schema)
+    assert schema["properties"]["requires_user_confirmation"] == {"const": True}
+    # Proposed queries are executed only by the parent after user confirmation.
+    assert contract["proposed_query_semantics"] == {
+        "execution": "parent_session_only_after_user_confirmation",
+        "auto_execution": "forbidden",
+    }
+    # Informed-consent fields the confirming user needs are required.
+    for field in ("data_needed", "finding", "evidence", "proposed_queries", "confidence"):
+        assert field in schema["required"]
+    # Whole-form delivery invariant: the rendered contract is never truncated.
+    rendered = _bounded_json(contract, _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS)
+    assert "[truncated]" not in rendered
+
+    validator = Draft202012Validator(schema)
+    noop = {
+        "lane_id": "data_context",
+        "data_needed": False,
+        "finding": "No data evidence is needed for this question.",
+        "confidence": "no_evidence",
+        "evidence": [],
+        "proposed_queries": [],
+        "requires_user_confirmation": True,
+    }
+    validator.validate(noop)
+    # A data-needed answer must carry evidence or proposed queries.
+    empty_but_needed = {**noop, "data_needed": True}
+    assert list(validator.iter_errors(empty_but_needed))
+    proposer = {
+        **noop,
+        "data_needed": True,
+        "proposed_queries": [
+            {
+                "tool_name": "clickhouse_query",
+                "query": "SELECT count(DISTINCT user_id) FROM events WHERE ...",
+                "expected_decision": "Whether the flow is actually used.",
+                "source_class": "external",
+            }
+        ],
+    }
+    validator.validate(proposer)
+    # confidence is tied to execution: reported_by_tool without a single
+    # executed evidence item (proposal-only response) is a contract violation.
+    assert list(validator.iter_errors({**proposer, "confidence": "reported_by_tool"}))
+    executed = {
+        **noop,
+        "data_needed": True,
+        "confidence": "reported_by_tool",
+        "evidence": [
+            {
+                "source": "clickhouse_query",
+                "query_summary": "count distinct MAU by plan tier",
+                "value": "78% of MAU are on the free tier",
+                "observed_at": "2026-07-22T02:00:00+09:00",
+            }
+        ],
+        "caveats": ["Point-in-time aggregate; may change after re-query."],
+    }
+    validator.validate(executed)
+    # Executed evidence must carry its observation timestamp and at least one
+    # point-in-time caveat.
+    missing_observed_at = {
+        **executed,
+        "evidence": [{k: v for k, v in executed["evidence"][0].items() if k != "observed_at"}],
+    }
+    assert list(validator.iter_errors(missing_observed_at))
+    missing_caveats = {k: v for k, v in executed.items() if k != "caveats"}
+    assert list(validator.iter_errors(missing_caveats))
+    # Provenance must be substantive: empty strings and non-timestamp
+    # observed_at values are rejected (bot-review round-2 probe).
+    empty_source = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "source": ""}],
+    }
+    assert list(validator.iter_errors(empty_source))
+    bad_timestamp = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "not-a-timestamp"}],
+    }
+    assert list(validator.iter_errors(bad_timestamp))
+    date_only = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "2026-07-22"}],
+    }
+    validator.validate(date_only)
+    # Digit-shaped garbage is not a timestamp: month 99 / hour 99 previously
+    # matched the digits-only pattern (bot-review round-3 probe).
+    out_of_range_timestamp = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "observed_at": "2026-99-99T99:::"}],
+    }
+    assert list(validator.iter_errors(out_of_range_timestamp))
+    # The evidence boundary is part of the contract: email-shaped (PII) and
+    # credential-shaped values are raw evidence, never an aggregate.
+    pii_value = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "alice@example.com token=sk-live-123"}],
+    }
+    assert list(validator.iter_errors(pii_value))
+    # Aggregate-only means aggregate-shaped (bot-review round-4 probe): a
+    # JSON-encoded row list and phone-shaped digit groups are raw evidence.
+    row_value = {
+        **executed,
+        "evidence": [
+            {
+                **executed["evidence"][0],
+                "value": '[{"name": "Alice Kim", "phone": "010-1234-5678"}]',
+            }
+        ],
+    }
+    assert list(validator.iter_errors(row_value))
+    phone_value = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "top customer phone 010-1234-5678"}],
+    }
+    assert list(validator.iter_errors(phone_value))
+    # Hyphenated vocabulary is NOT a credential (round-4 false-positive fix).
+    vocabulary_value = {
+        **executed,
+        "evidence": [
+            {**executed["evidence"][0], "value": "aggregate token-counts by plan tier: 12,400 avg"}
+        ],
+    }
+    validator.validate(vocabulary_value)
+    # An evidence value is a MEASUREMENT (round-18): aggregation is numeric,
+    # so a digit-free value — including any-delimiter name rosters — never
+    # validates; qualitative context belongs in finding.
+    no_measurement = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "premium tier dominates"}],
+    }
+    assert list(validator.iter_errors(no_measurement))
+    # The confidence constraint is two-way (round-12): executed evidence
+    # alongside confidence="no_evidence" is contradictory consent state.
+    contradictory_confidence = {**executed, "confidence": "no_evidence"}
+    assert list(validator.iter_errors(contradictory_confidence))
+    # An unexecuted proposal with empty tool/query/decision fields is not a
+    # proposal the parent session can run and judge.
+    empty_proposal = {
+        **noop,
+        "data_needed": True,
+        "proposed_queries": [
+            {"tool_name": "", "query": "", "expected_decision": "", "source_class": "external"}
+        ],
+    }
+    assert list(validator.iter_errors(empty_proposal))
+
+
+def test_question_advisory_v1_schema_accepts_unknown_lanes_and_capabilities() -> None:
+    """v1 forward-compatibility is real, not just prose.
+
+    Bot-review probe (PR #1703): the previous closed enums rejected any
+    additive lane, contradicting ``lane_compatibility_rules``. A host or
+    engine one lane ahead of this schema must still validate.
+    """
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+    schema = fanout["request_model_schema"]
+
+    question = "Which users need this first?"
+    request = {
+        "contract_id": fanout["contract_id"],
+        "session_id": "sess-123",
+        "question_identity": stable_code_investigation_question_identity(question),
+        "question": question,
+        "phase": "answer",
+        "user_question_first": True,
+        "advisory_goal": "help_human_answer_interview_question",
+        "parallel_preference": fanout["parallel_preference"],
+        "sequential_fallback": dict(fanout["sequential_fallback"]),
+        "allowed_capabilities": ["inspect_code", "future_capability"],
+        "lanes": [
+            *fanout["lanes"],
+            {
+                "lane_id": "future_lane",
+                "purpose": "A lane added after this schema shipped.",
+                "capability": "future_capability",
+                "required": False,
+                "future_block": {"anything": True},
+            },
+        ],
+        "synthesis_contract": dict(fanout["synthesis_contract"]),
+        "mcp_tool_capability": metadata,
+    }
+
+    Draft202012Validator(schema).validate(request)
+
+
+def test_question_advisory_v1_contract_carries_lane_compatibility_rules() -> None:
+    """v1-in-place lane additions require explicit host compatibility rules."""
+    metadata = ouroboros_tool_capability_metadata("ouroboros_interview")
+    fanout = metadata["orchestration"]["question_advisory_fanout"]
+
+    assert fanout["contract_id"] == "interview_question_advisory_fanout.v1"
+    assert fanout["lane_compatibility_rules"] == {
+        "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+        # Skipping is legal only for OPTIONAL unknown lanes: a required
+        # unknown lane gates completion and must never be dropped.
+        "unknown_required_lane": "dispatch_generic_or_return_noop_finding_never_skip",
+        "unsupported_capability": "dispatch_and_return_noop_finding",
+        "noop_finding_is_completion_signal": True,
+    }
+    # The data lane's no-auto-confirm rule is machine-readable at synthesis
+    # time, not prose-only (bot-review round-7).
+    assert fanout["synthesis_contract"]["confirmation_overrides"] == {
+        "data_context": "user_confirm_only_no_auto_confirm",
+    }
+    # The enforceable root grammar is DECLARED in the public contract
+    # (round-24 follow-through): unsupported forms are excluded by contract,
+    # not by undeclared narrowing.
+    lane_props = fanout["request_model_schema"]["properties"]["lanes"]["items"]["properties"]
+    contract_description = lane_props["answer_contract"]["description"]
+    assert "ENFORCEABLE ROOT GRAMMAR" in contract_description
+    assert "by contract, not omission" in contract_description
 
 
 def test_question_advisory_request_model_validates_parent_runtime_payload() -> None:

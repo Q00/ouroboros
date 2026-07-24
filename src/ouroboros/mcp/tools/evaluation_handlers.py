@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import ValidationError as PydanticValidationError
 import structlog
@@ -1639,13 +1640,31 @@ class LateralThinkHandler(BridgeAwareMixin):
                 # natural response documents alternative-thinking metadata.
                 # Expose persona_count + dispatch status at top level so callers
                 # can branch on delegation without parsing the envelope.
+                plugin_shape: dict[str, Any] = {
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "persona_count": len(payloads),
+                }
+                # Transport parity (bot-review round-16): the plugin envelope
+                # must carry the same durable re-entry contract as the inline
+                # paths — register the fan-out and stamp its identity BEFORE
+                # returning, with the same generated-owner boundary.
+                if self.fanout_registry is not None:
+                    plugin_owner = str(arguments.get("session_id") or "")
+                    if not plugin_owner:
+                        plugin_owner = f"lateral-{uuid4().hex[:16]}"
+                    plugin_fanout_id = register_lateral_persona_fanout(
+                        self.fanout_registry,
+                        session_id=plugin_owner,
+                        payloads=payloads,
+                    )
+                    if plugin_fanout_id is not None:
+                        plugin_shape["fanout_id"] = plugin_fanout_id
+                        plugin_shape["result_correlation_key"] = "context.persona"
+                        plugin_shape["session_id"] = plugin_owner
                 return build_multi_subagent_result(
                     payloads,
-                    response_shape={
-                        "status": "delegated_to_subagent",
-                        "dispatch_mode": "plugin",
-                        "persona_count": len(payloads),
-                    },
+                    response_shape=plugin_shape,
                 )
 
             # --- Inline/sequential fallback: concatenate persona prompts ---
@@ -1728,11 +1747,26 @@ class LateralThinkHandler(BridgeAwareMixin):
             if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
             if self.fanout_registry is not None:
-                dispatch_record["fanout_id"] = register_lateral_persona_fanout(
+                owner_session = str(arguments.get("session_id") or "")
+                if not owner_session:
+                    # ouroboros_lateral_think declares no session parameter,
+                    # and a record registered without identity skips the
+                    # strict correlation check — any session could complete
+                    # it (bot-review round-16). A generated owner token,
+                    # stamped on the dispatch record, restores the ownership
+                    # boundary: only a caller echoing it can submit.
+                    owner_session = f"lateral-{uuid4().hex[:16]}"
+                lateral_fanout_id = register_lateral_persona_fanout(
                     self.fanout_registry,
-                    session_id=str(arguments.get("session_id") or ""),
+                    session_id=owner_session,
                     payloads=payloads,
                 )
+                # A fan-out id whose record could not be persisted is not
+                # redeemable at re-entry: skip stamping instead of advertising
+                # an id whose first submission is unknown_fanout_id.
+                if lateral_fanout_id is not None:
+                    dispatch_record["fanout_id"] = lateral_fanout_id
+                    dispatch_record["session_id"] = owner_session
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (
@@ -1910,6 +1944,14 @@ class LateralThinkHandler(BridgeAwareMixin):
             )
 
 
+# Re-entry input bounds: fan-out results become durable state (received
+# results AND the terminal outcome), so an unbounded submission is a direct
+# disk/memory amplification vector. Both caps are generous multiples of the
+# largest legitimate lane set.
+_MAX_FANOUT_RESULT_ITEMS = 32
+_MAX_FANOUT_RESULTS_BYTES = 262_144  # 256 KB serialized per submission
+
+
 @dataclass
 class SubmitFanoutResultsHandler:
     """Handler for the ``ouroboros_submit_fanout_results`` re-entry tool.
@@ -1939,15 +1981,33 @@ class SubmitFanoutResultsHandler:
                 "subagents declared by a prior tool's `meta` (which stamped a "
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A complete set returns the "
-                "synthesis to continue with; a partial set returns "
-                "`status=partial` with the missing keys so you can resubmit."
+                "correlation field for that child. Statuses: `complete` returns "
+                "the synthesis (with `missing_optional_keys`, rejected "
+                "`unexpected_keys`, and any `contract_violations`); `partial` "
+                "lists `missing_keys`/`missing_required_keys` (and "
+                "`synthesis_rejected_keys` for content the synthesizer refused) "
+                "so you can resubmit the remainder — `accumulation_persisted: "
+                "false` means resubmit those lanes too; `accumulated` "
+                "(finalize=false) holds the batch without completing so later "
+                "optional lanes are not discarded; "
+                "`completion_not_persisted` means the synthesis succeeded but "
+                "the terminal write failed, so resubmit; `already_complete` "
+                "replays the immutable terminal outcome; `correlation_mismatch` "
+                "/ `unknown_fanout_id` are clean errors. Submissions are "
+                f"bounded: at most {_MAX_FANOUT_RESULT_ITEMS} results and "
+                f"{_MAX_FANOUT_RESULTS_BYTES // 1024} KB serialized per call."
             ),
             parameters=(
                 MCPToolParameter(
                     name="session_id",
                     type=ToolInputType.STRING,
-                    description="Interview/lateral session id the fan-out belongs to.",
+                    description=(
+                        "Interview/lateral session id the fan-out belongs to. "
+                        "Effectively required: every current producer registers "
+                        "it, and omitting a registered identity is a "
+                        "correlation_mismatch. Schema-optional ONLY for legacy "
+                        "records registered without a session identity."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -1961,7 +2021,10 @@ class SubmitFanoutResultsHandler:
                     type=ToolInputType.STRING,
                     description=(
                         "The result_correlation_key from the originating meta "
-                        "(e.g. 'context.persona' or 'code_facts')."
+                        "(e.g. 'context.persona' or 'code_facts'). Effectively "
+                        "required, like session_id: omitting a registered "
+                        "correlation key is a correlation_mismatch; "
+                        "schema-optional only for legacy identity-less records."
                     ),
                     required=False,
                 ),
@@ -1974,6 +2037,22 @@ class SubmitFanoutResultsHandler:
                         "result, object or text)."
                     ),
                     required=True,
+                ),
+                MCPToolParameter(
+                    name="finalize",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Sequential-submission control (question-advisory "
+                        "fan-outs only): pass false to accumulate this batch "
+                        "WITHOUT completing the fan-out (status='accumulated'), "
+                        "so optional lanes submitted after the required set are "
+                        "not discarded. Omit (or pass true) on the last "
+                        "submission to complete. Single-batch submissions omit "
+                        "it; other fan-out kinds validate content at synthesis "
+                        "and reject finalize=false (status="
+                        "'finalize_unsupported')."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -2000,14 +2079,51 @@ class SubmitFanoutResultsHandler:
                     tool_name="ouroboros_submit_fanout_results",
                 )
             )
+        # Bound the RAW submission BEFORE any filtering, validation, or
+        # persistence: results are written into durable fan-out state twice
+        # (received results + the terminal outcome), so unbounded input is a
+        # disk/memory exhaustion vector — and non-dict items count against
+        # the caps too (round-6 probe: 33 strings totaling 330 KB previously
+        # bypassed both advertised limits by being filtered out first).
+        if len(raw_results) > _MAX_FANOUT_RESULT_ITEMS:
+            return Result.err(
+                MCPToolError(
+                    f"results carries {len(raw_results)} items; at most "
+                    f"{_MAX_FANOUT_RESULT_ITEMS} results are accepted per "
+                    "submission",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+        try:
+            serialized_size = len(
+                json.dumps(list(raw_results), ensure_ascii=False).encode("utf-8", "replace")
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "results must be JSON-serializable",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
+        if serialized_size > _MAX_FANOUT_RESULTS_BYTES:
+            return Result.err(
+                MCPToolError(
+                    f"results serializes to {serialized_size} bytes; at most "
+                    f"{_MAX_FANOUT_RESULTS_BYTES} bytes are accepted per "
+                    "submission — trim child outputs to their findings",
+                    tool_name="ouroboros_submit_fanout_results",
+                )
+            )
         results = [item for item in raw_results if isinstance(item, dict)]
 
+        raw_finalize = arguments.get("finalize")
         outcome = submit_fanout_results(
             self._registry,
             session_id=str(arguments.get("session_id") or ""),
             correlation_key=str(arguments.get("correlation_key") or ""),
             results=results,
             fanout_id=fanout_id,
+            finalize=raw_finalize if isinstance(raw_finalize, bool) else None,
         )
 
         if outcome.get("status") == "unknown_fanout_id":

@@ -235,6 +235,73 @@ class TestInputValidator:
         assert result.is_err
         assert "Shell metacharacter" in str(result.error)
 
+    def test_validate_exempts_fanout_result_content_from_lexical_checks(self) -> None:
+        """Fan-out re-entry content carries child subagent outputs verbatim.
+
+        Real advisory/code findings legitimately contain ';', '|',
+        'subprocess', and '../' (found by live re-entry with real subagents,
+        Q00/ouroboros#1671): the ``results[*].content`` subtree must pass all
+        lexical checks — shell metacharacters, dangerous patterns, and path
+        traversal alike.
+        """
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "session_id": "s1",
+                "fanout_id": "fanout_abc",
+                "correlation_key": "context.lane_id",
+                "results": [
+                    {
+                        "key": "ambiguity_contrarian",
+                        "content": {
+                            "finding": "logs exist; that does not make them usable",
+                            "suggested_options": ["read local logs; exclude analytics || fallback"],
+                        },
+                    },
+                    {
+                        "key": "code_context",
+                        "content": {
+                            "finding": (
+                                "the CLI shells out via subprocess.run and reads "
+                                "open('../config/settings.yaml')"
+                            ),
+                            "evidence": ["src/cli/main.py uses os.system for legacy hooks"],
+                        },
+                    },
+                ],
+            },
+        )
+
+        assert result.is_ok
+
+    def test_validate_still_checks_fanout_routing_fields(self) -> None:
+        """Only the content subtree is exempt — routing fields stay validated."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "session_id": "s1",
+                "fanout_id": "fanout_abc; rm -rf /tmp/nope",
+                "correlation_key": "context.lane_id",
+                "results": [{"key": "code_context", "content": "ok"}],
+            },
+        )
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
+
+    def test_validate_content_exemption_is_scoped_to_the_fanout_tool(self) -> None:
+        """Other tools with a results-shaped argument keep full lexical checks."""
+        validator = InputValidator()
+        result = validator.validate(
+            "some_future_tool",
+            {"results": [{"key": "x", "content": "run this; rm -rf /tmp/nope"}]},
+        )
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)
+
     def test_validate_allows_user_preferences_punctuation_as_freetext(self) -> None:
         """Operator-supplied user_preferences carry freetext, never shell input."""
         validator = InputValidator()

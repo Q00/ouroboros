@@ -6,6 +6,7 @@ Contains handlers for interview and seed generation tools:
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -61,12 +62,14 @@ from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     SubagentDispatchMode,
+    _mutating_tool_verb,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
     register_question_advisory_fanout,
+    register_question_advisory_fanout_from_lanes,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
@@ -709,8 +712,13 @@ def _build_question_advisory_request(
         "advisory_goal": "help_human_answer_interview_question",
         "parallel_preference": advisory["parallel_preference"],
         "sequential_fallback": dict(advisory["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
-        "lanes": list(advisory["lanes"]),
+        "allowed_capabilities": [
+            "inspect_code",
+            "web_research",
+            "run_lateral_review",
+            "call_mcp",
+        ],
+        "lanes": _advisory_lanes_with_known_data_tools(advisory),
         "synthesis_contract": dict(advisory["synthesis_contract"]),
         "mcp_tool_capability": mcp_tool_capability,
     }
@@ -719,6 +727,44 @@ def _build_question_advisory_request(
     if code_investigation_request is not None:
         request["code_investigation_request"] = code_investigation_request
     return request
+
+
+# Known data tools from the environment are identifiers, not free text.
+# Aligned with the safe-identifier grammar used at re-entry (round-34): a
+# colon would read as a credential assignment there, so it is not part of
+# the tool-name grammar.
+_KNOWN_DATA_TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_MAX_KNOWN_DATA_TOOLS = 16
+
+
+def _advisory_lanes_with_known_data_tools(advisory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Copy advisory lanes, injecting configured ``known_data_tools``.
+
+    ``OUROBOROS_KNOWN_DATA_TOOLS`` (comma-separated MCP tool names) is the
+    public configuration source for the data lane's known tools — without it
+    only manually constructed lane metadata could exercise the contract
+    field. Lane dicts are copied so the cached capability metadata is never
+    mutated.
+    """
+    lanes = [dict(lane) for lane in advisory.get("lanes") or ()]
+    # Env values are untrusted prompt input: each entry must be a plain tool
+    # identifier (no whitespace/newlines that could smuggle prompt text), and
+    # the list is bounded. A hint whose identifier carries a mutating verb is
+    # rejected BEFORE dispatch (bot-review round-10): the plugin bridge
+    # grants the child broad permissions, and post-execution validation
+    # cannot undo a mutation the hint steered it into.
+    known_tools = [
+        item.strip()
+        for item in os.environ.get("OUROBOROS_KNOWN_DATA_TOOLS", "").split(",")
+        if item.strip()
+        and _KNOWN_DATA_TOOL_NAME.match(item.strip())
+        and _mutating_tool_verb(item.strip()) is None
+    ][:_MAX_KNOWN_DATA_TOOLS]
+    if known_tools:
+        for lane in lanes:
+            if lane.get("lane_id") == "data_context" and "known_data_tools" not in lane:
+                lane["known_data_tools"] = known_tools
+    return lanes
 
 
 def _attach_question_assist_requests(
@@ -810,11 +856,15 @@ def _attach_question_assist_requests(
         # round-trips through ``ouroboros_submit_fanout_results`` successfully
         # (#1578 registered a ``code_facts`` code-investigation record here,
         # which rejected contract-following submissions as a mismatch).
-        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
+        # ``None`` means the record could not be persisted: an id that cannot
+        # be redeemed at re-entry must not be advertised.
+        advisory_fanout_id = register_question_advisory_fanout(
             fanout_registry,
             session_id=session_id,
             payloads=advisory_payloads,
         )
+        if advisory_fanout_id is not None:
+            meta["question_advisory_fanout_id"] = advisory_fanout_id
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -948,10 +998,21 @@ def _interview_reasoning_meta(
 
 
 def _classify_interview_answer_source(answer: str) -> str:
-    """Return a coarse provenance class for an ``ooo interview`` answer."""
+    """Return a coarse provenance class for an ``ooo interview`` answer.
+
+    ``data_fact`` / ``research_fact`` are user-adopted external facts: the
+    human confirmed them before forwarding, but unlike ``repo_fact`` they are
+    point-in-time and not cheaply re-verifiable, so the intent guard treats
+    them like a typed human answer (WARN on contract change) rather than
+    silently passing them as evidence.
+    """
     lowered = str(answer).lstrip().casefold()
     if lowered.startswith("[from-code]") or lowered.startswith("[from-repo]"):
         return "repo_fact"
+    if lowered.startswith("[from-data]"):
+        return "data_fact"
+    if lowered.startswith("[from-research]"):
+        return "research_fact"
     if lowered.startswith("[from-auto]") or lowered.startswith("[from-safe-default]"):
         return "generated"
     if lowered.startswith("[from-assumption]") or lowered.startswith("[from-inference]"):
@@ -2437,6 +2498,38 @@ class InterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
 
+        # Transport parity (PR #1703 bot review rounds 4-5): the plugin child
+        # generates the question itself, so per-question lane payloads cannot
+        # be pre-built here — but the plugin transport must still receive the
+        # SAME machine-readable advisory contract as host-driven mode. The
+        # bridge dispatches ONLY ``_subagent.prompt`` to the child, so the
+        # ACTUAL fan-out id and the data lane's answer contract are embedded
+        # in the child prompt itself (round 5 B1: parent response meta alone
+        # never reaches the child); the parent meta carries them too for the
+        # host side of re-entry.
+        plugin_advisory_meta: dict[str, Any] = {}
+        plugin_fanout_id: str | None = None
+        plugin_advisory_contract: dict[str, Any] | None = None
+        plugin_registry = self._resolved_fanout_registry()
+        if plugin_registry is not None:
+            advisory_metadata = ouroboros_tool_capability_metadata("ouroboros_interview")[
+                "orchestration"
+            ]["question_advisory_fanout"]
+            plugin_advisory_contract = {
+                **advisory_metadata,
+                "lanes": _advisory_lanes_with_known_data_tools(advisory_metadata),
+            }
+            plugin_fanout_id = register_question_advisory_fanout_from_lanes(
+                plugin_registry,
+                session_id=real_session_id or "new",
+                lanes=plugin_advisory_contract["lanes"],
+            )
+            plugin_advisory_meta["question_advisory_fanout"] = plugin_advisory_contract
+            plugin_advisory_meta["question_advisory_result_correlation_key"] = "context.lane_id"
+            # None means the record could not be persisted: never advertise a
+            # fan-out id that cannot be redeemed at re-entry.
+            if plugin_fanout_id is not None:
+                plugin_advisory_meta["question_advisory_fanout_id"] = plugin_fanout_id
         payload = build_interview_subagent(
             session_id=real_session_id or "new",
             action=action,
@@ -2446,6 +2539,8 @@ class InterviewHandler:
             transcript=transcript,
             turn_context=turn_context,
             adapter_question=adapter_question,
+            advisory_fanout_id=plugin_fanout_id,
+            advisory_fanout_contract=plugin_advisory_contract,
         )
         return await dispatch_plugin_terminal(
             self.event_store,
@@ -2458,6 +2553,7 @@ class InterviewHandler:
                 "dispatch_mode": "plugin",
                 "question_advisory_strategy": "plugin_child_question_first_advisory",
                 "question_advisory_recommended": True,
+                **plugin_advisory_meta,
                 **_interview_reasoning_meta(
                     state=plugin_state,
                     session_id=real_session_id,

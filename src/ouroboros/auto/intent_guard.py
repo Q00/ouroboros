@@ -251,6 +251,18 @@ _HUMAN_ANSWER_SOURCES = {
     "user_response",
 }
 
+# Externally sourced facts the human explicitly confirmed before forwarding
+# ([from-data] / [from-research] answers). Unlike repo_fact they are
+# point-in-time and not cheaply re-verifiable, so they never earn the silent
+# evidence pass on contract changes — they get the same "confirm this scope
+# change is intentional" WARN a directly typed human answer gets, and must
+# never fail closed as generated.
+_USER_ADOPTED_ANSWER_SOURCES = {
+    "data_fact",
+    "research_fact",
+    *_HUMAN_ANSWER_SOURCES,
+}
+
 _EVIDENCE_ANSWER_SOURCES = {
     "user_goal",
     "user_preference",
@@ -357,7 +369,7 @@ def guard_interview_turn(
         return IntentGuardReport(tuple(checks))
 
     source = answer_source.strip().casefold()
-    if source in _HUMAN_ANSWER_SOURCES:
+    if source in _USER_ADOPTED_ANSWER_SOURCES:
         checks.append(
             IntentGuardCheck(
                 code="user_contract_change",

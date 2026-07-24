@@ -33,10 +33,13 @@ Payload structure:
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -69,6 +72,12 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
 _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
+# The data_context answer contract must reach the subagent WHOLE — a torn form
+# defeats its informed-consent purpose (the code contract is truncated at the
+# generic budget above; see Q00/ouroboros#1671 follow-ups). Pinned by tests.
+# Sized above the rendered contract with headroom for boundary-pattern
+# additions (the evidence policy patterns live inside the schema).
+_INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS = 8_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -1145,6 +1154,106 @@ Return ONLY the JSON verdict object. No other text."""
     )
 
 
+def _plugin_advisory_contract_section(
+    advisory_fanout_id: str | None,
+    advisory_fanout_contract: Mapping[str, Any] | None,
+    session_id: str = "",
+) -> str:
+    """Render the ACTUAL advisory re-entry contract into the child prompt.
+
+    The OpenCode bridge dispatches only ``_subagent.prompt`` to the child —
+    parent response meta never reaches it — so the concrete fan-out id, the
+    lane table, the data policy, and the COMPLETE ``data_evidence_answer.v1``
+    contract must ride the prompt itself (PR #1703 round 5 B1). The data
+    contract is rendered whole: a torn form defeats informed consent.
+    """
+    if not advisory_fanout_contract:
+        return ""
+    lane_lines = []
+    data_policy: Any = None
+    known_data_tools: Any = None
+    contract_blocks: list[str] = []
+    for lane in advisory_fanout_contract.get("lanes") or ():
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        lane_lines.append(
+            f"- {lane_id} (capability={lane.get('capability')}, "
+            f"required={bool(lane.get('required'))})"
+        )
+        # EVERY lane contract is rendered, not just the data lane's
+        # (bot-review round-9 probe): re-entry enforces any registered
+        # contract, so an additive lane's contract omitted here would make
+        # the promised v1 path unsatisfiable for the plugin child. Oversized
+        # contracts are excluded WHOLE (round-11): registration skips them
+        # too, so nothing enforced was ever torn.
+        lane_contract = lane.get("answer_contract")
+        if isinstance(lane_contract, Mapping):
+            contract_id = str(lane_contract.get("contract_id") or "unversioned")
+            if _enforceable_lane_contract(lane_contract):
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}, complete — fill this "
+                    "form exactly; it is validated server-side at re-entry):\n"
+                    + (_canonical_contract_json(lane_contract) or "{}")
+                )
+            elif lane_id == "data_context":
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}): full form "
+                    "OMITTED (oversized or invalid) — its schema is not "
+                    "enforced, but the data_policy above still binds and IS "
+                    "enforced at re-entry: return one JSON object with "
+                    "aggregates-only, PII-scrubbed evidence and "
+                    "requires_user_confirmation: true."
+                )
+            else:
+                contract_blocks.append(
+                    f"{lane_id} answer contract ({contract_id}): OMITTED — it "
+                    "exceeds the whole-form delivery budget or carries an "
+                    "invalid schema, and is therefore NOT enforced at "
+                    "re-entry; return the generic output shape for this lane."
+                )
+        if lane_id == "data_context":
+            data_policy = lane.get("data_policy")
+            known_data_tools = lane.get("known_data_tools")
+    fanout_line = (
+        f"fanout_id: {advisory_fanout_id}"
+        if advisory_fanout_id
+        else "fanout_id: (registration unavailable — skip re-entry this turn)"
+    )
+    policy_json = json.dumps(data_policy, ensure_ascii=False) if data_policy else "{}"
+    contracts_section = (
+        "\n\n".join(contract_blocks) if contract_blocks else "(no lane carries an answer contract)"
+    )
+    known_tools_line = (
+        f"\ndata_context known_data_tools: {json.dumps(known_data_tools, ensure_ascii=False)}"
+        if isinstance(known_data_tools, list) and known_data_tools
+        else ""
+    )
+    # session_id is part of the re-entry identity: the record is registered
+    # with it and correlation is strict, so a recipe omitting it would send
+    # a contract-following child straight into correlation_mismatch
+    # (bot-review round-8 probe).
+    session_line = f"session_id: {session_id}" if session_id else "session_id: (none registered)"
+    return f"""
+### Advisory Re-entry Contract (actual values)
+{fanout_line}
+{session_line}
+result_correlation_key: context.lane_id
+lanes:
+{chr(10).join(lane_lines)}{known_tools_line}
+
+data_context data_policy (enforce, do not just read):
+{policy_json}
+
+{contracts_section}
+
+After the advisory lanes run, submit one {{"key": <lane_id>, "content":
+<lane output>}} per dispatched lane via `ouroboros_submit_fanout_results`,
+passing ALL THREE identity arguments exactly as above: the fanout_id, the
+session_id, and correlation_key `context.lane_id` (omitting session_id or
+the correlation key is a correlation_mismatch, not a skipped check)."""
+
+
 def build_interview_subagent(
     *,
     session_id: str,
@@ -1155,6 +1264,8 @@ def build_interview_subagent(
     transcript: str = "",
     turn_context: Any | None = None,
     adapter_question: str | None = None,
+    advisory_fanout_id: str | None = None,
+    advisory_fanout_contract: Mapping[str, Any] | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
@@ -1164,6 +1275,12 @@ def build_interview_subagent(
     Args:
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
+        advisory_fanout_id: Registered advisory fan-out id for this turn;
+            embedded VERBATIM in the child prompt so the plugin child can
+            perform re-entry (the bridge dispatches only the prompt).
+        advisory_fanout_contract: The versioned ``question_advisory_fanout``
+            block; its lane table, data policy, and complete data answer
+            contract are rendered into the prompt.
     """
     from ouroboros.agents.loader import load_agent_prompt
 
@@ -1172,9 +1289,14 @@ def build_interview_subagent(
     plugin_question_advisory = """
 ## Question-first Advisory Fanout
 1. Show the interview question first.
-2. Then add a compact helper from: code_context, web_context, ambiguity_contrarian,
-   answer_simplifier, architecture_implications.
-3. Offer options, a draft, or unresolved ambiguities; preserve user agency."""
+2. Then add a compact helper from: code_context, web_context, data_context,
+   ambiguity_contrarian, answer_simplifier, architecture_implications.
+3. Offer options, a draft, or unresolved ambiguities; preserve user agency.
+4. Follow each lane's contract below — `data_context` is a read-only
+   proposer whose answers always require user confirmation — and submit
+   lane outputs back via `ouroboros_submit_fanout_results`.""" + _plugin_advisory_contract_section(
+        advisory_fanout_id, advisory_fanout_contract, session_id
+    )
 
     transcript_section = ""
     if transcript:
@@ -1336,10 +1458,14 @@ def build_interview_question_advisory_subagents(
 
         persona = str(raw_lane.get("persona") or "").strip()
         agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+            "researcher"
+            if capability in {"inspect_code", "web_research", "call_mcp"}
+            else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
+        data_policy = raw_lane.get("data_policy")
+        lane_answer_contract = raw_lane.get("answer_contract")
 
         if lane_id == "code_context":
             lane_task = (
@@ -1355,6 +1481,89 @@ def build_interview_question_advisory_subagents(
                 "If no current web facts are needed, return that no-op finding."
             )
             extra = "Use web research only when the answer depends on current external facts."
+        elif lane_id == "data_context":
+            # Read-only proposer lane (Q00/ouroboros#1671): relevance is decided
+            # before any tool call, direct execution covers only local free
+            # read-only lookups, and everything metered or side-effect-ambiguous
+            # comes back as proposed queries for the parent session to run
+            # after user confirmation.
+            lane_task = (
+                "Decide from the question text alone, BEFORE any tool call, "
+                "whether the answer depends on data evidence (metrics, database "
+                "or warehouse facts, usage numbers). If it does not, return the "
+                "no-op finding immediately. If it does, discover data-related "
+                "MCP tools available in this runtime by their names and "
+                "descriptions. Directly execute only obviously local, free, "
+                "read-only lookups. For metered, external, or "
+                "side-effect-ambiguous sources, do NOT execute: return the "
+                "queries you would run as proposed_queries so the parent "
+                "session can run them after user confirmation. Never run "
+                "mutating operations. Return aggregates and summaries only — "
+                "never raw rows — and scrub anything that looks like PII. "
+                "Every evidence value must state its NUMERIC measurement "
+                "(count, share, duration); qualitative context belongs in "
+                "the finding field. "
+                "Treat error-shaped tool output (for example an HTTP 200 body "
+                "carrying an error envelope) as no evidence, not as evidence. "
+                "If this runtime has no MCP or data-tool access, return the "
+                "no-op finding: the no-op IS your completion signal, so never "
+                "skip returning a result."
+            )
+            data_policy_json = _bounded_json(data_policy, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
+            # Rendering uses the SAME enforceability decision as registration
+            # (bot-review round-13): an undeliverable contract is never
+            # rendered truncated while claiming to supersede the generic
+            # shape — instead the child is told the schema is unenforced but
+            # the data policy still binds (registration keeps a minimal
+            # object contract, so the boundary scan stays active).
+            if isinstance(lane_answer_contract, Mapping) and _enforceable_lane_contract(
+                lane_answer_contract
+            ):
+                answer_contract_json = _canonical_contract_json(lane_answer_contract) or "{}"
+                contract_block = f"## Answer Contract\n```json\n{answer_contract_json}\n```\n"
+                output_rule = (
+                    "For this lane the generic Output section below is superseded: "
+                    "return EXACTLY one JSON object matching the answer contract's "
+                    "response_model_schema. It exists so the confirming user can "
+                    "decide with full context — executed evidence, deliberately "
+                    "unexecuted proposed_queries with their source_class, and "
+                    "caveats."
+                )
+            else:
+                contract_block = (
+                    "## Answer Contract\n"
+                    "The declared data answer contract could not be delivered "
+                    "whole (oversized or invalid), so its full schema is NOT "
+                    "enforced at re-entry.\n"
+                )
+                output_rule = (
+                    "The Data Access Policy above still binds and IS enforced "
+                    "at re-entry: return ONE JSON object with aggregates-only, "
+                    "PII-scrubbed evidence, point-in-time caveats, and "
+                    "requires_user_confirmation: true."
+                )
+            raw_known_tools = raw_lane.get("known_data_tools")
+            known_tools = (
+                [str(tool) for tool in raw_known_tools if str(tool).strip()]
+                if isinstance(raw_known_tools, (list, tuple))
+                else []
+            )
+            known_tools_hint = (
+                (
+                    "## Known Data Tools Hint\n"
+                    "Prefer these host-known data MCP tools before free discovery: "
+                    f"{', '.join(known_tools)}\n"
+                )
+                if known_tools
+                else ""
+            )
+            extra = (
+                "## Data Access Policy\n"
+                f"```json\n{data_policy_json}\n```\n"
+                f"{contract_block}"
+                f"{known_tools_hint}"
+                f"{output_rule}"
+            )
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
                 "Challenge the question and the likely answer. Identify hidden "
@@ -1377,6 +1586,38 @@ def build_interview_question_advisory_subagents(
         else:
             lane_task = "Help the parent session answer this interview question."
             extra = ""
+
+        # EVERY enforceable lane contract is rendered irrespective of lane id
+        # (bot-review rounds 8 and 30): re-entry enforcement is lane-agnostic,
+        # so an additive contract attached to a RECOGNIZED lane (code_context,
+        # web_context, ...) must reach its child exactly like an unknown
+        # lane's. The data lane keeps its custom rendering above. Oversized or
+        # invalid contracts are rejected whole instead of rendered torn
+        # (round-11): registration skips them too, so the lane falls back to
+        # the generic shape consistently on both sides.
+        if lane_id != "data_context" and isinstance(lane_answer_contract, Mapping):
+            if _enforceable_lane_contract(lane_answer_contract):
+                lane_contract_json = _bounded_json(
+                    lane_answer_contract,
+                    _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS,
+                )
+                contract_extra = (
+                    "## Answer Contract\n"
+                    f"```json\n{lane_contract_json}\n```\n"
+                    "This lane carries an answer contract: the generic Output "
+                    "section below is superseded — return EXACTLY one JSON "
+                    "object matching the contract's response_model_schema; it "
+                    "is validated server-side at re-entry."
+                )
+            else:
+                contract_extra = (
+                    "## Answer Contract\n"
+                    "This lane declared an answer contract that exceeds the "
+                    "whole-form delivery budget or carries an invalid "
+                    "schema; it is OMITTED and NOT enforced at re-entry. "
+                    "Return the generic Output shape below."
+                )
+            extra = f"{extra}\n\n{contract_extra}" if extra else contract_extra
 
         prompt = f"""## Task
 You are an Ouroboros interview advisory subagent.
@@ -1421,25 +1662,33 @@ Return a compact JSON object with:
 Keep it brief. The parent session will synthesize multiple advisory lanes before
 forwarding anything back to ouroboros_interview."""
 
+        lane_context: dict[str, Any] = {
+            "session_id": session_id,
+            "question_identity": question_identity,
+            "question": question,
+            "lane_id": lane_id,
+            "capability": capability,
+            "required": required,
+            "persona": persona or None,
+            "user_question_first": bool(request.get("user_question_first")),
+            "synthesis_contract": dict(synthesis_contract)
+            if isinstance(synthesis_contract, Mapping)
+            else {},
+        }
+        if isinstance(data_policy, Mapping):
+            lane_context["data_policy"] = dict(data_policy)
+        if isinstance(lane_answer_contract, Mapping):
+            lane_context["answer_contract"] = dict(lane_answer_contract)
+        raw_lane_known_tools = raw_lane.get("known_data_tools")
+        if isinstance(raw_lane_known_tools, (list, tuple)) and raw_lane_known_tools:
+            lane_context["known_data_tools"] = [str(tool) for tool in raw_lane_known_tools]
         payloads.append(
             build_subagent_payload(
                 tool_name="ouroboros_interview",
                 title=f"Interview advisory: {lane_id}",
                 agent=agent,
                 prompt=prompt,
-                context={
-                    "session_id": session_id,
-                    "question_identity": question_identity,
-                    "question": question,
-                    "lane_id": lane_id,
-                    "capability": capability,
-                    "required": required,
-                    "persona": persona or None,
-                    "user_question_first": bool(request.get("user_question_first")),
-                    "synthesis_contract": dict(synthesis_contract)
-                    if isinstance(synthesis_contract, Mapping)
-                    else {},
-                },
+                context=lane_context,
             )
         )
 
@@ -2630,6 +2879,13 @@ class FanoutRecord:
     correlation_key: str
     expected_keys: tuple[str, ...]
     synthesizer_input: dict[str, Any]
+    required_keys: tuple[str, ...] = ()
+    received_results: dict[str, Any] = field(default_factory=dict)
+    completed: bool = False
+    # The full completion response, persisted with the terminal record so a
+    # replay can return the immutable outcome instead of an unrecoverable
+    # "already_complete" error when the first response was lost in transit.
+    terminal_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2638,19 +2894,39 @@ class FanoutRecord:
             "session_id": self.session_id,
             "correlation_key": self.correlation_key,
             "expected_keys": list(self.expected_keys),
+            "required_keys": list(self.required_keys),
             "synthesizer_input": self.synthesizer_input,
+            "received_results": self.received_results,
+            "completed": self.completed,
+            "terminal_response": self.terminal_response,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> FanoutRecord:
         raw_input = data.get("synthesizer_input")
+        expected_keys = tuple(str(key) for key in data.get("expected_keys") or ())
+        raw_required = data.get("required_keys")
+        # Records persisted before the required/optional split (Q00/ouroboros
+        # #1671) carry no required_keys field: treat every expected key as
+        # required, preserving the original all-keys completion gate.
+        required_keys = (
+            tuple(str(key) for key in raw_required)
+            if isinstance(raw_required, (list, tuple))
+            else expected_keys
+        )
+        raw_received = data.get("received_results")
+        raw_terminal = data.get("terminal_response")
         return cls(
             fanout_id=str(data["fanout_id"]),
             kind=str(data["kind"]),
             session_id=str(data.get("session_id") or ""),
             correlation_key=str(data.get("correlation_key") or ""),
-            expected_keys=tuple(str(key) for key in data.get("expected_keys") or ()),
+            expected_keys=expected_keys,
             synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
+            required_keys=required_keys,
+            received_results=dict(raw_received) if isinstance(raw_received, Mapping) else {},
+            completed=bool(data.get("completed")),
+            terminal_response=dict(raw_terminal) if isinstance(raw_terminal, Mapping) else None,
         )
 
 
@@ -2662,9 +2938,12 @@ class FanoutRegistry:
     handlers that know the resolved interview state dir thread it in via
     :meth:`rebase_default`; until then the zero-arg default falls back to
     ``~/.ouroboros/data/fanout``.
-    Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
-    a persistence failure degrades re-entry (submissions report the fan-out as
-    unknown) but never breaks the fan-out request path.
+    Each record is a single ``{fanout_id}.json`` file. Write failures have
+    explicit, caller-visible outcomes rather than a uniform degradation:
+    a failed registration returns ``None`` (no fan-out id is advertised), a
+    failed accumulation reports ``accumulation_persisted=false``, and a
+    failed terminal write returns ``completion_not_persisted`` — the request
+    path itself never breaks.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
@@ -2688,6 +2967,159 @@ class FanoutRegistry:
         if self._dir == _DEFAULT_FANOUT_DIR:
             self._dir = directory
 
+    # Fan-out ids are opaque basenames, never paths: this is enforced INSIDE
+    # the registry (independently of any outer input validation) so a caller
+    # supplied absolute or traversal-shaped id can never make ``Path`` joining
+    # escape the configured fan-out root.
+    _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+    # Completed and orphaned records are retained for a bounded replay window,
+    # then swept opportunistically on the next registration — the directory
+    # never grows without bound, and replay of a recently completed fan-out
+    # keeps working.
+    _RECORD_RETENTION_SECONDS = 7 * 24 * 3600
+
+    def _gc_stale_records(self) -> None:
+        """Best-effort retention sweep; never fails the registration path."""
+        import time
+
+        cutoff = time.time() - self._RECORD_RETENTION_SECONDS
+        try:
+            entries = [
+                *self._dir.glob("*.json"),
+                *self._dir.glob(".*.lock"),
+                # Atomic-save leftovers: a crash between temp write and
+                # replace strands record contents in a temp file (bot-review
+                # round-11) — aged ones are crash artifacts, never live
+                # state, so they sweep without the lock protocol.
+                *self._dir.glob(".*.tmp-*"),
+            ]
+        except OSError:
+            return
+        for path in entries:
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            if ".tmp-" in path.name:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif path.name.endswith(".lock"):
+                self._unlink_lock_if_unheld(path)
+            else:
+                self._unlink_record_if_unlocked(path, cutoff)
+
+    def _unlink_record_if_unlocked(self, path: Path, cutoff: float) -> None:
+        """Delete an aged record only under its per-fanout lock (non-blocking).
+
+        Deleting outside the submission lock can vaporize the only durable
+        retry state while a submission is mid-flight (bot-review round-8
+        probe). A held lock skips this sweep, and age is re-checked under the
+        lock because an in-flight submission may have just refreshed the
+        record.
+        """
+        fanout_id = path.name[: -len(".json")]
+        if not self._valid_id(fanout_id):
+            # Not one of ours (no lock protocol applies): sweep directly.
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        try:
+            import fcntl
+        except ImportError:
+            # Cannot honor the lock protocol: leave the record in place.
+            return
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            # The lock path may have been unlinked/recreated by a concurrent
+            # sweep between open and flock (round-14): a lock on a dead inode
+            # excludes nobody, so acting on it could delete a record whose
+            # REPLACEMENT lock a submission currently holds. Skip this sweep.
+            if not self._lock_inode_matches(fd, lock_path):
+                return
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+
+    @classmethod
+    def _unlink_lock_if_unheld(cls, path: Path) -> None:
+        """Unlink an aged lock file only while holding its flock.
+
+        Unlinking a HELD lock reopens the divergent-terminalization race
+        (bot-review round-7 probe): a new locker would create a fresh inode
+        and enter the exclusive section alongside the current holder. A
+        non-blocking flock proves no holder exists, and unlinking while
+        holding it forces any concurrent waiter through the acquisition-side
+        inode re-verification.
+        """
+        try:
+            import fcntl
+        except ImportError:
+            return
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            return
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            # Same dead-inode guard as record sweeping (round-14): only the
+            # holder of the LIVE lock inode may unlink the lock path.
+            if not cls._lock_inode_matches(fd, path):
+                return
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _lock_inode_matches(fd: int, path: Path) -> bool:
+        """Whether ``fd`` still refers to the live file at ``path``.
+
+        A lock acquired on an inode that was unlinked/recreated between open
+        and flock excludes nobody (bot-review rounds 7 and 14): the holder of
+        such a dead inode must never act on it.
+        """
+        try:
+            fd_stat = os.fstat(fd)
+            path_stat = os.stat(path)
+        except OSError:
+            return False
+        return fd_stat.st_ino == path_stat.st_ino and fd_stat.st_dev == path_stat.st_dev
+
+    @classmethod
+    def _valid_id(cls, fanout_id: str) -> bool:
+        return bool(cls._ID_PATTERN.match(fanout_id))
+
     def _path(self, fanout_id: str) -> Path:
         return self._dir / f"{fanout_id}.json"
 
@@ -2700,13 +3132,22 @@ class FanoutRegistry:
         expected_keys: list[str],
         synthesizer_input: dict[str, Any],
         fanout_id: str | None = None,
-    ) -> str:
+        required_keys: list[str] | None = None,
+    ) -> str | None:
         """Persist a fan-out record and return its ``fanout_id``.
 
         A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
         supplied by the caller) and stamped into the returned value so the
-        producer can echo it into the emitted meta. Persistence is best-effort.
+        producer can echo it into the emitted meta. Returns ``None`` when the
+        record could NOT be persisted (or a caller-supplied id is not an
+        opaque basename): a fan-out id that cannot be redeemed at re-entry
+        must never be advertised — producers skip stamping instead of handing
+        the host an id whose first submission is ``unknown_fanout_id``.
+        ``required_keys`` names the subset of ``expected_keys`` that gates
+        completion; when omitted every expected key is required (the original
+        all-keys gate).
         """
+        self._gc_stale_records()
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
         record = FanoutRecord(
             fanout_id=resolved_id,
@@ -2715,27 +3156,159 @@ class FanoutRegistry:
             correlation_key=correlation_key,
             expected_keys=tuple(expected_keys),
             synthesizer_input=synthesizer_input,
+            required_keys=tuple(required_keys if required_keys is not None else expected_keys),
         )
+        if not self.save(record):
+            return None
+        return resolved_id
+
+    def save(self, record: FanoutRecord) -> bool:
+        """Persist ``record``, overwriting any prior state.
+
+        Used both by :meth:`register` and by partial-submission accumulation:
+        ``submit_fanout_results`` merges newly submitted lane results into the
+        record's ``received_results`` and re-saves, so a later resubmission of
+        only the remaining lanes completes the fan-out as the public contract
+        documents.
+
+        Returns ``True`` on success. A failed write is logged AND reported to
+        the caller so a partial submission does not claim its keys were
+        accumulated when they were lost (disk-full/read-only degradation):
+        the re-entry response surfaces it as ``accumulation_persisted=false``,
+        telling the host to resubmit those lanes together with the remainder.
+
+        The write is atomic (temp file + ``os.replace`` in the same
+        directory): a failure mid-write leaves the PRIOR record intact and
+        replayable instead of tearing the live JSON file, so the documented
+        resubmission path still finds the fan-out.
+        """
+        if not self._valid_id(record.fanout_id):
+            log.warning(
+                "fanout.registry.invalid_fanout_id",
+                fanout_id=record.fanout_id,
+                kind=record.kind,
+            )
+            return False
+        target = self._path(record.fanout_id)
+        tmp_path = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            self._path(resolved_id).write_text(
+            tmp_path.write_text(
                 json.dumps(record.to_dict(), ensure_ascii=False),
                 encoding="utf-8",
             )
-        except OSError as exc:
+            os.replace(tmp_path, target)
+        # UnicodeError: json.dumps happily escapes a lone surrogate, but
+        # utf-8 encoding at write time raises UnicodeEncodeError — that is a
+        # persistence failure to report (accumulation_persisted=false /
+        # completion_not_persisted), never an uncaught crash.
+        except (OSError, UnicodeError, ValueError) as exc:
             log.warning(
                 "fanout.registry.persist_failed",
-                fanout_id=resolved_id,
-                kind=kind,
+                fanout_id=record.fanout_id,
+                kind=record.kind,
                 error=str(exc),
             )
-        return resolved_id
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        return True
+
+    @contextmanager
+    def exclusive(self, fanout_id: str) -> Iterator[None]:
+        """Cross-process exclusive section for one fan-out record.
+
+        Terminalization is load → synthesize → replace: without mutual
+        exclusion two concurrent submissions can both observe an open record
+        and both return ``complete`` with divergent outcomes (bot-review
+        round-6 probe). An flock'd sidecar lock file serializes submissions
+        per ``fanout_id`` — the second submission then reloads the terminal
+        record and replays it. Where ``fcntl`` or the lock file are
+        unavailable the section degrades to best-effort (never an error).
+
+        Acquisition verifies inode identity after locking (bot-review
+        round-7 probe): the retention GC may unlink an aged lock path, and a
+        lock held on a deleted inode excludes nobody — on mismatch the open
+        is retried against the recreated path. The GC side only unlinks a
+        lock it can flock itself, so a HELD lock is never deleted.
+        """
+        if not self._valid_id(fanout_id):
+            yield
+            return
+        lock_path = self._dir / f".{fanout_id}.lock"
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            yield
+            return
+        try:
+            import fcntl
+        except ImportError:
+            # PLATFORM QUALIFICATION (round-26): without fcntl (e.g. native
+            # Windows) the section degrades to best-effort and the
+            # terminal-immutability guarantee is process-local only.
+            log.warning(
+                "fanout.registry.exclusive_unavailable_no_fcntl",
+                fanout_id=fanout_id,
+            )
+            yield
+            return
+        locked_fd: int | None = None
+        for _attempt in range(16):
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError:
+                break
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                break
+            if self._lock_inode_matches(fd, lock_path):
+                locked_fd = fd
+                break
+            # The path was unlinked/recreated while we waited: this lock
+            # excludes nobody. Release and retry against the live path.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+        try:
+            yield
+        finally:
+            if locked_fd is not None:
+                try:
+                    fcntl.flock(locked_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(locked_fd)
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
+        """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt.
+
+        The 7-day retention contract is enforced HERE too (bot-review
+        round-25), not only at sweep time: an expired record is
+        indistinguishable from an unknown id, so stale terminal results are
+        never re-exposed between GC passes. Saves refresh mtime, so active
+        records never expire mid-flight.
+        """
+        if not self._valid_id(fanout_id):
+            return None
+        import time
+
+        try:
+            if self._path(fanout_id).stat().st_mtime < time.time() - self._RECORD_RETENTION_SECONDS:
+                return None
+        except OSError:
+            return None
         try:
             content = self._path(fanout_id).read_text(encoding="utf-8")
-        except OSError:
+        # UnicodeError: a corrupt or legacy-torn record must degrade to the
+        # documented clean unknown/corrupt outcome, never an internal crash.
+        except (OSError, UnicodeError):
             return None
         try:
             data = json.loads(content)
@@ -2747,6 +3320,1103 @@ class FanoutRegistry:
             return FanoutRecord.from_dict(data)
         except (KeyError, TypeError, ValueError):
             return None
+
+
+@lru_cache(maxsize=1)
+def _data_evidence_boundary_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    # Function-level import: subagent.py is imported by orchestrator-side
+    # modules, so the canonical pattern strings are pulled lazily.
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_EVIDENCE_AUTH_HEADER_PATTERN,
+        DATA_EVIDENCE_AWS_KEY_PATTERN,
+        DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN,
+        DATA_EVIDENCE_EMAIL_PATTERN,
+        DATA_EVIDENCE_PASSWORD_PATTERN,
+        DATA_EVIDENCE_PHONE_PATTERN,
+        DATA_EVIDENCE_SECRET_PATTERN,
+        DATA_EVIDENCE_SSN_PATTERN,
+    )
+
+    return (
+        ("email-shaped (PII)", re.compile(DATA_EVIDENCE_EMAIL_PATTERN, re.IGNORECASE)),
+        ("credential-shaped (secret)", re.compile(DATA_EVIDENCE_SECRET_PATTERN, re.IGNORECASE)),
+        (
+            "authorization-header-shaped (secret)",
+            re.compile(DATA_EVIDENCE_AUTH_HEADER_PATTERN, re.IGNORECASE),
+        ),
+        (
+            "password-assignment-shaped (secret)",
+            re.compile(DATA_EVIDENCE_PASSWORD_PATTERN, re.IGNORECASE),
+        ),
+        (
+            "credential-assignment-shaped (secret)",
+            re.compile(DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN, re.IGNORECASE),
+        ),
+        # AWS access-key ids are uppercase by definition; case-insensitive
+        # matching would false-positive on ordinary prose.
+        ("aws-access-key-shaped (secret)", re.compile(DATA_EVIDENCE_AWS_KEY_PATTERN)),
+        ("phone-shaped (PII)", re.compile(DATA_EVIDENCE_PHONE_PATTERN)),
+        ("ssn-shaped (PII)", re.compile(DATA_EVIDENCE_SSN_PATTERN)),
+    )
+
+
+@lru_cache(maxsize=1)
+def _data_forbidden_operation_pattern() -> re.Pattern[str]:
+    """Mutating-operation SHAPES, not bare words.
+
+    The canonical ``forbidden_operation_patterns`` word list stays the
+    machine-readable host-side declaration (hosts apply it when selecting
+    tools), but the server-side scan matches operation shapes: a bare-word
+    scan rejected legitimate read-only evidence like "call volume by day",
+    "merge rate of premium upgrades", or "grant program signups" — blocking
+    the exact aggregates the lane exists to deliver. Every shape below still
+    catches the reviewed probes (DROP TABLE, DELETE FROM, UPSERT/REPLACE
+    INTO, CALL proc()).
+    """
+    shapes = (
+        r"\b(?:insert|upsert|replace|merge)\s+into\b",
+        r"\bdelete\s+from\b",
+        r"\bupdate\s+\S+\s+set\b",
+        r"\b(?:drop|truncate|alter|create)\s+"
+        r"(?:table|database|schema|index|view|user|role|procedure|function|column)\b",
+        r"\bgrant\s+(?:all|select|insert|update|delete|usage|create|execute)\b",
+        r"\bcall\s+\w+\s*\(",
+        r"\bexec(?:ute)?\s+(?:immediate\b|procedure\b|\w+\s*\()",
+        r"\btruncate\s+\S+",
+        r"\b(?:write|save|upload|publish)\s+(?:to|into|file|files|report|dataset|table)\b",
+    )
+    return re.compile("|".join(f"(?:{shape})" for shape in shapes), re.IGNORECASE)
+
+
+@lru_cache(maxsize=1)
+def _mutating_tool_verbs() -> frozenset[str]:
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _data_context_lane_policy,
+    )
+
+    return frozenset(
+        str(word).lower() for word in _data_context_lane_policy()["forbidden_operation_patterns"]
+    )
+
+
+def _mutating_tool_verb(tool_name: str) -> str | None:
+    """Return the mutating verb a tool identifier carries, if any.
+
+    Confirmed proposals are handed to the host for execution, so a proposal
+    whose TOOL NAME is a mutator (``delete_database``) is executable payload
+    regardless of its query text (bot-review round-8 probe). Identifiers are
+    tokenized on non-alphanumerics AND camelCase boundaries because ``\\b``
+    splits neither snake_case nor ``SaveReport``.
+    """
+    decamelled = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", tool_name)
+    tokens = re.split(r"[^a-z0-9]+", decamelled.lower())
+    verbs = _mutating_tool_verbs()
+    return next((token for token in tokens if token in verbs), None)
+
+
+def _canonical_contract_json(contract: Mapping[str, Any]) -> str | None:
+    """THE serialization for lane contracts — budgeting, delivery, plugin.
+
+    Budget and delivery previously used different serializations (compact vs
+    sorted+indented), so a contract could pass the budget yet render torn
+    (bot-review round-12). One canonical form, measured and delivered
+    identically everywhere, removes that class of drift.
+    """
+    try:
+        return json.dumps(contract, ensure_ascii=False, sort_keys=True, indent=2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
+    """Whether a lane answer contract may be enforced at re-entry.
+
+    Invariant (bot-review rounds 11-12): a contract is enforced IFF it was
+    deliverable to the child WHOLE and its ``response_model_schema`` is a
+    VALID JSON Schema object. An oversized or invalid contract is rejected
+    explicitly on both sides — never rendered truncated, never registered
+    for enforcement (an advertised contract that cannot be enforced, or
+    enforced against a form the child never received, is a lie) — so the
+    lane falls back to the generic output shape consistently.
+    """
+    rendered = _canonical_contract_json(contract)
+    if rendered is None or len(rendered) > _INTERVIEW_ADVISORY_MAX_CONTRACT_CHARS:
+        return False
+    schema = contract.get("response_model_schema")
+    if not isinstance(schema, Mapping):
+        return False
+    # $id rebasing is outside the declared self-contained grammar
+    # (round-25): our pointer-walk preflight cannot mirror standards
+    # reference-scope resolution, and a contract that registers but fails
+    # every submission is worse than one declared unsupported.
+    if _schema_uses_keyword(schema, "$id"):
+        return False
+    # Answer forms are OBJECTS: re-entry rejects non-object outputs before
+    # schema validation, so a valid scalar schema ({"type": "string"}) would
+    # be advertised yet unsatisfiable — a required lane following it would
+    # stay permanently partial (bot-review round-13). The root may be
+    # expressed through a LOCAL $ref (round-20): the effective root after
+    # bounded resolution is what must declare the object type.
+    if not _declares_object_root(schema, schema, depth=0):
+        return False
+    try:
+        Draft202012Validator.check_schema(dict(schema))
+    except Exception:
+        return False
+    # Every $ref must resolve WITHIN the document (bot-review round-17): a
+    # meta-schema-valid contract referencing missing #/$defs passes
+    # check_schema but explodes only when validation reaches the ref —
+    # advertising it would make enforcement silently fail open at re-entry.
+    # External/anchor refs are rejected conservatively (contracts must be
+    # self-contained; nothing resolves over the network at re-entry).
+    return _schema_local_refs_resolve(schema)
+
+
+def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> bool:
+    """Whether the effective root necessarily describes an OBJECT.
+
+    Covers every object form the public lane schema accepts (bot-review
+    rounds 20-22): a literal root ``type: object``, a LOCAL root ``$ref`` to
+    one, an ``allOf`` conjunction ANY branch of which declares one (a
+    conjunct forces object instances), and a ``oneOf``/``anyOf`` disjunction
+    ALL of whose branches declare one (a disjunction forces objects only
+    when every alternative does). Bounded recursion keeps this cycle-safe.
+    """
+    if depth > 32:
+        return False
+    if not isinstance(node, Mapping):
+        return False
+    # Signals on the node ITSELF are evaluated first and independently of
+    # any $ref sibling (rounds 25 and 29): Draft 2020-12 $ref siblings
+    # combine conjunctively, so a literal type, const/enum, or an
+    # object-forcing combinator alongside the ref already forces objects.
+    declared_type = node.get("type")
+    if declared_type == "object" or declared_type == ["object"]:
+        return True
+    if isinstance(node.get("const"), Mapping):
+        return True
+    enum_values = node.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        if all(isinstance(value, Mapping) for value in enum_values):
+            return True
+    all_of = node.get("allOf")
+    if isinstance(all_of, list) and any(
+        _declares_object_root(schema, branch, depth + 1) for branch in all_of
+    ):
+        return True
+    for disjunction_key in ("oneOf", "anyOf"):
+        branches = node.get(disjunction_key)
+        if (
+            isinstance(branches, list)
+            and branches
+            and all(_declares_object_root(schema, branch, depth + 1) for branch in branches)
+        ):
+            return True
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        target = _resolve_local_root_from(schema, {"$ref": ref})
+        if target is not None and _declares_object_root(schema, target, depth + 1):
+            return True
+    return False
+
+
+def _resolve_local_root(schema: Mapping[str, Any]) -> Any:
+    """Follow a chain of LOCAL root ``$ref``s to the effective root schema."""
+    return _resolve_local_root_from(schema, schema)
+
+
+def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
+    """Resolve ``start`` (a node of ``schema``) through local ``$ref`` hops.
+
+    Bounded and cycle-safe; returns the node itself when it carries no
+    ``$ref``, and ``None`` when a hop cannot be resolved locally.
+    """
+    node: Any = start
+    seen: set[str] = set()
+    # Visited-based, not hop-bounded (round-34: a valid eight-hop chain was
+    # silently dropped): ref cycles are already rejected by the graph
+    # check, so termination is guaranteed by the visited set.
+    for _hop in range(64):
+        if not isinstance(node, Mapping) or "$ref" not in node:
+            return node
+        ref = node.get("$ref")
+        if not isinstance(ref, str) or not ref.startswith("#/") or ref in seen:
+            return None
+        seen.add(ref)
+        target: Any = schema
+        for raw_part in ref[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(target, Mapping) and part in target:
+                target = target[part]
+            elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
+                target = target[int(part)]
+            else:
+                return None
+        node = target
+    return None
+
+
+# Schema traversal is WHITELIST-based (bot-review rounds 26-28): only
+# keywords that actually carry subschemas are descended into. Everything
+# else — const/enum/default/examples payloads, property NAMES, and unknown
+# extension annotations like x-output-example — is data and must never be
+# mistaken for schema content.
+_SCHEMA_NAME_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+_SCHEMA_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "items",
+        "prefixItems",
+        "unevaluatedItems",
+        "contains",
+        "contentSchema",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+    }
+)
+
+
+def _iter_subschemas(node: Mapping[str, Any]) -> list[Any]:
+    """Return every DIRECT subschema of a schema object (whitelist walk)."""
+    subs: list[Any] = []
+    for key, value in node.items():
+        if key in _SCHEMA_NAME_MAP_KEYWORDS:
+            if isinstance(value, Mapping):
+                subs.extend(value.values())
+        elif key in _SCHEMA_SUBSCHEMA_KEYWORDS:
+            if isinstance(value, list):
+                subs.extend(value)
+            else:
+                subs.append(value)
+    return subs
+
+
+def _schema_uses_keyword(node: Any, needle: str) -> bool:
+    """Whether ``needle`` appears as a SCHEMA KEYWORD (not as data)."""
+    if not isinstance(node, Mapping):
+        return False
+    if needle in node:
+        return True
+    return any(_schema_uses_keyword(sub, needle) for sub in _iter_subschemas(node))
+
+
+def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
+    """Whether every ``$ref`` in ``schema`` resolves inside the document.
+
+    Traversal is SCHEMA-AWARE like the ``$id`` check (bot-review round-27):
+    a ``$ref`` key inside literal ``const``/``enum`` data is instance
+    content, not a reference, so a contract matching outputs that contain a
+    field named ``$ref`` stays enforceable.
+    """
+    refs: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, Mapping):
+            return
+        # Every Draft 2020-12 reference form is preflighted (round-18):
+        # $dynamicRef (and legacy $recursiveRef) explode at validation
+        # exactly like $ref. Only schema-bearing keywords are descended
+        # (round-28), so annotation payloads never register as refs.
+        for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+            ref_value = node.get(ref_key)
+            if isinstance(ref_value, str):
+                refs.append(ref_value)
+        for sub in _iter_subschemas(node):
+            _walk(sub)
+
+    _walk(schema)
+
+    def _resolve_pointer(ref: str) -> Any:
+        node: Any = schema
+        for raw_part in ref[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if isinstance(node, Mapping) and part in node:
+                node = node[part]
+            elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            else:
+                return _UNRESOLVED
+        return node
+
+    def _refs_within(node: Any) -> list[str]:
+        found: list[str] = []
+
+        def _collect(inner: Any) -> None:
+            if not isinstance(inner, Mapping):
+                return
+            for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+                candidate = inner.get(ref_key)
+                if isinstance(candidate, str):
+                    found.append(candidate)
+            for sub in _iter_subschemas(inner):
+                _collect(sub)
+
+        _collect(node)
+        return found
+
+    # Reference edges form a GRAPH, not just chains (round-33: a cycle
+    # routed through an allOf branch — a → b → a — recursed at validation
+    # while chain-only detection missed it). Every pointer must resolve to
+    # a schema, and the pointer graph must be acyclic.
+    for ref in refs:
+        if ref == "#":
+            # Root-recursive "#" is outside the declared grammar (round-31).
+            return False
+        if not ref.startswith("#/"):
+            return False
+        target = _resolve_pointer(ref)
+        if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+            return False
+
+    edges: dict[str, list[str]] = {}
+    for ref in refs:
+        target = _resolve_pointer(ref)
+        edges[ref] = _refs_within(target) if isinstance(target, Mapping) else []
+
+    visiting: set[str] = set()
+    settled: set[str] = set()
+
+    def _cyclic(pointer: str) -> bool:
+        if pointer in settled:
+            return False
+        if pointer in visiting:
+            return True
+        visiting.add(pointer)
+        for nxt in edges.get(pointer, ()):
+            if nxt == "#" or not nxt.startswith("#/"):
+                return True
+            if nxt not in edges:
+                target = _resolve_pointer(nxt)
+                if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+                    return True
+                edges[nxt] = _refs_within(target) if isinstance(target, Mapping) else []
+            if _cyclic(nxt):
+                return True
+        visiting.discard(pointer)
+        settled.add(pointer)
+        return False
+
+    return not any(_cyclic(pointer) for pointer in list(edges))
+
+
+_UNRESOLVED = object()
+
+
+def _strip_sql_comments(query: str) -> str:
+    """Remove SQL line/block comments so a comment prefix cannot hide the
+    statement form from classification (round-25)."""
+    without_blocks = re.sub(r"/\*.*?\*/", " ", query, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", " ", without_blocks)
+
+
+def _blank_paren_content(text: str) -> str:
+    """Blank nested parenthesized CONTENT, keeping the parens themselves."""
+    out: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+            out.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            out.append(char)
+        elif depth == 0:
+            out.append(char)
+    return "".join(out)
+
+
+def _main_select_segment(query: str) -> str:
+    """Return the query text from its first TOP-LEVEL select.
+
+    CTE prefixes (``WITH name AS (...), ...``) are skipped by paren
+    depth-walking, so an aggregate marker inside an unrelated CTE cannot
+    launder a raw final projection (round-24). Aggregation belongs in the
+    outermost SELECT.
+    """
+    lowered = query.lower()
+    if not re.match(r"\s*with\b", lowered):
+        return query
+    depth = 0
+    for index in range(len(lowered)):
+        char = lowered[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and lowered.startswith("select", index):
+            return query[index:]
+    return query
+
+
+def _mutating_source_identifier_verb(source: str) -> str | None:
+    """Mutating verb carried by a tool IDENTIFIER inside ``source``, if any.
+
+    ``source`` is free text naming the executed tool. A whitespace guard
+    alone is a bypass ("delete_database tool" — bot-review round-11), so
+    every whitespace-separated token is examined: a token counts as a tool
+    identifier when it is the entire source (bare tool name) or a COMPOUND
+    identifier (snake_case/kebab/dotted/camelCase). Bare English words
+    inside longer prose are not identifiers, keeping "call center logs"
+    valid.
+    """
+    stripped = source.strip()
+    if not stripped:
+        return None
+    tokens = stripped.split()
+    if len(tokens) == 1:
+        return _mutating_tool_verb(tokens[0])
+    for token in tokens:
+        is_compound = bool(re.search(r"[_.\-]", token) or re.search(r"(?<=[a-z0-9])[A-Z]", token))
+        if is_compound and (verb := _mutating_tool_verb(token)):
+            return verb
+    return None
+
+
+def _is_row_shaped_value(value: str) -> bool:
+    """True when an evidence value looks like serialized rows, not an aggregate.
+
+    Aggregates are short scalar statements; a JSON-encoded list/object or a
+    multi-record blob is raw data regardless of what it contains.
+    """
+    stripped = value.strip()
+    if stripped.startswith(("[", "{")):
+        return True
+    if "},{" in stripped.replace(" ", "") or '",["' in stripped:
+        return True
+    # An aggregate is a SINGLE-LINE scalar statement: two customer rows
+    # separated by one newline are raw data (bot-review round-5 probe).
+    if "\n" in stripped or "\r" in stripped:
+        return True
+    # Single-line CSV rows (bot-review round-6 probe: "Alice Kim,premium;
+    # Bob Lee,free"): two or more letter,letter joints are field boundaries —
+    # prose puts a space after a comma, and thousands separators are
+    # digit,digit so neither trips this.
+    if len(re.findall(r"[A-Za-z],[A-Za-z]", stripped)) >= 2:
+        return True
+    # Semicolon-delimited record lists: 2+ segments with 2+ commas EACH is a
+    # multi-field record list even with digits (round-7 probe: "Alice Kim,
+    # premium, 1; Bob Lee, free, 2"), and every ;-segment carrying a comma
+    # with no digit anywhere is a name/label roster. Metric prose keeps one
+    # comma per clause ("revenue up 12%, churn down 3%; retention flat,
+    # NPS +4") and stays valid.
+    segments = [segment for segment in stripped.split(";") if segment.strip()]
+    if len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments):
+        return True
+    if (
+        len(segments) >= 2
+        and all("," in segment for segment in segments)
+        and not any(char.isdigit() for char in stripped)
+    ):
+        return True
+    # Same-label, identifier-keyed records survive comma separation too
+    # (round-29: "account u1 premium 34, account u2 free 12") — the second
+    # token being identifier-shaped (letters+digits) marks per-entity rows,
+    # while grouped aggregates key by category words ("region us-east 34,
+    # region eu-west 12" has hyphenated bucket names, not ids).
+    id_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
+    if len(id_segments) >= 2:
+        tokens_per_segment = [seg.split() for seg in id_segments]
+        firsts = {tokens[0].lower() for tokens in tokens_per_segment if tokens}
+        id_shaped_seconds = sum(
+            1
+            for tokens in tokens_per_segment
+            if len(tokens) > 1 and re.match(r"^[A-Za-z]+[-_]?\d+$", tokens[1])
+        )
+        if len(firsts) == 1 and id_shaped_seconds >= 2:
+            return True
+        # Segments LED by separator-bearing ids are identity rows too
+        # (round-34: "user-123 premium 34, user-456 free 12") — the
+        # separator requirement keeps bare quarter buckets ("q1 78, q2 82")
+        # valid.
+        id_shaped_firsts = sum(
+            1
+            for tokens in tokens_per_segment
+            if tokens and re.match(r"^[A-Za-z]+[-_]\d+$", tokens[0])
+        )
+        if id_shaped_firsts >= 2:
+            return True
+    # Segments sharing their FIRST token are repeated records (round-20:
+    # "acct u1 premium 34 \\ acct u2 free 12") — grouped aggregates lead each
+    # segment with a DIFFERENT category ("free: 78%; pro: 15%") and stay
+    # valid.
+    record_segments = [seg.strip() for seg in re.split(r"[;\\|/]", stripped) if seg.strip()]
+    if len(record_segments) >= 2:
+        first_tokens = [seg.split()[0].lower().rstrip(":,=") for seg in record_segments]
+        if len(set(first_tokens)) < len(first_tokens):
+            return True
+    # Repeated "CapName attribute N" segments are entity rows (round-33:
+    # "Alice premium 34, Bob free 12") — categories lead with a colon
+    # ("Free: 78%") or lowercase and stay valid.
+    name_row_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
+    if len(name_row_segments) >= 2:
+        name_rows = sum(
+            1 for seg in name_row_segments if re.match(r"^[A-Z][a-z]+ [a-z][^:]*\d", seg)
+        )
+        if name_rows >= 2:
+            return True
+    # Two or more capitalized word-pairs are a person/entity roster
+    # (round-19: digit-bearing Alice/Bob rows; round-23: acronym-suffixed
+    # company names like "Beta LLC") — one aggregate names at most one
+    # entity; aggregate by count instead.
+    if len(re.findall(r"\b[A-Z][a-z]+ [A-Z][A-Za-z]*\b", stripped)) >= 2:
+        return True
+    # A REPEATED field label is a record list, independent of punctuation
+    # (rounds 15-16 probes: "customer=Alice ...; customer=Bob ..." and
+    # "customer: Alice ...; customer: Bob ...") — one aggregate states each
+    # field once, so "p50=120ms p95=340ms" and "p50: 120ms p95: 340ms" stay
+    # valid (labels distinct). Labels start with a letter so clock times
+    # ("10:00 and 10:45") never count, and URL schemes are excluded.
+    labels = [
+        label.lower()
+        for label in re.findall(r"\b([A-Za-z_]\w*)\s*[=:]", stripped)
+        if label.lower() not in ("http", "https")
+    ]
+    return len(labels) >= 2 and len(set(labels)) < len(labels)
+
+
+# Error-envelope shapes: a JSON error key or an HTTP 4xx/5xx status inside an
+# evidence value means the tool call FAILED — the policy requires a
+# no-evidence finding, never evidence ("error rate 0.2%" prose stays valid;
+# only the envelope shapes match).
+_DATA_EVIDENCE_ERROR_SHAPE = re.compile(
+    r"[\"']error[\"']\s*:|[\"']ok[\"']\s*:\s*[Ff]alse|\bHTTP[ /]?[45]\d{2}\b"
+    r"|\btraceback \(most recent call last\)"
+    # Assignment-style failure envelopes, = and : forms (rounds 19-26:
+    # "status=failed code=502", "status: failed; code: 502",
+    # "success=false; status_code=503; retries exhausted").
+    r"|\bstatus\s*[:=]\s*(failed|error)\b|\b(status_)?code\s*[:=]\s*[45]\d{2}\b"
+    r"|\bsuccess\s*[:=]\s*false\b|\bretr(y|ies)\s+exhausted\b"
+    # Assignment-form error envelopes (round-28: value="error=503"); plural
+    # metric forms ("errors: 12", "error rate 0.2%") stay valid.
+    r"|\berror\s*[:=]\s*\S"
+    # Singular-subject failure narratives (round-27: "request timed out
+    # after 3 attempts"); PLURAL forms are metrics ABOUT failures ("1,240
+    # requests timed out: 0.8%") and stay valid.
+    r"|\b(request|query|connection|call|lookup)\s+timed\s+out\b"
+    r"|\b(upstream|gateway|connection|request|query|read|write)\s+timeout\b"
+    # Failure prose variants (round-33: "query failed because permission was
+    # denied"); plural metric forms ("queries failed: 12") stay valid.
+    r"|\b(query|request|call|lookup|connection)\s+failed\b"
+    # Bare HTTP failure statuses (round-34: "403 Forbidden", "returned 403").
+    r"|\b[45]\d{2}\s+(forbidden|unauthorized|not\s+found|bad\s+request"
+    r"|unavailable|error)\b"
+    r"|\breturned\s+[45]\d{2}\b"
+    r"|\b(permission|access|authorization)\s+(was|is)\s+denied\b"
+    r"|\bafter\s+\d+\s+(attempts?|retries)\b"
+    # Availability narratives and bare status codes (round-29: "database
+    # unavailable, code 503").
+    r"|\b(service|database|db|api|endpoint|server|tool|warehouse)\s+"
+    r"(unavailable|unreachable|down)\b"
+    r"|\bcode\s+[45]\d{2}\b"
+    # No-result admissions (round-31: a caveat narrating that nothing came
+    # back alongside "executed" evidence).
+    r"|\bno\s+(result|results|records|rows|data)\s+(was\s+|were\s+)?"
+    r"(returned|found|available)\b",
+    re.IGNORECASE,
+)
+
+# Embedded serialized-row shapes for PROSE fields (finding, caveats,
+# provenance text): a JSON array-of-objects opening, an object chain, or a
+# quoted-key object inside prose is smuggled rows. This is the
+# field-appropriate subset of the evidence.value row check — prose fields
+# legitimately contain newlines, and query text legitimately contains comma
+# lists, so neither of those rules applies here.
+_EMBEDDED_JSON_ROWS = re.compile(r"\[\s*\{|\}\s*,\s*\{|\{\s*\"[^\"]+\"\s*:")
+
+
+def _prose_contains_rows(text: str) -> bool:
+    """Row-shaped content embedded in a prose field (not evidence.value)."""
+    if _EMBEDDED_JSON_ROWS.search(text):
+        return True
+    if len(re.findall(r"[A-Za-z],[A-Za-z]", text)) >= 2:
+        return True
+    segments = [segment for segment in text.split(";") if segment.strip()]
+    return len(segments) >= 2 and all(segment.count(",") >= 2 for segment in segments)
+
+
+def _parseable_timestamp(value: str) -> bool:
+    """True when ``value`` is a real ISO-8601 calendar date(-time).
+
+    The schema's range regex cannot reject impossible dates like 2026-02-31;
+    parsing can.
+    """
+    from datetime import datetime
+
+    normalized = value[:-1] + "+00:00" if value and value[-1] in "zZ" else value
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return True
+
+
+def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
+    """Scan a data-lane output for shapes the data policy forbids.
+
+    The policy (read-only proposals; aggregates only, no raw rows,
+    PII-scrubbed, real point-in-time timestamps) is enforced at re-entry —
+    the point the engine owns — not just declared in the schema: the WHOLE
+    serialized output is scanned so PII/credential content cannot hide in any
+    field, including outputs validated against a contract persisted before
+    the schema carried the boundary patterns. Matched content is deliberately
+    NOT echoed into the error messages: the violation report flows back to
+    the host and must not re-leak the data.
+    """
+    try:
+        serialized = json.dumps(output, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return ["data evidence output is not JSON-serializable"]
+
+    # Identifier FIELDS (evidence source, proposal tool_name) are exempt
+    # from the credential-shape scan ONLY when they actually look like
+    # identifiers (rounds 29-30): token_usage_v2 is a tool name, but a
+    # value like "token=sk-live-123" in the source field is a credential
+    # wearing the field, so anything failing the identifier syntax stays
+    # fully scanned. Exempted identifiers remain guarded by the
+    # mutating-verb checks, and every other pattern scans the full output.
+    def _blank_if_identifier(item: Any, field: str) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        value = item.get(field)
+        if (
+            isinstance(value, str)
+            and _SAFE_IDENTIFIER_SYNTAX.match(value)
+            and not _identifier_looks_secret(value)
+        ):
+            return {**item, field: ""}
+        return item
+
+    identifier_scrubbed = dict(output)
+    raw_evidence = identifier_scrubbed.get("evidence")
+    if isinstance(raw_evidence, list):
+        identifier_scrubbed["evidence"] = [
+            _blank_if_identifier(item, "source") for item in raw_evidence
+        ]
+    raw_proposals = identifier_scrubbed.get("proposed_queries")
+    if isinstance(raw_proposals, list):
+        identifier_scrubbed["proposed_queries"] = [
+            _blank_if_identifier(item, "tool_name") for item in raw_proposals
+        ]
+    try:
+        serialized_sans_identifiers = json.dumps(
+            identifier_scrubbed, ensure_ascii=False, default=str
+        )
+    except (TypeError, ValueError):
+        serialized_sans_identifiers = serialized
+    errors = [
+        f"data evidence boundary: {label} content is raw evidence; the "
+        "evidence policy requires aggregates only, PII-scrubbed"
+        for label, pattern in _data_evidence_boundary_patterns()
+        if pattern.search(
+            serialized_sans_identifiers if label.startswith("credential") else serialized
+        )
+    ]
+    # STRUCTURAL aggregate rule (bot-review round-18, ending the delimiter
+    # game): an executed evidence VALUE is a measurement, and aggregation is
+    # numeric by definition — a value with no numeral is a claim or a name
+    # roster, not query output. This makes digit-free record lists
+    # unrepresentable under ANY delimiter; qualitative context belongs in
+    # ``finding``.
+    evidence_items = output.get("evidence")
+    for index, item in enumerate(evidence_items if isinstance(evidence_items, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        if isinstance(value, str) and not re.search(r"\d", value):
+            errors.append(
+                f"evidence[{index}].value: no numeric measurement — an "
+                "aggregate states a count/share/duration; qualitative "
+                "context belongs in finding"
+            )
+    # The no-rows policy binds EVERY persisted prose field, not just
+    # evidence.value (bot-review round-10 probe: JSON rows smuggled through
+    # ``finding``). Each field gets the prose-appropriate subset of the row
+    # check; proposal query text is covered by the embedded-JSON rule only,
+    # since comma lists are legitimate query syntax.
+    finding = output.get("finding")
+    if isinstance(finding, str) and _prose_contains_rows(finding):
+        errors.append(
+            "finding: row-shaped (serialized-record) content is raw evidence "
+            "and may not ride any persisted field; state aggregates only"
+        )
+    caveats = output.get("caveats")
+    for index, caveat in enumerate(caveats if isinstance(caveats, list) else ()):
+        if isinstance(caveat, str) and _prose_contains_rows(caveat):
+            errors.append(
+                f"caveats[{index}]: row-shaped (serialized-record) content is "
+                "raw evidence and may not ride any persisted field"
+            )
+        # A caveat admitting the call produced nothing contradicts EXECUTED
+        # evidence it accompanies (rounds 31-32): the contradiction requires
+        # evidence to exist — a no-op (data_needed=false, empty evidence)
+        # legitimately narrates "no data was returned because no lookup was
+        # needed" and must not be rejected for saying so.
+        if (
+            isinstance(caveat, str)
+            and isinstance(evidence_items, list)
+            and evidence_items
+            and _DATA_EVIDENCE_ERROR_SHAPE.search(caveat)
+        ):
+            errors.append(
+                f"caveats[{index}]: describes a failed lookup; a failed call "
+                "is a no-evidence finding, not evidence with a caveat"
+            )
+    forbidden = _data_forbidden_operation_pattern()
+    evidence = output.get("evidence")
+    for index, item in enumerate(evidence if isinstance(evidence, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        if isinstance(value, str) and _is_row_shaped_value(value):
+            errors.append(
+                f"evidence[{index}].value: row-shaped (list/object/multi-record) "
+                "content is raw evidence, not an aggregate"
+            )
+        # Error semantics bind the WHOLE evidence item (round-31): a failure
+        # narrative in query_summary or source is the same failed call as
+        # one in value — the policy's error_shaped_tool_output rule requires
+        # a no-evidence finding either way.
+        for error_field in ("value", "source", "query_summary"):
+            field_text = item.get(error_field)
+            if isinstance(field_text, str) and _DATA_EVIDENCE_ERROR_SHAPE.search(field_text):
+                errors.append(
+                    f"evidence[{index}].{error_field}: error-shaped tool "
+                    "output is not evidence; return a no-evidence finding "
+                    "instead"
+                )
+        observed_at = item.get("observed_at")
+        if isinstance(observed_at, str) and not _parseable_timestamp(observed_at):
+            errors.append(
+                f"evidence[{index}].observed_at: not a real ISO-8601 calendar date(-time)"
+            )
+        # The read-only boundary binds EXECUTED evidence too, not only
+        # proposals: evidence whose provenance claims a mutating operation
+        # (e.g. query_summary "DELETE FROM customers") is a policy violation
+        # regardless of whether the mutation already happened elsewhere.
+        for field_name in ("source", "query_summary"):
+            field_value = item.get(field_name)
+            if isinstance(field_value, str) and (match := forbidden.search(field_value)):
+                errors.append(
+                    f"evidence[{index}].{field_name}: claims forbidden operation "
+                    f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
+                )
+            if isinstance(field_value, str) and _prose_contains_rows(field_value):
+                errors.append(
+                    f"evidence[{index}].{field_name}: row-shaped "
+                    "(serialized-record) content is raw evidence and may not "
+                    "ride any persisted field"
+                )
+        # The executed-tool identity inside ``source`` gets the same
+        # mutating-verb check as proposal tool names. Detection is per
+        # whitespace-separated token, so surrounding prose cannot disable it
+        # (bot-review round-11 probe: "delete_database tool"): a token is
+        # treated as a TOOL IDENTIFIER when it is either the whole source or
+        # a compound identifier (snake_case/kebab/dotted/camelCase). Bare
+        # English words inside prose ("call center logs") are not
+        # identifiers and stay exempt — the SQL-shape scan covers prose.
+        source = item.get("source")
+        if isinstance(source, str) and (verb := _mutating_source_identifier_verb(source)):
+            errors.append(
+                f"evidence[{index}].source: names a mutating tool ({verb!r}); "
+                "the data lane is read-only"
+            )
+        # A credential-shaped identifier IS the leak, digits or not
+        # (round-33: api_key_live_supersecret) — classified directly, since
+        # alphabetic secrets evade the entropy-based content pattern.
+        if isinstance(source, str) and _identifier_looks_secret(source.strip()):
+            errors.append(
+                f"evidence[{index}].source: credential-shaped identifier; "
+                "name the read-only data tool instead"
+            )
+    proposals = output.get("proposed_queries")
+    for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        query = item.get("query")
+        if isinstance(query, str) and (match := forbidden.search(query)):
+            # User confirmation gates *execution* of read-only proposals; it
+            # must never make an explicitly mutating operation permissible.
+            errors.append(
+                f"proposed_queries[{index}].query: proposes forbidden operation "
+                f"{match.group(0).split()[0].lower()!r}; the data lane is read-only"
+            )
+        tool_name = item.get("tool_name")
+        if isinstance(tool_name, str) and (verb := _mutating_tool_verb(tool_name)):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: names a mutating tool "
+                f"({verb!r}); the data lane is read-only"
+            )
+        if isinstance(tool_name, str) and _identifier_looks_secret(tool_name.strip()):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: credential-shaped "
+                "identifier; name the read-only data tool instead"
+            )
+        # A confirmed proposal is executed by the parent, so the aggregate
+        # policy binds the QUERY too (bot-review round-19): a select-star
+        # projection requests raw rows by construction. count(*)/aggregated
+        # projections stay valid.
+        #
+        # DIALECT BOUNDARY (round-26): this lint classifies SQL — the
+        # dominant dialect — plus the demonstrated GraphQL identity-field
+        # shape below. Other dialects and natural-language proposals are
+        # validated by the confirming human, who sees every proposal
+        # verbatim before any execution; the lint is advisory
+        # defense-in-depth under that structural gate, not a completeness
+        # contract.
+        if isinstance(query, str) and re.search(
+            r"\{[^{}]*\b(id|email|phone|name|address|ssn)\b[^{}]*\}",
+            query,
+            re.IGNORECASE,
+        ):
+            errors.append(
+                f"proposed_queries[{index}].query: selects raw identity "
+                "fields (GraphQL-style entity selection); request aggregate "
+                "fields (counts, totals) instead"
+            )
+        if isinstance(query, str) and re.search(r"\bselect\s+(?:\w+\.)?\*", query, re.IGNORECASE):
+            errors.append(
+                f"proposed_queries[{index}].query: requests raw rows "
+                "(SELECT *); propose an aggregate projection "
+                "(COUNT/AVG/GROUP BY) instead"
+            )
+        # A SELECT projection WITHOUT any aggregate marker returns rows by
+        # construction (round-20: "SELECT account_id, plan, seats FROM
+        # accounts"; round-23: CTE-prefixed "WITH ... SELECT ..."): the
+        # aggregate policy binds confirmable payload, so it must aggregate,
+        # deduplicate to categories, or fetch a scalar. The marker scan runs
+        # over the WHOLE query, so a raw projection OVER an aggregated CTE
+        # stays valid.
+        elif isinstance(query, str) and re.match(
+            r"\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(with|select)\b",
+            query,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            # The aggregation must live in the MAIN statement (round-24): an
+            # unrelated aggregated CTE must not launder a raw final
+            # projection, so markers are scanned from the first top-level
+            # SELECT after any WITH prefix. LIMIT 1 is NOT an aggregate
+            # marker (round-21): it fetches one ROW of raw columns.
+            main_statement = _main_select_segment(_strip_sql_comments(query))
+            # Markers inside parenthesized subexpressions cannot launder the
+            # MAIN projection (round-25: a scalar count(*) subquery aliased
+            # into a raw row projection): scan with paren contents blanked —
+            # aggregate calls keep their name+paren, subquery internals
+            # vanish.
+            scannable = _blank_paren_content(main_statement)
+            has_aggregate_marker = re.search(
+                r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
+                r"|\bgroup\s+by\b|\bdistinct\b",
+                scannable,
+                re.IGNORECASE,
+            )
+            identity_columns = (
+                r"(email|phone|address|ssn"
+                r"|first_name|last_name|full_name|user_id|account_id|customer_id)"
+            )
+            distinct_pii = re.search(
+                r"\bdistinct\b[^,]*\b" + identity_columns + r"\b",
+                scannable,
+                re.IGNORECASE,
+            )
+            # Grouping BY an identity column keys the aggregate per user —
+            # per-identity rows, not categories (round-25).
+            grouped_identity = re.search(
+                r"\bgroup\s+by\b[^;]*\b" + identity_columns + r"\b",
+                scannable,
+                re.IGNORECASE,
+            )
+            if grouped_identity:
+                errors.append(
+                    f"proposed_queries[{index}].query: GROUP BY an "
+                    "identity/PII column keys results per identity — "
+                    "aggregate by category (plan, region, time bucket) "
+                    "instead"
+                )
+            elif distinct_pii:
+                # DISTINCT deduplicates to categories — a DISTINCT projection
+                # of an identity/PII column is a raw identifier list, not a
+                # category set (round-24: SELECT DISTINCT email FROM users).
+                errors.append(
+                    f"proposed_queries[{index}].query: DISTINCT over an "
+                    "identity/PII column returns raw identifiers; aggregate "
+                    "by count instead"
+                )
+            elif not has_aggregate_marker:
+                errors.append(
+                    f"proposed_queries[{index}].query: a SELECT projection "
+                    "without aggregation returns raw rows; use "
+                    "COUNT/AVG/GROUP BY/DISTINCT (a scalar fetch is "
+                    "max(col), not LIMIT 1)"
+                )
+        if isinstance(query, str) and _EMBEDDED_JSON_ROWS.search(query):
+            errors.append(
+                f"proposed_queries[{index}].query: embedded serialized rows "
+                "are raw evidence and may not ride any persisted field"
+            )
+        expected_decision = item.get("expected_decision")
+        if isinstance(expected_decision, str) and _prose_contains_rows(expected_decision):
+            errors.append(
+                f"proposed_queries[{index}].expected_decision: row-shaped "
+                "(serialized-record) content is raw evidence and may not ride "
+                "any persisted field"
+            )
+    return errors
+
+
+_DATA_EVIDENCE_CONTRACT_ID = "data_evidence_answer.v1"
+
+# A safe identifier is one token of word/dot/dash characters — no spaces,
+# no '=', no ':' — so a credential can never wear the exemption.
+_SAFE_IDENTIFIER_SYNTAX = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+# Standalone secrets that ARE syntactically identifiers (round-31):
+# unambiguous vendor prefixes, or a credential word whose suffix tokens are
+# all hex/digit gibberish. token_usage_v2 keeps its exemption — "usage" is
+# a word, not entropy.
+_VENDOR_SECRET_PREFIX = re.compile(
+    r"^(ghp_|gho_|github_pat_|xox[a-z][-_]|sk[-_]|pk[-_]|AKIA|ASIA|ABIA|ACCA)",
+)
+_CREDENTIAL_WORD_PREFIX = re.compile(r"^(token|secret|key|bearer|api_?key)[-_]", re.IGNORECASE)
+
+
+def _identifier_looks_secret(value: str) -> bool:
+    if _VENDOR_SECRET_PREFIX.match(value):
+        return True
+    match = _CREDENTIAL_WORD_PREFIX.match(value)
+    if not match:
+        return False
+    # ANY gibberish segment marks the credential (round-32:
+    # api_key_prod_123abc — the word "prod" must not launder "123abc").
+    # Short version tags (v2, v12) stay words, so token_usage_v2 keeps its
+    # exemption.
+    suffix_tokens = [tok for tok in re.split(r"[-_.]", value[match.end() :]) if tok]
+
+    def _gibberish(tok: str) -> bool:
+        if re.fullmatch(r"\d{4,}", tok):
+            return True
+        return bool(re.fullmatch(r"[0-9a-fA-F]{4,}", tok) and re.search(r"\d", tok))
+
+    # Secret-marker words in the suffix mark alphabetic credentials too
+    # (round-33: api_key_live_supersecret) — live/test-key conventions and
+    # the word secret itself never name read-only data tools.
+    def _secret_marker(tok: str) -> bool:
+        lowered = tok.lower()
+        return lowered in ("live", "prod", "priv", "private") or "secret" in lowered
+
+    return any(_gibberish(tok) or _secret_marker(tok) for tok in suffix_tokens)
+
+
+# Lane ids (and correlation values generally) are short identifiers; an
+# unexpected key that does not look like one is untrusted freeform content.
+_LANE_KEY_SHAPE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _reportable_unexpected_key(key: str) -> str:
+    """Return a safe-to-echo form of a rejected submission key.
+
+    Lane-id shaped keys are echoed verbatim (they are plain identifiers the
+    host needs to recognize its own mistake); anything else could be PII or a
+    secret masquerading as a key, so only a digest is reported.
+    """
+    if _LANE_KEY_SHAPE.match(key):
+        return key
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return f"<redacted-key sha256:{digest}>"
+
+
+def _lane_answer_contract_violations(
+    contracts: Mapping[str, Any],
+    provided: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate submitted lane outputs against their registered answer contracts.
+
+    Returns one ``{"lane_id", "contract_id", "errors"}`` entry per violating
+    lane. Lanes without a registered contract are not checked; a submitted
+    output that is not a JSON object is itself a violation when a contract
+    exists (the contract's response_model_schema describes an object form).
+    Data-evidence lanes additionally get the semantic boundary scan, keyed on
+    the contract id so records persisted with an older schema still get it.
+    """
+    violations: list[dict[str, Any]] = []
+    for lane_id, contract in contracts.items():
+        if lane_id not in provided or not isinstance(contract, Mapping):
+            continue
+        contract_id = str(contract.get("contract_id") or "")
+        output = provided[lane_id]
+        if not isinstance(output, Mapping):
+            violations.append(
+                {
+                    "lane_id": lane_id,
+                    "contract_id": contract_id,
+                    "errors": ["lane output is not a JSON object"],
+                }
+            )
+            continue
+        # The data boundary scan runs INDEPENDENTLY of schema shape AND
+        # validity (rounds 14 and 16): the data lane's fail-closed guarantee
+        # is keyed on the contract identity, so a legacy record whose
+        # persisted schema is missing, non-mapping, or invalid still gets the
+        # policy scan — schema unenforceability never disables it.
+        boundary_errors = (
+            _data_evidence_boundary_violations(output)
+            if contract_id == _DATA_EVIDENCE_CONTRACT_ID
+            else []
+        )
+        schema = contract.get("response_model_schema")
+        if not isinstance(schema, Mapping):
+            if boundary_errors:
+                violations.append(
+                    {
+                        "lane_id": lane_id,
+                        "contract_id": contract_id,
+                        "errors": boundary_errors,
+                    }
+                )
+            continue
+        # Belt for records persisted before registration validated schemas
+        # (round-12): an invalid registered schema must degrade to
+        # "unenforced" — the child never received an enforceable form — not
+        # crash re-entry with UnknownType.
+        try:
+            validator = Draft202012Validator(dict(schema))
+            # Redacted messages for EVERY lane (rounds 12 and 24): jsonschema
+            # echoes the offending instance value into ``error.message``, and
+            # violations ride the response AND the persisted terminal record —
+            # so any lane's rejected value would otherwise leak into durable
+            # state through its own violation report. Report the location and
+            # the violated keyword, never the content.
+            errors = sorted(
+                f"{error.json_path}: violates {error.validator!r}"
+                for error in validator.iter_errors(dict(output))
+            )
+        except Exception:
+            # An ADVERTISED contract whose validation explodes must fail
+            # CLOSED (bot-review round-17): content that cannot be verified
+            # is not accepted into durable state. Registration now rejects
+            # unresolvable schemas, so this belt only fires for legacy
+            # records — whose retention window expires them.
+            log.warning(
+                "fanout.lane_contract.validation_failed_closed",
+                lane_id=lane_id,
+                contract_id=contract_id,
+            )
+            errors = [
+                "contract validation failed (unresolvable or broken schema); "
+                "the output cannot be verified and is not accepted"
+            ]
+        errors = [*errors, *boundary_errors]
+        if errors:
+            violations.append({"lane_id": lane_id, "contract_id": contract_id, "errors": errors})
+    return violations
 
 
 def _fanout_identity_synthesis(aggregated_outputs: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -2772,7 +4442,7 @@ def register_lateral_persona_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.persona",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a lateral persona-panel fan-out for later result re-entry.
 
     Expected keys are the payload personas (``context.persona``); the persisted
@@ -2803,7 +4473,7 @@ def register_code_investigation_fanout(
     request: Mapping[str, Any],
     correlation_key: str = "code_facts",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a code-investigation fan-out for later result re-entry.
 
     Expected keys default to the request's ``required_result_ids`` (or the
@@ -2833,7 +4503,7 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
@@ -2848,19 +4518,112 @@ def register_question_advisory_fanout(
     the human's answer easier), so submission routes to a deterministic
     aggregation that returns the correlated lane outputs in dispatch order for
     the host to synthesize.
+
+    Only ``required: true`` lanes gate completion (Q00/ouroboros#1671): a host
+    that cannot run an optional lane (for example ``data_context`` on a runtime
+    without MCP access) must not pin the fan-out at ``status="partial"``
+    forever. Optional lanes that were submitted still aggregate; missing ones
+    are reported as ``missing_optional_keys`` on the complete outcome.
+    """
+    lanes: list[dict[str, Any]] = []
+    for payload in payloads:
+        payload_dict = payload.to_dict()
+        lane_id = _payload_lane_id(payload_dict)
+        if not lane_id:
+            continue
+        context = payload_dict.get("context")
+        lane = dict(context) if isinstance(context, Mapping) else {}
+        lane["lane_id"] = lane_id
+        lanes.append(lane)
+    return register_question_advisory_fanout_from_lanes(
+        registry,
+        session_id=session_id,
+        lanes=lanes,
+        correlation_key=correlation_key,
+        fanout_id=fanout_id,
+    )
+
+
+def register_question_advisory_fanout_from_lanes(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    lanes: list[Mapping[str, Any]],
+    correlation_key: str = "context.lane_id",
+    fanout_id: str | None = None,
+) -> str | None:
+    """Register a question-advisory fan-out directly from lane metadata.
+
+    The plugin (OpenCode passive) transport cannot pre-build per-question
+    lane payloads server-side — the plugin child generates the question — but
+    it must still receive the SAME machine-readable re-entry contract as the
+    host-driven transport: registered lane ids, required/optional gating, and
+    each lane's answer contract for door validation. Lane dicts are the
+    versioned ``question_advisory_fanout`` metadata lanes (or payload
+    contexts, which carry the same fields). Returns ``None`` when nothing was
+    registered or persistence failed — the caller must then skip stamping a
+    fan-out id.
     """
     expected_keys: list[str] = []
-    for payload in payloads:
-        lane_id = _payload_lane_id(payload.to_dict())
-        if lane_id and lane_id not in expected_keys:
-            expected_keys.append(lane_id)
+    required_keys: list[str] = []
+    lane_answer_contracts: dict[str, Any] = {}
+    for lane in lanes:
+        if not isinstance(lane, Mapping):
+            continue
+        lane_id = str(lane.get("lane_id") or "")
+        if not lane_id or lane_id in expected_keys:
+            continue
+        # The public grammar and re-entry validation agree (round-33): a
+        # lane id that could not round-trip as results[*].key (shell
+        # metacharacters, whitespace) is never registered as an expected
+        # key it could not complete.
+        if not _LANE_KEY_SHAPE.match(lane_id):
+            log.warning("fanout.lane_id.invalid_shape_skipped", lane_id=lane_id)
+            continue
+        expected_keys.append(lane_id)
+        if bool(lane.get("required")):
+            required_keys.append(lane_id)
+        # Persist the lane's answer contract so re-entry can validate the
+        # submitted output against it BEFORE synthesis — a data lane result
+        # is otherwise arbitrary content flowing toward user confirmation and
+        # persisted interview state.
+        answer_contract = lane.get("answer_contract")
+        if isinstance(answer_contract, Mapping):
+            # Enforced IFF deliverable whole (round-11): an oversized
+            # contract is skipped here so re-entry never validates against a
+            # schema the child could only have received torn.
+            if _enforceable_lane_contract(answer_contract):
+                lane_answer_contracts[lane_id] = dict(answer_contract)
+            else:
+                log.warning(
+                    "fanout.lane_contract.unenforceable_not_enforced",
+                    lane_id=lane_id,
+                    contract_id=str(answer_contract.get("contract_id") or ""),
+                )
+                if lane_id == "data_context":
+                    # The data lane FAILS CLOSED (bot-review round-13):
+                    # dropping its unenforceable contract entirely would also
+                    # drop the contract-id-keyed evidence boundary scan,
+                    # letting PII/credential content persist unvalidated. A
+                    # minimal object contract keeps the policy scan active
+                    # while the undeliverable full schema stays unenforced.
+                    lane_answer_contracts[lane_id] = {
+                        "contract_id": _DATA_EVIDENCE_CONTRACT_ID,
+                        "response_model_schema": {"type": "object"},
+                    }
+    if not expected_keys:
+        return None
+    synthesizer_input: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    if lane_answer_contracts:
+        synthesizer_input["lane_answer_contracts"] = lane_answer_contracts
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
         correlation_key=correlation_key,
         expected_keys=expected_keys,
-        synthesizer_input={"lane_ids": list(expected_keys)},
+        synthesizer_input=synthesizer_input,
         fanout_id=fanout_id,
+        required_keys=required_keys,
     )
 
 
@@ -2871,6 +4634,7 @@ def submit_fanout_results(
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
+    finalize: bool | None = None,
 ) -> dict[str, Any]:
     """Validate + route a batch of correlated fan-out results back to synthesis.
 
@@ -2879,86 +4643,345 @@ def submit_fanout_results(
     * Unknown ``fanout_id`` → ``status="unknown_fanout_id"`` (clean error).
     * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
       record → ``status="correlation_mismatch"`` (clean error).
-    * Missing expected keys → ``status="partial"`` + ``missing_keys`` (the host
-      may resubmit with the remaining lanes).
-    * Complete set → route to the revived synthesizer for the record ``kind``
-      and return its structured outcome under ``status="complete"``.
+    * A fan-out that already completed → ``status="already_complete"``: the
+      record is terminal, so a replay cannot mutate the synthesized outcome.
+      The persisted terminal outcome is replayed on the response, so a caller
+      that lost the first completion response can still recover the synthesis.
+    * Submitted keys that are not in the record's ``expected_keys`` are
+      rejected at the door and reported under ``unexpected_keys`` — an
+      unregistered key is arbitrary content and never enters durable state.
+    * Missing required keys → ``status="partial"`` + ``missing_keys`` (the host
+      may resubmit with the remaining lanes). Lanes with a registered answer
+      contract are validated BEFORE anything is persisted — a violating
+      output never enters durable state, is reported under
+      ``contract_violations``, and (if required) stays missing until a
+      conforming output is resubmitted. ``accumulation_persisted=false``
+      means the received keys could NOT be saved (I/O failure): resubmit
+      them together with the remaining lanes.
+    * All required keys present → route to the revived synthesizer for the
+      record ``kind``. The synthesizer's own content validation gates
+      terminalization: outputs it rejects (e.g. a ``code_facts`` result bound
+      to a different session) come back as ``status="partial"`` with
+      ``synthesis_rejected_keys`` so a corrected retry stays possible, instead
+      of freezing an unusable outcome behind ``already_complete``.
+    * A synthesizable outcome is persisted as the terminal record BEFORE
+      completion is claimed: if that write fails the response is
+      ``status="completion_not_persisted"`` (the fan-out stays open — retry
+      the submission), never a claimed-durable ``complete``. On success the
+      structured outcome returns under ``status="complete"``; optional keys
+      that never arrived are reported as ``missing_optional_keys`` instead of
+      pinning the fan-out at ``partial`` (Q00/ouroboros#1671); records
+      persisted without a required/optional split treat every expected key as
+      required.
+
+    ``finalize`` is the sequential-host escape from eager completion
+    (bot-review round-7): completion normally fires as soon as every
+    required lane is present, which would permanently discard optional
+    results a host submits one at a time AFTER the required set. Passing
+    ``finalize=False`` accumulates the batch without terminalizing
+    (``status="accumulated"``); the host closes the fan-out with a final
+    ``finalize``-omitted (or ``finalize=True``) submission. Single-batch
+    hosts never need the parameter.
+
+    The whole load → validate → synthesize → persist sequence runs inside a
+    per-fanout exclusive section: concurrent submissions serialize, so
+    exactly one can terminalize a record and the other replays the terminal
+    outcome instead of double-completing with a divergent result.
     """
+    with registry.exclusive(fanout_id):
+        return _submit_fanout_results_locked(
+            registry,
+            session_id=session_id,
+            correlation_key=correlation_key,
+            results=results,
+            fanout_id=fanout_id,
+            finalize=finalize,
+        )
+
+
+def _submit_fanout_results_locked(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    correlation_key: str,
+    results: list[Mapping[str, Any]],
+    fanout_id: str,
+    finalize: bool | None = None,
+) -> dict[str, Any]:
     record = registry.load(fanout_id)
     if record is None:
         return {
             "status": "unknown_fanout_id",
             "fanout_id": fanout_id,
-            "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
+            "error": (
+                f"No fan-out record exists for fanout_id={fanout_id!r}. "
+                "Records (including completed ones held for replay) are "
+                "retained for 7 days after their last update, so an expired "
+                "id and a never-registered id are indistinguishable here."
+            ),
         }
-    if record.session_id and session_id and record.session_id != session_id:
+    # Correlation is validated BEFORE terminal replay, and STRICTLY: when the
+    # record was registered with a session/correlation identity, the caller
+    # must present it — omitting the parameters does not skip the boundary
+    # (bot-review round-5 probe). Only records registered WITHOUT an identity
+    # (legacy/empty) accept an omitted value.
+    if record.session_id and session_id != record.session_id:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
-            "error": "session_id does not match the registered fan-out.",
+            "error": (
+                "session_id does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
             "expected_session_id": record.session_id,
         }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
+    if record.correlation_key and correlation_key != record.correlation_key:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
-            "error": "correlation_key does not match the registered fan-out.",
+            "error": (
+                "correlation_key does not match the registered fan-out "
+                "(required — omitting it does not bypass the check)."
+            ),
             "expected_correlation_key": record.correlation_key,
         }
+    if record.completed:
+        replay: dict[str, Any] = (
+            dict(record.terminal_response) if record.terminal_response is not None else {}
+        )
+        replay.update(
+            {
+                "status": "already_complete",
+                "fanout_id": fanout_id,
+                "kind": record.kind,
+                "error": (
+                    "This fan-out already completed; its record is terminal and "
+                    "late results cannot mutate the synthesized outcome."
+                    + (
+                        " The persisted terminal outcome is replayed on this response."
+                        if record.terminal_response is not None
+                        else ""
+                    )
+                ),
+            }
+        )
+        return replay
 
-    provided: dict[str, Any] = {}
+    # Unknown keys are rejected at the door, BEFORE any merge or write: a key
+    # the record never registered is arbitrary content with no lane contract,
+    # so accepting it would smuggle unvalidated data into durable state. The
+    # rejected key VALUES are themselves untrusted content: only lane-id
+    # shaped keys are echoed back verbatim; anything else (an email, a token,
+    # freeform text) is reported as a redacted digest so the report and the
+    # terminal record never carry it.
+    submitted: dict[str, Any] = {}
+    unexpected_keys: list[str] = []
+    malformed_keys: list[str] = []
     for result in results:
         key = result.get("key")
         if key is None:
             continue
-        provided[str(key)] = result.get("content")
+        resolved_key = str(key)
+        if resolved_key not in record.expected_keys:
+            reportable = _reportable_unexpected_key(resolved_key)
+            if reportable not in unexpected_keys:
+                unexpected_keys.append(reportable)
+            continue
+        # A keyed result without usable content is NOT a submission
+        # (bot-review round-14): counting it toward completion would
+        # terminalize a fan-out around None outputs. The lane stays missing
+        # and is reported under malformed_keys.
+        raw_content = result.get("content")
+        if (
+            "content" not in result
+            or raw_content is None
+            or (isinstance(raw_content, str) and not raw_content.strip())
+        ):
+            if resolved_key not in malformed_keys:
+                malformed_keys.append(resolved_key)
+            continue
+        submitted[resolved_key] = result.get("content")
+    unexpected_keys.sort()
+    malformed_keys.sort()
+
+    # Contract validation happens at the door, BEFORE anything is merged or
+    # persisted: a violating data-lane output (raw rows, PII-shaped evidence,
+    # skipped confirmation) must never enter the durable record.
+    raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
+    contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+    # The public tool accepts ``content`` as object OR text (round-25): a
+    # text-transport child submitting its answer as JSON-serialized text is
+    # normalized here so contracted lanes validate the decoded object
+    # instead of rejecting every textual result.
+    for lane_key in list(submitted):
+        if lane_key in contracts and isinstance(submitted[lane_key], str):
+            try:
+                decoded = json.loads(submitted[lane_key])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                submitted[lane_key] = decoded
+    contract_violations = _lane_answer_contract_violations(contracts, submitted)
+    violating_lanes = {item["lane_id"] for item in contract_violations}
+    accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}
+
+    # Accumulate across calls: earlier partial submissions were persisted on
+    # the record, so "submit lane A, then submit the remaining lane B" reaches
+    # completion exactly as the partial-retry contract documents. The latest
+    # accepted submission wins on a per-key conflict.
+    provided: dict[str, Any] = {**record.received_results, **accepted}
+
+    # Accumulated state is validated BEFORE every durable write, not only at
+    # synthesis (bot-review round-15): a legacy violating value must not ride
+    # a partial or finalize=false re-save. Violations found in the
+    # accumulated mapping are scrubbed here, reported alongside the
+    # current-call ones, and their required lanes reopen as missing.
+    # Scrubbing considers the accumulated value INDEPENDENTLY of the current
+    # call (bot-review round-21): when a lane's replacement ALSO violates,
+    # the old violating value it failed to replace must still be scrubbed —
+    # only the violation REPORT is deduplicated per lane.
+    accumulated_violations = _lane_answer_contract_violations(contracts, provided)
+    if accumulated_violations:
+        scrubbed_lanes = {item["lane_id"] for item in accumulated_violations}
+        provided = {key: value for key, value in provided.items() if key not in scrubbed_lanes}
+        contract_violations = [
+            *contract_violations,
+            *[item for item in accumulated_violations if item["lane_id"] not in violating_lanes],
+        ]
+
+    # Kind-specific content validation runs before even PARTIAL persistence
+    # for code investigations (round-20 follow-up, dormant-hardening): a
+    # wrong-session code_facts result never rides an early partial into
+    # durable state. Lateral personas are content-blind, and advisory lanes
+    # are door-validated above.
+    early_rejected: list[str] = []
+    if record.kind == FANOUT_KIND_CODE_INVESTIGATION and provided:
+        code_request = record.synthesizer_input.get("request") or {}
+        probe = synthesize_code_investigation_when_complete(
+            code_request, provided, _fanout_identity_synthesis
+        )
+        valid_ids = {str(item["result_id"]) for item in probe.get("aggregated_outputs") or ()}
+        early_rejected = sorted(key for key in provided if key not in valid_ids)
+        provided = {key: value for key, value in provided.items() if key in valid_ids}
 
     missing_keys = [key for key in record.expected_keys if key not in provided]
-    if missing_keys:
+    missing_required = [key for key in record.required_keys if key not in provided]
+    if finalize is False and record.kind != FANOUT_KIND_QUESTION_ADVISORY:
+        # Non-advisory kinds validate content only at synthesis (e.g. a
+        # code_facts result is checked against its embedded session there), so
+        # accumulating them early would persist unvalidated content
+        # (bot-review round-13). Advisory lanes are door-validated, which is
+        # why they alone support sequential accumulation.
+        return {
+            "status": "finalize_unsupported",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": (
+                "finalize=false accumulation is supported only for question-"
+                "advisory fan-outs; this kind validates content at synthesis, "
+                "so submit the full result set in one finalizing call."
+            ),
+        }
+    if finalize is False:
+        # Sequential accumulation (bot-review round-7): the host is still
+        # submitting lanes one at a time, so even a required-complete set
+        # must NOT terminalize yet — optional results still in flight would
+        # be permanently discarded behind already_complete.
+        persisted = registry.save(replace(record, received_results=provided))
+        return {
+            "status": "accumulated",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": missing_keys,
+            "missing_required_keys": missing_required,
+            "received_keys": sorted(provided),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "accumulation_persisted": persisted,
+            "note": (
+                "Results accumulated; the fan-out stays open. Submit the "
+                "remaining lanes, then close with a finalizing submission "
+                "(finalize omitted or true)."
+            ),
+        }
+    if missing_required:
+        persisted = registry.save(replace(record, received_results=provided))
         return {
             "status": "partial",
             "fanout_id": fanout_id,
             "kind": record.kind,
             "missing_keys": missing_keys,
+            "missing_required_keys": missing_required,
             "received_keys": sorted(provided),
             "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "synthesis_rejected_keys": early_rejected,
+            "accumulation_persisted": persisted,
         }
+    # Every remaining missing key is optional: proceed to synthesis without it
+    # instead of pinning the fan-out at "partial" (Q00/ouroboros#1671).
+    missing_optional = missing_keys
 
+    # Run the kind's synthesizer BEFORE terminalizing: key presence alone is
+    # not completion. A synthesizer that rejects submitted content (e.g. a
+    # code_facts output bound to a different session) must leave the record
+    # open so a corrected retry can still land, and the rejected content must
+    # never persist as an accepted result.
+    completion_extra: dict[str, Any] = {}
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         entries = record.synthesizer_input.get("entries") or []
-        outcome = continue_interview_after_lateral_persona_synthesis(
+        outcome: dict[str, Any] = continue_interview_after_lateral_persona_synthesis(
             entries,
             provided,
             _fanout_identity_synthesis,
             _fanout_identity_continuation,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
+        ready = bool(outcome.get("ready_for_synthesis"))
+        rejected_keys = [str(key) for key in outcome.get("missing_personas") or ()]
+    elif record.kind == FANOUT_KIND_CODE_INVESTIGATION:
         request = record.synthesizer_input.get("request") or {}
         outcome = synthesize_code_investigation_when_complete(
             request,
             provided,
             _fanout_identity_synthesis,
         )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
+        kind_violation_ids = [
+            str(item.get("result_id")) for item in outcome.get("contract_violations") or ()
+        ]
+        ready = bool(outcome.get("ready_for_synthesis")) and not kind_violation_ids
+        rejected_keys = [
+            str(key) for key in outcome.get("missing_result_ids") or ()
+        ] + kind_violation_ids
+    elif record.kind == FANOUT_KIND_QUESTION_ADVISORY:
         # Advisory lanes are independent advice with no gating synthesizer, so
         # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize.
+        # order and hand them back for the host to synthesize. Exclusion from
+        # the aggregation is decided by validating what is ACTUALLY in the
+        # accumulated state (bot-review round-12): a rejected duplicate in the
+        # current call is reported under contract_violations, but it must not
+        # suppress an earlier CONFORMING value already accumulated for that
+        # lane — door validation kept the bad duplicate out of ``provided``,
+        # so the provided value is the one to judge. This same pass is the
+        # belt against records persisted before door validation existed.
+        provided_violations = _lane_answer_contract_violations(contracts, provided)
+        excluded_lanes = {item["lane_id"] for item in provided_violations}
+        reported_lanes = {item["lane_id"] for item in contract_violations}
+        contract_violations = [
+            *contract_violations,
+            *[item for item in provided_violations if item["lane_id"] not in reported_lanes],
+        ]
+        # Accumulated violations FAIL CLOSED (bot-review round-14): a
+        # violating value that reached durable state (legacy records) is
+        # scrubbed from it here — never re-persisted by the terminal write —
+        # and a REQUIRED lane it occupied reopens as missing instead of
+        # terminalizing around an empty aggregation.
+        rejected_keys = sorted(key for key in excluded_lanes if key in provided)
+        provided = {key: value for key, value in provided.items() if key not in excluded_lanes}
+        missing_optional = [key for key in record.expected_keys if key not in provided]
         lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
         aggregated = [
             {"lane_id": lane_id, "output": provided[lane_id]}
@@ -2966,20 +4989,81 @@ def submit_fanout_results(
             if lane_id in provided
         ]
         outcome = _fanout_identity_synthesis(aggregated)
+        ready = all(key in provided for key in record.required_keys)
+        completion_extra["contract_violations"] = contract_violations
+    else:
         return {
-            "status": "complete",
+            "status": "unknown_kind",
             "fanout_id": fanout_id,
             "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
+            "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
         }
 
-    return {
-        "status": "unknown_kind",
+    if not ready:
+        rejected_present = sorted(set(rejected_keys))
+        retained = {
+            key: value for key, value in provided.items() if key not in set(rejected_present)
+        }
+        persisted = registry.save(replace(record, received_results=retained))
+        return {
+            "status": "partial",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "missing_keys": [key for key in record.expected_keys if key not in retained],
+            "missing_required_keys": [key for key in record.required_keys if key not in retained],
+            "received_keys": sorted(retained),
+            "expected_keys": list(record.expected_keys),
+            "contract_violations": contract_violations,
+            "unexpected_keys": unexpected_keys,
+            "malformed_keys": malformed_keys,
+            "synthesis_rejected_keys": rejected_present,
+            "result": outcome,
+            "accumulation_persisted": persisted,
+        }
+
+    completion = {
+        "status": "complete",
         "fanout_id": fanout_id,
         "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+        "correlation_key": record.correlation_key,
+        "missing_optional_keys": missing_optional,
+        "unexpected_keys": unexpected_keys,
+        "malformed_keys": malformed_keys,
+        **completion_extra,
+        "result": outcome,
     }
+    # Persist the terminal record (with its outcome, for replay recovery)
+    # BEFORE claiming completion: a failed terminal write means the fan-out is
+    # NOT durably complete and a later submission could still replace the
+    # outcome, so the caller must be told to retry, never handed "complete".
+    # ``unexpected_keys`` is per-call rejection feedback, not part of the
+    # outcome: it is stripped from the persisted terminal response so even a
+    # redacted trace of rejected keys never enters durable state.
+    terminal_snapshot = {
+        key: value
+        for key, value in completion.items()
+        if key not in ("unexpected_keys", "malformed_keys")
+    }
+    terminal_persisted = registry.save(
+        replace(
+            record,
+            received_results=provided,
+            completed=True,
+            terminal_response=terminal_snapshot,
+        )
+    )
+    if not terminal_persisted:
+        return {
+            **completion,
+            "status": "completion_not_persisted",
+            "error": (
+                "All required results were accepted and synthesized, but the "
+                "terminal fan-out record could not be persisted; completion is "
+                "not durable and the fan-out remains open. Resubmit the same "
+                "results to complete durably."
+            ),
+        }
+    return completion
 
 
 # ---------------------------------------------------------------------------

@@ -305,6 +305,12 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # re-executes successful children and can double token spend.
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
+        # Data-lane tool steering: this names the MCP tools the data_context
+        # advisory child is told to prefer, so an untrusted repo .env must
+        # not be able to point the lane at attacker-selected tools (PR #1703
+        # round-7). Only the trusted home .env or the real environment may
+        # set it.
+        "OUROBOROS_KNOWN_DATA_TOOLS",
     }
 )
 

@@ -560,7 +560,9 @@ class TestBuildInterviewSubagent:
         assert "PRIMARY GOAL: Build a REST API." in p.prompt
         assert "[truncated]" in p.prompt
         assert "details " * 200 not in p.prompt
-        assert len(p.prompt) < 5_000
+        # Bound covers the fixed prompt skeleton incl. the plugin advisory
+        # re-entry contract pointer; raised with it in PR #1703 round 4.
+        assert len(p.prompt) < 5_600
 
     def test_answer_prompt_includes_answer(self) -> None:
         p = build_interview_subagent(
@@ -616,7 +618,9 @@ class TestBuildInterviewSubagent:
         assert "[truncated]" in p.prompt
         assert "A" * 1_000 not in p.prompt
         assert "T" * 1_000 not in p.prompt
-        assert len(p.prompt) < 5_000
+        # Bound covers the fixed prompt skeleton incl. the plugin advisory
+        # re-entry contract pointer; raised with it in PR #1703 round 4.
+        assert len(p.prompt) < 5_600
 
     def test_answer_prompt_preserves_latest_transcript_round(self) -> None:
         latest_question = "**Q7:** Should subscription control be server-side or client-side?"
@@ -661,7 +665,9 @@ class TestBuildInterviewSubagent:
         assert "Please decide this before Seed generation." in p.prompt
         assert "**A7:** Server-side should own it." in p.prompt
         assert "code line\n" * 100 not in p.prompt
-        assert len(p.prompt) < 5_000
+        # Bound covers the fixed prompt skeleton incl. the plugin advisory
+        # re-entry contract pointer; raised with it in PR #1703 round 4.
+        assert len(p.prompt) < 5_600
 
     def test_answer_prompt_falls_back_when_seed_closer_summary_missing(self, monkeypatch) -> None:
         from ouroboros.agents import loader
@@ -772,6 +778,101 @@ class TestBuildInterviewQuestionAdvisorySubagents:
         assert payloads[0].context["lane_id"] == "code_context"
         assert payloads[0].context["user_question_first"] is True
         assert payloads[1].context["persona"] == "contrarian"
+
+    def test_data_context_lane_builds_read_only_proposer_payload(self) -> None:
+        data_policy = {
+            "read_only": True,
+            "aggregate_only": True,
+            "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
+        }
+        answer_contract = {
+            "contract_id": "data_evidence_answer.v1",
+            "response_model_schema": {"type": "object"},
+        }
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "user_question_first": True,
+            "lanes": [
+                {
+                    "lane_id": "data_context",
+                    "capability": "call_mcp",
+                    "purpose": "Fetch data evidence for data-driven decisions.",
+                    "required": False,
+                    "data_policy": data_policy,
+                    "answer_contract": answer_contract,
+                },
+            ],
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert len(payloads) == 1
+        payload = payloads[0]
+        assert payload.title == "Interview advisory: data_context"
+        assert payload.agent == "researcher"
+        assert payload.context["lane_id"] == "data_context"
+        assert payload.context["capability"] == "call_mcp"
+        assert payload.context["required"] is False
+        assert payload.context["data_policy"] == data_policy
+        assert payload.context["answer_contract"] == answer_contract
+        # The proposer contract must be in the prompt: pre-call relevance
+        # gate, proposed queries for metered sources, no-op as completion
+        # signal, aggregates-only evidence, skeptical error handling.
+        assert "BEFORE any tool call" in payload.prompt
+        assert "proposed_queries" in payload.prompt
+        assert "no-op finding" in payload.prompt
+        assert "never raw rows" in payload.prompt
+        assert "Never run mutating operations" in payload.prompt
+        assert "no evidence, not as evidence" in payload.prompt
+        assert "## Data Access Policy" in payload.prompt
+        # The answer contract form ships whole and supersedes the generic
+        # output shape for this lane.
+        assert "## Answer Contract" in payload.prompt
+        assert "data_evidence_answer.v1" in payload.prompt
+        assert "superseded" in payload.prompt
+
+    def test_data_context_real_contract_ships_untruncated_in_prompt(self) -> None:
+        """The real metadata lane's contract must fit whole in the prompt."""
+        from ouroboros.orchestrator.capabilities.interview_schemas import (
+            _interview_question_advisory_fanout_metadata,
+        )
+
+        lanes = _interview_question_advisory_fanout_metadata()["lanes"]
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Which plan tier do most active users hit?",
+            "user_question_first": True,
+            "lanes": lanes,
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        data_payload = next(p for p in payloads if p.context["lane_id"] == "data_context")
+        assert "## Answer Contract" in data_payload.prompt
+        assert "data_evidence_answer.v1" in data_payload.prompt
+        assert "[truncated]" not in data_payload.prompt
+
+    def test_non_data_lanes_do_not_carry_data_policy(self) -> None:
+        request = {
+            "session_id": "sess-123",
+            "question_identity": "interview-question:0123456789abcdef",
+            "question": "Q?",
+            "lanes": [
+                {
+                    "lane_id": "answer_simplifier",
+                    "capability": "run_lateral_review",
+                    "persona": "simplifier",
+                    "required": True,
+                },
+            ],
+        }
+
+        payloads = build_interview_question_advisory_subagents(request)
+
+        assert "data_policy" not in payloads[0].context
 
     def test_requires_question_identity(self) -> None:
         with pytest.raises(ValueError, match="question_identity"):

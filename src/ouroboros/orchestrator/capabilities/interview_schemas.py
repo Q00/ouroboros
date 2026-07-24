@@ -5,6 +5,64 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+# Raw-evidence shapes the data_context evidence policy forbids (aggregates
+# only, PII-scrubbed): an email-shaped substring is PII, a credential prefix
+# glued to an opaque digit-bearing suffix is a leaked secret, and a
+# phone-shaped digit group is PII — never an aggregate. Written without
+# inline regex flags so the same strings are valid in both Python `re` and
+# the ECMA dialect JSON Schema validators use; the re-entry enforcement
+# point recompiles the case-sensitive ones case-insensitively.
+DATA_EVIDENCE_EMAIL_PATTERN = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+# The digit lookahead keeps ordinary hyphenated vocabulary ("token-counts",
+# "secret-santa") out: a credential suffix carries digits, a compound noun
+# does not.
+DATA_EVIDENCE_SECRET_PATTERN = (
+    r"\b(sk|pk|token|secret|bearer|api[_-]?key|ghp|gho|xox)"
+    r"[-_=:](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,}"
+)
+# Standard credential header/assignment forms (bot-review round-6 probe):
+# an Authorization/Bearer phrase followed by a digit-bearing opaque value, a
+# password assignment (sensitive regardless of digits), or an AWS-style
+# access key id.
+DATA_EVIDENCE_AUTH_HEADER_PATTERN = (
+    # Space-separated form needs a digit-bearing value ("authorization
+    # required for X" stays valid); the explicit colon HEADER form is a
+    # credential shape regardless of alphabet (round-7 probe: alphabetic
+    # Bearer values).
+    r"\b(authorization|bearer)\b[:= ]+(?=[^\s]*\d)[A-Za-z0-9_.=/+-]{8,}"
+    r"|\b(authorization|bearer)\s*:\s*\S{6,}"
+)
+DATA_EVIDENCE_PASSWORD_PATTERN = r"\b(password|passwd|pwd)\b\s*[:=]\s*\S{4,}"
+# Credential ASSIGNMENTS are secrets regardless of alphabet (round-34:
+# "api_key=supersecret") — the assignment itself is the signal, no digit
+# entropy required.
+DATA_EVIDENCE_CREDENTIAL_ASSIGNMENT_PATTERN = (
+    r"\b(api[_-]?key|access[_-]?key|secret|token)\s*[:=]\s*[A-Za-z0-9_\-/+]{6,}"
+)
+DATA_EVIDENCE_AWS_KEY_PATTERN = r"\b(AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"
+# US Social Security Number shape (round-7 probe): the phone pattern's group
+# widths deliberately do not cover the 3-2-4 split.
+DATA_EVIDENCE_SSN_PATTERN = r"\b\d{3}-\d{2}-\d{4}\b"
+# Phone shapes: international (+ then 7+ digits), separator-grouped local
+# numbers, or the US parenthesized area-code form. Comma-grouped magnitudes
+# ("1,234,567") and ISO dates/times do not match (comma and colon are not in
+# the separator class, and date groups are 2-digit).
+DATA_EVIDENCE_PHONE_PATTERN = (
+    r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b|\(\d{3}\)\s*\d{3}[-.\s]?\d{4}"
+)
+# An executed evidence value is a MEASUREMENT: aggregation is numeric by
+# definition, so a value with no numeral is a claim or a name roster, never
+# query output (qualitative context belongs in finding). This is the
+# structural rule that makes digit-free record lists unrepresentable under
+# any delimiter.
+DATA_EVIDENCE_MEASUREMENT_PATTERN = r"\d"
+# A value that opens as a JSON list/object is serialized rows, not an
+# aggregate.
+DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"
+# An aggregate is a single-line scalar statement: any embedded newline means
+# a record list (two customer rows separated by one newline are raw data).
+DATA_EVIDENCE_MULTILINE_PATTERN = r"[\r\n]"
+
 
 def _builtin_semantics_for(tool_name: str):  # noqa: ANN202
     from ouroboros.orchestrator.capabilities import _BUILTIN_SEMANTICS
@@ -475,6 +533,248 @@ def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, A
     return tuple(capabilities)
 
 
+def _data_context_answer_contract() -> dict[str, Any]:
+    """Return the answer contract for the data_context advisory lane.
+
+    Unlike ``code_fact_investigation_answer.v1`` this contract has NO grade
+    clause (``prefix_semantics``) and no auto-confirmed path: every data
+    answer requires user confirmation, because data evidence is point-in-time
+    and cannot be cheaply re-verified the way a manifest exact-match can
+    (Q00/ouroboros#1671). The contract's job is informed consent — the form
+    must give the confirming user everything needed to judge: what was
+    executed (evidence), what was deliberately NOT executed and why
+    (proposed_queries with source_class), and validity caveats.
+
+    Kept intentionally compact: the serialized contract must fit whole inside
+    the subagent prompt JSON budget (see the truncation of the code contract
+    at ``_INTERVIEW_ADVISORY_MAX_JSON_CHARS``).
+    """
+    answer_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "lane_id",
+            "data_needed",
+            "finding",
+            "confidence",
+            "evidence",
+            "proposed_queries",
+            "requires_user_confirmation",
+        ],
+        "properties": {
+            "lane_id": {"const": "data_context"},
+            "data_needed": {"type": "boolean"},
+            "finding": {"type": "string", "minLength": 1, "maxLength": 600},
+            "confidence": {"enum": ["reported_by_tool", "inferred", "no_evidence"]},
+            "evidence": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    # observed_at is required: executed data evidence is
+                    # point-in-time by nature, and an aggregate without its
+                    # observation timestamp loses that meaning by the time it
+                    # reaches the confirming user and persisted state.
+                    "required": ["source", "query_summary", "value", "observed_at"],
+                    "properties": {
+                        "source": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "query_summary": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 400,
+                            # The evidence policy (aggregates only, no raw
+                            # rows, PII-scrubbed) is part of the contract, not
+                            # just the prompt: email-, credential-, and
+                            # phone-shaped substrings and JSON-encoded
+                            # row/object payloads are raw evidence and never
+                            # validate.
+                            "allOf": [
+                                {"pattern": DATA_EVIDENCE_MEASUREMENT_PATTERN},
+                                {"not": {"pattern": DATA_EVIDENCE_EMAIL_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_PHONE_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_ROW_SHAPE_PATTERN}},
+                                {"not": {"pattern": DATA_EVIDENCE_MULTILINE_PATTERN}},
+                            ],
+                        },
+                        "observed_at": {
+                            "type": "string",
+                            "maxLength": 40,
+                            # ISO-8601-shaped WITH calendar/clock ranges: a real
+                            # date, optionally followed by a real time and zone
+                            # offset. Draft 2020-12 validators do not enforce
+                            # "format", and a digits-only shape accepted
+                            # month 99 / hour 99 (bot-review round-3 probe).
+                            "pattern": (
+                                r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+                                r"([T ]([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d{1,6})?)?"
+                                r"([Zz]|[+-]([01]\d|2[0-3]):?[0-5]\d)?)?$"
+                            ),
+                        },
+                    },
+                },
+            },
+            "proposed_queries": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["tool_name", "query", "expected_decision", "source_class"],
+                    # An unexecuted proposal is only useful if the parent
+                    # session can actually run and judge it: empty tool, query,
+                    # or decision fields are not a proposal.
+                    "properties": {
+                        "tool_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "query": {"type": "string", "minLength": 1, "maxLength": 400},
+                        "expected_decision": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "source_class": {
+                            "enum": [
+                                "metered",
+                                "external",
+                                "side_effect_ambiguous",
+                                "unknown",
+                            ]
+                        },
+                    },
+                },
+            },
+            "requires_user_confirmation": {"const": True},
+            "caveats": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+        },
+        "allOf": [
+            {
+                "if": {"properties": {"data_needed": {"const": False}}},
+                "then": {
+                    "properties": {
+                        "confidence": {"const": "no_evidence"},
+                        "evidence": {"maxItems": 0},
+                        "proposed_queries": {"maxItems": 0},
+                    }
+                },
+            },
+            {
+                "if": {"properties": {"data_needed": {"const": True}}},
+                "then": {
+                    "anyOf": [
+                        {"properties": {"evidence": {"minItems": 1}}, "required": ["evidence"]},
+                        {
+                            "properties": {"proposed_queries": {"minItems": 1}},
+                            "required": ["proposed_queries"],
+                        },
+                    ]
+                },
+            },
+            {
+                # confidence is tied to what was actually executed:
+                # "reported_by_tool" without a single executed evidence item
+                # (e.g. a proposal-only response) is a category error.
+                "if": {"properties": {"confidence": {"const": "reported_by_tool"}}},
+                "then": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+            },
+            {
+                # Executed evidence must carry its point-in-time warning to the
+                # confirming user: at least one caveat is required whenever any
+                # evidence item exists.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"caveats": {"minItems": 1}},
+                    "required": ["caveats"],
+                },
+            },
+            {
+                # The confidence constraint is two-way (round-12): executed
+                # evidence alongside confidence="no_evidence" is contradictory
+                # informed-consent state, just as reported_by_tool without
+                # evidence is.
+                "if": {
+                    "properties": {"evidence": {"minItems": 1}},
+                    "required": ["evidence"],
+                },
+                "then": {
+                    "properties": {"confidence": {"enum": ["reported_by_tool", "inferred"]}},
+                },
+            },
+        ],
+    }
+    return {
+        "contract_id": "data_evidence_answer.v1",
+        "scope": "single_data_context_advisory_lane",
+        "response_model_schema": answer_schema,
+        "proposed_query_semantics": {
+            "execution": "parent_session_only_after_user_confirmation",
+            "auto_execution": "forbidden",
+        },
+        "runtime_instruction": (
+            "Fill this form so the confirming user can decide with full "
+            "context: what you executed (evidence with source, query_summary, "
+            "value, and its required observed_at timestamp), "
+            "what you deliberately did not execute and why (proposed_queries "
+            "with source_class), and point-in-time caveats. Every data answer "
+            "requires user confirmation; there is no auto-confirmed grade."
+        ),
+    }
+
+
+def _data_context_lane_policy() -> dict[str, Any]:
+    """Return the machine-readable data-access policy for the data_context lane.
+
+    Prompt text alone is too weak for a lane that touches production data
+    stores (Q00/ouroboros#1671). Hosts with permission systems get this block
+    to enforce; the lane prompt restates it as the fallback. The lane is a
+    read-only *proposer*: it directly executes only obviously local, free,
+    read-only lookups and returns everything else as proposed queries for the
+    parent session to run after user confirmation.
+    """
+    return {
+        "read_only": True,
+        "aggregate_only": True,
+        "relevance_gate": "decide_from_question_text_before_any_tool_call",
+        "direct_execution_scope": "local_free_read_only_lookups_only",
+        "metered_or_uncertain_sources": "return_proposed_queries_without_executing",
+        "error_shaped_tool_output": "return_no_evidence_finding",
+        "forbidden_operation_patterns": [
+            "insert",
+            "update",
+            "delete",
+            "drop",
+            "alter",
+            "truncate",
+            "create",
+            "grant",
+            "write",
+            "save",
+            "upload",
+            "publish",
+            "upsert",
+            "replace",
+            "merge",
+            "call",
+            "exec",
+            "execute",
+        ],
+        "evidence_policy": {
+            "max_evidence_items": 5,
+            "max_evidence_chars": 2000,
+            "aggregates_only": True,
+            "raw_rows_allowed": False,
+            "pii_scrub_required": True,
+        },
+    }
+
+
 def _interview_question_advisory_request_schema() -> dict[str, Any]:
     """Return the runtime request model for per-question answer assistance."""
     return {
@@ -567,7 +867,14 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                    "minLength": 1,
+                    "description": (
+                        "Open capability identifier so v1 stays forward-compatible "
+                        "with additive lanes (Q00/ouroboros#1671). Well-known values: "
+                        "inspect_code, web_research, run_lateral_review, call_mcp. "
+                        "Hosts dispatch unsupported capabilities and return the "
+                        "no-op finding per lane_compatibility_rules."
+                    ),
                 },
             },
             "lanes": {
@@ -575,29 +882,102 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "object",
-                    "additionalProperties": False,
+                    # Additive lane evolution is the v1 compatibility promise:
+                    # unknown lane ids, capabilities, and lane-specific blocks
+                    # (data_policy arrived exactly this way) must validate.
+                    "additionalProperties": True,
                     "required": ["lane_id", "purpose", "capability", "required"],
                     "properties": {
                         "lane_id": {
                             "type": "string",
-                            "enum": [
-                                "code_context",
-                                "web_context",
-                                "ambiguity_contrarian",
-                                "answer_simplifier",
-                                "architecture_implications",
-                            ],
+                            "minLength": 1,
+                            # Lane ids ride re-entry as results[*].key and
+                            # must survive the transport input validator
+                            # (round-33): the grammar is the same opaque
+                            # identifier shape re-entry accepts — no shell
+                            # metacharacters, no whitespace.
+                            "pattern": r"^[A-Za-z0-9_.-]{1,64}$",
+                            "description": (
+                                "Open lane identifier (see lane_compatibility_rules); "
+                                "identifier-shaped ([A-Za-z0-9_.-], max 64) so it "
+                                "round-trips re-entry as results[*].key. Well-known "
+                                "values: code_context, web_context, data_context, "
+                                "ambiguity_contrarian, answer_simplifier, "
+                                "architecture_implications."
+                            ),
                         },
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                            "minLength": 1,
+                            "description": (
+                                "Open capability identifier; unsupported capabilities "
+                                "are dispatched and answered with the no-op finding."
+                            ),
                         },
                         "persona": {
                             "type": "string",
-                            "enum": ["researcher", "contrarian", "simplifier", "architect"],
+                            "minLength": 1,
+                            "description": (
+                                "Open persona identifier. Well-known values: "
+                                "researcher, contrarian, simplifier, architect."
+                            ),
                         },
                         "required": {"type": "boolean"},
+                        "data_policy": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["read_only", "aggregate_only"],
+                            "properties": {
+                                "read_only": {"const": True},
+                                "aggregate_only": {"const": True},
+                            },
+                            "description": (
+                                "Machine-readable read-only policy for data lanes; "
+                                "hosts with permission systems can enforce it, the "
+                                "lane prompt is the fallback."
+                            ),
+                        },
+                        "known_data_tools": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Optional host/config-provided hint list of data MCP "
+                                "tool names for tool-dense sessions."
+                            ),
+                        },
+                        "answer_contract": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["contract_id", "response_model_schema"],
+                            "properties": {
+                                "contract_id": {"type": "string", "minLength": 1},
+                                # A contract's schema must itself be an object:
+                                # a string (or otherwise malformed) schema is
+                                # unenforceable, and an advertised contract
+                                # that cannot be enforced is a lie (round-12).
+                                # Registration additionally validates it with
+                                # check_schema before enforcement.
+                                "response_model_schema": {"type": "object"},
+                            },
+                            "description": (
+                                "Structured lane answer form (data_context ships "
+                                "data_evidence_answer.v1). Lane outputs are "
+                                "validated against response_model_schema at fanout "
+                                "re-entry; violations surface as contract_violations. "
+                                "ENFORCEABLE ROOT GRAMMAR (a contract is advertised "
+                                "and enforced IFF its root provably describes an "
+                                "object through one of): literal type 'object' or "
+                                "['object']; a chain of LOCAL root $refs to one; an "
+                                "allOf with any such branch; a oneOf/anyOf whose "
+                                "branches ALL qualify; a const mapping or all-mapping "
+                                "enum. Every $ref/$dynamicRef must resolve inside the "
+                                "document as a plain JSON pointer; $id rebasing is "
+                                "not supported. Any other form is NOT advertised and the "
+                                "lane falls back to the generic output shape — by "
+                                "contract, not omission."
+                            ),
+                        },
                     },
                 },
             },
@@ -631,6 +1011,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                     "include_recommended_draft": {"type": "boolean"},
                     "preserve_user_agency": {"const": True},
                     "forward_to_mcp_only_after_user_or_auto_confirm": {"const": True},
+                    # Per-lane confirmation exceptions: lanes listed here have
+                    # NO auto-confirm path (the data lane is confirmation-only
+                    # by contract).
+                    "confirmation_overrides": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
             },
             "mcp_tool_capability": {
@@ -683,6 +1070,17 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "required": False,
         },
         {
+            "lane_id": "data_context",
+            "purpose": (
+                "Fetch data evidence (metrics, DB/warehouse facts) only when "
+                "the answer is a data-driven decision."
+            ),
+            "capability": "call_mcp",
+            "required": False,
+            "data_policy": _data_context_lane_policy(),
+            "answer_contract": _data_context_answer_contract(),
+        },
+        {
             "lane_id": "ambiguity_contrarian",
             "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
             "capability": "run_lateral_review",
@@ -720,12 +1118,31 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "request_model_schema": _interview_question_advisory_request_schema(),
         "lanes": lanes,
+        "lane_compatibility_rules": {
+            # v1-in-place lane additions (Q00/ouroboros#1671): hosts must not
+            # break on lanes or capabilities they do not recognise. Skipping
+            # is legal only for OPTIONAL unknown lanes — a required unknown
+            # lane gates completion, so it must be dispatched generically (or
+            # answered with a no-op finding), never dropped.
+            "unknown_lane_id": "dispatch_with_generic_prompt_or_skip",
+            "unknown_required_lane": "dispatch_generic_or_return_noop_finding_never_skip",
+            "unsupported_capability": "dispatch_and_return_noop_finding",
+            "noop_finding_is_completion_signal": True,
+        },
         "synthesis_contract": {
             "output_shape": "answer_advisory",
             "max_options": 3,
             "include_recommended_draft": True,
             "preserve_user_agency": True,
             "forward_to_mcp_only_after_user_or_auto_confirm": True,
+            # Machine-readable per-lane exception (round-7): the generic
+            # auto-confirm path NEVER applies to data output —
+            # data_evidence_answer.v1 pins requires_user_confirmation const
+            # true, so synthesis must route data-derived answers through
+            # explicit user confirmation only.
+            "confirmation_overrides": {
+                "data_context": "user_confirm_only_no_auto_confirm",
+            },
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
@@ -736,11 +1153,19 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "runtime_instruction": (
             "Show the MCP interview question to the user first, then fan out "
             "advisory lanes for code context, current web facts when needed, "
+            "data evidence when the answer is a data-driven decision, "
             "ambiguity critique, simplification, and architecture implications. "
+            "A lane whose capability this runtime cannot support must still "
+            "return its no-op finding — the no-op is the completion signal. "
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "
-            "chooses auto-confirm."
+            "chooses auto-confirm — EXCEPT data_context output, which has no "
+            "auto-confirm path (synthesis_contract.confirmation_overrides): a "
+            "data-derived answer is forwarded only after explicit user "
+            "confirmation. Execute a data lane's proposed_queries only "
+            "after the user confirms, and forward user-confirmed data-derived "
+            "answers prefixed [from-data] with their point-in-time caveat."
         ),
     }
 

@@ -261,6 +261,111 @@ class TestInterviewHandlerSubagentDispatch:
         assert result.is_ok
         assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_interview"
 
+    async def test_plugin_dispatch_carries_advisory_fanout_contract(self, tmp_path) -> None:
+        """Plugin transport parity (PR #1703 bot review round 4, B1).
+
+        The OpenCode plugin path previously emitted only a prose mention of
+        the advisory lanes — no ``data_policy``, no ``data_evidence_answer.v1``
+        contract, no fan-out id — so that supported transport bypassed the
+        machine-readable policy and re-entry validation entirely.
+        """
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry
+
+        registry = FanoutRegistry(tmp_path)
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=registry,
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        meta = result.value.meta
+
+        contract = meta["question_advisory_fanout"]
+        lanes = {lane["lane_id"]: lane for lane in contract["lanes"]}
+        assert lanes["data_context"]["data_policy"]["read_only"] is True
+        assert lanes["data_context"]["answer_contract"]["contract_id"] == "data_evidence_answer.v1"
+        assert meta["question_advisory_result_correlation_key"] == "context.lane_id"
+
+        # The stamped id is redeemable: the registered record carries the data
+        # lane's answer contract, so re-entry door validation applies on this
+        # transport too.
+        record = registry.load(meta["question_advisory_fanout_id"])
+        assert record is not None
+        contracts = record.synthesizer_input["lane_answer_contracts"]
+        assert contracts["data_context"]["contract_id"] == "data_evidence_answer.v1"
+
+        # Round-5 B1: the bridge dispatches ONLY the child prompt, so the
+        # ACTUAL fan-out id and the complete data contract ride the prompt
+        # itself — field names alone are not a contract.
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert meta["question_advisory_fanout_id"] in prompt
+        assert "data_evidence_answer.v1" in prompt
+        assert '"read_only": true' in prompt
+        assert "requires_user_confirmation" in prompt
+
+    async def test_plugin_rendered_recipe_is_redeemable_verbatim(self, tmp_path) -> None:
+        """Following the rendered re-entry recipe EXACTLY must succeed.
+
+        Bot-review round-8 probe (PR #1703): the recipe supplied fanout_id
+        and correlation_key but omitted session_id, and strict correlation
+        then rejected a contract-following child with correlation_mismatch.
+        The prompt now renders all three identity values; submitting with
+        them verbatim completes.
+        """
+        import re as re_module
+
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry, submit_fanout_results
+
+        registry = FanoutRegistry(tmp_path)
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=registry,
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        prompt = result.value.meta["_subagent"]["prompt"]
+
+        fanout_match = re_module.search(r"^fanout_id: (\S+)$", prompt, re_module.MULTILINE)
+        session_match = re_module.search(r"^session_id: (\S+)$", prompt, re_module.MULTILINE)
+        assert fanout_match, "recipe must render the actual fanout_id"
+        assert session_match, "recipe must render the actual session_id"
+
+        out = submit_fanout_results(
+            registry,
+            session_id=session_match.group(1),
+            correlation_key="context.lane_id",
+            results=[
+                {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+                {"key": "answer_simplifier", "content": "simplifier-advice"},
+            ],
+            fanout_id=fanout_match.group(1),
+        )
+        assert out["status"] == "complete"
+
+    async def test_plugin_child_prompt_renders_known_data_tools(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Round-6 suggestion: known_data_tools must reach the child prompt —
+        parent metadata alone is discarded by the bridge."""
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+        from ouroboros.mcp.tools.subagent import FanoutRegistry
+
+        monkeypatch.setenv("OUROBOROS_KNOWN_DATA_TOOLS", "clickhouse_query,metabase_card")
+        handler = InterviewHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            fanout_registry=FanoutRegistry(tmp_path),
+        )
+        result = await handler.handle({"initial_context": "Build a web app"})
+        assert result.is_ok
+        prompt = result.value.meta["_subagent"]["prompt"]
+        assert "clickhouse_query" in prompt
+        assert "metabase_card" in prompt
+
 
 # ---------------------------------------------------------------------------
 # EvaluateHandler

@@ -91,16 +91,24 @@ INNER_GUIDANCE_INVARIANTS: tuple[InnerGuidanceInvariant, ...] = (
     ),
     InnerGuidanceInvariant(
         name="answer-prefix-legend",
-        why="Interpretation contract for [from-code]/[from-user]/[from-research] answers",
-        # Full final legend lines (both builder variants). The header
-        # truncates from the end, so the complete last line surviving
-        # implies the whole legend above it is intact — a bare
-        # "[from-research]" fragment check would let the legend's
+        why=(
+            "Interpretation contract for [from-code]/[from-user]/"
+            "[from-research]/[from-data] answers"
+        ),
+        # Full final legend lines (both builder variants) PLUS the compact
+        # under-pressure form (bot-review round-31). The header truncates
+        # from the end, so the complete LAST line surviving implies the
+        # whole legend above it is intact — and since round-29 the last
+        # line is [from-data]; a bare fragment check would let the legend's
         # semantics be silently cut mid-line.
         resolve=lambda _inner, _state: (
-            "- [from-research]: Externally researched information "
-            "(API docs, pricing, compatibility).",
-            "- [from-research]: Caller-supplied external context.",
+            "- [from-data]: Data evidence from metrics/DB/warehouse queries "
+            "(factual at query time, may be stale — treat as description, "
+            "not decision).",
+            "- [from-data]: Caller-supplied data evidence (factual at query time, may be stale).",
+            "Prefixes: [from-code]=existing-system fact; [from-user]=human "
+            "decision; [from-research]=external fact; [from-data]=point-in-time "
+            "data description (not a decision, may be stale).",
         ),
     ),
     InnerGuidanceInvariant(
