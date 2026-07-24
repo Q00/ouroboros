@@ -271,6 +271,29 @@ def test_legacy_level_producers_use_session_aggregate_scope() -> None:
     assert all(relay["scope"]["session_id"] == "orch_1" for relay in relays)
 
 
+def test_explicit_foreign_session_wins_over_legacy_level_aggregate_inference() -> None:
+    """A migrated payload must not be re-attributed from its aggregate shape."""
+    foreign_level = BaseEvent(
+        id="foreign_level",
+        type="execution.decomposition.level_started",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={
+            "orchestrator_session_id": "orch_2",
+            "level": 0,
+            "total_levels": 1,
+            "child_indices": [0],
+        },
+    )
+
+    assert classify_relay_events(
+        [foreign_level],
+        job_id="job_1",
+        session_id="orch_1",
+    ) == []
+
+
 def test_legacy_frugality_proof_uses_single_session_execution_scope() -> None:
     """Production proof events omit session_id but share the execution aggregate."""
     configuration = BaseEvent(

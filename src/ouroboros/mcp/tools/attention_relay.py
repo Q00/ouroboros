@@ -311,8 +311,15 @@ def _history_for_session(
         if not _is_session_scoped_event(event):
             scoped.append(event)
             continue
-        if _event_session_id(event) == session_id:
+        event_session_id = _event_session_id(event)
+        if event_session_id == session_id:
             scoped.append(event)
+            continue
+        # Legacy inference is only valid for genuinely sessionless producer
+        # payloads.  An explicit foreign session is authoritative and must
+        # never be re-attributed from aggregate shape, otherwise a linked job
+        # can absorb another orchestration session's progress.
+        if event_session_id is not None:
             continue
         if not _legacy_event_belongs_to_session(
             event,

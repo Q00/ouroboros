@@ -6261,6 +6261,13 @@ Respond with either ATOMIC or the structured JSON object only.
             """Seal one provider boundary at most once."""
             if dispatch_id_to_seal in sealed_dispatch_ids:
                 return
+            # Poison the local recovery cache before the durable append.  If
+            # the event store rejects the seal, a same-executor retry must not
+            # treat the already-entered provider boundary as replayable merely
+            # because the in-memory handle is still present.
+            self._ac_runtime_handle_manager.mark_dispatch_non_replayable(
+                dispatch_id_to_seal
+            )
             await self._event_emitter.emit_ac_dispatch_sealed(
                 runtime_identity=runtime_identity,
                 dispatch_id=dispatch_id_to_seal,

@@ -75,6 +75,21 @@ class ACRuntimeHandleManager:
         self._task_cwd = task_cwd
         self._process_local_resume_nonce = process_local_resume_nonce
         self.runtime_handles: dict[str, RuntimeHandle] = {}
+        # A provider boundary becomes permanently non-replayable in this
+        # process as soon as we attempt to seal it.  This local poison bit is
+        # deliberately recorded before the event-store append: if the append
+        # fails, the in-memory handle must not be accepted on a same-executor
+        # retry as though the boundary were still safe to resume.
+        self._non_replayable_dispatch_ids: set[str] = set()
+
+    def mark_dispatch_non_replayable(self, dispatch_id: str) -> None:
+        """Poison a dispatch before attempting a potentially failing seal."""
+        if isinstance(dispatch_id, str) and dispatch_id:
+            self._non_replayable_dispatch_ids.add(dispatch_id)
+
+    def is_dispatch_non_replayable(self, dispatch_id: str | None) -> bool:
+        """Return whether this process has observed an unsafe seal boundary."""
+        return isinstance(dispatch_id, str) and dispatch_id in self._non_replayable_dispatch_ids
 
     @staticmethod
     def _build_expected_ac_runtime_metadata(
@@ -565,6 +580,17 @@ class ACRuntimeHandleManager:
             retry_attempt=retry_attempt,
         )
         cached_runtime_handle = self.runtime_handles.get(runtime_identity.cache_key)
+        cached_dispatch_id = (
+            cached_runtime_handle.metadata.get("ac_dispatch_id")
+            if cached_runtime_handle is not None
+            else None
+        )
+        if expected_capsule_fingerprint is not None and self.is_dispatch_non_replayable(
+            cached_dispatch_id
+        ):
+            raise AmbiguousACExecutionError(
+                "cached AC dispatch crossed an unsafe seal boundary; refusing replay"
+            )
         cached_handle = self._normalize_ac_runtime_handle(
             cached_runtime_handle,
             runtime_scope=runtime_identity.runtime_scope,
@@ -657,6 +683,15 @@ class ACRuntimeHandleManager:
                         raw_latest_dispatch_id = latest_dispatch_data.get("ac_dispatch_id")
                         if isinstance(raw_latest_dispatch_id, str):
                             latest_dispatch_id = raw_latest_dispatch_id
+                        latest_dispatch_kind = latest_dispatch_data.get("dispatch_kind")
+                    else:
+                        latest_dispatch_kind = None
+                else:
+                    latest_dispatch_kind = None
+                if self.is_dispatch_non_replayable(latest_dispatch_id):
+                    raise AmbiguousACExecutionError(
+                        "latest AC dispatch crossed an unsafe seal boundary; refusing replay"
+                    )
                 matching_indices = [
                     index
                     for index, event in enumerate(events)
@@ -677,6 +712,21 @@ class ACRuntimeHandleManager:
                 if last_seal_index > last_terminal_index and last_seal_index >= last_dispatch_index:
                     raise AmbiguousACExecutionError(
                         "AC dispatch boundary is sealed and cannot be replayed"
+                    )
+                # The executor can only reconstruct the primary AC prompt on
+                # entry.  A crash after a SessionSignal follow-up dispatch
+                # would otherwise restore its runtime handle and resend the
+                # original AC, losing the signal turn while claiming
+                # same-attempt recovery.  Until exact follow-up input replay is
+                # implemented, fail closed whenever that is the latest
+                # unsealed/non-terminal phase.
+                if (
+                    latest_dispatch_kind == "session_signal_followup"
+                    and last_dispatch_index > last_seal_index
+                    and last_dispatch_index > last_terminal_index
+                ):
+                    raise AmbiguousACExecutionError(
+                        "latest AC dispatch is a SessionSignal follow-up whose phase cannot be resumed"
                     )
 
             for event in reversed(events):
@@ -1023,6 +1073,35 @@ class ACRuntimeHandleManager:
                 predecessor = event_data.get("previous_ac_dispatch_id")
                 if predecessor != previous_dispatch_id:
                     raise AmbiguousACExecutionError("AC dispatch predecessor chain is invalid")
+                dispatch_kind = event_data.get("dispatch_kind")
+                if dispatch_kind not in {"primary", "session_signal_followup"}:
+                    raise AmbiguousACExecutionError("AC dispatch kind is invalid")
+                signal_fields = (
+                    event_data.get("signal_id"),
+                    event_data.get("signal_mode"),
+                    event_data.get("follow_up_input_digest"),
+                )
+                if dispatch_kind == "primary" and any(
+                    value is not None for value in signal_fields
+                ):
+                    raise AmbiguousACExecutionError(
+                        "primary AC dispatch carries unexpected follow-up identity"
+                    )
+                if dispatch_kind == "session_signal_followup":
+                    signal_id, signal_mode, follow_up_input_digest = signal_fields
+                    if (
+                        not isinstance(signal_id, str)
+                        or not signal_id.strip()
+                        or signal_mode not in {"inform", "after_turn"}
+                        or not isinstance(follow_up_input_digest, str)
+                        or not re.fullmatch(
+                            r"sha256:[0-9a-f]{64}",
+                            follow_up_input_digest,
+                        )
+                    ):
+                        raise AmbiguousACExecutionError(
+                            "SessionSignal follow-up dispatch identity is invalid"
+                        )
                 runtime_payload = event_data.get("runtime")
                 if isinstance(runtime_payload, dict):
                     runtime_metadata = runtime_payload.get("metadata")

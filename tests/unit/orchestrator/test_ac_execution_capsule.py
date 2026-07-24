@@ -98,6 +98,10 @@ def _lifecycle_event(
     if event_type == "execution.ac.attempt.dispatched":
         data.setdefault("ac_dispatch_id", "a" * 32)
         data.setdefault("previous_ac_dispatch_id", None)
+        data.setdefault("dispatch_kind", "primary")
+        data.setdefault("signal_id", None)
+        data.setdefault("signal_mode", None)
+        data.setdefault("follow_up_input_digest", None)
     elif event_type == "execution.ac.dispatch.sealed":
         data.setdefault("ac_dispatch_id", "a" * 32)
     return BaseEvent(
@@ -689,12 +693,50 @@ async def test_capsule_resume_rejects_sealed_dispatch(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_capsule_resume_rejects_locally_poisoned_dispatch_after_seal_failure(tmp_path) -> None:
+    """A failed seal append must not leave a same-process retry replayable."""
+    capsule = _capsule(tmp_path)
+    identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
+    dispatch_id = "a" * 32
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        native_session_id="same-attempt-session",
+        cwd=str(tmp_path.resolve()),
+        approval_mode="acceptEdits",
+        metadata={
+            **identity.to_metadata(),
+            "ac_capsule_fingerprint": capsule.fingerprint,
+            "ac_dispatch_id": dispatch_id,
+            "process_local_resume_nonce": "nonce-a",
+        },
+    )
+    manager = _manager_for_events([])
+    manager._remember_ac_runtime_handle(
+        0,
+        handle,
+        execution_context_id="execution-1",
+        retry_attempt=0,
+    )
+    manager.mark_dispatch_non_replayable(dispatch_id)
+
+    with pytest.raises(AmbiguousACExecutionError, match="unsafe seal boundary"):
+        await manager._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="execution-1",
+            retry_attempt=0,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce="nonce-a",
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tamper", "message"),
     [
         ("id", "dispatch id"),
         ("fingerprint", "fingerprint"),
         ("predecessor", "predecessor"),
+        ("phase", "dispatch kind"),
         ("ordering", "precedes"),
     ],
 )
@@ -738,6 +780,10 @@ async def test_capsule_resume_rejects_invalid_dispatch_chain(
     elif tamper == "predecessor":
         dispatched = dispatched.model_copy(
             update={"data": {**dispatched.data, "previous_ac_dispatch_id": "b" * 32}}
+        )
+    elif tamper == "phase":
+        dispatched = dispatched.model_copy(
+            update={"data": {**dispatched.data, "dispatch_kind": "unknown"}}
         )
 
     events = [dispatched, compiled] if tamper == "ordering" else [compiled, dispatched]
@@ -818,6 +864,92 @@ async def test_capsule_resume_rejects_handle_from_older_dispatch_after_follow_up
     manager = _manager_for_events(events)
 
     with pytest.raises(AmbiguousACExecutionError, match="latest AC dispatch"):
+        await manager._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="execution-1",
+            retry_attempt=0,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce="nonce-a",
+        )
+
+
+@pytest.mark.asyncio
+async def test_capsule_resume_rejects_unsealed_session_signal_follow_up_phase(tmp_path) -> None:
+    """Recovery must not re-enter the primary AC after an interrupted follow-up."""
+    capsule = _capsule(tmp_path)
+    identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
+    primary_id = "a" * 32
+    follow_up_id = "b" * 32
+    primary_handle = RuntimeHandle(
+        backend="codex_cli",
+        native_session_id="primary-session",
+        cwd=str(tmp_path.resolve()),
+        approval_mode="acceptEdits",
+        metadata={
+            **identity.to_metadata(),
+            "ac_capsule_fingerprint": capsule.fingerprint,
+            "ac_dispatch_id": primary_id,
+            "process_local_resume_nonce": "nonce-a",
+        },
+    )
+    follow_up_handle = replace(
+        primary_handle,
+        native_session_id="follow-up-session",
+        metadata={**primary_handle.metadata, "ac_dispatch_id": follow_up_id},
+    )
+    events = [
+        _lifecycle_event(
+            identity,
+            "execution.ac.capsule.compiled",
+            extra={
+                "capsule_fingerprint": capsule.fingerprint,
+                "capsule_manifest": capsule.manifest.to_contract_data(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.ac.attempt.dispatched",
+            extra={
+                "ac_dispatch_id": primary_id,
+                "previous_ac_dispatch_id": None,
+                "capsule_fingerprint": capsule.fingerprint,
+                "runtime": primary_handle.to_persisted_dict(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.ac.dispatch.sealed",
+            extra={
+                "ac_dispatch_id": primary_id,
+                "capsule_fingerprint": capsule.fingerprint,
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.ac.attempt.dispatched",
+            extra={
+                "ac_dispatch_id": follow_up_id,
+                "previous_ac_dispatch_id": primary_id,
+                "capsule_fingerprint": capsule.fingerprint,
+                "dispatch_kind": "session_signal_followup",
+                "signal_id": "signal-1",
+                "signal_mode": "inform",
+                "follow_up_input_digest": "sha256:" + "1" * 64,
+                "runtime": follow_up_handle.to_persisted_dict(),
+            },
+        ),
+        _lifecycle_event(
+            identity,
+            "execution.session.started",
+            extra={
+                "capsule_fingerprint": capsule.fingerprint,
+                "runtime": follow_up_handle.to_persisted_dict(),
+            },
+        ),
+    ]
+    manager = _manager_for_events(events)
+
+    with pytest.raises(AmbiguousACExecutionError, match="follow-up.*cannot be resumed"):
         await manager._load_persisted_ac_runtime_handle(
             0,
             execution_context_id="execution-1",
