@@ -677,6 +677,22 @@ class TestCodexCompletionReviewRoundOne:
         tool_result = results[0].data.get("tool_result") or {}
         assert "42" in (tool_result.get("text_content") or "")
 
+    def test_replayed_keyed_start_is_suppressed(self) -> None:
+        """start -> replayed start -> completion must yield exactly one pair."""
+        runtime = CodexCliRuntime(cli_path="codex")
+
+        first = runtime._convert_event(_COMMAND_ITEM_STARTED, current_handle=None)
+        replay = runtime._convert_event(_COMMAND_ITEM_STARTED, current_handle=None)
+        completion = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        assert len(first) == 1
+        assert replay == [], (
+            "a replayed keyed item.started emitted a duplicate start; exact "
+            "correlation requires one matching start per id"
+        )
+        assert len(completion) == 1
+        assert completion[0].data.get("subtype") == "tool_result"
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")

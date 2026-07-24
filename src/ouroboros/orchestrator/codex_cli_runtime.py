@@ -2160,6 +2160,13 @@ class CodexCliRuntime:
         calls = self._item_tool_calls(item_type, item)
         if not calls:
             return []
+        item_id = self._item_lifecycle_id(item)
+        if item_id is not None and item_id in scope.started_item_ids:
+            # A replayed keyed start must not emit a duplicate: exact
+            # correlation requires one matching start per id (review round
+            # six). Id-less starts keep per-count pairing for legitimate
+            # repeated invocations.
+            return []
         self._remember_item_started(item_type, item, scope)
         return [self._build_tool_start_message(call, current_handle) for call in calls]
 
