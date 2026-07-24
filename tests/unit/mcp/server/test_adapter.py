@@ -1488,6 +1488,16 @@ class TestServeTransport:
 
         handler.handle_mock.assert_awaited_once_with({"input": "required"})
 
+        handler.handle_mock.reset_mock()
+        await captured_wrapper(input="required", optional_input="provided")
+        handler.handle_mock.assert_awaited_once_with(
+            {"input": "required", "optional-input": "provided"}
+        )
+
+        handler.handle_mock.reset_mock()
+        await captured_wrapper(input="required")
+        handler.handle_mock.assert_awaited_once_with({"input": "required"})
+
     @pytest.mark.asyncio
     async def test_fastmcp_registers_base_resource_uri_template(self) -> None:
         """FastMCP path exposes child URIs for base resource handlers."""
