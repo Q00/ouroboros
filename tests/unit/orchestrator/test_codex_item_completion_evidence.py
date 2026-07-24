@@ -833,6 +833,105 @@ class TestCodexCompletionReviewRoundOne:
         assert len(results) == 1
         assert "42" in ((results[0].data.get("tool_result") or {}).get("text_content") or "")
 
+    def test_mcp_argument_mismatch_does_not_pair(self) -> None:
+        """A same-id MCP completion with different arguments must not inherit the start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "item_mcparg",
+                    "type": "mcp_tool_call",
+                    "tool": "write",
+                    "server": "filesystem",
+                    "arguments": {"path": "a"},
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_mcparg",
+                    "type": "mcp_tool_call",
+                    "tool": "write",
+                    "server": "filesystem",
+                    "arguments": {"path": "b"},
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2, (
+            "an MCP completion with mismatched arguments paired with the start "
+            "and would be accepted as its evidence"
+        )
+
+    def test_same_verdict_completions_with_different_output_stay_visible(self) -> None:
+        """Non-identical evidence with the same verdict must not be dropped as a replay."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        base = {
+            "id": "item_out",
+            "type": "command_execution",
+            "command": "pytest -q",
+            "exit_code": 0,
+            "status": "completed",
+        }
+
+        first = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "aggregated_output": "1 passed"}},
+            current_handle=None,
+        )
+        second = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "aggregated_output": "1 failed"}},
+            current_handle=None,
+        )
+        identical = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "aggregated_output": "1 failed"}},
+            current_handle=None,
+        )
+
+        assert len(first) == 2
+        second_results = [m for m in second if m.data.get("subtype") == "tool_result"]
+        assert len(second_results) == 1, (
+            "a same-verdict completion with different output was dropped as an exact replay"
+        )
+        assert "1 failed" in (
+            (second_results[0].data.get("tool_result") or {}).get("text_content") or ""
+        )
+        assert identical == [], "a genuinely identical replay must stay suppressed"
+
+    def test_malformed_error_envelope_never_claims_success(self) -> None:
+        """A present but malformed non-null error envelope must fail closed."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for bad_error in (7, ["boom"], {"code": 500}):
+            messages = runtime._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_be",
+                        "type": "mcp_tool_call",
+                        "name": "filesystem.write",
+                        "status": "completed",
+                        "error": bad_error,
+                    },
+                },
+                current_handle=None,
+            )
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert len(results) == 1, repr(bad_error)
+            assert results[0].data.get("is_error") is not False, (
+                f"a malformed error envelope {bad_error!r} was read as success"
+            )
+            assert (
+                _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+                is False
+            ), repr(bad_error)
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")

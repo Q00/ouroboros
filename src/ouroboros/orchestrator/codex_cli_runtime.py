@@ -1926,7 +1926,9 @@ class CodexCliRuntime:
         if item_type == "command_execution":
             return self._extract_command(item)
         if item_type == "mcp_tool_call":
-            return self._mcp_tool_name(item)
+            tool_input = self._extract_tool_input(item)
+            arguments = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, default=str)
+            return f"{self._mcp_tool_name(item)}\x00{arguments}"
         if item_type == "file_change":
             return "\n".join(self._extract_paths(item))
         if item_type == "web_search":
@@ -2072,11 +2074,18 @@ class CodexCliRuntime:
                     if item_type != "command_execution":
                         has_success = True
 
-            error_envelope = source.get("error")
-            if (isinstance(error_envelope, dict) and error_envelope) or (
-                isinstance(error_envelope, str) and error_envelope.strip()
-            ):
-                has_failure = True
+            if "error" in source:
+                error_envelope = source.get("error")
+                # Any present, meaningfully non-empty error envelope is a
+                # failure — including malformed non-null shapes (e.g. an int
+                # or list). Only an explicitly empty/false envelope
+                # (None/{}/[]/""/0/False) is treated as "no error" (round
+                # eight, blocker 3).
+                if isinstance(error_envelope, str):
+                    if error_envelope.strip():
+                        has_failure = True
+                elif error_envelope:
+                    has_failure = True
 
             for key in ("success", "ok"):
                 flag = source.get(key)
@@ -2225,12 +2234,26 @@ class CodexCliRuntime:
         is_error = self._resolve_item_completion_is_error(item_type, item)
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:
-            # Dedup on the id AND the terminal verdict: an exact replay is
-            # suppressed, but a conflicting same-id completion (e.g. a later
-            # failure after a success) has a different key and stays visible
-            # so verification fails closed (review round seven, blocker 1).
+            # Dedup on the id, input signature, verdict, AND every
+            # evidence-bearing completion field: an exact replay is
+            # suppressed, but any non-identical completion (a conflicting
+            # verdict, or the same verdict with different output) has a
+            # different fingerprint and stays visible so verification fails
+            # closed (review rounds seven & eight).
+            evidence_fields: dict[str, Any] = {
+                key: metadata.get(key)
+                for key in ("output", "stdout", "stderr", "result_preview", "exit_code", "status")
+            }
+            # The raw error envelope is evidence too: two malformed errors that
+            # produce no result text must not collapse to one fingerprint.
+            if "error" in item:
+                evidence_fields["error"] = item.get("error")
+            evidence_fingerprint = json.dumps(
+                evidence_fields, ensure_ascii=False, sort_keys=True, default=str
+            )
             dedup_key = (
-                f"{item_id}\x00{self._item_lifecycle_signature(item_type, item)}\x00{is_error}"
+                f"{item_id}\x00{self._item_lifecycle_signature(item_type, item)}"
+                f"\x00{is_error}\x00{evidence_fingerprint}"
             )
             if dedup_key in scope.completed_item_keys:
                 return []
