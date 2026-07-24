@@ -6444,16 +6444,6 @@ Respond with either ATOMIC or the structured JSON object only.
                         follow_up_runtime_handle,
                         metadata=follow_up_metadata,
                     )
-                    dispatch_state.runtime_handle = self._remember_ac_runtime_handle(
-                        ac_index,
-                        dispatch_state.runtime_handle,
-                        execution_context_id=execution_context_id,
-                        is_sub_ac=is_sub_ac,
-                        parent_ac_index=parent_ac_index,
-                        sub_ac_index=sub_ac_index,
-                        node_identity=node_identity,
-                        retry_attempt=retry_attempt,
-                    )
                     if dispatch_state.runtime_handle is None:
                         raise RuntimeError(
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
@@ -6474,6 +6464,24 @@ Respond with either ATOMIC or the structured JSON object only.
                             "sha256:" + hashlib.sha256(follow_up_prompt.encode("utf-8")).hexdigest()
                         ),
                     )
+                    # Keep the same durable-before-cache invariant as the
+                    # primary dispatch.  The follow-up handle is still cached
+                    # before provider entry, but a failed append cannot leave
+                    # its undurable dispatch ID as a phantom predecessor.
+                    dispatch_state.runtime_handle = self._remember_ac_runtime_handle(
+                        ac_index,
+                        dispatch_state.runtime_handle,
+                        execution_context_id=execution_context_id,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                    )
+                    if dispatch_state.runtime_handle is None:
+                        raise RuntimeError(
+                            "SessionSignal follow-up lost its capsule-bound runtime handle"
+                        )
                     active_dispatch_id = follow_up_dispatch_id
                     message_count_before_signal = dispatch_state.message_count
                     primary_final_message = dispatch_state.final_message
