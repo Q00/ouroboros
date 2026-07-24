@@ -27,6 +27,7 @@ from ouroboros.mcp.server.adapter import (
     _project_dir_from_seed,
     _safe_cwd,
     _to_fastmcp_tool_result,
+    _validate_parameter_constraints,
     validate_transport,
 )
 from ouroboros.mcp.tools import job_handlers as job_handlers_module
@@ -183,6 +184,26 @@ class TestMCPServerAdapter:
             "max_tokens": "max.tokens",
             "_class": "class",
         }
+
+    def test_validate_parameter_constraints_rejects_enum_and_array_items(self) -> None:
+        parameters = (
+            MCPToolParameter(
+                name="mode",
+                type=ToolInputType.STRING,
+                enum=("fast", "safe"),
+            ),
+            MCPToolParameter(
+                name="labels",
+                type=ToolInputType.ARRAY,
+                items={"type": "string"},
+            ),
+        )
+
+        _validate_parameter_constraints(parameters, {"mode": "fast", "labels": ["ok"]})
+        with pytest.raises(ValueError, match="mode"):
+            _validate_parameter_constraints(parameters, {"mode": "unsafe"})
+        with pytest.raises(ValueError, match="labels"):
+            _validate_parameter_constraints(parameters, {"labels": ["ok", 1]})
 
     def test_legacy_execution_report_maps_to_task_results_not_ac_verdicts(self) -> None:
         """Legacy AC PASS/FAIL execution lines are worker task completion signals."""
@@ -1407,12 +1428,12 @@ class TestServeTransport:
                     description="A tool with an omitted optional parameter",
                     parameters=(
                         MCPToolParameter(
-                            name="required-input",
+                            name="required_input",
                             type=ToolInputType.STRING,
                             required=True,
                         ),
                         MCPToolParameter(
-                            name="optional-input",
+                            name="optional_input",
                             type=ToolInputType.STRING,
                             default=None,
                             description="Optional input",
@@ -1436,11 +1457,11 @@ class TestServeTransport:
 
         await adapter._mcp_server.call_tool(
             "optional_tool",
-            {"required-input": "provided"},
+            {"required_input": "provided"},
         )
 
         handler.handle_mock.assert_awaited_once_with(
-            {"required-input": "provided", "optional-input": None}
+            {"required_input": "provided", "optional_input": None}
         )
 
     @pytest.mark.asyncio
