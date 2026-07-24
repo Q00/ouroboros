@@ -885,10 +885,18 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                         "lane_id": {
                             "type": "string",
                             "minLength": 1,
+                            # Lane ids ride re-entry as results[*].key and
+                            # must survive the transport input validator
+                            # (round-33): the grammar is the same opaque
+                            # identifier shape re-entry accepts — no shell
+                            # metacharacters, no whitespace.
+                            "pattern": r"^[A-Za-z0-9_.-]{1,64}$",
                             "description": (
-                                "Open lane identifier (see lane_compatibility_rules). "
-                                "Well-known values: code_context, web_context, "
-                                "data_context, ambiguity_contrarian, answer_simplifier, "
+                                "Open lane identifier (see lane_compatibility_rules); "
+                                "identifier-shaped ([A-Za-z0-9_.-], max 64) so it "
+                                "round-trips re-entry as results[*].key. Well-known "
+                                "values: code_context, web_context, data_context, "
+                                "ambiguity_contrarian, answer_simplifier, "
                                 "architecture_implications."
                             ),
                         },

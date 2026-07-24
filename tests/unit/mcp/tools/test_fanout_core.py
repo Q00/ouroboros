@@ -4522,6 +4522,107 @@ def test_dynamic_ref_cycles_are_rejected() -> None:
     assert not _enforceable_lane_contract(dynamic_cycle)
 
 
+def test_single_name_entity_rows_are_rejected() -> None:
+    """Repeated "CapName attribute N" segments are entity rows (round-33)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "Alice premium 34, Bob free 12"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("row-shaped" in error for error in errors)
+
+    # Colon-led capitalized categories stay valid.
+    clean = "Free: 78%, Pro: 15%, Enterprise: 7%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_alphabetic_credential_identifier_is_rejected() -> None:
+    """Secret-marker words mark alphabetic credentials (round-33)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    leak = _minimal_data_output("78% of MAU are on the free tier")
+    leak["evidence"][0]["source"] = "api_key_live_supersecret"
+    assert any(
+        "credential" in error or "secret" in error
+        for error in _data_evidence_boundary_violations(leak)
+    )
+
+    legit = _minimal_data_output("premium plans average 12,400 tokens/day")
+    legit["evidence"][0]["source"] = "token_usage_v2"
+    assert _data_evidence_boundary_violations(legit) == []
+
+
+def test_denied_failure_prose_is_not_evidence() -> None:
+    """Permission-denied narratives reject (round-33 probe)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = _minimal_data_output("0 records")
+    probe["evidence"][0]["query_summary"] = "query failed because permission was denied"
+    errors = _data_evidence_boundary_violations(probe)
+    assert any("error-shaped" in error for error in errors)
+
+    # Plural metric forms about failures stay valid.
+    clean = "queries failed: 12 of 155k (0.008%); access denied errors down 17%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_metacharacter_lane_ids_are_never_registered(tmp_path: Any) -> None:
+    """The lane-id grammar and re-entry validation agree (round-33)."""
+    lanes = [
+        {
+            "lane_id": "future|lane",
+            "capability": "future_capability",
+            "required": True,
+        },
+        {
+            "lane_id": "future_lane_ok",
+            "capability": "future_capability",
+            "required": True,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-lane-grammar", lanes=lanes
+    )
+    assert fanout_id is not None
+    record = registry.load(fanout_id)
+    assert record is not None
+    # The metacharacter id is skipped — never an expected key it could not
+    # complete through the transport validator.
+    assert record.expected_keys == ("future_lane_ok",)
+
+
+def test_allof_routed_ref_cycle_is_rejected() -> None:
+    """Reference cycles through subschema branches reject (round-33)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    allof_cycle = {
+        "contract_id": "allof_cycle.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"child": {"$ref": "#/$defs/a"}},
+            "$defs": {
+                "a": {"allOf": [{"$ref": "#/$defs/b"}]},
+                "b": {"allOf": [{"$ref": "#/$defs/a"}]},
+            },
+        },
+    }
+    assert not _enforceable_lane_contract(allof_cycle)
+
+    # An acyclic graph through subschemas stays enforceable.
+    acyclic = {
+        "contract_id": "allof_acyclic.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"child": {"$ref": "#/$defs/a"}},
+            "$defs": {
+                "a": {"allOf": [{"$ref": "#/$defs/b"}]},
+                "b": {"type": "string"},
+            },
+        },
+    }
+    assert _enforceable_lane_contract(acyclic)
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(

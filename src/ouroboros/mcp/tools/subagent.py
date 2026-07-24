@@ -3637,38 +3637,65 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
                 return _UNRESOLVED
         return node
 
+    def _refs_within(node: Any) -> list[str]:
+        found: list[str] = []
+
+        def _collect(inner: Any) -> None:
+            if not isinstance(inner, Mapping):
+                return
+            for ref_key in ("$ref", "$dynamicRef", "$recursiveRef"):
+                candidate = inner.get(ref_key)
+                if isinstance(candidate, str):
+                    found.append(candidate)
+            for sub in _iter_subschemas(inner):
+                _collect(sub)
+
+        _collect(node)
+        return found
+
+    # Reference edges form a GRAPH, not just chains (round-33: a cycle
+    # routed through an allOf branch — a → b → a — recursed at validation
+    # while chain-only detection missed it). Every pointer must resolve to
+    # a schema, and the pointer graph must be acyclic.
     for ref in refs:
         if ref == "#":
-            # Root-recursive "#" is outside the declared grammar (round-31):
-            # our preflight cannot prove the recursion terminates, and an
-            # advertised contract that fails every conforming submission is
-            # worse than one declared unsupported.
+            # Root-recursive "#" is outside the declared grammar (round-31).
             return False
         if not ref.startswith("#/"):
             return False
-        # The target must BE a schema (round-30: "#/description" resolves to
-        # prose and explodes at validation), and pure $ref chains must make
-        # progress — a self-referential chain never terminates validation.
-        seen_pointers = {ref}
         target = _resolve_pointer(ref)
-        while True:
-            if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
-                return False
-            if not isinstance(target, Mapping):
-                break
-            next_ref = None
-            for chain_key in ("$ref", "$dynamicRef", "$recursiveRef"):
-                candidate = target.get(chain_key)
-                if isinstance(candidate, str):
-                    next_ref = candidate
-                    break
-            if not isinstance(next_ref, str):
-                break
-            if next_ref == "#" or not next_ref.startswith("#/") or next_ref in seen_pointers:
-                return False
-            seen_pointers.add(next_ref)
-            target = _resolve_pointer(next_ref)
-    return True
+        if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+            return False
+
+    edges: dict[str, list[str]] = {}
+    for ref in refs:
+        target = _resolve_pointer(ref)
+        edges[ref] = _refs_within(target) if isinstance(target, Mapping) else []
+
+    visiting: set[str] = set()
+    settled: set[str] = set()
+
+    def _cyclic(pointer: str) -> bool:
+        if pointer in settled:
+            return False
+        if pointer in visiting:
+            return True
+        visiting.add(pointer)
+        for nxt in edges.get(pointer, ()):
+            if nxt == "#" or not nxt.startswith("#/"):
+                return True
+            if nxt not in edges:
+                target = _resolve_pointer(nxt)
+                if target is _UNRESOLVED or not isinstance(target, (Mapping, bool)):
+                    return True
+                edges[nxt] = _refs_within(target) if isinstance(target, Mapping) else []
+            if _cyclic(nxt):
+                return True
+        visiting.discard(pointer)
+        settled.add(pointer)
+        return False
+
+    return not any(_cyclic(pointer) for pointer in list(edges))
 
 
 _UNRESOLVED = object()
@@ -3805,6 +3832,16 @@ def _is_row_shaped_value(value: str) -> bool:
         first_tokens = [seg.split()[0].lower().rstrip(":,=") for seg in record_segments]
         if len(set(first_tokens)) < len(first_tokens):
             return True
+    # Repeated "CapName attribute N" segments are entity rows (round-33:
+    # "Alice premium 34, Bob free 12") — categories lead with a colon
+    # ("Free: 78%") or lowercase and stay valid.
+    name_row_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
+    if len(name_row_segments) >= 2:
+        name_rows = sum(
+            1 for seg in name_row_segments if re.match(r"^[A-Z][a-z]+ [a-z][^:]*\d", seg)
+        )
+        if name_rows >= 2:
+            return True
     # Two or more capitalized word-pairs are a person/entity roster
     # (round-19: digit-bearing Alice/Bob rows; round-23: acronym-suffixed
     # company names like "Beta LLC") — one aggregate names at most one
@@ -3845,6 +3882,10 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # requests timed out: 0.8%") and stay valid.
     r"|\b(request|query|connection|call|lookup)\s+timed\s+out\b"
     r"|\b(upstream|gateway|connection|request|query|read|write)\s+timeout\b"
+    # Failure prose variants (round-33: "query failed because permission was
+    # denied"); plural metric forms ("queries failed: 12") stay valid.
+    r"|\b(query|request|call|lookup|connection)\s+failed\b"
+    r"|\b(permission|access|authorization)\s+(was|is)\s+denied\b"
     r"|\bafter\s+\d+\s+(attempts?|retries)\b"
     # Availability narratives and bare status codes (round-29: "database
     # unavailable, code 503").
@@ -4063,6 +4104,14 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
                 f"evidence[{index}].source: names a mutating tool ({verb!r}); "
                 "the data lane is read-only"
             )
+        # A credential-shaped identifier IS the leak, digits or not
+        # (round-33: api_key_live_supersecret) — classified directly, since
+        # alphabetic secrets evade the entropy-based content pattern.
+        if isinstance(source, str) and _identifier_looks_secret(source.strip()):
+            errors.append(
+                f"evidence[{index}].source: credential-shaped identifier; "
+                "name the read-only data tool instead"
+            )
     proposals = output.get("proposed_queries")
     for index, item in enumerate(proposals if isinstance(proposals, list) else ()):
         if not isinstance(item, Mapping):
@@ -4080,6 +4129,11 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
             errors.append(
                 f"proposed_queries[{index}].tool_name: names a mutating tool "
                 f"({verb!r}); the data lane is read-only"
+            )
+        if isinstance(tool_name, str) and _identifier_looks_secret(tool_name.strip()):
+            errors.append(
+                f"proposed_queries[{index}].tool_name: credential-shaped "
+                "identifier; name the read-only data tool instead"
             )
         # A confirmed proposal is executed by the parent, so the aggregate
         # policy binds the QUERY too (bot-review round-19): a select-star
@@ -4225,7 +4279,14 @@ def _identifier_looks_secret(value: str) -> bool:
             return True
         return bool(re.fullmatch(r"[0-9a-fA-F]{4,}", tok) and re.search(r"\d", tok))
 
-    return any(_gibberish(tok) for tok in suffix_tokens)
+    # Secret-marker words in the suffix mark alphabetic credentials too
+    # (round-33: api_key_live_supersecret) — live/test-key conventions and
+    # the word secret itself never name read-only data tools.
+    def _secret_marker(tok: str) -> bool:
+        lowered = tok.lower()
+        return lowered in ("live", "prod", "priv", "private") or "secret" in lowered
+
+    return any(_gibberish(tok) or _secret_marker(tok) for tok in suffix_tokens)
 
 
 # Lane ids (and correlation values generally) are short identifiers; an
@@ -4485,6 +4546,13 @@ def register_question_advisory_fanout_from_lanes(
             continue
         lane_id = str(lane.get("lane_id") or "")
         if not lane_id or lane_id in expected_keys:
+            continue
+        # The public grammar and re-entry validation agree (round-33): a
+        # lane id that could not round-trip as results[*].key (shell
+        # metacharacters, whitespace) is never registered as an expected
+        # key it could not complete.
+        if not _LANE_KEY_SHAPE.match(lane_id):
+            log.warning("fanout.lane_id.invalid_shape_skipped", lane_id=lane_id)
             continue
         expected_keys.append(lane_id)
         if bool(lane.get("required")):
