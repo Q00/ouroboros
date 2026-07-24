@@ -720,7 +720,9 @@ async def test_capsule_resume_rejects_sealed_dispatch(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_capsule_resume_rejects_locally_poisoned_dispatch_after_seal_failure(tmp_path) -> None:
+async def test_capsule_resume_rejects_locally_poisoned_dispatch_after_seal_failure(
+    tmp_path,
+) -> None:
     """A failed seal append must not leave a same-process retry replayable."""
     capsule = _capsule(tmp_path)
     identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)

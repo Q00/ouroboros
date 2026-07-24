@@ -349,9 +349,7 @@ async def test_capsule_authority_fingerprint_changes_with_investment_spec() -> N
     low_capsule = _capsule_events(low_events)
     high_capsule = _capsule_events(high_events)
     assert len(low_capsule) == len(high_capsule) == 1
-    assert low_capsule[0].data["capsule_fingerprint"] != high_capsule[0].data[
-        "capsule_fingerprint"
-    ]
+    assert low_capsule[0].data["capsule_fingerprint"] != high_capsule[0].data["capsule_fingerprint"]
 
 
 @pytest.mark.asyncio
@@ -385,9 +383,10 @@ async def test_capsule_authority_fingerprint_changes_with_sibling_prompt_scope()
     first_capsule = _capsule_events(first_events)
     second_capsule = _capsule_events(second_events)
     assert len(first_capsule) == len(second_capsule) == 1
-    assert first_capsule[0].data["capsule_fingerprint"] != second_capsule[0].data[
-        "capsule_fingerprint"
-    ]
+    assert (
+        first_capsule[0].data["capsule_fingerprint"]
+        != second_capsule[0].data["capsule_fingerprint"]
+    )
 
 
 @pytest.mark.asyncio

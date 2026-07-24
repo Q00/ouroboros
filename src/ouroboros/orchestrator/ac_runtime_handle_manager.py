@@ -705,8 +705,8 @@ class ACRuntimeHandleManager:
                         for index in matching_indices
                         if events[index].type in _NON_REUSABLE_RUNTIME_EVENT_TYPES
                     ),
-                        default=-1,
-                    )
+                    default=-1,
+                )
                 last_seal_index = max(seal_indices, default=-1)
                 last_dispatch_index = max(dispatch_indices, default=-1)
                 if last_terminal_index >= 0 and any(
@@ -1064,15 +1064,15 @@ class ACRuntimeHandleManager:
 
             if event.type == _AC_ATTEMPT_DISPATCHED_EVENT:
                 if not any(compiled_index < index for compiled_index in compiled_indices):
-                    raise AmbiguousACExecutionError(
-                        "AC dispatch precedes its capsule authority"
-                    )
+                    raise AmbiguousACExecutionError("AC dispatch precedes its capsule authority")
                 if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
                     raise AmbiguousACExecutionError(
                         "AC dispatch capsule fingerprint disagrees with capsule authority"
                     )
                 dispatch_id = event_data.get("ac_dispatch_id")
-                if not isinstance(dispatch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+                if not isinstance(dispatch_id, str) or not re.fullmatch(
+                    r"[0-9a-f]{32}", dispatch_id
+                ):
                     raise AmbiguousACExecutionError("AC dispatch id is malformed")
                 if dispatch_id in dispatch_ids:
                     raise AmbiguousACExecutionError("AC dispatch chain contains a duplicate id")
@@ -1087,9 +1087,7 @@ class ACRuntimeHandleManager:
                     event_data.get("signal_mode"),
                     event_data.get("follow_up_input_digest"),
                 )
-                if dispatch_kind == "primary" and any(
-                    value is not None for value in signal_fields
-                ):
+                if dispatch_kind == "primary" and any(value is not None for value in signal_fields):
                     raise AmbiguousACExecutionError(
                         "primary AC dispatch carries unexpected follow-up identity"
                     )
@@ -1119,7 +1117,10 @@ class ACRuntimeHandleManager:
                         raise AmbiguousACExecutionError(
                             "AC dispatch runtime binding disagrees with dispatch id"
                         )
-                    if runtime_metadata.get("ac_capsule_fingerprint") != expected_capsule_fingerprint:
+                    if (
+                        runtime_metadata.get("ac_capsule_fingerprint")
+                        != expected_capsule_fingerprint
+                    ):
                         raise AmbiguousACExecutionError(
                             "AC dispatch runtime binding disagrees with capsule authority"
                         )
@@ -1135,13 +1136,13 @@ class ACRuntimeHandleManager:
                         "AC dispatch seal capsule fingerprint disagrees with capsule authority"
                     )
                 dispatch_id = event_data.get("ac_dispatch_id")
-                if not isinstance(dispatch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+                if not isinstance(dispatch_id, str) or not re.fullmatch(
+                    r"[0-9a-f]{32}", dispatch_id
+                ):
                     raise AmbiguousACExecutionError("AC dispatch seal id is malformed")
                 dispatch_index = dispatch_index_by_id.get(dispatch_id)
                 if dispatch_index is None or dispatch_index >= index:
-                    raise AmbiguousACExecutionError(
-                        "AC dispatch seal does not follow its dispatch"
-                    )
+                    raise AmbiguousACExecutionError("AC dispatch seal does not follow its dispatch")
                 seal_indices.append(index)
 
         if not compiled_indices:

@@ -287,11 +287,14 @@ def test_explicit_foreign_session_wins_over_legacy_level_aggregate_inference() -
         },
     )
 
-    assert classify_relay_events(
-        [foreign_level],
-        job_id="job_1",
-        session_id="orch_1",
-    ) == []
+    assert (
+        classify_relay_events(
+            [foreign_level],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
 
 
 def test_legacy_frugality_proof_uses_single_session_execution_scope() -> None:

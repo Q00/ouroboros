@@ -247,9 +247,7 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
         projection = project_session_signal(signal_events)
         execution_events = await store.replay("execution", scope_id)
         dispatch_events = [
-            event
-            for event in execution_events
-            if event.type == "execution.ac.attempt.dispatched"
+            event for event in execution_events if event.type == "execution.ac.attempt.dispatched"
         ]
         follow_up_dispatch = dispatch_events[-1]
         follow_up_dispatch_id = follow_up_dispatch.data["ac_dispatch_id"]
@@ -361,9 +359,7 @@ async def test_follow_up_dispatch_append_failure_keeps_last_durable_runtime_hand
         result = await asyncio.wait_for(execution_task, timeout=5)
         execution_events = await store.replay("execution", scope_id)
         dispatch_events = [
-            event
-            for event in execution_events
-            if event.type == "execution.ac.attempt.dispatched"
+            event for event in execution_events if event.type == "execution.ac.attempt.dispatched"
         ]
         lifecycle_events = [
             event

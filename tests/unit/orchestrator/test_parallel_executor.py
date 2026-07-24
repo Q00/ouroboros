@@ -984,9 +984,7 @@ async def test_dispatch_append_failure_does_not_cache_phantom_predecessor() -> N
 
     assert result.success is True
     dispatch_events = [
-        event
-        for event in appended_events
-        if event.type == "execution.ac.attempt.dispatched"
+        event for event in appended_events if event.type == "execution.ac.attempt.dispatched"
     ]
     assert len(dispatch_events) == 1
     assert dispatch_events[0].data["previous_ac_dispatch_id"] is None
