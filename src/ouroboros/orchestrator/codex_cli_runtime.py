@@ -192,14 +192,15 @@ class _CodexItemCorrelationScope:
     so a new thread begins with a clean correlation space.
     """
 
-    started_item_ids: set[str] = field(default_factory=set)
+    started_item_signatures: dict[str, str] = field(default_factory=dict)
     started_unkeyed_item_counts: dict[tuple[str, str], int] = field(default_factory=dict)
-    completed_item_ids: set[str] = field(default_factory=set)
+    completed_item_keys: set[str] = field(default_factory=set)
+    current_thread_id: str | None = None
 
     def clear(self) -> None:
-        self.started_item_ids.clear()
+        self.started_item_signatures.clear()
         self.started_unkeyed_item_counts.clear()
-        self.completed_item_ids.clear()
+        self.completed_item_keys.clear()
 
 
 class CodexCliRuntime:
@@ -1870,6 +1871,20 @@ class CodexCliRuntime:
         return None
 
     @staticmethod
+    def _mcp_tool_name(item: dict[str, Any]) -> str:
+        """Resolve an MCP tool identity from native tool+server or legacy name."""
+        tool = item.get("tool")
+        if isinstance(tool, str) and tool.strip():
+            server = item.get("server")
+            if isinstance(server, str) and server.strip():
+                return f"{server.strip()}.{tool.strip()}"
+            return tool.strip()
+        name = item.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return "mcp_tool"
+
+    @staticmethod
     def _extract_mcp_result_text(item: dict[str, Any]) -> str:
         """Normalize MCP result/error envelopes into result text."""
         error_envelope = item.get("error")
@@ -1894,6 +1909,8 @@ class CodexCliRuntime:
             structured = result.get("structured_content")
             if isinstance(structured, str) and structured.strip():
                 return structured.strip()
+            if isinstance(structured, (dict, list)) and structured:
+                return json.dumps(structured, ensure_ascii=False, sort_keys=True)
         if isinstance(result, str) and result.strip():
             return result.strip()
         return ""
@@ -1909,8 +1926,7 @@ class CodexCliRuntime:
         if item_type == "command_execution":
             return self._extract_command(item)
         if item_type == "mcp_tool_call":
-            name = item.get("name")
-            return name.strip() if isinstance(name, str) else ""
+            return self._mcp_tool_name(item)
         if item_type == "file_change":
             return "\n".join(self._extract_paths(item))
         if item_type == "web_search":
@@ -1938,8 +1954,7 @@ class CodexCliRuntime:
             ]
 
         if item_type == "mcp_tool_call":
-            raw_name = item.get("name")
-            tool_name = raw_name if isinstance(raw_name, str) else "mcp_tool"
+            tool_name = self._mcp_tool_name(item)
             return [
                 _CodexToolCall(
                     tool_name=tool_name,
@@ -1986,10 +2001,11 @@ class CodexCliRuntime:
     ) -> None:
         """Record that a thread item's tool start was already projected."""
         item_id = self._item_lifecycle_id(item)
+        signature = self._item_lifecycle_signature(item_type, item)
         if item_id is not None:
-            scope.started_item_ids.add(item_id)
+            scope.started_item_signatures[item_id] = signature
             return
-        key = (item_type, self._item_lifecycle_signature(item_type, item))
+        key = (item_type, signature)
         scope.started_unkeyed_item_counts[key] = scope.started_unkeyed_item_counts.get(key, 0) + 1
 
     def _consume_item_started(
@@ -2000,11 +2016,14 @@ class CodexCliRuntime:
     ) -> bool:
         """Return True when this completion's tool start was already emitted."""
         item_id = self._item_lifecycle_id(item)
+        signature = self._item_lifecycle_signature(item_type, item)
         if item_id is not None:
-            # Keep the id recorded: a duplicate completion for the same item
-            # must not resynthesize a second start (#1692 review blocker 2).
-            return item_id in scope.started_item_ids
-        key = (item_type, self._item_lifecycle_signature(item_type, item))
+            # Pair only when a prior start shares BOTH the id and the stable
+            # tool-input signature; a same-id completion for a different
+            # command must synthesize its own pair, not inherit the start
+            # (review round seven, blocker 2).
+            return scope.started_item_signatures.get(item_id) == signature
+        key = (item_type, signature)
         count = scope.started_unkeyed_item_counts.get(key, 0)
         if count <= 0:
             return False
@@ -2133,7 +2152,12 @@ class CodexCliRuntime:
                 # An unknown verdict must not forward a bare success-implying
                 # status: downstream consumers would read it as authoritative
                 # success while the journal gate fails closed (round five).
-                extra_data["reported_status"] = extra_data.pop("status")
+                reported = extra_data.pop("status")
+                extra_data["reported_status"] = reported
+                # Persist it inside the journaled result meta for auditability
+                # (round seven follow-up P2): runtime metadata serialization
+                # otherwise drops the top-level key.
+                tool_result_meta["reported_status"] = reported
         extra_data["subtype"] = "tool_result"
         if call.tool_call_id is not None:
             extra_data["tool_call_id"] = call.tool_call_id
@@ -2161,11 +2185,14 @@ class CodexCliRuntime:
         if not calls:
             return []
         item_id = self._item_lifecycle_id(item)
-        if item_id is not None and item_id in scope.started_item_ids:
-            # A replayed keyed start must not emit a duplicate: exact
-            # correlation requires one matching start per id (review round
-            # six). Id-less starts keep per-count pairing for legitimate
-            # repeated invocations.
+        if item_id is not None and (
+            scope.started_item_signatures.get(item_id)
+            == self._item_lifecycle_signature(item_type, item)
+        ):
+            # A replayed keyed start (same id and signature) must not emit a
+            # duplicate: exact correlation requires one matching start per id
+            # (review round six). Id-less starts keep per-count pairing for
+            # legitimate repeated invocations.
             return []
         self._remember_item_started(item_type, item, scope)
         return [self._build_tool_start_message(call, current_handle) for call in calls]
@@ -2187,14 +2214,6 @@ class CodexCliRuntime:
         calls = self._item_tool_calls(item_type, item)
         if not calls:
             return []
-        item_id = self._item_lifecycle_id(item)
-        if item_id is not None:
-            if item_id in scope.completed_item_ids:
-                # A replayed keyed completion must not emit a second lifecycle
-                # pair: downstream exact correlation would see two starts
-                # sharing one id (review round three, blocker 1).
-                return []
-            scope.completed_item_ids.add(item_id)
         metadata = self._extract_command_metadata(item)
         if item_type == "mcp_tool_call" and not any(
             isinstance(metadata.get(key), str) and metadata[key].strip()
@@ -2204,6 +2223,18 @@ class CodexCliRuntime:
             if normalized:
                 metadata["output"] = normalized
         is_error = self._resolve_item_completion_is_error(item_type, item)
+        item_id = self._item_lifecycle_id(item)
+        if item_id is not None:
+            # Dedup on the id AND the terminal verdict: an exact replay is
+            # suppressed, but a conflicting same-id completion (e.g. a later
+            # failure after a success) has a different key and stays visible
+            # so verification fails closed (review round seven, blocker 1).
+            dedup_key = (
+                f"{item_id}\x00{self._item_lifecycle_signature(item_type, item)}\x00{is_error}"
+            )
+            if dedup_key in scope.completed_item_keys:
+                return []
+            scope.completed_item_keys.add(dedup_key)
         has_started = self._consume_item_started(item_type, item, scope)
         if not has_started and item_id is not None:
             # Record the keyed synthesized start so the lifecycle state stays
@@ -2248,8 +2279,13 @@ class CodexCliRuntime:
         scope = item_scope if item_scope is not None else self._default_item_scope
 
         if event_type == "thread.started":
-            scope.clear()
             thread_id = event.get("thread_id")
+            # Clearing correlation on an exact same-thread header replay would
+            # orphan in-flight starts; only reset when the identity changes.
+            new_thread = thread_id if isinstance(thread_id, str) else None
+            if new_thread != scope.current_thread_id:
+                scope.clear()
+                scope.current_thread_id = new_thread
             if isinstance(thread_id, str):
                 handle = self._build_runtime_handle(thread_id, current_handle)
                 return [

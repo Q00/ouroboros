@@ -693,6 +693,146 @@ class TestCodexCompletionReviewRoundOne:
         assert len(completion) == 1
         assert completion[0].data.get("subtype") == "tool_result"
 
+    def test_conflicting_same_id_completion_remains_visible(self) -> None:
+        """A conflicting terminal envelope must not vanish behind dedup."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        base = {
+            "id": "item_cf2",
+            "type": "command_execution",
+            "command": "pytest -q",
+            "status": "completed",
+        }
+
+        first = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "exit_code": 0}}, current_handle=None
+        )
+        conflicting = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "exit_code": 1}}, current_handle=None
+        )
+        identical_replay = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "exit_code": 1}}, current_handle=None
+        )
+
+        assert len(first) == 2
+        conflict_results = [m for m in conflicting if m.data.get("subtype") == "tool_result"]
+        assert len(conflict_results) == 1, (
+            "a conflicting failed completion was silently dropped by id-only dedup"
+        )
+        assert conflict_results[0].data.get("is_error") is True
+        assert identical_replay == [], "a semantically identical replay must stay suppressed"
+
+    def test_keyed_completion_with_mismatched_signature_does_not_pair(self) -> None:
+        """A same-id completion for a different command must not inherit the start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "item_sig",
+                    "type": "command_execution",
+                    "command": "pytest tests/test_a.py",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_sig",
+                    "type": "command_execution",
+                    "command": "printf '1 passed'",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2, (
+            "a signature-mismatched completion paired with the pytest start and "
+            "would be accepted as successful test evidence"
+        )
+
+    def test_same_thread_header_replay_preserves_correlation(self) -> None:
+        """Replaying the current thread header must not wipe correlation state."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        header = {"type": "thread.started", "thread_id": "t1"}
+
+        runtime._convert_event(header, current_handle=None)
+        runtime._convert_event(_COMMAND_ITEM_STARTED, current_handle=None)
+        runtime._convert_event(header, current_handle=None)
+        completion = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        assert len(completion) == 1, (
+            "the same-thread header replay cleared correlation and a duplicate "
+            "start was synthesized"
+        )
+        assert completion[0].data.get("subtype") == "tool_result"
+
+    def test_native_mcp_tool_identity_is_preserved(self) -> None:
+        """Native tool+server MCP items must not journal as generic mcp_tool."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "item_native",
+                    "type": "mcp_tool_call",
+                    "tool": "write",
+                    "server": "filesystem",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 1
+        assert messages[0].tool_name == "filesystem.write"
+
+    def test_reported_status_is_persisted_in_result_meta(self) -> None:
+        """The audit trail keeps the raw status inside the journaled result meta."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_rs",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "exit_code": "1",
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        meta = (results[0].data.get("tool_result") or {}).get("meta") or {}
+        assert meta.get("reported_status") == "completed"
+
+    def test_structured_content_mapping_is_serialized(self) -> None:
+        """Mapping structured_content must reach the result text as JSON."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_sc",
+                    "type": "mcp_tool_call",
+                    "name": "calculator.add",
+                    "status": "completed",
+                    "result": {"content": [], "structured_content": {"answer": 42}},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert "42" in ((results[0].data.get("tool_result") or {}).get("text_content") or "")
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
