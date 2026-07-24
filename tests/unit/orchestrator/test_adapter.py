@@ -601,7 +601,11 @@ class TestRuntimeHandle:
             updated_at="2026-03-13T09:00:00+00:00",
             metadata={
                 "ac_id": "ac_2",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_dispatch_id": "b" * 32,
+                "ac_session_origin": "restored_same_attempt",
                 "server_session_id": "server-42",
+                "process_local_resume_nonce": "nonce-1",
                 "session_attempt_id": "ac_2_attempt_2",
                 "session_scope_id": "ac_2",
                 "session_state_path": "execution.acceptance_criteria.ac_2.implementation_session",
@@ -626,7 +630,11 @@ class TestRuntimeHandle:
             "approval_mode": "acceptEdits",
             "metadata": {
                 "ac_id": "ac_2",
+                "ac_capsule_fingerprint": "sha256:" + "a" * 64,
+                "ac_dispatch_id": "b" * 32,
+                "ac_session_origin": "restored_same_attempt",
                 "server_session_id": "server-42",
+                "process_local_resume_nonce": "nonce-1",
                 "session_attempt_id": "ac_2_attempt_2",
                 "session_scope_id": "ac_2",
                 "session_state_path": "execution.acceptance_criteria.ac_2.implementation_session",

@@ -245,9 +245,31 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
         result = await asyncio.wait_for(execution_task, timeout=5)
         signal_events = await store.replay("session_signal", signal.signal_id)
         projection = project_session_signal(signal_events)
+        execution_events = await store.replay("execution", scope_id)
+        dispatch_events = [
+            event
+            for event in execution_events
+            if event.type == "execution.ac.attempt.dispatched"
+        ]
+        follow_up_dispatch = dispatch_events[-1]
+        follow_up_dispatch_id = follow_up_dispatch.data["ac_dispatch_id"]
+        completed_event = next(
+            event
+            for event in reversed(execution_events)
+            if event.type == "execution.session.completed"
+        )
 
         assert result.success is True
         assert len(runtime.prompts) == 2
+        assert len(dispatch_events) == 2
+        assert follow_up_dispatch.data["dispatch_kind"] == "session_signal_followup"
+        assert (
+            follow_up_dispatch.data["runtime"]["metadata"]["ac_dispatch_id"]
+            == follow_up_dispatch_id
+        )
+        assert completed_event.data["runtime"]["metadata"]["ac_dispatch_id"] == (
+            follow_up_dispatch_id
+        )
         assert projection.state is SessionSignalState.COMPLETED
         assert projection.effective_mode is SessionSignalMode.AFTER_TURN
         assert [event.type for event in signal_events] == [
