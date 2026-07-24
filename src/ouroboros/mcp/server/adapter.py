@@ -274,6 +274,39 @@ def _build_tool_signature_with_aliases(
     return inspect.Signature(parameters=sig_params), alias_to_original
 
 
+def _validate_parameter_constraints(
+    parameters: tuple[MCPToolParameter, ...],
+    arguments: dict[str, Any],
+) -> None:
+    expected_types: dict[str, type | tuple[type, ...]] = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "object": dict,
+        "array": list,
+    }
+    for parameter in parameters:
+        if parameter.name not in arguments:
+            continue
+        value = arguments[parameter.name]
+        if parameter.enum is not None and value not in parameter.enum:
+            raise ValueError(
+                f"Invalid value for {parameter.name}: expected one of {parameter.enum}"
+            )
+        if parameter.items is None or not isinstance(value, list):
+            continue
+        item_type = parameter.items.get("type")
+        expected_type = expected_types.get(item_type or "")
+        if expected_type is None:
+            continue
+        if any(
+            not isinstance(item, expected_type) or (expected_type is int and isinstance(item, bool))
+            for item in value
+        ):
+            raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
+
+
 _PROJECT_ROOT_MARKERS = (
     # VCS (most universal — nearly every project has one)
     ".git",
@@ -1046,6 +1079,11 @@ class MCPServerAdapter:
                             normalized_kwargs[original_key] = kwargs[alias_key]
                     for key, value in kwargs.items():
                         normalized_kwargs.setdefault(key, value)
+
+                    _validate_parameter_constraints(
+                        h.definition.parameters,
+                        normalized_kwargs,
+                    )
 
                     # Route through call_tool() to enforce security checks.
                     # FastMCP does not provide credentials, so:
