@@ -40,7 +40,11 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
-from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
+from ouroboros.orchestrator.codex_cli_runtime import (
+    CodexCliRuntime,
+    SkillDispatchHandler,
+    _CodexItemCorrelationScope,
+)
 from ouroboros.runtime.child_env import build_child_env
 from ouroboros.zcode_cli_launcher import (
     build_zcode_command_prefix,
@@ -477,6 +481,8 @@ class ZcodeCLIRuntime(CodexCliRuntime):
         self,
         event: dict[str, Any],
         current_handle: RuntimeHandle | None,
+        *,
+        item_scope: _CodexItemCorrelationScope | None = None,
     ) -> list[AgentMessage]:
         """Convert a zcode ``--prompt --json`` summary into AgentMessage values.
 

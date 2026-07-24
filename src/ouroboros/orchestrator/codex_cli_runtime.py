@@ -165,6 +165,24 @@ class _CodexToolCall:
     tool_input: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _CodexItemCorrelationScope:
+    """Per-stream correlation state for Codex item lifecycle pairing.
+
+    Each streamed Codex process gets its own scope so parallel or sequential
+    ACs sharing one adapter can never suppress another stream's synthetic
+    start with stale item ids. The scope is also cleared on ``thread.started``
+    so a new thread begins with a clean correlation space.
+    """
+
+    started_item_ids: set[str] = field(default_factory=set)
+    started_unkeyed_item_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        self.started_item_ids.clear()
+        self.started_unkeyed_item_counts.clear()
+
+
 class CodexCliRuntime:
     """Agent runtime that shells out to the locally installed Codex CLI."""
 
@@ -245,8 +263,7 @@ class CodexCliRuntime:
         # ``item.started`` was already projected as a tool start, so the
         # matching ``item.completed`` never duplicates the start. Id-less
         # legacy items are tracked by (item_type, signature) counts instead.
-        self._started_item_ids: set[str] = set()
-        self._started_unkeyed_item_counts: dict[tuple[str, str], int] = {}
+        self._default_item_scope = _CodexItemCorrelationScope()
         if startup_output_timeout_seconds is not None:
             self._startup_output_timeout_seconds = (
                 None if startup_output_timeout_seconds <= 0 else startup_output_timeout_seconds
@@ -1896,37 +1913,43 @@ class CodexCliRuntime:
 
         return []
 
-    def _remember_item_started(self, item_type: str, item: dict[str, Any]) -> None:
+    def _remember_item_started(
+        self,
+        item_type: str,
+        item: dict[str, Any],
+        scope: _CodexItemCorrelationScope,
+    ) -> None:
         """Record that a thread item's tool start was already projected."""
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:
-            self._started_item_ids.add(item_id)
+            scope.started_item_ids.add(item_id)
             return
         key = (item_type, self._item_lifecycle_signature(item_type, item))
-        self._started_unkeyed_item_counts[key] = self._started_unkeyed_item_counts.get(key, 0) + 1
+        scope.started_unkeyed_item_counts[key] = scope.started_unkeyed_item_counts.get(key, 0) + 1
 
-    def _consume_item_started(self, item_type: str, item: dict[str, Any]) -> bool:
+    def _consume_item_started(
+        self,
+        item_type: str,
+        item: dict[str, Any],
+        scope: _CodexItemCorrelationScope,
+    ) -> bool:
         """Return True when this completion's tool start was already emitted."""
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:
             # Keep the id recorded: a duplicate completion for the same item
             # must not resynthesize a second start (#1692 review blocker 2).
-            return item_id in self._started_item_ids
+            return item_id in scope.started_item_ids
         key = (item_type, self._item_lifecycle_signature(item_type, item))
-        count = self._started_unkeyed_item_counts.get(key, 0)
+        count = scope.started_unkeyed_item_counts.get(key, 0)
         if count <= 0:
             return False
         if count == 1:
-            del self._started_unkeyed_item_counts[key]
+            del scope.started_unkeyed_item_counts[key]
         else:
-            self._started_unkeyed_item_counts[key] = count - 1
+            scope.started_unkeyed_item_counts[key] = count - 1
         return True
 
-    def _resolve_item_completion_is_error(
-        self,
-        item: dict[str, Any],
-        metadata: dict[str, Any],
-    ) -> bool | None:
+    def _resolve_item_completion_is_error(self, item: dict[str, Any]) -> bool | None:
         """Resolve tri-state completion status, failing closed on ambiguity.
 
         Returns ``False`` (success) only on explicit machine-readable signals
@@ -1938,22 +1961,26 @@ class CodexCliRuntime:
         has_failure = False
         has_success = False
 
-        exit_code = metadata.get("exit_code")
-        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-            if exit_code == 0:
-                has_success = True
-            else:
-                has_failure = True
-
-        status = metadata.get("status")
-        if isinstance(status, str):
-            normalized_status = status.strip().lower()
-            if normalized_status in _ITEM_FAILURE_STATUSES:
-                has_failure = True
-            elif normalized_status in _ITEM_SUCCESS_STATUSES:
-                has_success = True
-
+        # Scan every metadata source directly: first-value-wins merging must
+        # never let an outer success status shadow a nested failure (review
+        # blocker: failure signals take precedence wherever they appear).
         for source in self._iter_item_metadata_sources(item):
+            for exit_key in ("exit_code", "exitCode"):
+                exit_code = source.get(exit_key)
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                    if exit_code == 0:
+                        has_success = True
+                    else:
+                        has_failure = True
+
+            status = source.get("status")
+            if isinstance(status, str):
+                normalized_status = status.strip().lower()
+                if normalized_status in _ITEM_FAILURE_STATUSES:
+                    has_failure = True
+                elif normalized_status in _ITEM_SUCCESS_STATUSES:
+                    has_success = True
+
             for key in ("success", "ok"):
                 flag = source.get(key)
                 if flag is True:
@@ -2042,12 +2069,13 @@ class CodexCliRuntime:
         item_type: str,
         item: dict[str, Any],
         current_handle: RuntimeHandle | None,
+        scope: _CodexItemCorrelationScope,
     ) -> list[AgentMessage]:
         """Project ``item.started`` as correlated tool-start messages."""
         calls = self._item_tool_calls(item_type, item)
         if not calls:
             return []
-        self._remember_item_started(item_type, item)
+        self._remember_item_started(item_type, item, scope)
         return [self._build_tool_start_message(call, current_handle) for call in calls]
 
     def _convert_tool_item_completed(
@@ -2055,6 +2083,7 @@ class CodexCliRuntime:
         item_type: str,
         item: dict[str, Any],
         current_handle: RuntimeHandle | None,
+        scope: _CodexItemCorrelationScope,
     ) -> list[AgentMessage]:
         """Project ``item.completed`` as correlated tool-result messages.
 
@@ -2067,8 +2096,8 @@ class CodexCliRuntime:
         if not calls:
             return []
         metadata = self._extract_command_metadata(item)
-        is_error = self._resolve_item_completion_is_error(item, metadata)
-        has_started = self._consume_item_started(item_type, item)
+        is_error = self._resolve_item_completion_is_error(item)
+        has_started = self._consume_item_started(item_type, item, scope)
 
         messages: list[AgentMessage] = []
         for call in calls:
@@ -2088,13 +2117,24 @@ class CodexCliRuntime:
         self,
         event: dict[str, Any],
         current_handle: RuntimeHandle | None,
+        *,
+        item_scope: _CodexItemCorrelationScope | None = None,
     ) -> list[AgentMessage]:
-        """Convert a Codex JSON event into normalized AgentMessage values."""
+        """Convert a Codex JSON event into normalized AgentMessage values.
+
+        ``item_scope`` isolates start/result correlation per streamed process;
+        the streaming loop passes a fresh scope per invocation. Direct callers
+        fall back to a per-instance scope, which is cleared on every
+        ``thread.started`` so a new thread never inherits stale item ids.
+        """
         event_type = event.get("type")
         if not isinstance(event_type, str):
             return []
 
+        scope = item_scope if item_scope is not None else self._default_item_scope
+
         if event_type == "thread.started":
+            scope.clear()
             thread_id = event.get("thread_id")
             if isinstance(thread_id, str):
                 handle = self._build_runtime_handle(thread_id, current_handle)
@@ -2115,7 +2155,7 @@ class CodexCliRuntime:
             item_type = item.get("type")
             if not isinstance(item_type, str) or item_type not in _TOOL_LIFECYCLE_ITEM_TYPES:
                 return []
-            return self._convert_tool_item_started(item_type, item, current_handle)
+            return self._convert_tool_item_started(item_type, item, current_handle, scope)
 
         if event_type == "item.completed":
             item = event.get("item")
@@ -2127,7 +2167,7 @@ class CodexCliRuntime:
                 return []
 
             if item_type in _TOOL_LIFECYCLE_ITEM_TYPES:
-                return self._convert_tool_item_completed(item_type, item, current_handle)
+                return self._convert_tool_item_completed(item_type, item, current_handle, scope)
 
             if item_type == "agent_message":
                 content = self._extract_text(item)
@@ -2309,6 +2349,9 @@ class CodexCliRuntime:
         _resume_depth: int = 0,
     ) -> AsyncIterator[AgentMessage]:
         """Internal implementation with resume-depth tracking."""
+        # Per-stream correlation scope: parallel or sequential ACs sharing
+        # this adapter must never see another stream's item lifecycle state.
+        stream_item_scope = _CodexItemCorrelationScope()
         # Note: CODEX_SANDBOX_NETWORK_DISABLED=1 does NOT necessarily mean
         # child codex exec will fail.  Codex may apply different seatbelt
         # profiles to MCP server children vs shell commands.  Log at debug
@@ -2523,7 +2566,9 @@ class CodexCliRuntime:
                         last_content = self._update_last_content(last_content, message)
                         yield message
 
-                    for message in self._convert_event(event, current_handle):
+                    for message in self._convert_event(
+                        event, current_handle, item_scope=stream_item_scope
+                    ):
                         if message.resume_handle is not None:
                             current_handle = message.resume_handle
                             current_handle = self._bind_runtime_handle_controls(

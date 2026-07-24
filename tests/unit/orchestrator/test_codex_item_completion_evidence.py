@@ -252,6 +252,57 @@ class TestCodexItemLifecycleConversion:
         assert _event_has_explicit_tool_success(_as_journaled_tool_completed_event(result))
 
 
+class TestCodexCompletionReviewRoundOne:
+    """Regressions for the first bot review on the contract PR."""
+
+    def test_nested_failure_wins_over_outer_completed_status(self) -> None:
+        """Failure precedence: a nested failed status must never become success."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_5",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "completed",
+                "result": {"status": "failed", "output": "1 failed"},
+            },
+        }
+
+        messages = runtime._convert_event(event, current_handle=None)
+
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True, (
+            "outer status=completed must not shadow the nested result.status=failed"
+        )
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_new_thread_resets_item_correlation_state(self) -> None:
+        """A new thread's completed-only item must synthesize its own start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        thread_started = {"type": "thread.started", "thread_id": "t1"}
+
+        # Stream A: full lifecycle for item_0.
+        runtime._convert_event(thread_started, current_handle=None)
+        runtime._convert_event(_COMMAND_ITEM_STARTED, current_handle=None)
+        runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        # Stream B on the same adapter: completed-only reuse of the same item id.
+        runtime._convert_event({"type": "thread.started", "thread_id": "t2"}, current_handle=None)
+        messages = runtime._convert_event(_COMMAND_ITEM_COMPLETED, current_handle=None)
+
+        assert len(messages) == 2, (
+            "stale correlation state from the previous thread suppressed the "
+            "synthetic start for the new thread's completed-only item"
+        )
+        assert messages[0].data.get("tool_call_id") == "item_0"
+        assert messages[1].data.get("subtype") == "tool_result"
+
+
 class TestCodexCompletionJournaling:
     """Issue #1724 — completions must reach the execution.tool.completed journal."""
 
