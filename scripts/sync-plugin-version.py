@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
+BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([\d\w.]+) -->")
 
 
 def get_version() -> str:
@@ -95,14 +97,18 @@ def normalize_version(v: str) -> str:
 def update_version_marker(path: Path, version: str) -> bool:
     """Update <!-- ooo:VERSION:X.Y.Z --> marker in a text file."""
     text = path.read_text()
-    new_text = re.sub(
-        r"<!-- ooo:VERSION:[\d\w.]+ -->",
-        f"<!-- ooo:VERSION:{version} -->",
-        text,
-    )
+    matches = list(VERSION_MARKER_RE.finditer(text))
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one version marker in {path}")
+
+    new_text = VERSION_MARKER_RE.sub(f"<!-- ooo:VERSION:{version} -->", text)
     if text == new_text:
         return False
     path.write_text(new_text)
+
+    updated_matches = list(VERSION_MARKER_RE.finditer(path.read_text()))
+    if len(updated_matches) != 1 or updated_matches[0].group(1) != version:
+        raise RuntimeError(f"failed to verify version marker update in {path}")
     return True
 
 
@@ -153,20 +159,48 @@ def main() -> None:
         (MARKETPLACE_JSON, "plugins.0"),
     ]
 
-    changed = False
+    setup_markers: dict[Path, tuple[str, str]] = {}
+    for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
+        if not path.exists():
+            sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
+        text = path.read_text()
+        marker_matches = list(VERSION_MARKER_RE.finditer(text))
+        if len(marker_matches) != 1:
+            sys.exit(f"Error: expected exactly one version marker in {path.relative_to(ROOT)}")
+        setup_markers[path] = (text, marker_matches[0].group(1))
+
+    json_targets: list[tuple[Path, str | None, object, str]] = []
     for path, nested in targets:
+        if not path.exists():
+            continue
+
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                raise TypeError("top-level JSON value must be an object")
+            target: object = data
+            if nested:
+                for key in nested.split("."):
+                    if key.isdigit():
+                        if not isinstance(target, list):
+                            raise TypeError("numeric path component requires an array")
+                        target = target[int(key)]
+                    else:
+                        if not isinstance(target, dict):
+                            raise TypeError("named path component requires an object")
+                        target = target[key]
+                if not isinstance(target, dict):
+                    raise TypeError("version target must be an object")
+            old = target.get("version", "?")
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
+        json_targets.append((path, nested, data, str(old)))
+
+    changed = False
+    for path, nested, _data, old in json_targets:
         if not path.exists():
             print(f"  SKIP  {path.relative_to(ROOT)} (not found)")
             continue
-
-        data = json.loads(path.read_text())
-        if nested:
-            target = data
-            for key in nested.split("."):
-                target = target[int(key)] if key.isdigit() else target[key]
-            old = target.get("version", "?")
-        else:
-            old = data.get("version", "?")
 
         if old == version:
             print(f"  OK    {path.relative_to(ROOT)} ({old})")
@@ -178,19 +212,17 @@ def main() -> None:
             print(f"  DRIFT {path.relative_to(ROOT)} ({old} != {version})")
             changed = True
 
-    # Sync setup SKILL.md template version marker
-    if SETUP_SKILL_MD.exists():
-        text = SETUP_SKILL_MD.read_text()
-        marker_match = re.search(r"<!-- ooo:VERSION:([\d\w.]+) -->", text)
-        old_marker = marker_match.group(1) if marker_match else "?"
+    for path, (_text, old_marker) in setup_markers.items():
         if old_marker == version:
-            print(f"  OK    {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker})")
+            print(f"  OK    {path.relative_to(ROOT)} ({old_marker})")
         elif write:
-            update_version_marker(SETUP_SKILL_MD, version)
-            print(f"  WRITE {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker} -> {version})")
+            updated = update_version_marker(path, version)
+            if not updated:
+                sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
+            print(f"  WRITE {path.relative_to(ROOT)} ({old_marker} -> {version})")
             changed = True
         else:
-            print(f"  DRIFT {SETUP_SKILL_MD.relative_to(ROOT)} ({old_marker} != {version})")
+            print(f"  DRIFT {path.relative_to(ROOT)} ({old_marker} != {version})")
             changed = True
 
     if changed and not write:
