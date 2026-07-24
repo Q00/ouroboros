@@ -472,6 +472,10 @@ async def test_fresh_runtime_handle_inherits_pre_dispatch_authority() -> None:
     runtime_payload = started.data["runtime"]
     assert runtime_payload["metadata"]["ac_capsule_fingerprint"].startswith("sha256:")
     assert len(runtime_payload["metadata"]["ac_dispatch_id"]) == 32
+    assert (
+        runtime_payload["metadata"]["process_local_resume_nonce"]
+        == executor._process_local_resume_nonce
+    )
 
 
 @pytest.mark.asyncio
