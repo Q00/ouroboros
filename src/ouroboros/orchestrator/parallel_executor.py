@@ -5906,6 +5906,16 @@ Respond with either ATOMIC or the structured JSON object only.
                         "retry_attempt": retry_attempt,
                         "is_sub_ac": is_sub_ac,
                         "decomposition_trustworthy": decomposition_trustworthy,
+                        # Investment metadata is authority-bearing: the effort
+                        # router can lower or raise the dispatched tier from it.
+                        # Keep the canonical Seed representation in the capsule
+                        # scope so materially different investment decisions can
+                        # never reuse one durable dispatch identity.
+                        "investment_spec": (
+                            investment_spec.model_dump(mode="json")
+                            if investment_spec is not None
+                            else None
+                        ),
                     },
                 )
             ),

@@ -118,6 +118,10 @@ def _investment_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.investment_assessed"]
 
 
+def _capsule_events(events: list) -> list:
+    return [e for e in events if getattr(e, "type", None) == "execution.ac.capsule.compiled"]
+
+
 async def _run_one_ac(
     executor: ParallelACExecutor,
     *,
@@ -258,6 +262,55 @@ async def test_authorized_low_investment_lowers_effort_and_records_exact_inputs(
         )
     }
     assert runtime.received_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_capsule_authority_fingerprint_changes_with_investment_spec() -> None:
+    """Different investment authority must produce different durable capsules."""
+    low_store, low_events = _capturing_event_store()
+    high_store, high_events = _capturing_event_store()
+    low_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=low_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+    high_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=high_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+
+    await _run_one_ac(
+        low_executor,
+        is_sub_ac=False,
+        investment_spec=InvestmentSpec(
+            difficulty="low",
+            stakes="low",
+            provenance="measured",
+            confidence="high",
+        ),
+    )
+    await _run_one_ac(
+        high_executor,
+        is_sub_ac=False,
+        investment_spec=InvestmentSpec(
+            difficulty="high",
+            stakes="high",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+
+    low_capsule = _capsule_events(low_events)
+    high_capsule = _capsule_events(high_events)
+    assert len(low_capsule) == len(high_capsule) == 1
+    assert low_capsule[0].data["capsule_fingerprint"] != high_capsule[0].data[
+        "capsule_fingerprint"
+    ]
 
 
 @pytest.mark.asyncio
