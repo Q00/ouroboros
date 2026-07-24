@@ -281,6 +281,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
 )
 from ouroboros.orchestrator.level_context import (
     LevelContext,
+    build_context_prompt,
     deserialize_level_contexts,
     extract_level_context,
     serialize_level_contexts,
@@ -5901,11 +5902,27 @@ Respond with either ATOMIC or the structured JSON object only.
                         "ac_content": ac_content,
                         "seed_goal": seed_goal,
                         "retry_prompt_extra": retry_prompt_extra,
+                        # These values are projected into the provider prompt
+                        # and therefore are part of the dispatch authority even
+                        # though they are not provider/session continuity.
+                        "sibling_acs": [
+                            {"ac_index": sibling_index, "content": sibling_content}
+                            for sibling_index, sibling_content in (sibling_acs or [])
+                        ],
+                        "level_context_prompt": build_context_prompt(level_contexts or []),
                     },
                     execution_policy={
                         "retry_attempt": retry_attempt,
                         "is_sub_ac": is_sub_ac,
                         "decomposition_trustworthy": decomposition_trustworthy,
+                        "base_reasoning_effort": self._reasoning_effort,
+                        "model_routing": serialize_model_router(self._model_router),
+                        "execution_profile": (
+                            self._execution_profile.model_dump(mode="json")
+                            if self._execution_profile is not None
+                            else None
+                        ),
+                        "fat_harness_mode": self._fat_harness_mode,
                         # Investment metadata is authority-bearing: the effort
                         # router can lower or raise the dispatched tier from it.
                         # Keep the canonical Seed representation in the capsule
@@ -6205,6 +6222,21 @@ Respond with either ATOMIC or the structured JSON object only.
             runtime_metadata["ac_capsule_fingerprint"] = capsule.fingerprint
             runtime_metadata["ac_session_origin"] = session_origin
             runtime_handle = replace(runtime_handle, metadata=runtime_metadata)
+            # Cache the capsule-bound pre-dispatch handle before entering the
+            # provider boundary.  Runtimes are allowed to return a fresh handle
+            # object on their first message; the cache gives _augment_ac_runtime_handle
+            # an authoritative predecessor from which to carry the capsule,
+            # dispatch, and process-local bindings onto that replacement.
+            runtime_handle = self._remember_ac_runtime_handle(
+                ac_index,
+                runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
         await self._event_emitter.emit_ac_attempt_dispatched(
             runtime_identity=runtime_identity,
             dispatch_id=dispatch_id,
@@ -6747,6 +6779,32 @@ Respond with either ATOMIC or the structured JSON object only.
                 verify_gate_outcome=verify_gate_outcome,
                 error=fat_harness_error,
             )
+
+        except anyio.get_cancelled_exc_class():
+            # Cancellation after the durable dispatch event is an uncertain
+            # provider-effect boundary.  Shield the seal write so cancellation
+            # cannot leave a replayable handle that may resend work.
+            with anyio.CancelScope(shield=True):
+                with contextlib.suppress(Exception):
+                    await self._event_emitter.emit_ac_dispatch_sealed(
+                        runtime_identity=runtime_identity,
+                        dispatch_id=active_dispatch_id,
+                        execution_id=execution_context_id,
+                        session_id=session_id,
+                        capsule_fingerprint=capsule.fingerprint,
+                        reason="provider attempt cancelled after dispatch boundary",
+                    )
+            self._remember_ac_runtime_handle(
+                ac_index,
+                dispatch_state.runtime_handle,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                node_identity=node_identity,
+                retry_attempt=retry_attempt,
+            )
+            raise
 
         except Exception as e:
             duration = (datetime.now(UTC) - start_time).total_seconds()

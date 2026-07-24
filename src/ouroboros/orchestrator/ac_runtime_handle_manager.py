@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -530,47 +531,14 @@ class ACRuntimeHandleManager:
                 continue
 
             if expected_capsule_fingerprint is not None:
-                matching_compiled = []
-                for event in events:
-                    if event.type != _AC_CAPSULE_COMPILED_EVENT:
-                        continue
-                    event_data = event.data if isinstance(event.data, dict) else {}
-                    if not self._event_matches_ac_runtime_identity(event_data, runtime_identity):
-                        continue
-                    manifest = ACExecutionCapsuleManifest.from_contract_data(
-                        event_data.get("capsule_manifest")
+                compiled_indices, dispatch_indices, seal_indices = (
+                    self._validate_capsule_dispatch_chain(
+                        events,
+                        runtime_identity=runtime_identity,
+                        expected_capsule_fingerprint=expected_capsule_fingerprint,
                     )
-                    persisted_fingerprint = event_data.get("capsule_fingerprint")
-                    if persisted_fingerprint != manifest.fingerprint:
-                        raise AmbiguousACExecutionError(
-                            "durable AC capsule fingerprint disagrees with its manifest"
-                        )
-                    if manifest.fingerprint != expected_capsule_fingerprint:
-                        raise AmbiguousACExecutionError(
-                            "durable AC capsule disagrees with the current dispatch"
-                        )
-                    if (
-                        manifest.ac_id != runtime_identity.ac_id
-                        or manifest.session_attempt_id != runtime_identity.session_attempt_id
-                    ):
-                        raise AmbiguousACExecutionError(
-                            "durable AC capsule identity disagrees with the current attempt"
-                        )
-                    matching_compiled.append(event)
-
-                dispatch_events = [
-                    event
-                    for event in events
-                    if event.type == _AC_ATTEMPT_DISPATCHED_EVENT
-                    and self._event_matches_ac_runtime_identity(
-                        event.data if isinstance(event.data, dict) else {}, runtime_identity
-                    )
-                ]
-                if not matching_compiled:
-                    if dispatch_events:
-                        raise AmbiguousACExecutionError(
-                            "durable AC dispatch exists without capsule authority"
-                        )
+                )
+                if not compiled_indices:
                     continue
                 matching_indices = [
                     index
@@ -585,24 +553,10 @@ class ACRuntimeHandleManager:
                         for index in matching_indices
                         if events[index].type in _NON_REUSABLE_RUNTIME_EVENT_TYPES
                     ),
-                    default=-1,
-                )
-                last_seal_index = max(
-                    (
-                        index
-                        for index in matching_indices
-                        if events[index].type == _AC_DISPATCH_SEALED_EVENT
-                    ),
-                    default=-1,
-                )
-                last_dispatch_index = max(
-                    (
-                        index
-                        for index in matching_indices
-                        if events[index].type == _AC_ATTEMPT_DISPATCHED_EVENT
-                    ),
-                    default=-1,
-                )
+                        default=-1,
+                    )
+                last_seal_index = max(seal_indices, default=-1)
+                last_dispatch_index = max(dispatch_indices, default=-1)
                 if last_seal_index > last_terminal_index and last_seal_index >= last_dispatch_index:
                     raise AmbiguousACExecutionError(
                         "AC dispatch boundary is sealed and cannot be replayed"
@@ -859,6 +813,139 @@ class ACRuntimeHandleManager:
                 return False
 
         return matched_identity_key
+
+    @classmethod
+    def _validate_capsule_dispatch_chain(
+        cls,
+        events: list[Any],
+        *,
+        runtime_identity: ACRuntimeIdentity,
+        expected_capsule_fingerprint: str,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Validate the ordered durable capsule → dispatch → seal chain.
+
+        A matching event is not authority by itself: dispatch IDs, predecessor
+        links, capsule fingerprints, runtime bindings, and event ordering must
+        all agree before recovery can consider a provider handle reusable.
+        """
+        compiled_indices: list[int] = []
+        dispatch_indices: list[int] = []
+        seal_indices: list[int] = []
+        dispatch_ids: set[str] = set()
+        dispatch_index_by_id: dict[str, int] = {}
+        previous_dispatch_id: str | None = None
+
+        matching_compiled_exists = any(
+            event.type == _AC_CAPSULE_COMPILED_EVENT
+            and cls._event_matches_ac_runtime_identity(
+                event.data if isinstance(event.data, dict) else {}, runtime_identity
+            )
+            for event in events
+        )
+        matching_dispatch_exists = any(
+            event.type == _AC_ATTEMPT_DISPATCHED_EVENT
+            and cls._event_matches_ac_runtime_identity(
+                event.data if isinstance(event.data, dict) else {}, runtime_identity
+            )
+            for event in events
+        )
+        if not matching_compiled_exists:
+            if matching_dispatch_exists:
+                raise AmbiguousACExecutionError(
+                    "durable AC dispatch exists without capsule authority"
+                )
+            return compiled_indices, dispatch_indices, seal_indices
+
+        for index, event in enumerate(events):
+            event_data = event.data if isinstance(event.data, dict) else {}
+            if not cls._event_matches_ac_runtime_identity(event_data, runtime_identity):
+                continue
+
+            if event.type == _AC_CAPSULE_COMPILED_EVENT:
+                manifest = ACExecutionCapsuleManifest.from_contract_data(
+                    event_data.get("capsule_manifest")
+                )
+                persisted_fingerprint = event_data.get("capsule_fingerprint")
+                if persisted_fingerprint != manifest.fingerprint:
+                    raise AmbiguousACExecutionError(
+                        "durable AC capsule fingerprint disagrees with its manifest"
+                    )
+                if manifest.fingerprint != expected_capsule_fingerprint:
+                    raise AmbiguousACExecutionError(
+                        "durable AC capsule disagrees with the current dispatch"
+                    )
+                if (
+                    manifest.ac_id != runtime_identity.ac_id
+                    or manifest.session_attempt_id != runtime_identity.session_attempt_id
+                ):
+                    raise AmbiguousACExecutionError(
+                        "durable AC capsule identity disagrees with the current attempt"
+                    )
+                compiled_indices.append(index)
+                continue
+
+            if event.type == _AC_ATTEMPT_DISPATCHED_EVENT:
+                if not any(compiled_index < index for compiled_index in compiled_indices):
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch precedes its capsule authority"
+                    )
+                if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch capsule fingerprint disagrees with capsule authority"
+                    )
+                dispatch_id = event_data.get("ac_dispatch_id")
+                if not isinstance(dispatch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+                    raise AmbiguousACExecutionError("AC dispatch id is malformed")
+                if dispatch_id in dispatch_ids:
+                    raise AmbiguousACExecutionError("AC dispatch chain contains a duplicate id")
+                predecessor = event_data.get("previous_ac_dispatch_id")
+                if predecessor != previous_dispatch_id:
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch predecessor chain is invalid"
+                    )
+                runtime_payload = event_data.get("runtime")
+                if isinstance(runtime_payload, dict):
+                    runtime_metadata = runtime_payload.get("metadata")
+                    if not isinstance(runtime_metadata, dict):
+                        raise AmbiguousACExecutionError(
+                            "AC dispatch runtime binding is missing metadata"
+                        )
+                    if runtime_metadata.get("ac_dispatch_id") != dispatch_id:
+                        raise AmbiguousACExecutionError(
+                            "AC dispatch runtime binding disagrees with dispatch id"
+                        )
+                    if runtime_metadata.get("ac_capsule_fingerprint") != expected_capsule_fingerprint:
+                        raise AmbiguousACExecutionError(
+                            "AC dispatch runtime binding disagrees with capsule authority"
+                        )
+                dispatch_ids.add(dispatch_id)
+                dispatch_index_by_id[dispatch_id] = index
+                previous_dispatch_id = dispatch_id
+                dispatch_indices.append(index)
+                continue
+
+            if event.type == _AC_DISPATCH_SEALED_EVENT:
+                if event_data.get("capsule_fingerprint") != expected_capsule_fingerprint:
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch seal capsule fingerprint disagrees with capsule authority"
+                    )
+                dispatch_id = event_data.get("ac_dispatch_id")
+                if not isinstance(dispatch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dispatch_id):
+                    raise AmbiguousACExecutionError("AC dispatch seal id is malformed")
+                dispatch_index = dispatch_index_by_id.get(dispatch_id)
+                if dispatch_index is None or dispatch_index >= index:
+                    raise AmbiguousACExecutionError(
+                        "AC dispatch seal does not follow its dispatch"
+                    )
+                seal_indices.append(index)
+
+        if not compiled_indices:
+            if dispatch_indices:
+                raise AmbiguousACExecutionError(
+                    "durable AC dispatch exists without capsule authority"
+                )
+            return compiled_indices, dispatch_indices, seal_indices
+        return compiled_indices, dispatch_indices, seal_indices
 
     @staticmethod
     def _default_turn_id(

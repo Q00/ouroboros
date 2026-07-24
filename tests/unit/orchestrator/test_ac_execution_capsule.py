@@ -95,6 +95,11 @@ def _lifecycle_event(
     data = dict(identity.to_metadata())
     if extra:
         data.update(extra)
+    if event_type == "execution.ac.attempt.dispatched":
+        data.setdefault("ac_dispatch_id", "a" * 32)
+        data.setdefault("previous_ac_dispatch_id", None)
+    elif event_type == "execution.ac.dispatch.sealed":
+        data.setdefault("ac_dispatch_id", "a" * 32)
     return BaseEvent(
         type=event_type,
         aggregate_type=identity.runtime_scope.aggregate_type,
@@ -641,6 +646,71 @@ async def test_capsule_resume_rejects_sealed_dispatch(tmp_path) -> None:
     manager = _manager_for_events(events)
 
     with pytest.raises(AmbiguousACExecutionError, match="sealed"):
+        await manager._load_persisted_ac_runtime_handle(
+            0,
+            execution_context_id="execution-1",
+            retry_attempt=0,
+            expected_capsule_fingerprint=capsule.fingerprint,
+            expected_process_local_resume_nonce="nonce-a",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("id", "dispatch id"),
+        ("fingerprint", "fingerprint"),
+        ("predecessor", "predecessor"),
+        ("ordering", "precedes"),
+    ],
+)
+async def test_capsule_resume_rejects_invalid_dispatch_chain(
+    tmp_path,
+    tamper: str,
+    message: str,
+) -> None:
+    capsule = _capsule(tmp_path)
+    identity = build_ac_runtime_identity(0, execution_context_id="execution-1", retry_attempt=0)
+    compiled = _lifecycle_event(
+        identity,
+        "execution.ac.capsule.compiled",
+        extra={
+            "capsule_fingerprint": capsule.fingerprint,
+            "capsule_manifest": capsule.manifest.to_contract_data(),
+        },
+    )
+    dispatched = _lifecycle_event(
+        identity,
+        "execution.ac.attempt.dispatched",
+        extra={
+            "ac_dispatch_id": "a" * 32,
+            "previous_ac_dispatch_id": None,
+            "capsule_fingerprint": capsule.fingerprint,
+        },
+    )
+    if tamper == "id":
+        dispatched = dispatched.model_copy(
+            update={"data": {**dispatched.data, "ac_dispatch_id": "invalid"}}
+        )
+    elif tamper == "fingerprint":
+        dispatched = dispatched.model_copy(
+            update={
+                "data": {
+                    **dispatched.data,
+                    "capsule_fingerprint": "sha256:" + "0" * 64,
+                }
+            }
+        )
+    elif tamper == "predecessor":
+        dispatched = dispatched.model_copy(
+            update={"data": {**dispatched.data, "previous_ac_dispatch_id": "b" * 32}}
+        )
+
+    events = [dispatched, compiled] if tamper == "ordering" else [compiled, dispatched]
+    manager = _manager_for_events(events)
+
+    with pytest.raises(AmbiguousACExecutionError, match=message):
         await manager._load_persisted_ac_runtime_handle(
             0,
             execution_context_id="execution-1",

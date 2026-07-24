@@ -8,6 +8,7 @@ honest mode — that is what these tests pin.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -107,6 +108,44 @@ class _AdvisedRuntime:
             content="[TASK_COMPLETE]",
             data={"subtype": "success"},
             resume_handle=resume_handle,
+        )
+
+
+class _CancelledRuntime(_EnforcedRuntime):
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        raise asyncio.CancelledError
+        yield AgentMessage(type="result", content="unreachable", data={})
+
+
+class _FreshHandleRuntime(_EnforcedRuntime):
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        # Simulate runtimes that return a new handle object on first entry and
+        # do not copy orchestrator metadata themselves.
+        yield AgentMessage(
+            type="result",
+            content="[TASK_COMPLETE]",
+            data={"subtype": "success"},
+            resume_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id="fresh-provider-session",
+                cwd=self.working_directory,
+            ),
         )
 
 
@@ -359,6 +398,42 @@ async def test_advised_runtime_records_advised_and_does_not_pass_kwarg() -> None
     assert len(routed) == 1
     assert routed[0].data["effort_mode"] == "advised"
     assert routed[0].data["effort_level"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_seals_dispatch_boundary() -> None:
+    store, events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_CancelledRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_one_ac(executor, is_sub_ac=False)
+
+    sealed = [event for event in events if event.type == "execution.ac.dispatch.sealed"]
+    assert len(sealed) == 1
+    assert "cancelled" in sealed[0].data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_runtime_handle_inherits_pre_dispatch_authority() -> None:
+    store, events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_FreshHandleRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    await _run_one_ac(executor, is_sub_ac=False)
+
+    started = next(event for event in events if event.type == "execution.session.started")
+    runtime_payload = started.data["runtime"]
+    assert runtime_payload["metadata"]["ac_capsule_fingerprint"].startswith("sha256:")
+    assert len(runtime_payload["metadata"]["ac_dispatch_id"]) == 32
 
 
 @pytest.mark.asyncio
