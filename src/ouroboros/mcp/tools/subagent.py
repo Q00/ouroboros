@@ -3477,35 +3477,39 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     """
     if depth > 6:
         return False
-    # A node declaring type object qualifies BEFORE any $ref sibling is
-    # followed (round-25): in Draft 2020-12 a $ref sibling combines
-    # conjunctively, so the literal declaration alone already forces
-    # objects.
-    if isinstance(node, Mapping) and node.get("type") in ("object", ["object"]):
-        return True
-    resolved = _resolve_local_root_from(schema, node)
-    if not isinstance(resolved, Mapping):
+    if not isinstance(node, Mapping):
         return False
-    declared_type = resolved.get("type")
-    # JSON Schema allows the type keyword as an array (round-24): a
-    # single-member ["object"] forces objects; a multi-type union does not.
+    # Signals on the node ITSELF are evaluated first and independently of
+    # any $ref sibling (rounds 25 and 29): Draft 2020-12 $ref siblings
+    # combine conjunctively, so a literal type, const/enum, or an
+    # object-forcing combinator alongside the ref already forces objects.
+    declared_type = node.get("type")
     if declared_type == "object" or declared_type == ["object"]:
         return True
-    # A const (or an enum whose members are all mappings) NECESSARILY
-    # describes an object without declaring a type (round-23).
-    if isinstance(resolved.get("const"), Mapping):
+    if isinstance(node.get("const"), Mapping):
         return True
-    enum_values = resolved.get("enum")
+    enum_values = node.get("enum")
     if isinstance(enum_values, list) and enum_values:
         if all(isinstance(value, Mapping) for value in enum_values):
             return True
-    all_of = resolved.get("allOf")
-    if isinstance(all_of, list):
-        return any(_declares_object_root(schema, branch, depth + 1) for branch in all_of)
+    all_of = node.get("allOf")
+    if isinstance(all_of, list) and any(
+        _declares_object_root(schema, branch, depth + 1) for branch in all_of
+    ):
+        return True
     for disjunction_key in ("oneOf", "anyOf"):
-        branches = resolved.get(disjunction_key)
-        if isinstance(branches, list) and branches:
-            return all(_declares_object_root(schema, branch, depth + 1) for branch in branches)
+        branches = node.get(disjunction_key)
+        if (
+            isinstance(branches, list)
+            and branches
+            and all(_declares_object_root(schema, branch, depth + 1) for branch in branches)
+        ):
+            return True
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        target = _resolve_local_root_from(schema, {"$ref": ref})
+        if target is not None and _declares_object_root(schema, target, depth + 1):
+            return True
     return False
 
 
@@ -3741,6 +3745,22 @@ def _is_row_shaped_value(value: str) -> bool:
         and not any(char.isdigit() for char in stripped)
     ):
         return True
+    # Same-label, identifier-keyed records survive comma separation too
+    # (round-29: "account u1 premium 34, account u2 free 12") — the second
+    # token being identifier-shaped (letters+digits) marks per-entity rows,
+    # while grouped aggregates key by category words ("region us-east 34,
+    # region eu-west 12" has hyphenated bucket names, not ids).
+    id_segments = [seg.strip() for seg in re.split(r"[,;\\|/]", stripped) if seg.strip()]
+    if len(id_segments) >= 2:
+        tokens_per_segment = [seg.split() for seg in id_segments]
+        firsts = {tokens[0].lower() for tokens in tokens_per_segment if tokens}
+        id_shaped_seconds = sum(
+            1
+            for tokens in tokens_per_segment
+            if len(tokens) > 1 and re.match(r"^[A-Za-z]+\d+$", tokens[1])
+        )
+        if len(firsts) == 1 and id_shaped_seconds >= 2:
+            return True
     # Segments sharing their FIRST token are repeated records (round-20:
     # "acct u1 premium 34 \\ acct u2 free 12") — grouped aggregates lead each
     # segment with a DIFFERENT category ("free: 78%; pro: 15%") and stay
@@ -3789,7 +3809,12 @@ _DATA_EVIDENCE_ERROR_SHAPE = re.compile(
     # after 3 attempts"); PLURAL forms are metrics ABOUT failures ("1,240
     # requests timed out: 0.8%") and stay valid.
     r"|\b(request|query|connection|call|lookup)\s+timed\s+out\b"
-    r"|\bafter\s+\d+\s+(attempts?|retries)\b",
+    r"|\bafter\s+\d+\s+(attempts?|retries)\b"
+    # Availability narratives and bare status codes (round-29: "database
+    # unavailable, code 503").
+    r"|\b(service|database|db|api|endpoint|server|tool|warehouse)\s+"
+    r"(unavailable|unreachable|down)\b"
+    r"|\bcode\s+[45]\d{2}\b",
     re.IGNORECASE,
 )
 
@@ -3844,11 +3869,36 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         serialized = json.dumps(output, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return ["data evidence output is not JSON-serializable"]
+    # Identifier FIELDS (evidence source, proposal tool_name) are exempt
+    # from the credential-shape scan (round-29: a legitimate tool named
+    # token_usage_v2 is not a secret) — they are already guarded by the
+    # mutating-verb identifier checks, and every other pattern still scans
+    # the full output.
+    identifier_scrubbed = dict(output)
+    raw_evidence = identifier_scrubbed.get("evidence")
+    if isinstance(raw_evidence, list):
+        identifier_scrubbed["evidence"] = [
+            {**item, "source": ""} if isinstance(item, Mapping) else item for item in raw_evidence
+        ]
+    raw_proposals = identifier_scrubbed.get("proposed_queries")
+    if isinstance(raw_proposals, list):
+        identifier_scrubbed["proposed_queries"] = [
+            {**item, "tool_name": ""} if isinstance(item, Mapping) else item
+            for item in raw_proposals
+        ]
+    try:
+        serialized_sans_identifiers = json.dumps(
+            identifier_scrubbed, ensure_ascii=False, default=str
+        )
+    except (TypeError, ValueError):
+        serialized_sans_identifiers = serialized
     errors = [
         f"data evidence boundary: {label} content is raw evidence; the "
         "evidence policy requires aggregates only, PII-scrubbed"
         for label, pattern in _data_evidence_boundary_patterns()
-        if pattern.search(serialized)
+        if pattern.search(
+            serialized_sans_identifiers if label.startswith("credential") else serialized
+        )
     ]
     # STRUCTURAL aggregate rule (bot-review round-18, ending the delimiter
     # game): an executed evidence VALUE is a measurement, and aggregation is

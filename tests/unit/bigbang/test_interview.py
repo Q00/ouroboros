@@ -1455,3 +1455,31 @@ class TestSystemPromptBrownfield:
         prompt = engine._build_system_prompt(state)
 
         assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS
+
+
+def test_prefix_glossary_survives_header_truncation() -> None:
+    """The [from-data] glossary is never the truncation victim (round-29).
+
+    The glossary was appended last and hard-truncation under history
+    pressure cut it mid-entry ("- [from-d"); under pressure it is now
+    swapped for a compact one-liner that preserves EVERY prefix meaning,
+    and the retained initial context keeps priority.
+    """
+    from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+
+    engine = InterviewEngine.__new__(InterviewEngine)
+    engine.suppress_tool_use_prompt_cues = False
+    state = InterviewState(
+        interview_id="glossary-budget",
+        initial_context="x" * 4000,
+    )
+    # A budget where instructions + retained context + COMPACT glossary fit
+    # but the full glossary does not — the round-29 pressure window.
+    prompt = engine._build_system_prompt(state, initial_context="x" * 4000, max_chars=2450)
+    assert len(prompt) <= 2450
+    # The retained (capped) initial context keeps priority…
+    assert engine._initial_context_for_system_prompt("x" * 4000) in prompt
+    # …and the glossary survives as the compact form with FULL semantics —
+    # never a mid-entry tear like "- [from-d".
+    assert "[from-data]=point-in-time data description" in prompt
+    assert "- [from-d" not in prompt

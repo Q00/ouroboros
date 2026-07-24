@@ -4202,6 +4202,104 @@ def test_assignment_error_envelope_is_rejected() -> None:
     assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
 
 
+def test_comma_separated_identifier_records_are_rejected() -> None:
+    """Same-label id-keyed records reject across commas too (round-29)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "account u1 premium 34, account u2 free 12"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("row-shaped" in error for error in errors)
+
+    # Category-keyed grouped aggregates stay valid.
+    clean = "region us-east 34, region eu-west 12"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_availability_narrative_is_not_evidence() -> None:
+    """ "database unavailable, code 503" is a failure envelope (round-29)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    probe = "database unavailable, code 503"
+    errors = _data_evidence_boundary_violations(_minimal_data_output(probe))
+    assert any("error-shaped" in error for error in errors)
+
+    clean = "api availability 99.9% across 30 days; downtime shrank 12%"
+    assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == []
+
+
+def test_ref_sibling_with_object_forcing_allof_is_enforceable(tmp_path: Any) -> None:
+    """Conjunctive siblings alongside a root $ref qualify (round-29)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    sibling_allof_contract = {
+        "contract_id": "ref_allof.v1",
+        "response_model_schema": {
+            "$ref": "#/$defs/extra",
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["lane_id", "ok"],
+                    "properties": {
+                        "lane_id": {"const": "ref_allof_lane"},
+                        "ok": {"const": True},
+                    },
+                }
+            ],
+            "$defs": {"extra": {"required": ["lane_id"]}},
+        },
+    }
+    assert _enforceable_lane_contract(sibling_allof_contract)
+
+    lanes = [
+        {
+            "lane_id": "ref_allof_lane",
+            "capability": "future_capability",
+            "required": True,
+            "answer_contract": sibling_allof_contract,
+        },
+    ]
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout_from_lanes(
+        registry, session_id="sess-ref-allof", lanes=lanes
+    )
+    assert fanout_id is not None
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-ref-allof",
+        correlation_key="context.lane_id",
+        results=[{"key": "ref_allof_lane", "content": {"ok": False}}],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "partial"
+    assert [item["lane_id"] for item in out["contract_violations"]] == ["ref_allof_lane"]
+
+
+def test_identifier_fields_are_exempt_from_credential_scan() -> None:
+    """A tool named token_usage_v2 is not a secret (round-29 warning)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    output = _minimal_data_output("premium plans average 12,400 tokens/day")
+    output["evidence"][0]["source"] = "token_usage_v2"
+    assert _data_evidence_boundary_violations(output) == []
+
+    # A credential shape in the VALUE still rejects.
+    leaked = _minimal_data_output("token=sk-live-123 spotted in 3 configs")
+    assert any("credential" in error for error in _data_evidence_boundary_violations(leaked))
+
+
+def test_plugin_child_prompt_carries_from_data_glossary() -> None:
+    """Provenance semantics are transport-uniform (round-29 B4)."""
+    from ouroboros.mcp.tools.subagent import build_interview_subagent
+
+    p = build_interview_subagent(
+        session_id="sess-glossary",
+        action="start",
+        initial_context="Build a web app",
+    )
+    assert "[from-data]" in p.prompt
+    assert "point-in-time description" in p.prompt
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
