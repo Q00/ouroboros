@@ -45,6 +45,7 @@ from ouroboros.orchestrator.adapter import (
     SubagentOrchestration,
     TaskResult,
 )
+from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result, serialize_tool_result
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -1735,6 +1736,76 @@ class CodexCliRuntime:
                 self._merge_command_metadata(data, nested)
         return data
 
+    @staticmethod
+    def _extract_tool_call_id(item: dict[str, Any]) -> str | None:
+        for key in ("id", "item_id", "call_id"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _command_result_text(metadata: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("stdout", "output", "result_preview", "stderr"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in parts:
+                parts.append(value.strip())
+        return "\n".join(parts)
+
+    @staticmethod
+    def _completion_failed(
+        metadata: dict[str, Any],
+        *,
+        require_terminal_evidence: bool = False,
+    ) -> bool:
+        if metadata.get("is_error_invalid") is True or metadata.get("is_error") is True:
+            return True
+        status = metadata.get("status")
+        if isinstance(status, str) and status.strip():
+            normalized_status = status.strip().lower()
+            if normalized_status in {"failed", "error"}:
+                return True
+            if normalized_status not in {"completed", "success", "succeeded"}:
+                return True
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None:
+            return not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code != 0
+        if isinstance(status, str) and status.strip():
+            return False
+        return require_terminal_evidence
+
+    def _build_tool_completion_message(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        content: str,
+        is_error: bool,
+        handle: RuntimeHandle | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentMessage:
+        result_metadata = dict(metadata or {})
+        return AgentMessage(
+            type="tool_result",
+            content=content,
+            tool_name=tool_name,
+            data={
+                "subtype": "tool_result",
+                "tool_call_id": tool_call_id,
+                "is_error": is_error,
+                "runtime_event_type": "tool.completed",
+                "tool_result": serialize_tool_result(
+                    normalize_runtime_tool_result(
+                        content,
+                        is_error=is_error,
+                        meta=result_metadata,
+                    )
+                ),
+            },
+            resume_handle=handle,
+        )
+
     def _merge_command_metadata(self, data: dict[str, Any], source: dict[str, Any]) -> None:
         """Merge known command-result fields from one Codex event object."""
         text_key_map = {
@@ -1746,21 +1817,48 @@ class CodexCliRuntime:
             "result_preview": "result_preview",
             "resultPreview": "result_preview",
             "text": "output",
-            "status": "status",
         }
         for key, target_key in text_key_map.items():
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 data.setdefault(target_key, value.strip())
+        if "status" in source:
+            status = source["status"]
+            if not isinstance(status, str) or not status.strip():
+                data.setdefault("is_error_invalid", True)
+            else:
+                normalized_status = status.strip()
+                existing_status = data.get("status")
+                if existing_status is not None and existing_status != normalized_status:
+                    data.setdefault("is_error_invalid", True)
+                else:
+                    data.setdefault("status", normalized_status)
         for key in ("exit_code", "exitCode", "returncode", "return_code"):
-            value = source.get(key)
-            if isinstance(value, int):
-                data.setdefault("exit_code", value)
-                break
-        if source.get("success") is True:
-            data.setdefault("subtype", "success")
-        if source.get("ok") is True:
-            data.setdefault("subtype", "success")
+            if key not in source:
+                continue
+            value = source[key]
+            if isinstance(value, int) and not isinstance(value, bool):
+                existing_exit_code = data.get("exit_code")
+                if existing_exit_code is not None and existing_exit_code != value:
+                    data.setdefault("is_error_invalid", True)
+                else:
+                    data.setdefault("exit_code", value)
+            else:
+                data.setdefault("is_error_invalid", True)
+            break
+        for key in ("success", "ok", "is_error"):
+            if key not in source:
+                continue
+            value = source[key]
+            if not isinstance(value, bool):
+                data.setdefault("is_error_invalid", True)
+            elif key == "is_error":
+                if value:
+                    data.setdefault("is_error", True)
+            elif value:
+                data.setdefault("subtype", "success")
+            else:
+                data.setdefault("is_error", True)
 
     def _build_tool_message(
         self,
@@ -1838,14 +1936,53 @@ class CodexCliRuntime:
                 command = self._extract_command(item)
                 if not command:
                     return []
+                metadata = self._extract_command_metadata(item)
+                tool_call_id = self._extract_tool_call_id(item)
+                if tool_call_id is None:
+                    return [
+                        self._build_tool_message(
+                            tool_name="Bash",
+                            tool_input={"command": command},
+                            content=f"Calling tool: Bash: {command}",
+                            handle=current_handle,
+                            extra_data=metadata,
+                        )
+                    ]
+                started = self._build_tool_message(
+                    tool_name="Bash",
+                    tool_input={"command": command},
+                    content=f"Calling tool: Bash: {command}",
+                    handle=current_handle,
+                    extra_data={"tool_call_id": tool_call_id},
+                )
+                exit_code = metadata.get("exit_code")
+                if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                    return [
+                        started,
+                        self._build_tool_completion_message(
+                            tool_name="Bash",
+                            tool_call_id=tool_call_id,
+                            content=self._command_result_text(metadata),
+                            is_error=True,
+                            handle=current_handle,
+                        ),
+                    ]
+                result_metadata = {
+                    key: value
+                    for key, value in metadata.items()
+                    if key in {"output", "stdout", "stderr", "result_preview", "status"}
+                }
+                result_metadata["exit_status"] = exit_code
                 return [
-                    self._build_tool_message(
+                    started,
+                    self._build_tool_completion_message(
                         tool_name="Bash",
-                        tool_input={"command": command},
-                        content=f"Calling tool: Bash: {command}",
+                        tool_call_id=tool_call_id,
+                        content=self._command_result_text(metadata),
+                        is_error=self._completion_failed(metadata),
                         handle=current_handle,
-                        extra_data=self._extract_command_metadata(item),
-                    )
+                        metadata=result_metadata,
+                    ),
                 ]
 
             if item_type == "mcp_tool_call":
@@ -1864,6 +2001,33 @@ class CodexCliRuntime:
                 file_paths = self._extract_paths(item)
                 if not file_paths:
                     return []
+                tool_call_id = self._extract_tool_call_id(item)
+                if tool_call_id is not None:
+                    metadata = self._extract_command_metadata(item)
+                    is_error = self._completion_failed(
+                        metadata,
+                        require_terminal_evidence=True,
+                    )
+                    return [
+                        message
+                        for index, file_path in enumerate(file_paths)
+                        for message in (
+                            self._build_tool_message(
+                                tool_name="Edit",
+                                tool_input={"file_path": file_path},
+                                content=f"Calling tool: Edit: {file_path}",
+                                handle=current_handle,
+                                extra_data={"tool_call_id": f"{tool_call_id}:{index}"},
+                            ),
+                            self._build_tool_completion_message(
+                                tool_name="Edit",
+                                tool_call_id=f"{tool_call_id}:{index}",
+                                content=file_path,
+                                is_error=is_error,
+                                handle=current_handle,
+                            ),
+                        )
+                    ]
                 return [
                     self._build_tool_message(
                         tool_name="Edit",
