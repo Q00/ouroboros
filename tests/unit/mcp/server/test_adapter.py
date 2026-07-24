@@ -1396,6 +1396,54 @@ class TestServeTransport:
         assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
 
     @pytest.mark.asyncio
+    async def test_real_fastmcp_invocation_passes_none_for_omitted_optional_parameter(self) -> None:
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+
+        class OptionalParameterHandler(MockToolHandler):
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="optional_tool",
+                    description="A tool with an omitted optional parameter",
+                    parameters=(
+                        MCPToolParameter(
+                            name="required-input",
+                            type=ToolInputType.STRING,
+                            required=True,
+                        ),
+                        MCPToolParameter(
+                            name="optional-input",
+                            type=ToolInputType.STRING,
+                            default=None,
+                            description="Optional input",
+                        ),
+                    ),
+                )
+
+        from unittest.mock import patch
+
+        adapter = MCPServerAdapter()
+        handler = OptionalParameterHandler(name="optional_tool")
+        adapter.register_tool(handler)
+        with (
+            patch.object(
+                fastmcp_module.FastMCP,
+                "run_stdio_async",
+                new=AsyncMock(),
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        await adapter._mcp_server.call_tool(
+            "optional_tool",
+            {"required-input": "provided"},
+        )
+
+        handler.handle_mock.assert_awaited_once_with(
+            {"required-input": "provided", "optional-input": None}
+        )
+
+    @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
         """FastMCP tool wrapper routes through call_tool to enforce security checks."""
         from unittest.mock import MagicMock, patch
