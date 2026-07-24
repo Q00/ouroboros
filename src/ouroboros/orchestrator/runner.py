@@ -828,6 +828,11 @@ class OrchestratorRunner:
             _economics_config = _economics_config.model_copy(
                 update={"tiers": _shipped_config.economics.tiers}
             )
+        # Keep the exact economics snapshot that produced the model router. The
+        # Routing B compatibility bridge rebuilds its immutable registry from
+        # this snapshot at the effect boundary, so a mutable/resumed router can
+        # never introduce an unconfigured model or cost.
+        self._route_economics = _economics_config
         _execution_config = _config.execution
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
@@ -3586,9 +3591,20 @@ class OrchestratorRunner:
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
+        from ouroboros.orchestrator.route_compat import (
+            build_route_compat_projection,
+            serialize_route_compat_contract,
+        )
 
         guidance_bundle = self._ensure_new_run_guidance()
         routing_contract = serialize_model_router(self._model_router)
+        route_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=None,
+        )
+        routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
         routing_contract["constructor_model"] = self._constructor_model_contract()
         routing_contract["runtime_execution"] = self._runtime_execution_identity_contract()
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
@@ -4102,6 +4118,34 @@ class OrchestratorRunner:
                     "execution_runtime_backend": persisted_runtime_backend,
                 },
             )
+        raw_route_compat = raw_routing.get("route_compat")
+        if raw_route_compat is not None:
+            from ouroboros.orchestrator.route_compat import (
+                deserialize_route_compat_contract,
+                validate_route_compat_projection,
+            )
+
+            route_compat_recognized, restored_projection = deserialize_route_compat_contract(
+                raw_route_compat
+            )
+            if not route_compat_recognized:
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid execution contract",
+                    details={"invalid": "route_compat"},
+                )
+            if restored_projection is not None and not validate_route_compat_projection(
+                restored_projection,
+                self._route_economics,
+                model_router=restored_router,
+                runtime_backend=persisted_runtime_backend,
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with a changed route compatibility catalog",
+                    details={
+                        "runtime_backend": persisted_runtime_backend,
+                        "hint": "Restore the original route catalog or start a new session.",
+                    },
+                )
         constructor_model_value = persisted_constructor_model.get("model")
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
@@ -7212,6 +7256,7 @@ class OrchestratorRunner:
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
             model_router=self._model_router,
+            route_economics=self._route_economics,
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,

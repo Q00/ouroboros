@@ -308,6 +308,12 @@ from ouroboros.orchestrator.rate_limit import (
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
 )
+from ouroboros.orchestrator.route_compat import (
+    admit_compat_route,
+    admitted_execute_model_kwargs,
+    build_route_compat_projection,
+    serialize_route_compat_contract,
+)
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -1567,6 +1573,7 @@ class ParallelACExecutor:
         atomic_verifier: Verifier | None = None,
         reasoning_effort: str | None = None,
         model_router: ModelRouter | None = None,
+        route_economics: Any | None = None,
         run_verify_commands: bool = True,
         verify_command_timeout_seconds: int = 600,
         ac_retry_attempts: int = 0,
@@ -1610,6 +1617,9 @@ class ParallelACExecutor:
                 low-level constructor default is 0 so direct/test callers keep
                 today's single-dispatch behavior; real run paths (CLI `ooo run`
                 via the runner) pass the config value (default 2).
+            route_economics: Optional economics snapshot used to project live
+                model/effort decisions into the Routing B Admission Kernel. The
+                bridge stays dormant for low-level callers that omit it.
         """
         if _foundation_a_internal_entry_roots is None:
             raise ValueError("execution authority internal entry roots are unavailable")
@@ -1651,6 +1661,10 @@ class ParallelACExecutor:
         # override → byte-identical to today's behavior), so laying the executor on
         # the model capability contract is safe by default.
         self._model_router = model_router
+        # Routing B compatibility is explicit at this constructor seam. The live
+        # runner supplies the resolved economics; direct/test callers retain the
+        # historical dispatch path until they opt into the bridge.
+        self._route_economics = route_economics
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Default OFF:
         # replaying a decomposed child at the parent tier doubles token cost, so
         # this is an experiment lever, never a production default. When on, a
@@ -5930,6 +5944,18 @@ Respond with either ATOMIC or the structured JSON object only.
                         "decomposition_trustworthy": decomposition_trustworthy,
                         "base_reasoning_effort": self._reasoning_effort,
                         "model_routing": serialize_model_router(self._model_router),
+                        "route_compat": serialize_route_compat_contract(
+                            build_route_compat_projection(
+                                self._route_economics,
+                                model_router=self._model_router,
+                                runtime_backend=getattr(
+                                    self._adapter,
+                                    "runtime_backend",
+                                    None,
+                                ),
+                                effort=None,
+                            )
+                        ),
                         "execution_profile": (
                             self._execution_profile.model_dump(mode="json")
                             if self._execution_profile is not None
@@ -6183,6 +6209,50 @@ Respond with either ATOMIC or the structured JSON object only.
                     else None
                 ),
                 model_escalated=model_escalated,
+            )
+        route_admission = None
+        if self._route_economics is not None and self._model_router is not None:
+            # Rebuild the compatibility projection from the immutable economics
+            # catalog for this exact effort decision.  The router's mutable map
+            # is checked against that catalog; a mismatch becomes a blocked AC,
+            # never a default-provider dispatch.
+            projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=self._model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=effort_decision.level,
+            )
+            route_admission = admit_compat_route(
+                projection,
+                model_decision=model_decision,
+                effort=effort_decision.level,
+            )
+            if not route_admission.admitted:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                reason = route_admission.reason
+                log.warning(
+                    "parallel_executor.ac.route_admission_blocked",
+                    ac_index=ac_index,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    reason=reason,
+                )
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    error=f"route admission blocked: {reason}",
+                    duration_seconds=duration,
+                    session_id=session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                )
+            # The Admission Kernel is now the source of truth for the executable
+            # model kwarg.  A stale/tampered decision cannot smuggle a model into
+            # the provider call after admission.
+            execute_model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
             )
         # Merge the model override into the effort kwargs. The merged dict flows
         # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher

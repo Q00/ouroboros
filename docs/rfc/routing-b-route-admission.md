@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed implementation slice for Stack 2. This document defines the route
-contract and the pure Admission Kernel. Provider dispatch, bounded escalation,
-and acceptance remain later slices.
+The provider-neutral contract and pure Admission Kernel are implemented. The
+first compatibility projection is now wired into the live parallel AC executor;
+provider dispatch, bounded escalation, and acceptance remain separate slices.
 
 ## Why this boundary exists
 
@@ -111,10 +111,27 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
-1. Wire this contract into the existing live model/harness routing path while
-   preserving current behavior behind the explicit compatibility adapter in
-   the next stacked routing layer.
-2. Add bounded observations and escalation in the subsequent stacked routing
-   layer. Escalation may choose the next configured route only after a
-   classified failure and a finite budget.
+1. Extend the compatibility adapter to direct/resume calls and persist a
+   versioned route projection alongside the resolved model router.
+2. Add Routing C observations and bounded escalation. Escalation may choose the
+   next configured route only after a classified failure and a finite budget.
 3. Emit the route fingerprint into the frugality proof and shared projection.
+
+## Compatibility projection (implemented slice)
+
+`route_compat.py` snapshots the configured economics catalog into a
+`RouteRegistry`. It does not trust the mutable `ModelRouter.tier_models` mapping:
+the mapping must exactly match the normalized provider catalog for the active
+runtime backend, and every candidate carries the configured cost factor. The
+current model/effort decisions are pinned by route ID, model, harness, effort,
+persona, tool policy, and authority identity before a live parallel AC enters
+the provider dispatcher.
+
+The projection is deliberately opt-in at the low-level executor constructor so
+legacy test/embedding callers retain byte-identical behavior. The real runner
+passes the resolved economics snapshot. A missing projection, unknown model,
+catalog/cost/backend mismatch, or any other failed pin produces a Kernel
+`blocked` result and returns before `execute_task`; it never falls back to the
+provider's default model. Resume restores the model router as before, then the
+effect-boundary projection rechecks it against the current catalog, preventing a
+tampered resume payload from authorizing a new model or cost.
