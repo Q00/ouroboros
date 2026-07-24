@@ -958,7 +958,8 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "allOf with any such branch; a oneOf/anyOf whose "
                                 "branches ALL qualify; a const mapping or all-mapping "
                                 "enum. Every $ref/$dynamicRef must resolve inside the "
-                                "document. Any other form is NOT advertised and the "
+                                "document as a plain JSON pointer; $id rebasing is "
+                                "not supported. Any other form is NOT advertised and the "
                                 "lane falls back to the generic output shape — by "
                                 "contract, not omission."
                             ),

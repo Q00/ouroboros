@@ -3278,8 +3278,22 @@ class FanoutRegistry:
                 os.close(locked_fd)
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt."""
+        """Load a persisted fan-out record, or ``None`` if unknown/invalid/corrupt.
+
+        The 7-day retention contract is enforced HERE too (bot-review
+        round-25), not only at sweep time: an expired record is
+        indistinguishable from an unknown id, so stale terminal results are
+        never re-exposed between GC passes. Saves refresh mtime, so active
+        records never expire mid-flight.
+        """
         if not self._valid_id(fanout_id):
+            return None
+        import time
+
+        try:
+            if self._path(fanout_id).stat().st_mtime < time.time() - self._RECORD_RETENTION_SECONDS:
+                return None
+        except OSError:
             return None
         try:
             content = self._path(fanout_id).read_text(encoding="utf-8")
@@ -3417,6 +3431,12 @@ def _enforceable_lane_contract(contract: Mapping[str, Any]) -> bool:
     schema = contract.get("response_model_schema")
     if not isinstance(schema, Mapping):
         return False
+    # $id rebasing is outside the declared self-contained grammar
+    # (round-25): our pointer-walk preflight cannot mirror standards
+    # reference-scope resolution, and a contract that registers but fails
+    # every submission is worse than one declared unsupported.
+    if _schema_contains_key(schema, "$id"):
+        return False
     # Answer forms are OBJECTS: re-entry rejects non-object outputs before
     # schema validation, so a valid scalar schema ({"type": "string"}) would
     # be advertised yet unsatisfiable — a required lane following it would
@@ -3450,6 +3470,12 @@ def _declares_object_root(schema: Mapping[str, Any], node: Any, depth: int) -> b
     """
     if depth > 6:
         return False
+    # A node declaring type object qualifies BEFORE any $ref sibling is
+    # followed (round-25): in Draft 2020-12 a $ref sibling combines
+    # conjunctively, so the literal declaration alone already forces
+    # objects.
+    if isinstance(node, Mapping) and node.get("type") in ("object", ["object"]):
+        return True
     resolved = _resolve_local_root_from(schema, node)
     if not isinstance(resolved, Mapping):
         return False
@@ -3507,6 +3533,16 @@ def _resolve_local_root_from(schema: Mapping[str, Any], start: Any) -> Any:
     return None
 
 
+def _schema_contains_key(node: Any, needle: str) -> bool:
+    if isinstance(node, Mapping):
+        if needle in node:
+            return True
+        return any(_schema_contains_key(value, needle) for value in node.values())
+    if isinstance(node, list):
+        return any(_schema_contains_key(value, needle) for value in node)
+    return False
+
+
 def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
     """Whether every ``$ref`` in ``schema`` resolves inside the document."""
     refs: list[str] = []
@@ -3540,6 +3576,29 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
             else:
                 return False
     return True
+
+
+def _strip_sql_comments(query: str) -> str:
+    """Remove SQL line/block comments so a comment prefix cannot hide the
+    statement form from classification (round-25)."""
+    without_blocks = re.sub(r"/\*.*?\*/", " ", query, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", " ", without_blocks)
+
+
+def _blank_paren_content(text: str) -> str:
+    """Blank nested parenthesized CONTENT, keeping the parens themselves."""
+    out: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+            out.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            out.append(char)
+        elif depth == 0:
+            out.append(char)
+    return "".join(out)
 
 
 def _main_select_segment(query: str) -> str:
@@ -3848,26 +3907,53 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         # deduplicate to categories, or fetch a scalar. The marker scan runs
         # over the WHOLE query, so a raw projection OVER an aggregated CTE
         # stays valid.
-        elif isinstance(query, str) and re.match(r"\s*(with|select)\b", query, re.IGNORECASE):
+        elif isinstance(query, str) and re.match(
+            r"\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(with|select)\b",
+            query,
+            re.IGNORECASE | re.DOTALL,
+        ):
             # The aggregation must live in the MAIN statement (round-24): an
             # unrelated aggregated CTE must not launder a raw final
             # projection, so markers are scanned from the first top-level
             # SELECT after any WITH prefix. LIMIT 1 is NOT an aggregate
             # marker (round-21): it fetches one ROW of raw columns.
-            main_statement = _main_select_segment(query)
+            main_statement = _main_select_segment(_strip_sql_comments(query))
+            # Markers inside parenthesized subexpressions cannot launder the
+            # MAIN projection (round-25: a scalar count(*) subquery aliased
+            # into a raw row projection): scan with paren contents blanked —
+            # aggregate calls keep their name+paren, subquery internals
+            # vanish.
+            scannable = _blank_paren_content(main_statement)
             has_aggregate_marker = re.search(
                 r"\b(count|sum|avg|min|max|median|percentile\w*|approx\w*)\s*\("
                 r"|\bgroup\s+by\b|\bdistinct\b",
-                main_statement,
+                scannable,
                 re.IGNORECASE,
+            )
+            identity_columns = (
+                r"(email|phone|address|ssn"
+                r"|first_name|last_name|full_name|user_id|account_id|customer_id)"
             )
             distinct_pii = re.search(
-                r"\bdistinct\b[^,]*\b(email|phone|address|ssn"
-                r"|first_name|last_name|full_name|user_id|account_id|customer_id)\b",
-                main_statement,
+                r"\bdistinct\b[^,]*\b" + identity_columns + r"\b",
+                scannable,
                 re.IGNORECASE,
             )
-            if distinct_pii:
+            # Grouping BY an identity column keys the aggregate per user —
+            # per-identity rows, not categories (round-25).
+            grouped_identity = re.search(
+                r"\bgroup\s+by\b[^;]*\b" + identity_columns + r"\b",
+                scannable,
+                re.IGNORECASE,
+            )
+            if grouped_identity:
+                errors.append(
+                    f"proposed_queries[{index}].query: GROUP BY an "
+                    "identity/PII column keys results per identity — "
+                    "aggregate by category (plan, region, time bucket) "
+                    "instead"
+                )
+            elif distinct_pii:
                 # DISTINCT deduplicates to categories — a DISTINCT projection
                 # of an identity/PII column is a raw identifier list, not a
                 # category set (round-24: SELECT DISTINCT email FROM users).
@@ -4387,6 +4473,18 @@ def _submit_fanout_results_locked(
     # skipped confirmation) must never enter the durable record.
     raw_contracts = record.synthesizer_input.get("lane_answer_contracts")
     contracts = raw_contracts if isinstance(raw_contracts, Mapping) else {}
+    # The public tool accepts ``content`` as object OR text (round-25): a
+    # text-transport child submitting its answer as JSON-serialized text is
+    # normalized here so contracted lanes validate the decoded object
+    # instead of rejecting every textual result.
+    for lane_key in list(submitted):
+        if lane_key in contracts and isinstance(submitted[lane_key], str):
+            try:
+                decoded = json.loads(submitted[lane_key])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                submitted[lane_key] = decoded
     contract_violations = _lane_answer_contract_violations(contracts, submitted)
     violating_lanes = {item["lane_id"] for item in contract_violations}
     accepted = {key: value for key, value in submitted.items() if key not in violating_lanes}

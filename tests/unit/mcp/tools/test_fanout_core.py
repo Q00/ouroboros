@@ -3887,6 +3887,172 @@ def test_blank_content_does_not_count_toward_completion(tmp_path: Any) -> None:
     assert record.received_results == {}
 
 
+def test_expired_record_is_unknown_at_load(tmp_path: Any) -> None:
+    """The 7-day retention contract binds load/replay too (round-25 probe)."""
+    import os as os_module
+    import time
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = register_question_advisory_fanout(
+        registry,
+        session_id="sess-expiry",
+        payloads=_mixed_advisory_payloads(),
+    )
+    first = submit_fanout_results(
+        registry,
+        session_id="sess-expiry",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert first["status"] == "complete"
+
+    ancient = time.time() - FanoutRegistry._RECORD_RETENTION_SECONDS - 3600
+    os_module.utime(tmp_path / f"{fanout_id}.json", (ancient, ancient))
+    assert registry.load(fanout_id) is None
+    replay = submit_fanout_results(
+        registry,
+        session_id="sess-expiry",
+        correlation_key="context.lane_id",
+        results=[],
+        fanout_id=fanout_id,
+    )
+    assert replay["status"] == "unknown_fanout_id"
+
+
+def test_subquery_and_identity_grouping_cannot_launder_projections() -> None:
+    """Markers must aggregate the MAIN projection itself (round-25 probes)."""
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    def proposal(query: str) -> dict[str, Any]:
+        return {
+            "lane_id": "data_context",
+            "data_needed": True,
+            "finding": "Needs a query.",
+            "confidence": "inferred",
+            "evidence": [],
+            "proposed_queries": [
+                {
+                    "tool_name": "warehouse",
+                    "query": query,
+                    "expected_decision": "n/a",
+                    "source_class": "external",
+                }
+            ],
+            "requires_user_confirmation": True,
+        }
+
+    laundered = "SELECT account_id, plan, (SELECT count(*) FROM accounts) AS total FROM accounts"
+    assert any(
+        "without aggregation" in error
+        for error in _data_evidence_boundary_violations(proposal(laundered))
+    )
+
+    grouped_identity = "SELECT account_id, count(*) FROM events GROUP BY account_id"
+    assert any(
+        "identity/PII column" in error
+        for error in _data_evidence_boundary_violations(proposal(grouped_identity))
+    )
+
+    commented = "-- fetch it all\nSELECT account_id, plan FROM accounts"
+    assert any(
+        "without aggregation" in error
+        for error in _data_evidence_boundary_violations(proposal(commented))
+    )
+
+    # Category-grouped aggregates stay valid, comments included.
+    clean = "-- per plan\nSELECT plan, count(*) FROM accounts GROUP BY plan"
+    assert _data_evidence_boundary_violations(proposal(clean)) == []
+
+
+def test_id_rebased_schema_is_declared_unsupported() -> None:
+    """$id rebasing is outside the declared grammar (round-25)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    id_contract = {
+        "contract_id": "id_scoped.v1",
+        "response_model_schema": {
+            "$id": "https://example.com/base.json",
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/shape"}},
+            "$defs": {"shape": {"type": "string"}},
+        },
+    }
+    assert not _enforceable_lane_contract(id_contract)
+
+    # A literal type: object WITH a $ref sibling stays enforceable — the
+    # declaration alone forces objects (2020-12 conjunctive $ref).
+    sibling_contract = {
+        "contract_id": "ref_sibling.v1",
+        "response_model_schema": {
+            "type": "object",
+            "$ref": "#/$defs/extra",
+            "required": ["lane_id"],
+            "properties": {"lane_id": {"const": "sibling_lane"}},
+            "$defs": {"extra": {"required": ["lane_id"]}},
+        },
+    }
+    assert _enforceable_lane_contract(sibling_contract)
+
+
+def test_json_text_child_results_are_normalized(tmp_path: Any) -> None:
+    """content is 'object or text' — JSON text validates as its object (r25)."""
+    import json as json_module
+
+    registry = FanoutRegistry(tmp_path)
+    request = {
+        "session_id": "sess-json-text",
+        "question_identity": "interview-question:0123456789abcdef",
+        "question": "Which plan tier do most active users hit?",
+        "user_question_first": True,
+        "lanes": _interview_question_advisory_fanout_metadata()["lanes"],
+    }
+    payloads = build_interview_question_advisory_subagents(request)
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id="sess-json-text", payloads=payloads
+    )
+
+    conforming_text = json_module.dumps(
+        {
+            "lane_id": "data_context",
+            "data_needed": False,
+            "finding": "No data evidence is needed for this question.",
+            "confidence": "no_evidence",
+            "evidence": [],
+            "proposed_queries": [],
+            "requires_user_confirmation": True,
+        }
+    )
+    out = submit_fanout_results(
+        registry,
+        session_id="sess-json-text",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": conforming_text},
+            {"key": "ambiguity_contrarian", "content": "contrarian-advice"},
+            {"key": "answer_simplifier", "content": "simplifier-advice"},
+        ],
+        fanout_id=fanout_id,
+    )
+    assert out["status"] == "complete"
+    assert out["contract_violations"] == []
+    aggregated = {item["lane_id"]: item["output"] for item in out["result"]["aggregated_outputs"]}
+    assert aggregated["data_context"]["data_needed"] is False
+
+    # Non-JSON text on a contracted lane is still a violation.
+    plain_text = submit_fanout_results(
+        registry,
+        session_id="sess-json-text",
+        correlation_key="context.lane_id",
+        results=[{"key": "data_context", "content": "just prose"}],
+        fanout_id=fanout_id,
+    )
+    assert plain_text["status"] == "already_complete"
+
+
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
     """Records persisted before the required/optional split keep the old gate."""
     record = FanoutRecord.from_dict(
