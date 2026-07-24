@@ -169,20 +169,38 @@ def main() -> None:
             sys.exit(f"Error: expected exactly one version marker in {path.relative_to(ROOT)}")
         setup_markers[path] = (text, marker_matches[0].group(1))
 
-    changed = False
+    json_targets: list[tuple[Path, str | None, object, str]] = []
     for path, nested in targets:
+        if not path.exists():
+            continue
+
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                raise TypeError("top-level JSON value must be an object")
+            target: object = data
+            if nested:
+                for key in nested.split("."):
+                    if key.isdigit():
+                        if not isinstance(target, list):
+                            raise TypeError("numeric path component requires an array")
+                        target = target[int(key)]
+                    else:
+                        if not isinstance(target, dict):
+                            raise TypeError("named path component requires an object")
+                        target = target[key]
+                if not isinstance(target, dict):
+                    raise TypeError("version target must be an object")
+            old = target.get("version", "?")
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+            sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
+        json_targets.append((path, nested, data, str(old)))
+
+    changed = False
+    for path, nested, _data, old in json_targets:
         if not path.exists():
             print(f"  SKIP  {path.relative_to(ROOT)} (not found)")
             continue
-
-        data = json.loads(path.read_text())
-        if nested:
-            target = data
-            for key in nested.split("."):
-                target = target[int(key)] if key.isdigit() else target[key]
-            old = target.get("version", "?")
-        else:
-            old = data.get("version", "?")
 
         if old == version:
             print(f"  OK    {path.relative_to(ROOT)} ({old})")

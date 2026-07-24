@@ -136,3 +136,41 @@ def test_main_write_fails_when_setup_marker_is_missing(
         assert marketplace_json.read_text() == original_marketplace_json
     else:
         raise AssertionError("missing version marker must fail")
+
+
+def test_main_write_preflights_json_targets_before_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
+
+    source_skill.parent.mkdir(parents=True, exist_ok=True)
+    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
+    plugin_json.write_text('{"version": "1.2.3"}\n')
+    marketplace_json.write_text('{"plugins": [}\n')
+    original_plugin_json = plugin_json.read_text()
+
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+
+    try:
+        sync_plugin_version.main()
+    except SystemExit as exc:
+        assert "could not validate" in str(exc)
+        assert plugin_json.read_text() == original_plugin_json
+    else:
+        raise AssertionError("invalid marketplace JSON must fail before mutation")
