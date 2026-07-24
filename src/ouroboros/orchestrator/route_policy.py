@@ -31,8 +31,6 @@ MAX_REJECTION_REASONS = 16
 MAX_ROUTE_COST_UNITS = 1_000_000_000
 MAX_ROUTE_ORDINAL = 1_000_000_000
 
-_ADMISSION_KERNEL_TOKEN = object()
-
 _SAFE_ROUTE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_ID_CHARS - 1}}}$")
 _SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_ROUTE_FIELD_CHARS - 1}}}$")
 
@@ -322,10 +320,10 @@ class RouteAdmission:
     """Deterministic Kernel result; only ``selected`` may enter dispatch.
 
     This is intentionally not a dataclass.  Admission is an authority-bearing
-    value, so allowing ``dataclasses.replace`` to copy its private provenance
-    token would let callers alter the selected route while retaining Kernel
-    provenance.  The sealed value object keeps construction private to the
-    Kernel and rejects mutation after validation.
+    value, so allowing ordinary reconstruction to copy its provenance would
+    let callers alter the selected route while retaining Kernel authority. The
+    public constructor never publishes a valid value; the Kernel-only factory
+    validates and seals the result before returning it.
     """
 
     __slots__ = (
@@ -334,7 +332,6 @@ class RouteAdmission:
         "eligible_route_ids",
         "rejections",
         "reason",
-        "_kernel_token",
         "_sealed",
     )
 
@@ -343,7 +340,6 @@ class RouteAdmission:
     eligible_route_ids: tuple[str, ...]
     rejections: tuple[RouteRejection, ...]
     reason: str
-    _kernel_token: object
     _sealed: bool
 
     def __init__(
@@ -353,8 +349,17 @@ class RouteAdmission:
         eligible_route_ids: tuple[str, ...],
         rejections: tuple[RouteRejection, ...],
         reason: str,
-        *,
-        _kernel_token: object | None = None,
+    ) -> None:
+        self._validate(disposition, selected, eligible_route_ids, rejections, reason)
+        raise ValueError("route admission must be produced by the Admission Kernel")
+
+    @staticmethod
+    def _validate(
+        disposition: RouteDecisionDisposition,
+        selected: RouteCandidate | None,
+        eligible_route_ids: tuple[str, ...],
+        rejections: tuple[RouteRejection, ...],
+        reason: str,
     ) -> None:
         if not isinstance(disposition, RouteDecisionDisposition):
             raise ValueError("disposition must be a RouteDecisionDisposition")
@@ -393,20 +398,31 @@ class RouteAdmission:
             raise ValueError("route rejections must be unique")
         if set(rejection_ids).intersection(eligible_route_ids):
             raise ValueError("route cannot be both eligible and rejected")
-        if _kernel_token is not _ADMISSION_KERNEL_TOKEN:
-            raise ValueError("route admission must be produced by the Admission Kernel")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("route admission reason must be non-empty")
         if len(reason) > MAX_ROUTE_FIELD_CHARS:
             raise ValueError("route admission reason exceeds its bound")
 
-        object.__setattr__(self, "disposition", disposition)
-        object.__setattr__(self, "selected", selected)
-        object.__setattr__(self, "eligible_route_ids", eligible_route_ids)
-        object.__setattr__(self, "rejections", rejections)
-        object.__setattr__(self, "reason", reason)
-        object.__setattr__(self, "_kernel_token", _kernel_token)
-        object.__setattr__(self, "_sealed", True)
+    @classmethod
+    def _from_kernel(
+        cls,
+        disposition: RouteDecisionDisposition,
+        selected: RouteCandidate | None,
+        eligible_route_ids: tuple[str, ...],
+        rejections: tuple[RouteRejection, ...],
+        reason: str,
+    ) -> RouteAdmission:
+        """Build a validated admission without exposing transferable state."""
+
+        cls._validate(disposition, selected, eligible_route_ids, rejections, reason)
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "disposition", disposition)
+        object.__setattr__(instance, "selected", selected)
+        object.__setattr__(instance, "eligible_route_ids", eligible_route_ids)
+        object.__setattr__(instance, "rejections", rejections)
+        object.__setattr__(instance, "reason", reason)
+        object.__setattr__(instance, "_sealed", True)
+        return instance
 
     def __setattr__(self, name: str, value: object) -> None:
         if getattr(self, "_sealed", False):
@@ -562,22 +578,20 @@ def admit_route(
         )
     )
     if not eligible:
-        return RouteAdmission(
+        return RouteAdmission._from_kernel(
             disposition=RouteDecisionDisposition.BLOCKED,
             selected=None,
             eligible_route_ids=(),
             rejections=tuple(rejections),
             reason="no_eligible_route",
-            _kernel_token=_ADMISSION_KERNEL_TOKEN,
         )
     selected = eligible[0]
-    return RouteAdmission(
+    return RouteAdmission._from_kernel(
         disposition=RouteDecisionDisposition.ADMITTED,
         selected=selected,
         eligible_route_ids=tuple(candidate.route_id for candidate in eligible),
         rejections=tuple(rejections),
         reason="cheapest_eligible_route",
-        _kernel_token=_ADMISSION_KERNEL_TOKEN,
     )
 
 

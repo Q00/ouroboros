@@ -90,7 +90,8 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
 def _is_credential_namespace_label(value: str) -> bool:
     """Return whether a namespace segment labels a credential-bearing value."""
 
-    label = value.strip().lower().replace("-", "_")
+    label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
+    label = label.lower().replace("-", "_")
     return label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
         ("_key", "_token", "_secret", "_credential")
     )
@@ -110,7 +111,7 @@ def is_credential_shaped(value: str) -> bool:
     if not normalized:
         return False
     candidates = [normalized]
-    namespace_parts = [part for part in re.split(r"[:/]", normalized) if part]
+    namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
     candidates.extend(namespace_parts)
     if any(_is_credential_namespace_label(part) for part in namespace_parts[:-1]):
         return True

@@ -274,6 +274,9 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "github:ghp_namespaced-credential",
         "api_key:opaque-provider-credential",
         "access_token/opaque-provider-credential",
+        "accessToken:opaqueProviderSecret",
+        "clientSecret/opaqueProviderSecret",
+        "api_key.opaqueProviderSecret",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
     )
     for identity in credential_shapes:
@@ -321,7 +324,7 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     decision = admit_route(_registry(original), RouteRequirements())
 
     with pytest.raises(TypeError, match="dataclass"):
-        replace(
+        replace(  # type: ignore[type-var]
             decision,
             selected=other,
             eligible_route_ids=(other.route_id,),
@@ -333,6 +336,7 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     assert copy.copy(decision) is decision
     assert copy.deepcopy(decision) is decision
     assert decision.selected is original
+    assert not hasattr(decision, "_kernel_token")
 
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(decision)
