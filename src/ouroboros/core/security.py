@@ -58,6 +58,53 @@ SENSITIVE_PREFIXES = (
     "AIza",
 )
 
+_CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # GitHub PAT/app/OAuth tokens and other opaque provider tokens.
+    re.compile(r"^gh[oprsu]_"),
+    re.compile(r"^github_pat_"),
+    re.compile(r"^sk-"),
+    re.compile(r"^sk_(?:live|test)_"),
+    re.compile(r"^rk_(?:live|test)_"),
+    re.compile(r"^pk-"),
+    re.compile(r"^api-"),
+    re.compile(r"^xox[bpa]-"),
+    re.compile(r"^xapp-"),
+    re.compile(r"^npm_"),
+    re.compile(r"^pypi-"),
+    # Google API keys, AWS access-key IDs, and JWT-shaped bearer values.
+    re.compile(r"^AIza[A-Za-z0-9_-]{35,}$"),
+    re.compile(r"^AKIA[0-9A-Z]{16}$"),
+    re.compile(r"^ASIA[0-9A-Z]{16}$"),
+    re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"),
+)
+
+
+def is_credential_shaped(value: str) -> bool:
+    """Return whether a string matches a high-confidence credential shape.
+
+    This is deliberately shape-based rather than a validity check. It protects
+    canonical metadata boundaries from copying opaque credentials while still
+    allowing ordinary route and authority identifiers through.
+    """
+
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    candidates = [normalized]
+    namespace_parts = [part for part in re.split(r"[:/]", normalized) if part]
+    candidates.extend(namespace_parts)
+    if any(part.lower() in {"bearer", "token", "secret"} for part in namespace_parts[:-1]):
+        return True
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered.startswith(("bearer ", "token ", "secret_")):
+            return True
+        if any(pattern.match(candidate) for pattern in _CREDENTIAL_SHAPE_PATTERNS):
+            return True
+    return False
+
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:
     """Mask an API key for safe logging/display.
@@ -154,7 +201,9 @@ def is_sensitive_value(value: Any) -> bool:
         return False
 
     value_lower = value.lower()
-    return any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES)
+    return is_credential_shaped(value) or any(
+        value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES
+    )
 
 
 def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:

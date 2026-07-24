@@ -14,6 +14,7 @@ from ouroboros.core.security import (
     MAX_SEED_FILE_SIZE,
     MAX_USER_RESPONSE_LENGTH,
     InputValidator,
+    is_credential_shaped,
     is_sensitive_field,
     is_sensitive_value,
     mask_api_key,
@@ -116,6 +117,20 @@ class TestSensitiveDetection:
         assert is_sensitive_value("hello world") is False
         assert is_sensitive_value("model-gpt-4") is False
         assert is_sensitive_value(123) is False
+
+    def test_credential_shapes_cover_common_provider_formats(self) -> None:
+        for value in (
+            "ghp_credential-shaped-value",
+            "sk_live_credential-shaped-value",
+            "AIza" + "A" * 35,
+            "AKIA" + "A" * 16,
+            "ASIA" + "A" * 16,
+            "github:ghp_namespaced-credential",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        ):
+            assert is_credential_shaped(value) is True
+        assert is_credential_shaped("authority-session-123") is False
+        assert is_credential_shaped("github:read") is False
 
 
 class TestMaskSensitiveValue:
