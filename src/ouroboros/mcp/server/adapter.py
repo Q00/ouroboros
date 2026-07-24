@@ -227,23 +227,26 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
-        default: Any = (
-            Field(default_factory=lambda: None)
-            if not p.required and p.default is None
-            else p.default
-        )
+        default: Any = inspect.Parameter.empty if p.required else p.default
         if p.description or p.enum is not None or p.items is not None:
             schema_extra: dict[str, Any] = {}
             if p.enum is not None:
                 schema_extra["enum"] = list(p.enum)
             if p.items is not None:
                 schema_extra["items"] = p.items
-            field_default: Any = ... if p.required else default
-            default = Field(
-                default=field_default,
-                description=p.description or None,
-                json_schema_extra=schema_extra or None,
-            )
+            field_kwargs: dict[str, Any] = {
+                "description": p.description or None,
+                "json_schema_extra": schema_extra or None,
+            }
+            if p.required:
+                field_kwargs["default"] = ...
+            elif p.default is None:
+                field_kwargs["default_factory"] = lambda: None
+            else:
+                field_kwargs["default"] = p.default
+            default = Field(**field_kwargs)
+        elif not p.required and p.default is None:
+            default = Field(default_factory=lambda: None)
 
         if p.required:
             sig_params.append(
