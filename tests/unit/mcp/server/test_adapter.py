@@ -1430,6 +1430,91 @@ class TestServeTransport:
         assert isinstance(returned["duration_ms"], int)
 
     @pytest.mark.asyncio
+    async def test_fastmcp_wrapper_omits_unset_optional_arguments(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        class OptionalToolHandler(MockToolHandler):
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name=self._name,
+                    description="A test tool",
+                    parameters=(
+                        MCPToolParameter(name="input", type=ToolInputType.STRING),
+                        MCPToolParameter(
+                            name="optional-input",
+                            type=ToolInputType.STRING,
+                            required=False,
+                        ),
+                    ),
+                )
+
+        adapter = MCPServerAdapter()
+        handler = OptionalToolHandler(name="optional_tool")
+        adapter.register_tool(handler)
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        captured_wrapper = None
+
+        def capture_tool_decorator(name, description):
+            def decorator(func):
+                nonlocal captured_wrapper
+                captured_wrapper = func
+                return func
+
+            return decorator
+
+        mock_instance.tool = capture_tool_decorator
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        assert captured_wrapper is not None
+        await captured_wrapper(input="required", optional_input=None)
+
+        handler.handle_mock.assert_awaited_once_with({"input": "required"})
+
+        handler.handle_mock.reset_mock()
+        await captured_wrapper(input="required", optional_input="provided")
+        handler.handle_mock.assert_awaited_once_with(
+            {"input": "required", "optional-input": "provided"}
+        )
+
+        handler.handle_mock.reset_mock()
+        await captured_wrapper(input="required")
+        handler.handle_mock.assert_awaited_once_with({"input": "required"})
+
+        real_adapter = MCPServerAdapter()
+        real_handler = OptionalToolHandler(name="optional_tool")
+        real_adapter.register_tool(real_handler)
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await real_adapter.serve(transport="stdio")
+
+        await real_adapter._mcp_server.call_tool("optional_tool", {"input": "required"})
+
+        real_handler.handle_mock.assert_awaited_once_with({"input": "required"})
+
+    @pytest.mark.asyncio
     async def test_fastmcp_registers_base_resource_uri_template(self) -> None:
         """FastMCP path exposes child URIs for base resource handlers."""
         from unittest.mock import MagicMock, patch
