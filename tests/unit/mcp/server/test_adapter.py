@@ -1498,6 +1498,22 @@ class TestServeTransport:
         await captured_wrapper(input="required")
         handler.handle_mock.assert_awaited_once_with({"input": "required"})
 
+        real_adapter = MCPServerAdapter()
+        real_handler = OptionalToolHandler(name="optional_tool")
+        real_adapter.register_tool(real_handler)
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+
+        with patch.object(
+            fastmcp_module.FastMCP,
+            "run_stdio_async",
+            new=AsyncMock(),
+        ):
+            await real_adapter.serve(transport="stdio")
+
+        await real_adapter._mcp_server.call_tool("optional_tool", {"input": "required"})
+
+        real_handler.handle_mock.assert_awaited_once_with({"input": "required"})
+
     @pytest.mark.asyncio
     async def test_fastmcp_registers_base_resource_uri_template(self) -> None:
         """FastMCP path exposes child URIs for base resource handlers."""
