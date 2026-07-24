@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rich.cells import cell_len, set_cell_size
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -33,6 +35,28 @@ STATUS_STYLES = {
     "completed": "green",
     "failed": "red",
 }
+
+# Defaults are used only before Textual has measured the widget. Once mounted,
+# labels follow the available terminal-cell width instead of a character count.
+_DEFAULT_CONTENT_WIDTH = 45
+_MIN_CONTENT_WIDTH = 20
+_CONTENT_WIDTH_RESERVED_CELLS = 20
+
+
+def _truncate_to_cell_width(content: str, width: int) -> str:
+    """Truncate text within a terminal display-cell budget.
+
+    ``len`` is unsuitable here: CJK and many emoji occupy two cells while
+    combining marks occupy none. Rich uses these same primitives for layout.
+    """
+    if cell_len(content) <= width:
+        return content
+
+    ellipsis = "..." if width >= 3 else "." * max(0, width)
+    content_budget = max(0, width - cell_len(ellipsis))
+    # set_cell_size can pad a crop before a wide glyph; discard that padding
+    # so the ellipsis immediately follows visible content.
+    return set_cell_size(content, content_budget).rstrip() + ellipsis
 
 
 @dataclass
@@ -199,11 +223,26 @@ class ACProgressWidget(Widget):
             )
             yield Static(remaining_text, classes="progress-footer")
 
-    def _render_ac_item(self, ac: ACProgressItem) -> Static:
+    def _content_max_width(self, *, default: int = _DEFAULT_CONTENT_WIDTH) -> int:
+        """Return the current content budget, with a safe unmounted fallback."""
+        try:
+            width = self.size.width
+        except Exception:
+            width = 0
+
+        if width > 0:
+            # Keep labels readable in tight panes, but never claim more cells
+            # than a pane actually has.
+            return max(min(_MIN_CONTENT_WIDTH, width), width - _CONTENT_WIDTH_RESERVED_CELLS)
+        return default
+
+    def _render_ac_item(self, ac: ACProgressItem, *, max_width: int | None = None) -> Static:
         """Render a single AC item.
 
         Args:
             ac: AC progress item to render.
+            max_width: Optional explicit content budget used by tests. Normal
+                rendering derives it from the widget's current size.
 
         Returns:
             Static widget with formatted AC line.
@@ -211,8 +250,8 @@ class ACProgressWidget(Widget):
         icon = STATUS_ICONS.get(ac.status, "○")
         style = STATUS_STYLES.get(ac.status, "dim")
 
-        # Truncate content
-        content = ac.content[:45] + "..." if len(ac.content) > 45 else ac.content
+        width = max_width if max_width is not None else self._content_max_width()
+        content = _truncate_to_cell_width(ac.content, width)
 
         # Build label
         label = f" [{style}]{icon}[/{style}]  {ac.index}. {content}"
@@ -229,6 +268,11 @@ class ACProgressWidget(Widget):
 
     def watch_acceptance_criteria(self, _new_criteria: list[ACProgressItem]) -> None:
         """React to acceptance_criteria changes."""
+        self.refresh(recompose=True)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recompose so labels are recalculated for the new width."""
+        del event
         self.refresh(recompose=True)
 
     def watch_completed_count(self, _new_count: int) -> None:
