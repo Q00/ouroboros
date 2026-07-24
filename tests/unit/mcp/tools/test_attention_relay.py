@@ -242,6 +242,100 @@ def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
     assert [relay["source_event_id"] for relay in accepted] == [acceptance_a.id]
 
 
+def test_legacy_level_producers_use_session_aggregate_scope() -> None:
+    """Production level events carry the session only as aggregate_id."""
+    level_started = BaseEvent(
+        id="legacy_level_started",
+        type="execution.decomposition.level_started",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={"level": 0, "total_levels": 1, "child_indices": [0]},
+    )
+    level_completed = BaseEvent(
+        id="legacy_level_completed",
+        type="execution.decomposition.level_completed",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=2),
+        data={"level": 0, "successful": 1, "failed": 0, "outcome": "succeeded"},
+    )
+
+    relays = classify_relay_events(
+        [level_started, level_completed],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    assert [relay["subtype"] for relay in relays] == ["level_started", "level_completed"]
+    assert all(relay["scope"]["session_id"] == "orch_1" for relay in relays)
+
+
+def test_legacy_frugality_proof_uses_single_session_execution_scope() -> None:
+    """Production proof events omit session_id but share the execution aggregate."""
+    configuration = BaseEvent(
+        id="legacy_config",
+        type="execution.run.configuration_resolved",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE,
+        data={
+            "execution_id": "exec_1",
+            "session_id": "orch_1",
+            "frugality_assurance": "observe",
+        },
+    )
+    proof = BaseEvent(
+        id="legacy_proof",
+        type="execution.frugality_proof.evaluated",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={
+            "execution_id": "exec_1",
+            "status": "fail_no_frugality",
+            "reason": "no measurable savings",
+        },
+    )
+
+    relays = classify_relay_events(
+        [configuration, proof],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    attention = next(relay for relay in relays if relay["kind"] == "attention_required")
+    assert attention["trigger"] == "frugality_no_savings"
+    assert attention["scope"]["session_id"] == "orch_1"
+
+
+def test_legacy_frugality_proof_fails_closed_for_ambiguous_sessions() -> None:
+    proof = BaseEvent(
+        id="ambiguous_proof",
+        type="execution.frugality_proof.evaluated",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE + timedelta(seconds=2),
+        data={
+            "execution_id": "exec_1",
+            "status": "fail_no_frugality",
+            "reason": "no measurable savings",
+        },
+    )
+    history = [
+        _event(1, "execution.run.configuration_resolved", {"frugality_assurance": "observe"}),
+        _event(
+            2,
+            "execution.run.configuration_resolved",
+            {"session_id": "orch_2", "frugality_assurance": "observe"},
+        ),
+        proof,
+    ]
+
+    relays = classify_relay_events(history, job_id="job_1", session_id="orch_1")
+    assert not any(relay.get("trigger") == "frugality_no_savings" for relay in relays)
+
+
 def test_foreign_execution_attention_evidence_is_not_relayed() -> None:
     foreign_routed = _event(
         1,

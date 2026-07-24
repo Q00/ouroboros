@@ -45,6 +45,19 @@ _MAX_EVIDENCE_EVENT_IDS = 8
 _MAX_TEXT = 320
 _MAX_LIST = 8
 
+# These producers predate the explicit session-id contract.  Their scope is
+# still recoverable without guessing: level events use the linked session as
+# their execution aggregate, while the proof event uses the execution
+# aggregate and can be attributed only when the surrounding history identifies
+# exactly one session for that execution.
+_LEGACY_SESSIONLESS_EVENT_TYPES = frozenset(
+    {
+        "execution.decomposition.level_started",
+        "execution.decomposition.level_completed",
+        "execution.frugality_proof.evaluated",
+    }
+)
+
 
 def _text(value: object, *, limit: int = _MAX_TEXT) -> str | None:
     if not isinstance(value, str):
@@ -89,6 +102,51 @@ def _event_session_id(event: BaseEvent) -> str | None:
     if isinstance(legacy, str) and legacy.strip():
         return legacy
     return None
+
+
+def _event_execution_id(event: BaseEvent) -> str | None:
+    """Return the execution identity used to correlate legacy projections."""
+    execution_id = event.data.get("execution_id")
+    if isinstance(execution_id, str) and execution_id.strip():
+        return execution_id
+    if event.aggregate_type == "execution":
+        return event.aggregate_id
+    return None
+
+
+def _legacy_event_belongs_to_session(
+    event: BaseEvent,
+    *,
+    session_id: str,
+    history_events: Sequence[BaseEvent],
+) -> bool:
+    """Safely recover session scope for the known legacy producer shapes.
+
+    We never attach an unscoped event to a linked session from the caller's
+    session ID alone.  A level event is unambiguous when its execution
+    aggregate is the linked session itself.  A frugality proof is unambiguous
+    only when all explicitly scoped events for its execution identify exactly
+    that one session; mixed-session histories remain fail-closed.
+    """
+    if event.type not in _LEGACY_SESSIONLESS_EVENT_TYPES:
+        return False
+    if event.type.startswith("execution.decomposition."):
+        return event.aggregate_type == "execution" and event.aggregate_id == session_id
+
+    if event.aggregate_type != "execution":
+        return False
+    execution_id = _event_execution_id(event)
+    if execution_id is None or execution_id != event.aggregate_id:
+        return False
+
+    sessions: set[str] = set()
+    for candidate in history_events:
+        candidate_session = _event_session_id(candidate)
+        if candidate_session is None:
+            continue
+        if _event_execution_id(candidate) == execution_id:
+            sessions.add(candidate_session)
+    return sessions == {session_id}
 
 
 def _scope(event: BaseEvent, *, job_id: str | None) -> dict[str, object]:
@@ -244,13 +302,30 @@ def _history_for_session(
     several sessions under one execution id and must be fail-closed when a
     linked session is known.
     """
+    events = list(history_events)
     if session_id is None:
-        return list(history_events)
-    return [
-        event
-        for event in history_events
-        if not _is_session_scoped_event(event) or _event_session_id(event) == session_id
-    ]
+        return events
+
+    scoped: list[BaseEvent] = []
+    for event in events:
+        if not _is_session_scoped_event(event):
+            scoped.append(event)
+            continue
+        if _event_session_id(event) == session_id:
+            scoped.append(event)
+            continue
+        if not _legacy_event_belongs_to_session(
+            event,
+            session_id=session_id,
+            history_events=events,
+        ):
+            continue
+        # Normalize only the safely attributed legacy projection.  Downstream
+        # scope construction and correlation then see the same explicit
+        # session identity as migrated producers, while the original event ID
+        # and payload values remain unchanged.
+        scoped.append(event.model_copy(update={"data": {**event.data, "session_id": session_id}}))
+    return scoped
 
 
 def _latest_configuration_before(
