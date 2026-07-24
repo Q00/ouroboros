@@ -44,6 +44,12 @@ DATA_EVIDENCE_SSN_PATTERN = r"\b\d{3}-\d{2}-\d{4}\b"
 DATA_EVIDENCE_PHONE_PATTERN = (
     r"\+\d{7,}|\b\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}\b|\(\d{3}\)\s*\d{3}[-.\s]?\d{4}"
 )
+# An executed evidence value is a MEASUREMENT: aggregation is numeric by
+# definition, so a value with no numeral is a claim or a name roster, never
+# query output (qualitative context belongs in finding). This is the
+# structural rule that makes digit-free record lists unrepresentable under
+# any delimiter.
+DATA_EVIDENCE_MEASUREMENT_PATTERN = r"\d"
 # A value that opens as a JSON list/object is serialized rows, not an
 # aggregate.
 DATA_EVIDENCE_ROW_SHAPE_PATTERN = r"^\s*[\[{]"
@@ -579,6 +585,7 @@ def _data_context_answer_contract() -> dict[str, Any]:
                             # row/object payloads are raw evidence and never
                             # validate.
                             "allOf": [
+                                {"pattern": DATA_EVIDENCE_MEASUREMENT_PATTERN},
                                 {"not": {"pattern": DATA_EVIDENCE_EMAIL_PATTERN}},
                                 {"not": {"pattern": DATA_EVIDENCE_SECRET_PATTERN}},
                                 {"not": {"pattern": DATA_EVIDENCE_PHONE_PATTERN}},

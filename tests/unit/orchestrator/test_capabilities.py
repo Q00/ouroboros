@@ -5151,9 +5151,19 @@ def test_data_context_answer_contract_is_confirmation_only_and_untruncated() -> 
     # Hyphenated vocabulary is NOT a credential (round-4 false-positive fix).
     vocabulary_value = {
         **executed,
-        "evidence": [{**executed["evidence"][0], "value": "aggregate token-counts by plan tier"}],
+        "evidence": [
+            {**executed["evidence"][0], "value": "aggregate token-counts by plan tier: 12,400 avg"}
+        ],
     }
     validator.validate(vocabulary_value)
+    # An evidence value is a MEASUREMENT (round-18): aggregation is numeric,
+    # so a digit-free value — including any-delimiter name rosters — never
+    # validates; qualitative context belongs in finding.
+    no_measurement = {
+        **executed,
+        "evidence": [{**executed["evidence"][0], "value": "premium tier dominates"}],
+    }
+    assert list(validator.iter_errors(no_measurement))
     # The confidence constraint is two-way (round-12): executed evidence
     # alongside confidence="no_evidence" is contradictory consent state.
     contradictory_confidence = {**executed, "confidence": "no_evidence"}

@@ -1500,6 +1500,9 @@ def build_interview_question_advisory_subagents(
                 "session can run them after user confirmation. Never run "
                 "mutating operations. Return aggregates and summaries only — "
                 "never raw rows — and scrub anything that looks like PII. "
+                "Every evidence value must state its NUMERIC measurement "
+                "(count, share, duration); qualitative context belongs in "
+                "the finding field. "
                 "Treat error-shaped tool output (for example an HTTP 200 body "
                 "carrying an error envelope) as no evidence, not as evidence. "
                 "If this runtime has no MCP or data-tool access, return the "
@@ -3440,7 +3443,10 @@ def _schema_local_refs_resolve(schema: Mapping[str, Any]) -> bool:
     def _walk(node: Any) -> None:
         if isinstance(node, Mapping):
             for key, value in node.items():
-                if key == "$ref" and isinstance(value, str):
+                # Every Draft 2020-12 reference form is preflighted
+                # (bot-review round-18): $dynamicRef (and legacy
+                # $recursiveRef) explode at validation exactly like $ref.
+                if key in ("$ref", "$dynamicRef", "$recursiveRef") and isinstance(value, str):
                     refs.append(value)
                 _walk(value)
         elif isinstance(node, list):
@@ -3606,6 +3612,23 @@ def _data_evidence_boundary_violations(output: Mapping[str, Any]) -> list[str]:
         for label, pattern in _data_evidence_boundary_patterns()
         if pattern.search(serialized)
     ]
+    # STRUCTURAL aggregate rule (bot-review round-18, ending the delimiter
+    # game): an executed evidence VALUE is a measurement, and aggregation is
+    # numeric by definition — a value with no numeral is a claim or a name
+    # roster, not query output. This makes digit-free record lists
+    # unrepresentable under ANY delimiter; qualitative context belongs in
+    # ``finding``.
+    evidence_items = output.get("evidence")
+    for index, item in enumerate(evidence_items if isinstance(evidence_items, list) else ()):
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        if isinstance(value, str) and not re.search(r"\d", value):
+            errors.append(
+                f"evidence[{index}].value: no numeric measurement — an "
+                "aggregate states a count/share/duration; qualitative "
+                "context belongs in finding"
+            )
     # The no-rows policy binds EVERY persisted prose field, not just
     # evidence.value (bot-review round-10 probe: JSON rows smuggled through
     # ``finding``). Each field gets the prose-appropriate subset of the row

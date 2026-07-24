@@ -1726,8 +1726,8 @@ def test_standard_credential_and_pii_forms_are_rejected() -> None:
         assert _data_evidence_boundary_violations(_minimal_data_output(probe)), probe
 
     for clean in (
-        "authorization required for the premium tier",
-        "bearer of the top NPS score is the free plan",
+        "authorization required for 92% of premium routes",
+        "bearer of the top NPS score: free plan at 61 points",
         "password rotation completed for 1,204 accounts",
         "78% of MAU are on the free tier",
     ):
@@ -2950,8 +2950,8 @@ def test_colon_delimited_repeated_records_are_rejected() -> None:
 
     for clean in (
         "p50: 120ms p95: 340ms max: 890ms",
-        "between 10:00 and 10:45 KST",
-        "sources: https://a.example and https://b.example",
+        "between 10:00 and 10:45 KST, 3 spikes",
+        "sources: https://a1.example and https://b2.example, 2 dashboards",
     ):
         assert _data_evidence_boundary_violations(_minimal_data_output(clean)) == [], clean
 
@@ -3145,6 +3145,55 @@ def test_legacy_unresolvable_ref_record_fails_closed(tmp_path: Any) -> None:
     assert reloaded is not None
     assert reloaded.completed is False
     assert reloaded.received_results == {}
+
+
+def test_dynamic_ref_contract_is_not_advertised() -> None:
+    """Every Draft 2020-12 reference form is preflighted (round-18 probe)."""
+    from ouroboros.mcp.tools.subagent import _enforceable_lane_contract
+
+    dynamic_ref_contract = {
+        "contract_id": "future_dynamic.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$dynamicRef": "#missing"}},
+        },
+    }
+    assert not _enforceable_lane_contract(dynamic_ref_contract)
+
+    recursive_ref_contract = {
+        "contract_id": "future_recursive.v1",
+        "response_model_schema": {
+            "type": "object",
+            "properties": {"payload": {"$recursiveRef": "#/definitions/missing"}},
+        },
+    }
+    assert not _enforceable_lane_contract(recursive_ref_contract)
+
+
+def test_evidence_value_requires_numeric_measurement() -> None:
+    """The aggregate rule is structural, not delimiter-based (round-18).
+
+    An executed evidence value is a measurement — aggregation is numeric by
+    definition — so a digit-free value (any-delimiter name rosters included)
+    is rejected, ending the delimiter-variant class entirely.
+    """
+    from ouroboros.mcp.tools.subagent import _data_evidence_boundary_violations
+
+    for roster in (
+        "Alice Kim / premium \\ Bob Lee / free",
+        "Alice Kim | premium | Bob Lee | free",
+        "Alice Kim - premium - Bob Lee - free",
+        "premium tier dominates",
+    ):
+        errors = _data_evidence_boundary_violations(_minimal_data_output(roster))
+        assert any("numeric measurement" in error for error in errors), roster
+
+    for measured in (
+        "78% of MAU are on the free tier",
+        "premium plans average 12,400 tokens/day",
+        "read/write split 80/20 across 3 regions",
+    ):
+        assert _data_evidence_boundary_violations(_minimal_data_output(measured)) == [], measured
 
 
 def test_legacy_record_without_required_keys_treats_all_expected_as_required() -> None:
