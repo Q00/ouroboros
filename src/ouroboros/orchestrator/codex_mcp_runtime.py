@@ -126,6 +126,10 @@ class CodexMcpWorkerTransport:
         # across turns so codex-reply reaches the SAME (process-bound) server.
         self._pool: dict[str, MCPSessionActor] = {}
 
+    @property
+    def cli_path(self) -> str:
+        return self._cli_path
+
     def _server_config(self) -> MCPServerConfig:
         # Strip ouroboros MCP env vars so the spawned codex server cannot recurse
         # back into the ouroboros MCP server (#185 child-env discipline).
