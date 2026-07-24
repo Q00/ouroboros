@@ -1391,6 +1391,9 @@ class TestServeTransport:
         execute_schema = evolve_tool.inputSchema["properties"]["execute"]
         assert execute_schema["type"] == "boolean"
         assert "null" not in execute_schema.get("type", [])
+        seed_schema = evolve_tool.inputSchema["properties"]["seed_content"]
+        assert "default" not in seed_schema
+        assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
