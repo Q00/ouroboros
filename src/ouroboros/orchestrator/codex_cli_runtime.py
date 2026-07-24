@@ -1626,7 +1626,6 @@ class CodexCliRuntime:
         returncode = control_state.get("returncode")
         if control_state.get("terminated") is True and handle.lifecycle_state not in {
             "cancelled",
-            "declined",
             "terminated",
         }:
             metadata = dict(handle.metadata)
@@ -1986,7 +1985,9 @@ class CodexCliRuntime:
             scope.started_unkeyed_item_counts[key] = count - 1
         return True
 
-    def _resolve_item_completion_is_error(self, item: dict[str, Any]) -> bool | None:
+    def _resolve_item_completion_is_error(
+        self, item_type: str, item: dict[str, Any]
+    ) -> bool | None:
         """Resolve tri-state completion status, failing closed on ambiguity.
 
         Returns ``False`` (success) only on explicit machine-readable signals
@@ -2016,7 +2017,12 @@ class CodexCliRuntime:
                 if normalized_status in _ITEM_FAILURE_STATUSES:
                     has_failure = True
                 elif normalized_status in _ITEM_SUCCESS_STATUSES:
-                    has_success = True
+                    # Codex marks command_execution items "completed" even on
+                    # non-zero exits, so lifecycle status alone must never
+                    # claim command success — only a validated zero exit or an
+                    # explicit success/ok flag can (review round four).
+                    if item_type != "command_execution":
+                        has_success = True
 
             for key in ("success", "ok"):
                 flag = source.get(key)
@@ -2141,11 +2147,14 @@ class CodexCliRuntime:
                 return []
             scope.completed_item_ids.add(item_id)
         metadata = self._extract_command_metadata(item)
-        is_error = self._resolve_item_completion_is_error(item)
+        is_error = self._resolve_item_completion_is_error(item_type, item)
         has_started = self._consume_item_started(item_type, item, scope)
-        if not has_started:
-            # Record the synthesized start so the lifecycle state stays
-            # consistent for any later event referencing the same identity.
+        if not has_started and item_id is not None:
+            # Record the keyed synthesized start so the lifecycle state stays
+            # consistent; replays are suppressed via completed_item_ids. An
+            # id-less synthesized start is already paired with its own result
+            # and must NOT stay pending, or the next identical completed-only
+            # item would consume it and emit an orphan result (round four).
             self._remember_item_started(item_type, item, scope)
 
         messages: list[AgentMessage] = []

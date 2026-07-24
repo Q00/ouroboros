@@ -549,6 +549,58 @@ class TestCodexCompletionReviewRoundOne:
                 is False
             ), item["id"]
 
+    def test_command_completed_status_alone_never_claims_success(self) -> None:
+        """command_execution success requires a validated zero exit, not lifecycle status."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for item_id, extra in (
+            ("item_nc1", {}),  # no exit code at all
+            ("item_nc2", {"exit_code": "1"}),  # malformed exit alongside completed
+        ):
+            item = {
+                "id": item_id,
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "completed",
+                "aggregated_output": ". [100%]\n1 passed in 0.01s\n",
+                **extra,
+            }
+            messages = runtime._convert_event(
+                {"type": "item.completed", "item": item}, current_handle=None
+            )
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert len(results) == 1, item_id
+            assert results[0].data.get("is_error") is not False, (
+                f"{item_id}: lifecycle completion alone must not claim command success"
+            )
+            assert (
+                _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+                is False
+            ), item_id
+
+    def test_consecutive_idless_completions_each_pair_without_orphans(self) -> None:
+        """Identical id-less completed-only items must each emit a full pair."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "pytest -q",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+
+        shapes = []
+        for _ in range(3):
+            messages = runtime._convert_event(event, current_handle=None)
+            shapes.append([m.data.get("subtype") or "start" for m in messages])
+
+        assert shapes == [
+            ["start", "tool_result"],
+            ["start", "tool_result"],
+            ["start", "tool_result"],
+        ], f"id-less completed-only lifecycles must never emit orphan results: {shapes}"
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
