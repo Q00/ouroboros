@@ -63,6 +63,8 @@ _CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^gh[oprsu]_"),
     re.compile(r"^github_pat_"),
     re.compile(r"^sk-"),
+    re.compile(r"^sk_(?:live|test)_"),
+    re.compile(r"^rk_(?:live|test)_"),
     re.compile(r"^pk-"),
     re.compile(r"^api-"),
     re.compile(r"^xox[bpa]-"),

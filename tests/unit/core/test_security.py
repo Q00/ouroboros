@@ -121,6 +121,7 @@ class TestSensitiveDetection:
     def test_credential_shapes_cover_common_provider_formats(self) -> None:
         for value in (
             "ghp_credential-shaped-value",
+            "sk_live_credential-shaped-value",
             "AIza" + "A" * 35,
             "AKIA" + "A" * 16,
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
