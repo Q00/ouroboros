@@ -690,7 +690,11 @@ def admit_route(
 
 
 def _build_admission_kernel() -> tuple[type[object], object]:
-    """Build the public type and kernel with closure-private publication state."""
+    """Build the public type and kernel with closure-private publication state.
+
+    Keeping this registry in the factory closure is part of the authorization
+    contract: it must not become a module-level minting surface.
+    """
 
     class AdmissionState(NamedTuple):
         disposition: RouteDecisionDisposition
