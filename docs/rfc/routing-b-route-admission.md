@@ -91,22 +91,16 @@ Registry candidates and capability lists are bounded before nested parsing, and
 streaming ordered inputs stop at the first item beyond their bound. Unordered
 collections are rejected rather than serialized in process-dependent order.
 
-The returned `RouteAdmission` is an authorization boundary for a later
-executor: only `selected` on an `admitted` result may be passed to dispatch.
-Admission results are Kernel-produced and validate disposition, selected-route
-membership, eligible/rejected-set coherence, and bounded ordered collections.
-Admissions are sealed value objects: ordinary mutation, object-protocol
-construction/replacement, dataclass replacement, shallow/deep copying, and
-pickle restoration cannot create a new authorization state. The Kernel checks a
-private immutable publication state and candidate fingerprints on every public
-projection, so an object created or rewritten with `object.__new__` or
-`object.__setattr__` is not an admission. The module deliberately has no
-provider calls, retry/escalation policy, or Final Gate behavior.
-
-The publication registry is an implementation detail of the Kernel closure, not
-a durable capability or a caller-visible factory. A serialized route contract
-is configuration evidence only; it must be rebuilt and compared with the live
-catalog before an effect boundary can dispatch it.
+The returned `RouteAdmission` is a deterministic result value, not a
+self-authenticating capability. It validates disposition, selected-route
+membership, eligible/rejected-set coherence, and bounded ordered collections,
+but Python object/closure introspection can still manufacture an object-shaped
+value. Every effect boundary must call `validate_admission(registry,
+requirements, admission)` against the live registry and exact requirements;
+only that revalidated `selected` route may enter dispatch. A serialized route
+contract is configuration evidence only and must likewise be rebuilt and
+compared before side effects. The module deliberately has no provider calls,
+retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 

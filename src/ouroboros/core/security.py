@@ -140,7 +140,9 @@ def is_credential_shaped(value: str) -> bool:
     # descriptor such as ``runtime:SG.<id>.<secret>`` cannot hide a credential
     # from the shape matcher when the namespace is split below.
     candidates.extend(
-        normalized.split(delimiter, 1)[1] for delimiter in (":", "/") if delimiter in normalized
+        normalized.split(delimiter, 1)[1]
+        for delimiter in (":", "/", ".")
+        if delimiter in normalized
     )
     namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
     candidates.extend(namespace_parts)

@@ -339,13 +339,6 @@ class _AdmissionState(NamedTuple):
     reason: str
 
 
-# Keep a weak reference plus immutable state so a forged object's id cannot be
-# recycled into a previously published authorization, without leaking every
-# admission ever produced.  The mapping is intentionally private; callers
-# receive only the immutable projection below, never the state registry.
-_TRUSTED_ADMISSIONS: dict[int, tuple[weakref.ReferenceType[RouteAdmission], _AdmissionState]] = {}
-
-
 def _candidate_fingerprint(candidate: RouteCandidate | None) -> tuple[object, ...] | None:
     if candidate is None:
         return None
@@ -369,13 +362,11 @@ def _rejection_fingerprint(rejection: RouteRejection) -> tuple[object, ...]:
 
 
 class RouteAdmission:
-    """Deterministic Kernel result; only ``selected`` may enter dispatch.
+    """Deterministic Kernel result; effect boundaries must revalidate it.
 
-    This is intentionally not a dataclass.  Admission is an authority-bearing
-    value, so allowing ordinary reconstruction to copy its provenance would
-    let callers alter the selected route while retaining Kernel authority. The
-    public constructor never publishes a valid value; ``admit_route`` validates
-    and seals results through its private publication path.
+    This is intentionally not a dataclass.  Ordinary mutation and protocol
+    reconstruction are blocked, while :func:`validate_admission` ties the value
+    to the live registry and exact requirements before dispatch.
     """
 
     __slots__ = ("_sealed_state", "__weakref__")
@@ -397,20 +388,16 @@ class RouteAdmission:
     def _trusted_state(instance: RouteAdmission) -> _AdmissionState:
         """Return state only for an object published by the current Kernel.
 
-        ``object.__new__`` and ``object.__setattr__`` intentionally bypass a
-        Python class' normal guards.  Every public projection therefore checks
-        both the private publication registry and the immutable state identity.
-        A caller can manufacture an object-shaped value, but it cannot make that
-        value an authorization without going through ``admit_route``.
+        This value is a deterministic result, not a self-authenticating
+        capability.  The effect boundary must call :func:`validate_admission`
+        against the live registry and requirements before dispatch.  The
+        fingerprints still detect ordinary post-publication mutation.
         """
 
         try:
             state = object.__getattribute__(instance, "_sealed_state")
         except AttributeError as exc:
             raise TypeError("unpublished route admission") from exc
-        entry = _TRUSTED_ADMISSIONS.get(id(instance))
-        if entry is None or entry[0]() is not instance or entry[1] is not state:
-            raise TypeError("unpublished route admission")
         if not isinstance(state, _AdmissionState):
             raise TypeError("invalid route admission state")
         if state.selected is not None and _candidate_fingerprint(state.selected) != (
@@ -500,13 +487,13 @@ class RouteAdmission:
         raise AttributeError("RouteAdmission is immutable")
 
     def __copy__(self) -> RouteAdmission:
-        """Return this immutable authorization rather than reconstructing it."""
+        """Return this immutable result rather than reconstructing it."""
 
         self._trusted_state(self)
         return self
 
     def __deepcopy__(self, memo: dict[int, object]) -> RouteAdmission:
-        """Return this immutable authorization rather than copying its fields."""
+        """Return this immutable result rather than copying its fields."""
 
         self._trusted_state(self)
         memo[id(self)] = self
@@ -615,7 +602,6 @@ def admit_route(
             reason=reason,
         )
         object.__setattr__(instance, "_sealed_state", state)
-        _TRUSTED_ADMISSIONS[id(instance)] = (weakref.ref(instance), state)
         return instance
 
     required_capabilities = set(requirements.required_capabilities)
@@ -693,10 +679,10 @@ def admit_route(
 
 
 def _build_admission_kernel() -> tuple[type[object], object]:
-    """Build the public type and kernel with closure-private publication state.
+    """Build the public type and kernel with bounded publication bookkeeping.
 
-    Keeping this registry in the factory closure is part of the authorization
-    contract: it must not become a module-level minting surface.
+    The bookkeeping protects ordinary object projections and is not itself an
+    authorization boundary; effect callers revalidate against the live registry.
     """
 
     class AdmissionState(NamedTuple):
@@ -731,7 +717,7 @@ def _build_admission_kernel() -> tuple[type[object], object]:
         return (rejection.route_id, tuple(reason.value for reason in rejection.reasons))
 
     class KernelRouteAdmission:
-        """Immutable result whose publication authority lives in this closure."""
+        """Immutable result whose publication is checked by the Kernel."""
 
         __slots__ = ("_sealed_state", "__weakref__")
 
@@ -1024,6 +1010,13 @@ def _build_admission_kernel() -> tuple[type[object], object]:
 _kernel_route_admission, _kernel_admit_route = _build_admission_kernel()
 globals()["RouteAdmission"] = _kernel_route_admission
 globals()["admit_route"] = _kernel_admit_route
+# The kernel class is intentionally created once, but its local class name is
+# not part of the module namespace.  Publish a resolvable runtime annotation so
+# reflection and static tooling see the same public contract.
+_kernel_route_admission.__name__ = "RouteAdmission"
+_kernel_route_admission.__qualname__ = "RouteAdmission"
+_kernel_route_admission.__module__ = __name__
+_kernel_admit_route.__annotations__["return"] = RouteAdmission
 for _private_name in (
     "_AdmissionState",
     "_TRUSTED_ADMISSIONS",
@@ -1032,6 +1025,34 @@ for _private_name in (
 ):
     globals().pop(_private_name, None)
 del _build_admission_kernel, _kernel_route_admission, _kernel_admit_route, _private_name
+
+
+def validate_admission(
+    registry: RouteRegistry,
+    requirements: RouteRequirements,
+    admission: RouteAdmission,
+    *,
+    advisor_order: Sequence[str] = (),
+) -> bool:
+    """Validate an admission at the effect boundary.
+
+    ``RouteAdmission`` is an immutable result value, not a self-authenticating
+    capability.  Python object/closure introspection can manufacture an
+    object-shaped value, so a dispatcher must recompute the Kernel result from
+    the live registry and exact requirements before applying side effects.
+    """
+
+    if not isinstance(registry, RouteRegistry):
+        return False
+    if not isinstance(requirements, RouteRequirements):
+        return False
+    if not isinstance(admission, RouteAdmission):
+        return False
+    try:
+        expected = admit_route(registry, requirements, advisor_order=advisor_order)
+        return admission.to_contract_data() == expected.to_contract_data()
+    except Exception:
+        return False
 
 
 def _advisor_rank(
@@ -1059,7 +1080,10 @@ def _advisor_rank(
             return {}
         if not isinstance(value, str):
             return {}
-        route_id = value.strip()
+        try:
+            route_id = value.strip()
+        except Exception:
+            return {}
         if not _SAFE_ROUTE_ID.fullmatch(route_id):
             return {}
         if route_id in known and route_id not in ranks:
@@ -1154,4 +1178,5 @@ __all__ = [
     "RouteRejectionCode",
     "RouteRequirements",
     "admit_route",
+    "validate_admission",
 ]

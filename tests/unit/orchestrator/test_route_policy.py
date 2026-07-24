@@ -24,6 +24,7 @@ from ouroboros.orchestrator.route_policy import (
     RouteRejectionCode,
     RouteRequirements,
     admit_route,
+    validate_admission,
 )
 
 
@@ -483,6 +484,36 @@ def test_object_protocol_cannot_forge_or_rewrite_admission_state() -> None:
         "_rejection_fingerprint",
     ):
         assert not hasattr(route_policy, private_name)
+
+
+def test_effect_boundary_revalidates_admission_against_live_registry() -> None:
+    original = _route("original", cost=1)
+    registry = _registry(original)
+    requirements = RouteRequirements()
+    decision = admit_route(registry, requirements)
+
+    assert validate_admission(registry, requirements, decision) is True
+
+    forged = object.__new__(RouteAdmission)
+    object.__setattr__(forged, "_sealed_state", object.__getattribute__(decision, "_sealed_state"))
+    assert validate_admission(registry, requirements, forged) is False
+
+
+def test_advisor_string_normalization_failure_falls_back_to_kernel_order() -> None:
+    class ExplodingString(str):
+        def strip(self) -> str:
+            raise RuntimeError("malformed advisor token")
+
+    registry = _registry(_route("cheap", cost=1), _route("expensive", cost=2))
+    decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=(ExplodingString("expensive"),),
+    )
+
+    assert decision.admitted is True
+    assert decision.selected is not None
+    assert decision.selected.route_id == "cheap"
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:
