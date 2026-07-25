@@ -217,6 +217,27 @@ def test_resume_restores_persisted_custom_frontier_router() -> None:
     assert resumed._model_router == _frontier_custom_router()
 
 
+@pytest.mark.parametrize(
+    ("persisted_effort", "current_effort"),
+    [("low", "high"), ("high", None), (None, "low")],
+)
+def test_resume_rejects_base_reasoning_effort_transition(
+    persisted_effort: str | None,
+    current_effort: str | None,
+) -> None:
+    original = _runner()
+    original._reasoning_effort = persisted_effort
+    persisted = original._build_execution_contract()
+    route_compat = persisted["model_routing"]["route_compat"]
+    assert route_compat["projection"]["effort"] == persisted_effort
+
+    resumed = _runner()
+    resumed._reasoning_effort = current_effort
+
+    with pytest.raises(OrchestratorError, match="changed route compatibility catalog"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_resume_restores_persisted_kill_switch() -> None:
     original = _runner()
     original._model_router = None

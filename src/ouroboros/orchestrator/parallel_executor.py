@@ -6424,6 +6424,28 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(dispatch_id_to_seal)
 
+        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
+            """Close durable recovery state when live admission becomes stale."""
+
+            nonlocal clear_cached_runtime_handle
+            clear_cached_runtime_handle = True
+            await _seal_dispatch(
+                dispatch_id_to_terminalize,
+                reason="live route authority changed before provider entry",
+            )
+            await self._emit_ac_runtime_event(
+                event_type="execution.session.failed",
+                runtime_identity=runtime_identity,
+                ac_content=ac_content,
+                runtime_handle=dispatch_state.runtime_handle,
+                execution_id=execution_context_id,
+                session_id=dispatch_state.ac_session_id,
+                orchestrator_session_id=session_id,
+                success=False,
+                error="route admission blocked: live route state changed before provider entry",
+            )
+            return _route_drift_blocked_result()
+
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -6450,7 +6472,7 @@ Respond with either ATOMIC or the structured JSON object only.
 
             provider_kwargs = _live_provider_kwargs()
             if provider_kwargs is None:
-                return _route_drift_blocked_result()
+                return await _terminalize_route_drift(active_dispatch_id)
             _invoke_execution_authority_guard(self)
             await self._authority_leaf_dispatcher_stream(
                 self._authority_leaf_dispatcher,
@@ -6649,7 +6671,20 @@ Respond with either ATOMIC or the structured JSON object only.
                     try:
                         provider_kwargs = _live_provider_kwargs()
                         if provider_kwargs is None:
-                            return _route_drift_blocked_result()
+                            await self._event_store.append(
+                                create_session_signal_rejected_event(
+                                    queued_signal.signal,
+                                    rejection_code="route_admission_stale",
+                                    detail=(
+                                        "The live route authority changed before the runtime "
+                                        "follow-up provider boundary."
+                                    ),
+                                    effective_mode=queued_signal.effective_mode,
+                                    runtime_backend=signal_target.runtime_backend,
+                                    orchestrator_session_id=session_id,
+                                )
+                            )
+                            return await _terminalize_route_drift(follow_up_dispatch_id)
                         _invoke_execution_authority_guard(self)
                         await self._authority_leaf_dispatcher_stream(
                             self._authority_leaf_dispatcher,

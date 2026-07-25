@@ -406,10 +406,12 @@ class TestModelRoutedEvent:
     async def test_dispatch_revalidates_after_telemetry_await(self) -> None:
         """Route drift during the final durable event cannot reach the provider."""
         store = AsyncMock()
+        events = []
         runtime = _EnforcedModelRuntime()
         router = _claude_router()
 
         async def _append(event):
+            events.append(event)
             if getattr(event, "type", None) == "execution.ac.attempt.dispatched":
                 router.tier_models["standard"] = "unconfigured-attacker-model"  # type: ignore[index]
 
@@ -429,6 +431,9 @@ class TestModelRoutedEvent:
         assert result.error is not None
         assert "live route state changed" in result.error
         assert runtime.received_model == "UNSET"
+        assert "execution.ac.dispatch.sealed" in {event.type for event in events}
+        assert "execution.session.failed" in {event.type for event in events}
+        assert executor._ac_runtime_handles == {}
 
     @pytest.mark.asyncio
     async def test_dispatch_recomputes_live_model_policy(self) -> None:

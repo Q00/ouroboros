@@ -3692,7 +3692,7 @@ class OrchestratorRunner:
             self._route_economics,
             model_router=self._model_router,
             runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            effort=None,
+            effort=self._reasoning_effort,
         )
         routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
         routing_contract["constructor_model"] = self._constructor_model_contract()
@@ -4244,6 +4244,7 @@ class OrchestratorRunner:
                 self._route_economics,
                 model_router=restored_router,
                 runtime_backend=persisted_runtime_backend,
+                current_effort=self._reasoning_effort,
             ):
                 raise OrchestratorError(
                     message="Cannot resume with a changed route compatibility catalog",
