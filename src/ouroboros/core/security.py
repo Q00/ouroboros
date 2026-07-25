@@ -92,6 +92,9 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
         "client_secret",
     )
 )
+_COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
+    {"apikey", "accesstoken", "clientsecret", "accesskey", "privatekey"}
+)
 _SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
 _CREDENTIAL_COMPOUND_PREFIX = re.compile(
@@ -116,6 +119,20 @@ def _is_credential_namespace_label(value: str) -> bool:
 
     label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
     label = label.lower().replace("-", "_")
+    compact_label = label.replace("_", "")
+    # Providers commonly omit separators in labels (``clientsecret``,
+    # ``accesstoken``, ``privatekey``).  Treat those aliases like their
+    # delimiter-bearing forms before any opaque payload can be serialized.
+    for compact_credential_label in _COMPACT_CREDENTIAL_NAMESPACE_LABELS:
+        if compact_label == compact_credential_label:
+            return True
+        if compact_label.startswith(f"{compact_credential_label}_"):
+            suffix = compact_label[len(compact_credential_label) + 1 :]
+            safe_suffixes = {
+                safe_suffix.replace("_", "")
+                for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+            }
+            return suffix not in safe_suffixes
     if label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
         ("_key", "_token", "_secret", "_credential")
     ):

@@ -147,7 +147,7 @@ class RouteCandidate:
 
         if not isinstance(value, Mapping):
             raise ValueError("route candidate must be an object")
-        expected = {
+        expected = frozenset({
             "route_id",
             "model",
             "harness",
@@ -159,9 +159,8 @@ class RouteCandidate:
             "capabilities",
             "enabled",
             "ordinal",
-        }
-        if set(value) != expected:
-            raise ValueError("route candidate has an unsupported shape")
+        })
+        _bounded_mapping_keys(value, expected=expected, field="route candidate")
         capabilities = value["capabilities"]
         if not isinstance(capabilities, Sequence) or isinstance(
             capabilities, str | bytes | bytearray
@@ -207,7 +206,7 @@ class RouteRegistry:
         )
         if not candidates:
             raise ValueError("route registry must contain at least one candidate")
-        if not all(isinstance(candidate, RouteCandidate) for candidate in candidates):
+        if not all(type(candidate) is RouteCandidate for candidate in candidates):
             raise ValueError("route registry candidates must be RouteCandidate values")
         route_ids = [candidate.route_id for candidate in candidates]
         if len(route_ids) != len(set(route_ids)):
@@ -224,11 +223,12 @@ class RouteRegistry:
     def from_contract_data(cls, value: object) -> RouteRegistry:
         if not isinstance(value, Mapping):
             raise ValueError("route registry must be an object")
-        if set(value) != {"version", "candidates"}:
-            raise ValueError("route registry has an unsupported shape")
-        if value.get("version") != ROUTE_CONTRACT_VERSION:
+        expected = frozenset({"version", "candidates"})
+        _bounded_mapping_keys(value, expected=expected, field="route registry")
+        version = value["version"]
+        if type(version) is not int or version != ROUTE_CONTRACT_VERSION:
             raise ValueError("unsupported route registry version")
-        raw_candidates = value.get("candidates")
+        raw_candidates = value["candidates"]
         if not isinstance(raw_candidates, Sequence) or isinstance(
             raw_candidates, str | bytes | bytearray
         ):
@@ -242,7 +242,7 @@ class RouteRegistry:
                     max_count=MAX_ROUTE_CANDIDATES,
                 )
             ),
-            version=value["version"],  # type: ignore[arg-type]
+            version=version,  # type: ignore[arg-type]
         )
 
 
@@ -327,6 +327,58 @@ class RouteRejection:
         return {"route_id": self.route_id, "reasons": [reason.value for reason in self.reasons]}
 
 
+def _strict_candidate_fingerprint(candidate: object) -> tuple[object, ...] | None:
+    """Return a type-safe semantic fingerprint for effect-boundary checks."""
+
+    if candidate is None:
+        return None
+    if type(candidate) is not RouteCandidate:
+        raise TypeError("candidate must be an exact RouteCandidate")
+    values = (
+        candidate.route_id,
+        candidate.model,
+        candidate.harness,
+        candidate.effort,
+        candidate.cost_units,
+        candidate.persona,
+        candidate.tool_policy,
+        candidate.authority_identity,
+        candidate.capabilities,
+        candidate.enabled,
+        candidate.ordinal,
+    )
+    if any(
+        type(value) is not str
+        for value in values[:3]
+        + values[5:8]
+        + (() if values[3] is None else (values[3],))
+    ):
+        raise TypeError("candidate contains non-canonical string fields")
+    if type(values[4]) is not int or type(values[8]) is not tuple:
+        raise TypeError("candidate contains non-canonical scalar fields")
+    if not all(type(item) is str for item in values[8]):
+        raise TypeError("candidate capabilities are not canonical")
+    if type(values[9]) is not bool or type(values[10]) is not int:
+        raise TypeError("candidate contains non-canonical scalar fields")
+    return values
+
+
+def _strict_rejection_fingerprint(rejection: object) -> tuple[object, ...]:
+    if type(rejection) is not RouteRejection:
+        raise TypeError("rejection must be an exact RouteRejection")
+    if type(rejection.route_id) is not str or type(rejection.reasons) is not tuple:
+        raise TypeError("rejection contains non-canonical fields")
+    if not all(type(reason) is RouteRejectionCode for reason in rejection.reasons):
+        raise TypeError("rejection reasons are not canonical")
+    return (rejection.route_id, tuple(reason.value for reason in rejection.reasons))
+
+
+def _strict_route_id_tuple(value: object) -> tuple[str, ...]:
+    if type(value) is not tuple or not all(type(item) is str for item in value):
+        raise TypeError("route IDs are not canonical")
+    return value
+
+
 def _build_admission_kernel() -> tuple[type[object], object]:
     """Build the public type and kernel with bounded publication bookkeeping.
 
@@ -346,24 +398,10 @@ def _build_admission_kernel() -> tuple[type[object], object]:
     trusted: dict[int, tuple[weakref.ReferenceType[object], AdmissionState]] = {}
 
     def candidate_fingerprint(candidate: RouteCandidate | None) -> tuple[object, ...] | None:
-        if candidate is None:
-            return None
-        return (
-            candidate.route_id,
-            candidate.model,
-            candidate.harness,
-            candidate.effort,
-            candidate.cost_units,
-            candidate.persona,
-            candidate.tool_policy,
-            candidate.authority_identity,
-            tuple(candidate.capabilities),
-            candidate.enabled,
-            candidate.ordinal,
-        )
+        return _strict_candidate_fingerprint(candidate)
 
     def rejection_fingerprint(rejection: RouteRejection) -> tuple[object, ...]:
-        return (rejection.route_id, tuple(reason.value for reason in rejection.reasons))
+        return _strict_rejection_fingerprint(rejection)
 
     class KernelRouteAdmission:
         """Immutable result whose publication is checked by the Kernel."""
@@ -412,7 +450,7 @@ def _build_admission_kernel() -> tuple[type[object], object]:
         ) -> None:
             if not isinstance(disposition, RouteDecisionDisposition):
                 raise ValueError("disposition must be a RouteDecisionDisposition")
-            if selected is not None and not isinstance(selected, RouteCandidate):
+            if selected is not None and type(selected) is not RouteCandidate:
                 raise ValueError("selected route must be a RouteCandidate")
             if disposition is RouteDecisionDisposition.ADMITTED and selected is None:
                 raise ValueError("admitted route decision requires a selected candidate")
@@ -440,7 +478,7 @@ def _build_admission_kernel() -> tuple[type[object], object]:
                 raise ValueError("route rejections must be an ordered tuple")
             if len(rejections) > MAX_ROUTE_CANDIDATES:
                 raise ValueError("route rejections exceed their bound")
-            if not all(isinstance(rejection, RouteRejection) for rejection in rejections):
+            if not all(type(rejection) is RouteRejection for rejection in rejections):
                 raise ValueError("route rejections are invalid")
             rejection_ids = tuple(rejection.route_id for rejection in rejections)
             if len(set(rejection_ids)) != len(rejection_ids):
@@ -542,9 +580,9 @@ def _build_admission_kernel() -> tuple[type[object], object]:
         *,
         advisor_order: Sequence[str] = (),
     ) -> KernelRouteAdmission:
-        if not isinstance(registry, RouteRegistry):
+        if type(registry) is not RouteRegistry:
             raise TypeError("registry must be a RouteRegistry")
-        if not isinstance(requirements, RouteRequirements):
+        if type(requirements) is not RouteRequirements:
             raise TypeError("requirements must be RouteRequirements")
         advisor_rank = _advisor_rank(advisor_order, registry)
         eligible: list[RouteCandidate] = []
@@ -741,19 +779,25 @@ def validate_admission(
     function is the mandatory check at that boundary.
     """
 
-    if not isinstance(registry, RouteRegistry):
+    if type(registry) is not RouteRegistry:
         return False
-    if not isinstance(requirements, RouteRequirements):
+    if type(requirements) is not RouteRequirements:
         return False
-    if not isinstance(admission, RouteAdmission):
+    if type(admission) is not RouteAdmission:
         return False
     try:
         expected = admit_route(registry, requirements, advisor_order=advisor_order)
         return (
             admission.disposition is expected.disposition
-            and admission.selected == expected.selected
-            and admission.eligible_route_ids == expected.eligible_route_ids
-            and admission.rejections == expected.rejections
+            and _strict_candidate_fingerprint(admission.selected)
+            == _strict_candidate_fingerprint(expected.selected)
+            and _strict_route_id_tuple(admission.eligible_route_ids)
+            == _strict_route_id_tuple(expected.eligible_route_ids)
+            and tuple(
+                _strict_rejection_fingerprint(item) for item in admission.rejections
+            )
+            == tuple(_strict_rejection_fingerprint(item) for item in expected.rejections)
+            and type(admission.reason) is str
             and admission.reason == expected.reason
         )
     except Exception:
@@ -786,10 +830,14 @@ def _advisor_rank(
         if not isinstance(value, str):
             return {}
         try:
-            route_id = value.strip()
+            # Call the base ``str`` operations explicitly.  A hostile
+            # subclass may override ``strip`` or ``__hash__``; advisory input
+            # must degrade to the deterministic Kernel order rather than
+            # raising from membership/insertion.
+            route_id = str.strip(str.__str__(value))
         except Exception:
             return {}
-        if not isinstance(route_id, str):
+        if type(route_id) is not str:
             return {}
         if not _SAFE_ROUTE_ID.fullmatch(route_id):
             return {}
@@ -801,7 +849,15 @@ def _advisor_rank(
 def _bounded_token(value: object, *, field: str, pattern: re.Pattern[str]) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
-    normalized = value.strip()
+    try:
+        # Never retain a caller-controlled ``str`` subclass.  Equality,
+        # hashing, and ordering of route semantics must be plain built-ins at
+        # the live effect boundary.
+        normalized = str.strip(str.__str__(value))
+    except Exception as exc:
+        raise ValueError(f"{field} has an invalid shape") from exc
+    if type(normalized) is not str:
+        raise ValueError(f"{field} has an invalid shape")
     if (
         not normalized
         or len(normalized) > MAX_ROUTE_FIELD_CHARS
@@ -870,6 +926,36 @@ def _bounded_iterable(
         if index >= max_count:
             raise ValueError(f"{field} exceeds its bound")
         yield value
+
+
+def _bounded_mapping_keys(
+    value: Mapping[object, object],
+    *,
+    expected: frozenset[str],
+    field: str,
+) -> tuple[str, ...]:
+    """Validate mapping shape without materializing an untrusted key stream."""
+
+    try:
+        iterator = iter(value)
+    except Exception as exc:
+        raise ValueError(f"{field} could not be iterated") from exc
+    keys: list[str] = []
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            if len(keys) != len(expected):
+                raise ValueError(f"{field} has an unsupported shape")
+            return tuple(keys)
+        except Exception as exc:
+            raise ValueError(f"{field} could not be iterated") from exc
+        if index >= len(expected):
+            raise ValueError(f"{field} has an unsupported shape (too many keys)")
+        if type(key) is not str or key not in expected or key in keys:
+            raise ValueError(f"{field} has an unsupported shape")
+        keys.append(key)
+    raise ValueError(f"{field} has an unsupported shape (too many keys)")
 
 
 __all__ = [

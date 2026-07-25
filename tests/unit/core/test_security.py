@@ -170,6 +170,10 @@ class TestSensitiveDetection:
             "runtime:access_token-abc123",
             "runtime:api_key-abc123",
             "runtime:client_secret-abc123",
+            "runtime:clientsecret:opaquevalue",
+            "runtime:accesstoken:opaquevalue",
+            "runtime:accesskey:opaquevalue",
+            "runtime:privatekey:opaquevalue",
         ):
             assert is_stable_authority_identity(value) is False
 

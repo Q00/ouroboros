@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import replace
 import json
@@ -354,6 +354,50 @@ def test_contract_parser_bounds_lying_and_infinite_sequences_before_nested_parsi
     assert consumed_capabilities == MAX_ROUTE_CAPABILITIES + 1
 
 
+def test_contract_parser_bounds_mapping_keys_before_nested_value_access() -> None:
+    route_data = _route("candidate", cost=1).to_contract_data()
+    route_keys = tuple(route_data)
+
+    class InfiniteMapping(Mapping[str, object]):
+        def __iter__(self):
+            yield from route_keys
+            index = 0
+            while True:
+                yield f"unexpected-{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> object:
+            return route_data[key]
+
+    with pytest.raises(ValueError, match="keys|shape"):
+        RouteCandidate.from_contract_data(InfiniteMapping())
+
+    class InfiniteRegistryMapping(Mapping[str, object]):
+        def __iter__(self):
+            yield "version"
+            yield "candidates"
+            index = 0
+            while True:
+                yield f"unexpected-{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            if key == "version":
+                return 1
+            if key == "candidates":
+                return []
+            return None
+
+    with pytest.raises(ValueError, match="keys|shape"):
+        RouteRegistry.from_contract_data(InfiniteRegistryMapping())
+
+
 def test_unordered_collections_are_rejected_at_the_contract_boundary() -> None:
     with pytest.raises(ValueError, match="ordered"):
         RouteCandidate(
@@ -513,6 +557,26 @@ def test_effect_boundary_rejects_same_id_route_semantic_drift() -> None:
     assert validate_admission(_registry(changed), requirements, stale_admission) is False
 
 
+def test_effect_boundary_uses_plain_scalar_semantics_not_overloaded_equality() -> None:
+    class AlwaysEqual(str):
+        def strip(self) -> str:
+            return self
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return str.__hash__(self)
+
+    original = _route("same-id", cost=1, model=AlwaysEqual("old-model"))
+    changed = _route("same-id", cost=1, model="new-model")
+    requirements = RouteRequirements()
+    stale_admission = admit_route(_registry(original), requirements)
+
+    assert type(original.model) is str
+    assert validate_admission(_registry(changed), requirements, stale_admission) is False
+
+
 def test_effect_boundary_rejects_closure_registered_outside_route() -> None:
     original = _route("original", cost=1)
     outside = _route("outside-registry", cost=1)
@@ -568,6 +632,25 @@ def test_advisor_string_normalization_failure_falls_back_to_kernel_order() -> No
         assert decision.admitted is True
         assert decision.selected is not None
         assert decision.selected.route_id == "cheap"
+
+
+def test_advisor_hash_failure_falls_back_to_kernel_order() -> None:
+    class HashExplodes(str):
+        def strip(self) -> str:
+            return self
+
+        def __hash__(self) -> int:
+            raise RuntimeError("malformed advisor token")
+
+    registry = _registry(_route("cheap", cost=1), _route("expensive", cost=2))
+    decision = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=(HashExplodes("expensive"),),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.route_id == "cheap"
 
 
 def test_exported_admission_reflection_has_one_coherent_runtime_contract() -> None:

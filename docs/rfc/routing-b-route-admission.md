@@ -109,9 +109,8 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 
 1. Wire this contract into the existing live model/harness routing path while
    preserving current behavior behind the explicit compatibility adapter in
-   [`routing-c-route-compat.md`](./routing-c-route-compat.md).
-2. Add bounded observations and escalation in
-   [`routing-d-bounded-escalation.md`](./routing-d-bounded-escalation.md).
-   Escalation may choose the next configured route only after a classified
-   failure and a finite budget.
+   the next stacked routing layer.
+2. Add bounded observations and escalation in the subsequent stacked routing
+   layer. Escalation may choose the next configured route only after a
+   classified failure and a finite budget.
 3. Emit the route fingerprint into the frugality proof and shared projection.
