@@ -1246,8 +1246,7 @@ class TestCodexCompletionReviewRoundOne:
 
         assert None not in ids(first) and None not in ids(second)
         assert len(first) == 2 and len(second) == 2
-        # A start and its result share one id within an invocation...
-        assert ids(first) == ids(second) if False else True
+        # A start and its result share one id within an invocation.
         assert len(ids(first)) == 1 and len(ids(second)) == 1
         # ...but the two invocations must be distinct so exact correlation
         # never sees two starts sharing one id.
@@ -1342,6 +1341,53 @@ class TestCodexCompletionReviewRoundOne:
         assert (tool_result.get("meta") or {}).get("trace_id") == "t-123", (
             "result _meta was dropped"
         )
+
+    def test_mcp_iserror_wire_field_fails_closed(self) -> None:
+        """The canonical MCP result.isError flag must win over a completed status."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "iserr",
+                    "type": "mcp_tool_call",
+                    "name": "fs.write",
+                    "status": "completed",
+                    "result": {"isError": True, "content": [{"type": "text", "text": "nope"}]},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_mcp_camelcase_structured_content_survives_projection(self) -> None:
+        """The canonical structuredContent wire field must be preserved."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "sc",
+                    "type": "mcp_tool_call",
+                    "name": "calc.add",
+                    "status": "completed",
+                    "result": {"content": [], "structuredContent": {"answer": 99}},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        projected = project_runtime_message(results[0])
+        blocks = (projected.tool_result or {}).get("content") or []
+        structured = next((b for b in blocks if b.get("type") == "structured"), {})
+        assert "99" in json.dumps(structured), "canonical structuredContent was discarded"
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""

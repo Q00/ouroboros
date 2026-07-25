@@ -1990,6 +1990,8 @@ class CodexCliRuntime:
                     block["uri"] = raw["uri"]
                 blocks.append(block)
         structured = result.get("structured_content")
+        if structured is None:
+            structured = result.get("structuredContent")
         if isinstance(structured, (dict, list)) and structured:
             # No structured payload field survives the flat projection, so ride
             # the JSON in ``data`` (which the projection preserves) under a
@@ -2025,6 +2027,8 @@ class CodexCliRuntime:
                 if joined:
                     return joined
             structured = result.get("structured_content")
+            if structured is None:
+                structured = result.get("structuredContent")
             if isinstance(structured, str) and structured.strip():
                 return structured.strip()
             if isinstance(structured, (dict, list)) and structured:
@@ -2193,6 +2197,14 @@ class CodexCliRuntime:
                         has_success = True
                     else:
                         has_failure = True
+
+            for error_flag_key in ("isError", "is_error"):
+                if error_flag_key in source:
+                    error_flag = source.get(error_flag_key)
+                    if error_flag is True:
+                        has_failure = True
+                    elif error_flag is False:
+                        has_success = True
 
             status = source.get("status")
             if isinstance(status, str):
