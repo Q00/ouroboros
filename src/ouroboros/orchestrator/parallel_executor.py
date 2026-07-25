@@ -6253,6 +6253,8 @@ Respond with either ATOMIC or the structured JSON object only.
             execute_model_kwargs = admitted_execute_model_kwargs(
                 route_admission,
                 model_decision=model_decision,
+                projection=projection,
+                effort=effort_decision.level,
             )
         # Merge the model override into the effort kwargs. The merged dict flows
         # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher

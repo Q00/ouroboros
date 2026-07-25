@@ -18,9 +18,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
+import re
 from typing import TYPE_CHECKING
 
 from ouroboros.config._model_defaults import normalize_tier_model
+from ouroboros.core.security import is_stable_authority_identity
 from ouroboros.orchestrator.model_routing import (
     _BACKEND_PROVIDER,
     MODEL_TIER_LADDER,
@@ -35,6 +37,7 @@ from ouroboros.orchestrator.route_policy import (
     RouteRegistry,
     RouteRequirements,
     admit_route,
+    validate_admission,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +53,21 @@ INVALID_CAPABILITY = "compat:invalid-capability"
 # Keep the persisted retry control finite while allowing ordinary user config
 # values well beyond the shipped defaults.
 MAX_ROUTE_ESCALATION_THRESHOLD = 1_000_000_000
+MAX_ROUTE_MODELS_PER_TIER = MAX_ROUTE_CANDIDATES
+_SAFE_COMPAT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}$")
+
+
+def _canonical_compat_token(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    normalized = value.strip()
+    if (
+        not isinstance(normalized, str)
+        or not normalized
+        or not _SAFE_COMPAT_TOKEN.fullmatch(normalized)
+    ):
+        raise ValueError(f"{field} has an invalid shape")
+    return normalized
 
 
 def _bounded_tuple(values: Iterable[object], *, max_count: int) -> tuple[object, ...]:
@@ -97,6 +115,71 @@ class RouteCompatProjection:
     base_tier: str
     escalation_retry_threshold: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.registry, RouteRegistry):
+            raise ValueError("compatibility projection registry is invalid")
+        runtime_backend = _canonical_compat_token(
+            self.runtime_backend,
+            field="runtime_backend",
+        )
+        if runtime_backend not in _BACKEND_PROVIDER:
+            raise ValueError("runtime_backend is not supported by compatibility routing")
+        effort = (
+            None if self.effort is None else _canonical_compat_token(self.effort, field="effort")
+        )
+        persona = _canonical_compat_token(self.persona, field="persona")
+        tool_policy = _canonical_compat_token(self.tool_policy, field="tool_policy")
+        authority_identity = _canonical_compat_token(
+            self.authority_identity,
+            field="authority_identity",
+        )
+        if not is_stable_authority_identity(authority_identity):
+            raise ValueError("authority_identity must be a stable authority descriptor")
+        if self.child_tier not in MODEL_TIER_LADDER:
+            raise ValueError("child_tier is invalid")
+        if self.base_tier not in MODEL_TIER_LADDER:
+            raise ValueError("base_tier is invalid")
+        if (
+            isinstance(self.escalation_retry_threshold, bool)
+            or not isinstance(self.escalation_retry_threshold, int)
+            or not 1 <= self.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
+        ):
+            raise ValueError("escalation_retry_threshold is invalid")
+        if not isinstance(self.tier_route_ids, tuple):
+            raise ValueError("tier_route_ids must be an ordered tuple")
+        if not self.tier_route_ids or len(self.tier_route_ids) > MAX_ROUTE_CANDIDATES:
+            raise ValueError("tier_route_ids exceed their bound")
+        expected_route_ids = tuple(candidate.route_id for candidate in self.registry.candidates)
+        seen_tiers: set[str] = set()
+        for item in self.tier_route_ids:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError("tier_route_ids entries are invalid")
+            tier, route_id = item
+            if (
+                not isinstance(tier, str)
+                or tier not in MODEL_TIER_LADDER
+                or tier in seen_tiers
+                or not isinstance(route_id, str)
+            ):
+                raise ValueError("tier_route_ids entries are invalid")
+            seen_tiers.add(tier)
+        if tuple(route_id for _, route_id in self.tier_route_ids) != expected_route_ids:
+            raise ValueError("tier_route_ids do not match the registry")
+        for candidate in self.registry.candidates:
+            if (
+                candidate.harness != runtime_backend
+                or candidate.effort != effort
+                or candidate.persona != persona
+                or candidate.tool_policy != tool_policy
+                or candidate.authority_identity != authority_identity
+            ):
+                raise ValueError("projection metadata does not match its registry")
+        object.__setattr__(self, "runtime_backend", runtime_backend)
+        object.__setattr__(self, "effort", effort)
+        object.__setattr__(self, "persona", persona)
+        object.__setattr__(self, "tool_policy", tool_policy)
+        object.__setattr__(self, "authority_identity", authority_identity)
+
     def route_id_for_tier(self, tier: str | None) -> str | None:
         """Return the snapshotted route id for ``tier`` if it exists."""
 
@@ -139,7 +222,7 @@ def _configured_models(
     economics: EconomicsConfig,
     *,
     runtime_backend: str,
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """Resolve the immutable config catalog for a runtime backend."""
 
     provider = _BACKEND_PROVIDER.get(runtime_backend)
@@ -150,7 +233,9 @@ def _configured_models(
         tier_config = economics.tiers.get(tier)
         if tier_config is None:
             continue
-        for model_config in tier_config.models:
+        for index, model_config in enumerate(tier_config.models):
+            if index >= MAX_ROUTE_MODELS_PER_TIER:
+                return None
             if model_config.provider == provider:
                 configured[tier] = normalize_tier_model(
                     model_config.model,
@@ -216,6 +301,8 @@ def build_route_compat_projection(
     if model_router.runtime_backend != runtime_backend:
         return None
     configured = _configured_models(economics, runtime_backend=runtime_backend)
+    if configured is None:
+        return None
     routed = _snapshot_router_models(model_router)
     if routed is None:
         return None
@@ -302,6 +389,8 @@ def admit_compat_route(
     merely retaining the same tier name.
     """
 
+    if not isinstance(model_decision, ModelDecision):
+        return _blocked_compat_admission(projection)
     if projection is None or model_decision.tier is None or model_decision.model is None:
         # ``UNRESOLVED_ROUTE_ID`` is syntactically valid but absent from every
         # projection; the Kernel consequently returns a deterministic blocked
@@ -310,7 +399,34 @@ def admit_compat_route(
             # No registry exists to evaluate.  Build a one-entry disabled
             # registry so callers still receive a genuine Kernel-produced
             # blocked decision rather than an exception or an implicit bypass.
-            fallback = RouteRegistry(
+            return _blocked_compat_admission(None)
+        requirements = RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID)
+        return admit_route(projection.registry, requirements)
+
+    try:
+        requirements = _compat_requirements(
+            projection,
+            model_decision=model_decision,
+            effort=effort,
+            required_capabilities=required_capabilities,
+        )
+        if requirements is None:
+            return _blocked_compat_admission(projection)
+        return admit_route(projection.registry, requirements)
+    except Exception:
+        # The compatibility bridge is an optional fail-closed layer.  A
+        # malformed runtime decision must never become an implicit provider
+        # dispatch or leak an input-validation exception to the executor.
+        return _blocked_compat_admission(projection)
+
+
+def _blocked_compat_admission(projection: RouteCompatProjection | None) -> RouteAdmission:
+    """Return a genuine Kernel-produced blocked decision for invalid input."""
+
+    try:
+        registry = projection.registry if isinstance(projection, RouteCompatProjection) else None
+        if registry is None:
+            registry = RouteRegistry(
                 candidates=(
                     RouteCandidate(
                         route_id=UNRESOLVED_ROUTE_ID,
@@ -325,14 +441,43 @@ def admit_compat_route(
                     ),
                 )
             )
-            return admit_route(
-                fallback,
-                RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID),
+        return admit_route(registry, RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID))
+    except Exception:
+        # This branch is defensive only; the fixed fallback above is a valid
+        # RouteRegistry.  Avoid raising from a compatibility guard if a caller
+        # supplies an object with hostile attribute access.
+        fallback = RouteRegistry(
+            candidates=(
+                RouteCandidate(
+                    route_id=UNRESOLVED_ROUTE_ID,
+                    model="unresolved",
+                    harness="unresolved",
+                    effort=None,
+                    cost_units=0,
+                    persona=DEFAULT_ROUTE_PERSONA,
+                    tool_policy=DEFAULT_ROUTE_TOOL_POLICY,
+                    authority_identity="runtime:unresolved",
+                    enabled=False,
+                ),
             )
-        requirements = RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID)
-        return admit_route(projection.registry, requirements)
+        )
+        return admit_route(fallback, RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID))
 
-    route_id = projection.route_id_for_tier(model_decision.tier)
+
+def _compat_requirements(
+    projection: RouteCompatProjection,
+    *,
+    model_decision: ModelDecision,
+    effort: str | None,
+    required_capabilities: Iterable[object],
+) -> RouteRequirements | None:
+    if not isinstance(projection, RouteCompatProjection):
+        return None
+    tier = model_decision.tier
+    model = model_decision.model
+    if not isinstance(tier, str) or not isinstance(model, str):
+        return None
+    route_id = projection.route_id_for_tier(tier)
     if route_id is None:
         route_id = UNRESOLVED_ROUTE_ID
     try:
@@ -356,20 +501,44 @@ def admit_compat_route(
         pinned_tool_policy=projection.tool_policy,
         pinned_authority_identity=projection.authority_identity,
     )
-    return admit_route(projection.registry, requirements)
+    return requirements
 
 
 def admitted_execute_model_kwargs(
     admission: RouteAdmission,
     *,
     model_decision: ModelDecision,
+    projection: RouteCompatProjection | None = None,
+    effort: str | None = None,
+    required_capabilities: Iterable[object] = (),
 ) -> dict[str, str]:
     """Return a model override only for an admitted, enforced decision."""
 
-    if admission.admitted and model_decision.is_enforced and model_decision.model is not None:
-        selected = admission.selected
-        if selected is not None and selected.model == model_decision.model:
-            return {"model": selected.model}
+    if not isinstance(model_decision, ModelDecision) or not model_decision.is_enforced:
+        return {}
+    if projection is not None:
+        try:
+            requirements = _compat_requirements(
+                projection,
+                model_decision=model_decision,
+                effort=effort,
+                required_capabilities=required_capabilities,
+            )
+            if requirements is None or not validate_admission(
+                projection.registry,
+                requirements,
+                admission,
+            ):
+                return {}
+        except Exception:
+            return {}
+    try:
+        if admission.admitted and model_decision.model is not None:
+            selected = admission.selected
+            if selected is not None and selected.model == model_decision.model:
+                return {"model": selected.model}
+    except Exception:
+        return {}
     return {}
 
 
