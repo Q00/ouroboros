@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence, Set, Sized
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 import weakref
 
 from ouroboros.core.security import is_stable_authority_identity
@@ -656,32 +656,72 @@ def _build_admission_kernel() -> tuple[type[object], object]:
     return KernelRouteAdmission, admit
 
 
-_kernel_route_admission, _kernel_admit_route = _build_admission_kernel()
-RouteAdmission = _kernel_route_admission
-admit_route = _kernel_admit_route
-# The kernel class is intentionally created once, but its local class name is
-# not part of the module namespace.  Publish a resolvable runtime annotation so
-# reflection and static tooling see the same public contract.
-_kernel_route_admission.__name__ = "RouteAdmission"
-_kernel_route_admission.__qualname__ = "RouteAdmission"
-_kernel_route_admission.__module__ = __name__
-_kernel_admit_route.__annotations__["return"] = RouteAdmission
-# The implementation class is built in a factory so its publication state is
-# not a module-level minting surface. Normalize all reflective method hints to
-# the exported type before the factory locals are discarded.
-RouteAdmission.__new__.__annotations__["return"] = RouteAdmission
-RouteAdmission._trusted_state.__annotations__["instance"] = RouteAdmission
-RouteAdmission._trusted_state.__annotations__["return"] = object
-RouteAdmission.__copy__.__annotations__["return"] = RouteAdmission
-RouteAdmission.__deepcopy__.__annotations__["return"] = RouteAdmission
-for _private_name in (
-    "_AdmissionState",
-    "_TRUSTED_ADMISSIONS",
-    "_candidate_fingerprint",
-    "_rejection_fingerprint",
-):
-    globals().pop(_private_name, None)
-del _build_admission_kernel, _kernel_route_admission, _kernel_admit_route, _private_name
+if TYPE_CHECKING:
+    class RouteAdmission:
+        """Public static contract for a Kernel-produced admission result.
+
+        The runtime implementation is intentionally constructed in a factory
+        so its publication bookkeeping is not a module-level minting surface.
+        Keeping this declaration in the type-checking branch gives external
+        consumers a real importable type without changing that runtime
+        boundary.
+        """
+
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        @property
+        def disposition(self) -> RouteDecisionDisposition: ...
+
+        @property
+        def selected(self) -> RouteCandidate | None: ...
+
+        @property
+        def eligible_route_ids(self) -> tuple[str, ...]: ...
+
+        @property
+        def rejections(self) -> tuple[RouteRejection, ...]: ...
+
+        @property
+        def reason(self) -> str: ...
+
+        @property
+        def admitted(self) -> bool: ...
+
+        def to_contract_data(self) -> dict[str, object]: ...
+
+    def admit_route(
+        registry: RouteRegistry,
+        requirements: RouteRequirements,
+        *,
+        advisor_order: Sequence[str] = (),
+    ) -> RouteAdmission: ...
+else:
+    _kernel_route_admission, _kernel_admit_route = _build_admission_kernel()
+    RouteAdmission = _kernel_route_admission
+    admit_route = _kernel_admit_route
+    # The kernel class is intentionally created once, but its local class name
+    # is not part of the module namespace.  Publish a resolvable runtime
+    # annotation so reflection sees the same public contract.
+    _kernel_route_admission.__name__ = "RouteAdmission"
+    _kernel_route_admission.__qualname__ = "RouteAdmission"
+    _kernel_route_admission.__module__ = __name__
+    _kernel_admit_route.__annotations__["return"] = RouteAdmission
+    # The implementation class is built in a factory so its publication state
+    # is not a module-level minting surface. Normalize all reflective method
+    # hints to the exported type before the factory locals are discarded.
+    RouteAdmission.__new__.__annotations__["return"] = RouteAdmission
+    RouteAdmission._trusted_state.__annotations__["instance"] = RouteAdmission
+    RouteAdmission._trusted_state.__annotations__["return"] = object
+    RouteAdmission.__copy__.__annotations__["return"] = RouteAdmission
+    RouteAdmission.__deepcopy__.__annotations__["return"] = RouteAdmission
+    for _private_name in (
+        "_AdmissionState",
+        "_TRUSTED_ADMISSIONS",
+        "_candidate_fingerprint",
+        "_rejection_fingerprint",
+    ):
+        globals().pop(_private_name, None)
+    del _build_admission_kernel, _kernel_route_admission, _kernel_admit_route, _private_name
 
 
 def validate_admission(
@@ -747,6 +787,8 @@ def _advisor_rank(
         try:
             route_id = value.strip()
         except Exception:
+            return {}
+        if not isinstance(route_id, str):
             return {}
         if not _SAFE_ROUTE_ID.fullmatch(route_id):
             return {}

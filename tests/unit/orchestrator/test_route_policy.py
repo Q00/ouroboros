@@ -548,16 +548,26 @@ def test_advisor_string_normalization_failure_falls_back_to_kernel_order() -> No
         def strip(self) -> str:
             raise RuntimeError("malformed advisor token")
 
+    class NonStringString(str):
+        def strip(self) -> object:
+            return object()
+
     registry = _registry(_route("cheap", cost=1), _route("expensive", cost=2))
-    decision = admit_route(
+    exploding = admit_route(
         registry,
         RouteRequirements(),
         advisor_order=(ExplodingString("expensive"),),
     )
+    non_string = admit_route(
+        registry,
+        RouteRequirements(),
+        advisor_order=(NonStringString("expensive"),),
+    )
 
-    assert decision.admitted is True
-    assert decision.selected is not None
-    assert decision.selected.route_id == "cheap"
+    for decision in (exploding, non_string):
+        assert decision.admitted is True
+        assert decision.selected is not None
+        assert decision.selected.route_id == "cheap"
 
 
 def test_exported_admission_reflection_has_one_coherent_runtime_contract() -> None:
