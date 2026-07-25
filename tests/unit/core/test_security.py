@@ -167,6 +167,9 @@ class TestSensitiveDetection:
             "runtime:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
             "runtime.hvs." + "A" * 24,
             "runtime.SG." + "A" * 22 + "." + "B" * 43,
+            "runtime:access_token-abc123",
+            "runtime:api_key-abc123",
+            "runtime:client_secret-abc123",
         ):
             assert is_stable_authority_identity(value) is False
 

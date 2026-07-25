@@ -666,6 +666,14 @@ _kernel_route_admission.__name__ = "RouteAdmission"
 _kernel_route_admission.__qualname__ = "RouteAdmission"
 _kernel_route_admission.__module__ = __name__
 _kernel_admit_route.__annotations__["return"] = RouteAdmission
+# The implementation class is built in a factory so its publication state is
+# not a module-level minting surface. Normalize all reflective method hints to
+# the exported type before the factory locals are discarded.
+RouteAdmission.__new__.__annotations__["return"] = RouteAdmission
+RouteAdmission._trusted_state.__annotations__["instance"] = RouteAdmission
+RouteAdmission._trusted_state.__annotations__["return"] = object
+RouteAdmission.__copy__.__annotations__["return"] = RouteAdmission
+RouteAdmission.__deepcopy__.__annotations__["return"] = RouteAdmission
 for _private_name in (
     "_AdmissionState",
     "_TRUSTED_ADMISSIONS",
@@ -700,7 +708,13 @@ def validate_admission(
         return False
     try:
         expected = admit_route(registry, requirements, advisor_order=advisor_order)
-        return admission.to_contract_data() == expected.to_contract_data()
+        return (
+            admission.disposition is expected.disposition
+            and admission.selected == expected.selected
+            and admission.eligible_route_ids == expected.eligible_route_ids
+            and admission.rejections == expected.rejections
+            and admission.reason == expected.reason
+        )
     except Exception:
         return False
 

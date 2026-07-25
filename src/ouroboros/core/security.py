@@ -92,6 +92,9 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
         "client_secret",
     )
 )
+_SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset(
+    {"budget", "default", "id", "name", "plane", "scope"}
+)
 
 _CREDENTIAL_COMPOUND_PREFIX = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
@@ -115,9 +118,16 @@ def _is_credential_namespace_label(value: str) -> bool:
 
     label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
     label = label.lower().replace("-", "_")
-    return label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
+    if label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
         ("_key", "_token", "_secret", "_credential")
-    )
+    ):
+        return True
+    for credential_label in _CREDENTIAL_NAMESPACE_LABELS:
+        prefix = f"{credential_label}_"
+        if label.startswith(prefix):
+            suffix = label[len(prefix) :]
+            return suffix not in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+    return False
 
 
 def is_credential_shaped(value: str) -> bool:
@@ -146,7 +156,7 @@ def is_credential_shaped(value: str) -> bool:
     )
     namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
     candidates.extend(namespace_parts)
-    if any(_is_credential_namespace_label(part) for part in namespace_parts[:-1]):
+    if any(_is_credential_namespace_label(part) for part in namespace_parts):
         return True
     for candidate in candidates:
         lowered = candidate.lower()

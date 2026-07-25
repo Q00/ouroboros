@@ -7,6 +7,7 @@ import copy
 from dataclasses import replace
 import json
 import pickle
+import typing
 import weakref
 
 import pytest
@@ -393,6 +394,9 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "passwd:opaquevalue",
         "glpat-opaque-provider-credential",
         "hf_opaque-provider-credential",
+        "runtime:access_token-abc123",
+        "runtime:api_key-abc123",
+        "runtime:client_secret-abc123",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         "SG." + "A" * 22 + "." + "B" * 43,
         "hvs." + "A" * 24,
@@ -500,6 +504,15 @@ def test_effect_boundary_revalidates_admission_against_live_registry() -> None:
     assert validate_admission(registry, requirements, forged) is False
 
 
+def test_effect_boundary_rejects_same_id_route_semantic_drift() -> None:
+    original = _route("same-id", cost=1, model="model-a")
+    changed = _route("same-id", cost=99, model="model-b", authority_identity="session-b")
+    requirements = RouteRequirements()
+    stale_admission = admit_route(_registry(original), requirements)
+
+    assert validate_admission(_registry(changed), requirements, stale_admission) is False
+
+
 def test_effect_boundary_rejects_closure_registered_outside_route() -> None:
     original = _route("original", cost=1)
     outside = _route("outside-registry", cost=1)
@@ -545,6 +558,12 @@ def test_advisor_string_normalization_failure_falls_back_to_kernel_order() -> No
     assert decision.admitted is True
     assert decision.selected is not None
     assert decision.selected.route_id == "cheap"
+
+
+def test_exported_admission_reflection_has_one_coherent_runtime_contract() -> None:
+    assert typing.get_type_hints(admit_route)["return"] is RouteAdmission
+    for method_name in ("__new__", "__copy__", "__deepcopy__", "_trusted_state"):
+        typing.get_type_hints(getattr(RouteAdmission, method_name))
 
 
 def test_streaming_capability_input_stops_at_the_bound() -> None:
