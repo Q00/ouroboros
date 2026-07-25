@@ -3,7 +3,8 @@
 import pytest
 
 from ouroboros.core.seed import AcceptanceCriterionSpec
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.adapter import AgentMessage, ClaudeAgentAdapter, RuntimeHandle
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
 from ouroboros.orchestrator.workflow_state import (
     AcceptanceCriterion,
@@ -13,6 +14,14 @@ from ouroboros.orchestrator.workflow_state import (
     WorkflowStateTracker,
     get_ac_tracking_prompt,
 )
+
+
+def _create_mock_sdk_message(class_name: str, **attrs: object) -> object:
+    """Create a Claude SDK-shaped object with the requested class name."""
+    message = type(class_name, (), {})()
+    for name, value in attrs.items():
+        setattr(message, name, value)
+    return message
 
 
 class TestACStatus:
@@ -196,6 +205,81 @@ class TestWorkflowStateTracker:
         assert state.tool_calls_count == 1
         assert state.last_tool == "Read"
         assert state.activity == ActivityType.EXPLORING
+
+    def test_codex_tool_start_and_result_count_as_one_call(
+        self, tracker: WorkflowStateTracker
+    ) -> None:
+        """A correlated Codex start/result pair should count one invocation."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        started = {
+            "type": "item.started",
+            "item": {
+                "id": "item_0",
+                "type": "command_execution",
+                "command": "pytest -q",
+            },
+        }
+        completed = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "aggregated_output": "1 passed in 0.01s",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+
+        messages = [
+            *runtime._convert_event(started, current_handle=None),
+            *runtime._convert_event(completed, current_handle=None),
+        ]
+        for message in messages:
+            tracker.process_runtime_message(message)
+
+        state = tracker.state
+        assert state.messages_count == 2
+        assert state.tool_calls_count == 1
+        assert state.last_tool == "Bash"
+        assert state.activity == ActivityType.TESTING
+        assert state.last_update["message_type"] == "tool_result"
+        assert state.last_update["tool_name"] == "Bash"
+
+    def test_claude_tool_start_and_result_count_as_one_call(
+        self, tracker: WorkflowStateTracker
+    ) -> None:
+        """A correlated Claude start/result pair should count one invocation."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        tool_use_block = _create_mock_sdk_message(
+            "ToolUseBlock",
+            name="Read",
+            id="toolu_read_1",
+            input={"file_path": "src/app.py"},
+        )
+        tool_result_block = _create_mock_sdk_message(
+            "ToolResultBlock",
+            tool_use_id="toolu_read_1",
+            tool_name="Read",
+            content="file contents",
+            is_error=False,
+        )
+        assistant_message = _create_mock_sdk_message("AssistantMessage", content=[tool_use_block])
+        user_message = _create_mock_sdk_message("UserMessage", content=[tool_result_block])
+
+        for message in (
+            adapter._convert_message(assistant_message),
+            adapter._convert_message(user_message),
+        ):
+            tracker.process_runtime_message(message)
+
+        state = tracker.state
+        assert state.messages_count == 2
+        assert state.tool_calls_count == 1
+        assert state.last_tool == "Read"
+        assert state.activity == ActivityType.EXPLORING
+        assert state.last_update["message_type"] == "tool_result"
+        assert state.last_update["tool_name"] == "Read"
 
     def test_parse_ac_start_marker(self, tracker: WorkflowStateTracker) -> None:
         """Test parsing AC_START marker."""

@@ -662,8 +662,8 @@ class WorkflowStateTracker:
 
         Args:
             content: Message content.
-            message_type: Type of message (assistant, tool, result).
-            tool_name: Name of tool if this is a tool call.
+            message_type: Type of message (assistant, tool, tool_result, result).
+            tool_name: Name of the tool associated with a call or result.
             is_input: Whether this is input (True) or output (False).
             message_data: Optional normalized runtime metadata for the message.
         """
@@ -678,9 +678,10 @@ class WorkflowStateTracker:
 
         self._update_cost_estimate()
 
-        # Update tool tracking
+        # Count invocations while retaining activity updates from named results.
         if tool_name:
-            self._state.tool_calls_count += 1
+            if message_type == "tool":
+                self._state.tool_calls_count += 1
             self._state.last_tool = tool_name
             self._update_activity_from_tool(tool_name, content)
 
