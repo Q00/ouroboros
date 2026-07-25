@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -48,10 +49,12 @@ from ouroboros.orchestrator.parallel_executor import (
     _complete_sibling_acs_from_evidence,
     _criterion_satisfied_by_evidence,
     _effective_evidence_schema_for_ac,
+    _matching_journal_entries,
     _message_contains_test_success,
     _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_command_claim,
     _runtime_messages_support_test_claim,
+    _standard_deliver_facts,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -63,6 +66,61 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
     """The default stall watchdog should not kill long quiet test commands too early."""
     assert STALL_TIMEOUT_SECONDS == 900.0
+
+
+def _journal_entry(*, handle: str, command: str) -> EvidenceEntry:
+    return EvidenceEntry(
+        handle=handle,
+        kind=EvidenceKind.COMMAND_EXECUTED,
+        ok=True,
+        started_at=datetime.now(UTC),
+        ended_at=datetime.now(UTC),
+        payload={"tool_name": "Bash", "command": command},
+        source_event_ids=(f"event-{handle}",),
+    )
+
+
+def test_deliver_matching_uses_verifier_command_aliases() -> None:
+    """A shell-wrapped command has the same backing evidence as its clean claim."""
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_wrapped",
+                command="/bin/zsh -lc 'pytest tests/test_app.py'",
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="pytest tests/test_app.py",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_wrapped",)
+
+
+def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:
+    """Multiple journal matches remain rejected and are not labelled missing."""
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(handle="ev_1", command="pytest tests/test_app.py"),
+            _journal_entry(handle="ev_2", command="pytest tests/test_app.py"),
+        ),
+    )
+
+    facts = _standard_deliver_facts(
+        EvidenceRecord(data={"commands_run": ["pytest tests/test_app.py"]}),
+        manifest,
+        task_cwd=None,
+        verifier_passed=True,
+    )
+
+    assert facts is not None
+    assert len(facts) == 1
+    assert facts[0].evidence_handle == "ambiguous:commands_run:0"
 
 
 class _RateGateStubAdapter:

@@ -1200,7 +1200,12 @@ def _standard_deliver_facts(
                 if eligible
                 else ()
             )
-            handle = matches[0].handle if len(matches) == 1 else f"missing:{field}:{index}"
+            if len(matches) == 1:
+                handle = matches[0].handle
+            elif len(matches) > 1:
+                handle = f"ambiguous:{field}:{index}"
+            else:
+                handle = f"missing:{field}:{index}"
             statement_value = _structured_literal(match_value)
             if statement_value is None:
                 handle = f"missing:{field}:{index}"
@@ -1260,7 +1265,18 @@ def _matching_journal_entries(
             observed = payload.get("command")
             if not isinstance(observed, str):
                 observed = payload.get("args_preview")
-        if isinstance(observed, str) and observed.strip() == value:
+        if not isinstance(observed, str):
+            continue
+        if field == "commands_run" or field == "tests_passed":
+            # The verifier already treats a concise claim and a runtime shell
+            # wrapper (and safe output plumbing) as the same exact command.
+            # Deliver evidence must use the same aliases or it will reject
+            # claims that the preceding verifier accepted.
+            if set(_normalized_command_claim_aliases(observed)).intersection(
+                _normalized_command_claim_aliases(value)
+            ):
+                matches.append(entry)
+        elif observed.strip() == value:
             matches.append(entry)
     return tuple(matches)
 
