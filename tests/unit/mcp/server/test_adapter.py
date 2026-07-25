@@ -1432,21 +1432,27 @@ class TestServeTransport:
                             type=ToolInputType.STRING,
                             required=True,
                         ),
+                        # `MCPToolParameter.required` defaults to True, so an
+                        # optional parameter must say so explicitly — `default=None`
+                        # alone does not make it optional.
                         MCPToolParameter(
                             name="optional_input",
                             type=ToolInputType.STRING,
+                            required=False,
                             default=None,
                             description="Optional input",
                         ),
                         MCPToolParameter(
                             name="optional_mode",
                             type=ToolInputType.STRING,
+                            required=False,
                             enum=("fast", "safe"),
                             default=None,
                         ),
                         MCPToolParameter(
                             name="scores",
                             type=ToolInputType.ARRAY,
+                            required=False,
                             items={"type": "number"},
                         ),
                     ),
