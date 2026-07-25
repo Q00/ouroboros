@@ -1417,7 +1417,14 @@ class TestServeTransport:
         assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
 
     @pytest.mark.asyncio
-    async def test_real_fastmcp_invocation_passes_none_for_omitted_optional_parameter(self) -> None:
+    async def test_real_fastmcp_invocation_omits_unset_optional_parameters(self) -> None:
+        """Omitted optionals must not reach the handler as explicit `None`.
+
+        #1538 classified forwarding an unset optional as `None` a bug — in-process
+        callers see a missing key while plugin-MCP callers saw `key present, value
+        None`, which crashed handlers doing `.get(k, [])`. #1726 normalized that at
+        the wrapper chokepoint, so the contract asserted here is omission, not None.
+        """
         fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
 
         class OptionalParameterHandler(MockToolHandler):
@@ -1480,11 +1487,12 @@ class TestServeTransport:
         handler.handle_mock.assert_awaited_once_with(
             {
                 "required_input": "provided",
-                "optional_input": None,
-                "optional_mode": None,
                 "scores": [1.5],
             }
         )
+        forwarded = handler.handle_mock.await_args.args[0]
+        assert "optional_input" not in forwarded
+        assert "optional_mode" not in forwarded
 
         with pytest.raises(Exception, match="Invalid value for optional_mode"):
             await adapter._mcp_server.call_tool(
