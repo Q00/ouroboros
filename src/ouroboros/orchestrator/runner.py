@@ -187,6 +187,29 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
+def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    """Inspect at most one key beyond a finite durable-contract schema."""
+
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    seen: set[str] = set()
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(seen) == len(expected)
+        except Exception:
+            return False
+        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
+            return False
+        seen.add(key)
+    return False
+
+
 # =============================================================================
 # Result Types
 # =============================================================================
@@ -1618,7 +1641,7 @@ class OrchestratorRunner:
             "final_acceptance_declared",
         }
         if (
-            set(pause_data) != expected_pause_keys
+            not _mapping_has_exact_keys(pause_data, frozenset(expected_pause_keys))
             or type(pause_data.get("schema_version")) is not int
             or pause_data.get("schema_version") != 1
             or pause_data.get("root_ac_index") is not None
@@ -1679,7 +1702,7 @@ class OrchestratorRunner:
                 continue
             superseded = superseded_pause.data
             if (
-                set(superseded) != expected_pause_keys
+                not _mapping_has_exact_keys(superseded, frozenset(expected_pause_keys))
                 or superseded.get("schema_version") != 1
                 or superseded.get("execution_id") != execution_id
                 or superseded.get("session_id") != session_id
@@ -4488,49 +4511,54 @@ class OrchestratorRunner:
             StagedExecutionPlan,
         )
 
-        if not isinstance(raw, Mapping) or set(raw) != {
-            "schema_version",
-            "nodes",
-            "stages",
-        }:
+        if not isinstance(raw, Mapping) or not _mapping_has_exact_keys(
+            raw, frozenset({"schema_version", "nodes", "stages"})
+        ):
             raise OrchestratorError(message="Invalid persisted parallel resume plan")
         nodes_raw = raw.get("nodes")
         stages_raw = raw.get("stages")
         ac_count = len(seed.acceptance_criteria)
         if (
             raw.get("schema_version") != 1
-            or not isinstance(nodes_raw, list)
+            or type(nodes_raw) is not list
             or len(nodes_raw) != ac_count
-            or not isinstance(stages_raw, list)
+            or type(stages_raw) is not list
             or len(stages_raw) > ac_count
             or (ac_count > 0 and not stages_raw)
         ):
             raise OrchestratorError(message="Invalid persisted parallel resume plan")
         nodes: list[ACNode] = []
         for expected_index, value in enumerate(nodes_raw):
-            if not isinstance(value, Mapping) or set(value) != {
-                "index",
-                "depends_on",
-                "can_run_independently",
-                "requires_serial_stage",
-                "serialization_reasons",
-            }:
+            if not isinstance(value, Mapping) or not _mapping_has_exact_keys(
+                value,
+                frozenset(
+                    {
+                        "index",
+                        "depends_on",
+                        "can_run_independently",
+                        "requires_serial_stage",
+                        "serialization_reasons",
+                    }
+                ),
+            ):
                 raise OrchestratorError(message="Invalid persisted parallel resume plan")
             depends_on = value.get("depends_on")
             reasons = value.get("serialization_reasons")
             if (
                 type(value.get("index")) is not int
                 or value.get("index") != expected_index
-                or not isinstance(depends_on, list)
+                or type(depends_on) is not list
                 or len(depends_on) > ac_count
                 or any(type(index) is not int for index in depends_on)
                 or len(set(depends_on)) != len(depends_on)
                 or any(not 0 <= index < ac_count or index == expected_index for index in depends_on)
                 or type(value.get("can_run_independently")) is not bool
                 or type(value.get("requires_serial_stage")) is not bool
-                or not isinstance(reasons, list)
+                or type(reasons) is not list
                 or len(reasons) > ac_count
-                or any(type(reason) is not str or not reason for reason in reasons)
+                or any(
+                    type(reason) is not str or not reason or len(reason) > 256 for reason in reasons
+                )
             ):
                 raise OrchestratorError(message="Invalid persisted parallel resume plan")
             nodes.append(
@@ -4547,24 +4575,23 @@ class OrchestratorRunner:
         seen_acs: set[int] = set()
         stage_by_ac: dict[int, int] = {}
         for expected_stage, value in enumerate(stages_raw):
-            if not isinstance(value, Mapping) or set(value) != {
-                "index",
-                "ac_indices",
-                "depends_on_stages",
-            }:
+            if not isinstance(value, Mapping) or not _mapping_has_exact_keys(
+                value,
+                frozenset({"index", "ac_indices", "depends_on_stages"}),
+            ):
                 raise OrchestratorError(message="Invalid persisted parallel resume plan")
             ac_indices = value.get("ac_indices")
             dependencies = value.get("depends_on_stages")
             if (
                 type(value.get("index")) is not int
                 or value.get("index") != expected_stage
-                or not isinstance(ac_indices, list)
+                or type(ac_indices) is not list
                 or not ac_indices
                 or len(ac_indices) > ac_count
                 or any(type(index) is not int or not 0 <= index < ac_count for index in ac_indices)
                 or len(set(ac_indices)) != len(ac_indices)
                 or seen_acs.intersection(ac_indices)
-                or not isinstance(dependencies, list)
+                or type(dependencies) is not list
                 or len(dependencies) > expected_stage
                 or any(
                     type(index) is not int or not 0 <= index < expected_stage
