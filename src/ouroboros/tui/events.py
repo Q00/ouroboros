@@ -793,6 +793,41 @@ def _subtask_root_ac_index(data: dict[str, Any]) -> int:
     return ac_index if ac_index is not None else legacy_ac_index or 0
 
 
+def _resolve_tool_completion_success(data: dict[str, Any]) -> bool:
+    """Resolve tool-completion success without laundering a reported failure.
+
+    No producer sets ``success`` on ``execution.tool.completed``:
+    ``ExecutionEventEmitter.emit_atomic_tool_completed`` builds its payload from
+    the runtime identity plus ``serialize_runtime_message_metadata`` output, and
+    neither contributes that key. A plain ``data.get("success", True)`` therefore
+    rendered every failed tool as succeeded — a Codex command exiting 1 arrives
+    carrying ``is_error=True`` and was still displayed as a success.
+
+    ``is_error`` is the authoritative verdict channel, and a malformed claim is
+    treated as failure rather than silently ignored, matching the fail-closed
+    contract the runtime adapters use.
+
+    A completion carrying no verdict at all stays optimistic: the serialized
+    metadata forwards neither ``tool_result`` nor ``reported_status``, so there
+    is no signal to fail closed on, and flipping every signal-less runtime to a
+    failed display would be a louder wrong answer than the one being fixed.
+    Widening the payload is a shared-projection change and is deliberately out
+    of scope here.
+    """
+    raw_success = data.get("success")
+    if isinstance(raw_success, bool):
+        return raw_success
+
+    if data.get("is_error_invalid") is True:
+        return False
+
+    is_error = data.get("is_error")
+    if isinstance(is_error, bool):
+        return not is_error
+
+    return True
+
+
 def create_message_from_event(event: BaseEvent) -> Message | None:
     """Convert an EventStore event to a TUI message.
 
@@ -997,7 +1032,7 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             tool_detail=data.get("tool_detail", ""),
             call_index=data.get("call_index", 0),
             duration_seconds=data.get("duration_seconds", 0.0),
-            success=data.get("success", True),
+            success=_resolve_tool_completion_success(data),
         )
 
     elif event_type == "execution.agent.thinking":

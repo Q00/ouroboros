@@ -960,3 +960,94 @@ class TestFrugalityTelemetryEvents:
         )
         assert "waste" not in line.lower()
         assert "avoidable" not in line.lower()
+
+
+class TestToolCompletionSuccessFailClosed:
+    """`execution.tool.completed` must not display a reported failure as success.
+
+    No producer sets `success` on this event: `emit_atomic_tool_completed` builds
+    its payload from the runtime identity plus `serialize_runtime_message_metadata`,
+    and neither contributes that key. The previous `data.get("success", True)`
+    therefore rendered every failed tool green.
+    """
+
+    @staticmethod
+    def _completed_event(**data: object) -> BaseEvent:
+        return BaseEvent(
+            type="execution.tool.completed",
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={"ac_id": "ac_1", "tool_name": "Bash", **data},
+        )
+
+    def test_reported_error_renders_as_failure(self) -> None:
+        message = create_message_from_event(self._completed_event(is_error=True))
+        assert message is not None
+        assert message.success is False
+
+    def test_reported_error_false_renders_as_success(self) -> None:
+        message = create_message_from_event(self._completed_event(is_error=False))
+        assert message is not None
+        assert message.success is True
+
+    def test_malformed_error_claim_fails_closed(self) -> None:
+        message = create_message_from_event(self._completed_event(is_error_invalid=True))
+        assert message is not None
+        assert message.success is False
+
+    def test_explicit_success_field_wins(self) -> None:
+        message = create_message_from_event(self._completed_event(success=False, is_error=False))
+        assert message is not None
+        assert message.success is False
+
+    def test_absent_verdict_stays_optimistic(self) -> None:
+        """No verdict channel is forwarded, so there is nothing to fail closed on."""
+        message = create_message_from_event(self._completed_event())
+        assert message is not None
+        assert message.success is True
+
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_success"),
+        [(0, True), (1, False)],
+    )
+    def test_real_codex_completion_reaches_the_display_verdict(
+        self, exit_code: int, expected_success: bool
+    ) -> None:
+        """Drive the real adapter and projection, not a hand-built payload.
+
+        This is the path from #1724: a Codex command exiting non-zero produced
+        `is_error=True` and was still displayed as a success.
+        """
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+        from ouroboros.orchestrator.runtime_message_projection import (
+            serialize_runtime_message_metadata,
+        )
+
+        runtime = CodexCliRuntime()
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-1",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": exit_code,
+                    "status": "completed",
+                },
+            },
+            None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert results, "adapter must emit a tool_result message"
+
+        metadata = serialize_runtime_message_metadata(results[0])
+        event = BaseEvent(
+            type="execution.tool.completed",
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={"ac_id": "ac_1", "tool_name": "Bash", **metadata},
+        )
+
+        message = create_message_from_event(event)
+        assert message is not None
+        assert message.success is expected_success
