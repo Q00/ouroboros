@@ -1056,51 +1056,6 @@ class OrchestratorRunner:
             is_decomposed_child=False,
             decomposition_trustworthy=False,
         )
-        if self._model_router is None:
-            model_kwargs = legacy_model_kwargs
-        else:
-            projection = build_route_compat_projection(
-                self._route_economics,
-                model_router=self._model_router,
-                runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                effort=decision.level,
-            )
-            route_admission = admit_compat_route(
-                projection,
-                model_decision=model_decision,
-                effort=decision.level,
-            )
-            if not route_admission.admitted:
-                raise OrchestratorError(
-                    message="Route admission blocked before provider dispatch",
-                    details={
-                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-                        "reason": route_admission.reason,
-                        "call_site": "runner",
-                    },
-                )
-            model_kwargs = admitted_execute_model_kwargs(
-                route_admission,
-                model_decision=model_decision,
-                projection=projection,
-                effort=decision.level,
-            )
-            if (
-                model_decision.is_enforced
-                and model_decision.model is not None
-                and model_kwargs.get("model") != model_decision.model
-            ):
-                raise OrchestratorError(
-                    message="Route admission could not authorize the provider model",
-                    details={
-                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-                        "model_tier": model_decision.tier,
-                        "call_site": "runner",
-                    },
-                )
-        # Merge the model override; kwargs carry a parameter ONLY for runtimes that
-        # enforce it, so an advised runtime is never handed one.
-        kwargs = {**kwargs, **model_kwargs}
         from ouroboros.events.base import BaseEvent
 
         try:
@@ -1186,7 +1141,54 @@ class OrchestratorRunner:
                     model_tier=model_decision.tier,
                     model_mode=model_decision.mode,
                 )
-        return kwargs
+
+        # All observability awaits are complete. Rebuild and admit from live
+        # routing state now, immediately before the caller enters execute_task.
+        if self._model_router is None:
+            model_kwargs = legacy_model_kwargs
+        else:
+            projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=self._model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=decision.level,
+            )
+            route_admission = admit_compat_route(
+                projection,
+                model_decision=model_decision,
+                effort=decision.level,
+            )
+            if not route_admission.admitted:
+                raise OrchestratorError(
+                    message="Route admission blocked before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": route_admission.reason,
+                        "call_site": "runner",
+                    },
+                )
+            model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
+                projection=projection,
+                effort=decision.level,
+            )
+            if (
+                model_decision.is_enforced
+                and model_decision.model is not None
+                and model_kwargs.get("model") != model_decision.model
+            ):
+                raise OrchestratorError(
+                    message="Route admission could not authorize the provider model",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "model_tier": model_decision.tier,
+                        "call_site": "runner",
+                    },
+                )
+        # Model kwargs are collapsed only after live admission above. Callers
+        # invoke execute_task on the next statement without another await.
+        return {**kwargs, **model_kwargs}
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.

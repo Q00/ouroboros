@@ -313,6 +313,7 @@ from ouroboros.orchestrator.route_compat import (
     admitted_execute_model_kwargs,
     build_route_compat_projection,
     serialize_route_compat_contract,
+    validate_compat_admission,
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
@@ -6247,20 +6248,61 @@ Respond with either ATOMIC or the structured JSON object only.
                     depth=depth,
                     outcome=ACExecutionOutcome.BLOCKED,
                 )
-            # The Admission Kernel is now the source of truth for the executable
-            # model kwarg.  A stale/tampered decision cannot smuggle a model into
-            # the provider call after admission.
-            execute_model_kwargs = admitted_execute_model_kwargs(
-                route_admission,
-                model_decision=model_decision,
-                projection=projection,
+        if route_admission is None:
+            # Dormant compatibility preserves the legacy model kwarg exactly.
+            execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+
+        def _live_provider_kwargs() -> dict[str, Any] | None:
+            """Revalidate carried admission against live state at provider entry."""
+
+            if route_admission is None:
+                return dict(execute_effort_kwargs)
+            live_projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=self._model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
                 effort=effort_decision.level,
             )
-        # Merge the model override into the effort kwargs. The merged dict flows
-        # through LeafDispatcher.stream → execute_task unchanged (LeafDispatcher
-        # itself is untouched); ``model`` is present ONLY for runtimes that enforce
-        # a per-call override, so an advised runtime is never handed one.
-        execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+            if not validate_compat_admission(
+                live_projection,
+                route_admission,
+                model_decision=model_decision,
+                effort=effort_decision.level,
+            ):
+                return None
+            live_model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
+                projection=live_projection,
+                effort=effort_decision.level,
+            )
+            if (
+                model_decision.is_enforced
+                and model_decision.model is not None
+                and live_model_kwargs.get("model") != model_decision.model
+            ):
+                return None
+            return {**execute_effort_kwargs, **live_model_kwargs}
+
+        def _route_drift_blocked_result() -> ACExecutionResult:
+            duration = (datetime.now(UTC) - start_time).total_seconds()
+            log.warning(
+                "parallel_executor.ac.route_admission_stale",
+                ac_index=ac_index,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            )
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=False,
+                messages=tuple(messages),
+                error="route admission blocked: live route state changed before provider entry",
+                duration_seconds=duration,
+                session_id=session_id,
+                retry_attempt=retry_attempt,
+                depth=depth,
+                outcome=ACExecutionOutcome.BLOCKED,
+            )
 
         # Runtime dispatch + streaming/heartbeat consumption. The dispatcher owns
         # the stall-scoped CancelScope and the per-message loop; it mutates
@@ -6379,6 +6421,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
+            provider_kwargs = _live_provider_kwargs()
+            if provider_kwargs is None:
+                return _route_drift_blocked_result()
             _invoke_execution_authority_guard(self)
             await self._authority_leaf_dispatcher_stream(
                 self._authority_leaf_dispatcher,
@@ -6386,7 +6431,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 prompt=prompt,
                 tools=tools,
                 system_prompt=system_prompt,
-                execute_effort_kwargs=execute_effort_kwargs,
+                execute_effort_kwargs=provider_kwargs,
                 runtime_identity=runtime_identity,
                 execution_context_id=execution_context_id,
                 session_id=session_id,
@@ -6575,6 +6620,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
+                        provider_kwargs = _live_provider_kwargs()
+                        if provider_kwargs is None:
+                            return _route_drift_blocked_result()
                         _invoke_execution_authority_guard(self)
                         await self._authority_leaf_dispatcher_stream(
                             self._authority_leaf_dispatcher,
@@ -6582,7 +6630,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             prompt=(follow_up_prompt),
                             tools=[] if inform_mode else tools,
                             system_prompt=system_prompt,
-                            execute_effort_kwargs=execute_effort_kwargs,
+                            execute_effort_kwargs=provider_kwargs,
                             runtime_identity=runtime_identity,
                             execution_context_id=execution_context_id,
                             session_id=session_id,

@@ -549,26 +549,15 @@ def admitted_execute_model_kwargs(
     function returns an empty override.
     """
 
-    if (
-        not isinstance(model_decision, ModelDecision)
-        or not model_decision.is_enforced
-        or projection is None
-    ):
+    if not isinstance(model_decision, ModelDecision) or not model_decision.is_enforced:
         return {}
-    try:
-        requirements = _compat_requirements(
-            projection,
-            model_decision=model_decision,
-            effort=effort,
-            required_capabilities=required_capabilities,
-        )
-        if requirements is None or not validate_admission(
-            projection.registry,
-            requirements,
-            admission,
-        ):
-            return {}
-    except Exception:
+    if not validate_compat_admission(
+        projection,
+        admission,
+        model_decision=model_decision,
+        effort=effort,
+        required_capabilities=required_capabilities,
+    ):
         return {}
     try:
         if admission.admitted and model_decision.model is not None:
@@ -578,6 +567,34 @@ def admitted_execute_model_kwargs(
     except Exception:
         return {}
     return {}
+
+
+def validate_compat_admission(
+    projection: RouteCompatProjection | None,
+    admission: RouteAdmission,
+    *,
+    model_decision: ModelDecision,
+    effort: str | None,
+    required_capabilities: Iterable[object] = (),
+) -> bool:
+    """Revalidate one carried admission against the current live projection."""
+
+    if not isinstance(model_decision, ModelDecision) or projection is None:
+        return False
+    try:
+        requirements = _compat_requirements(
+            projection,
+            model_decision=model_decision,
+            effort=effort,
+            required_capabilities=required_capabilities,
+        )
+        return requirements is not None and validate_admission(
+            projection.registry,
+            requirements,
+            admission,
+        )
+    except Exception:
+        return False
 
 
 def deserialize_route_compat_projection(value: object) -> RouteCompatProjection | None:
@@ -782,5 +799,6 @@ __all__ = [
     "deserialize_route_compat_contract",
     "deserialize_route_compat_projection",
     "serialize_route_compat_contract",
+    "validate_compat_admission",
     "validate_route_compat_projection",
 ]
