@@ -66,8 +66,10 @@ This slice wires the compatibility boundary into the parallel AC executor and
 both direct runner provider boundaries, as well as the runner's persisted
 execution/resume contract. It does not add provider calls,
 retry/escalation policy, route-failure classification, persistence of new
-execution outcomes, or Final Gate acceptance. Those remain the next routing
-slice and must consume only revalidated Kernel output.
+execution outcomes, or Final Gate acceptance. Those remain the bounded
+escalation slice in
+[`routing-d-bounded-escalation.md`](./routing-d-bounded-escalation.md) and must
+consume only revalidated Kernel output.
 
 ## Verification
 
