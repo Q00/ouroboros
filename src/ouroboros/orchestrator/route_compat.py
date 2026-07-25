@@ -518,26 +518,35 @@ def admitted_execute_model_kwargs(
     effort: str | None = None,
     required_capabilities: Iterable[object] = (),
 ) -> dict[str, str]:
-    """Return a model override only for an admitted, enforced decision."""
+    """Return a model override only after projection-boundary revalidation.
 
-    if not isinstance(model_decision, ModelDecision) or not model_decision.is_enforced:
+    ``projection`` is intentionally required in practice.  Without the live
+    registry and exact compatibility requirements there is no safe way to
+    distinguish a Kernel result from a forged or stale admission, so the
+    function returns an empty override.
+    """
+
+    if (
+        not isinstance(model_decision, ModelDecision)
+        or not model_decision.is_enforced
+        or projection is None
+    ):
         return {}
-    if projection is not None:
-        try:
-            requirements = _compat_requirements(
-                projection,
-                model_decision=model_decision,
-                effort=effort,
-                required_capabilities=required_capabilities,
-            )
-            if requirements is None or not validate_admission(
-                projection.registry,
-                requirements,
-                admission,
-            ):
-                return {}
-        except Exception:
+    try:
+        requirements = _compat_requirements(
+            projection,
+            model_decision=model_decision,
+            effort=effort,
+            required_capabilities=required_capabilities,
+        )
+        if requirements is None or not validate_admission(
+            projection.registry,
+            requirements,
+            admission,
+        ):
             return {}
+    except Exception:
+        return {}
     try:
         if admission.admitted and model_decision.model is not None:
             selected = admission.selected

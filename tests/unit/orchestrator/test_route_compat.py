@@ -248,7 +248,12 @@ def test_model_kwargs_require_admitted_enforced_route() -> None:
     projection = _projection(effort=None)
     decision = ModelDecision("standard", "sonnet-x", MODEL_MODE_ENFORCED)
     admitted = admit_compat_route(projection, model_decision=decision, effort=None)
-    assert admitted_execute_model_kwargs(admitted, model_decision=decision) == {"model": "sonnet-x"}
+    assert admitted_execute_model_kwargs(
+        admitted,
+        model_decision=decision,
+        projection=projection,
+        effort=None,
+    ) == {"model": "sonnet-x"}
 
     advised = replace(decision, mode=MODEL_MODE_ADVISED)
     assert admitted_execute_model_kwargs(admitted, model_decision=advised) == {}
