@@ -45,6 +45,7 @@ from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
+    ResolvedExecutionPreferences,
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
@@ -610,7 +611,8 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 2
+EXECUTION_CONTRACT_VERSION = 3
+PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -798,6 +800,8 @@ class OrchestratorRunner:
         # var counts here.
         _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
         _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        self._model_routing_disabled = _model_routing_disabled
+        self._model_pin = _model_pin
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.
@@ -918,6 +922,26 @@ class OrchestratorRunner:
             self._model_router,
             child_tier=self._model_router.base_tier,
         )
+
+    def _authoritative_model_router(
+        self,
+        preferences: ResolvedExecutionPreferences,
+    ) -> ModelRouter | None:
+        """Rebuild current route policy without trusting a mutable/restored router."""
+
+        if self._model_routing_disabled:
+            return None
+        from ouroboros.orchestrator.model_routing import build_model_router
+
+        router = build_model_router(
+            self._route_economics,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            pinned_model=self._model_pin,
+            base_tier_override=self._requested_model_tier,
+        )
+        if router is not None and not preferences.child_model_lowering_enabled:
+            router = replace(router, child_tier=router.base_tier)
+        return router
 
     def _resolved_shadow_replay_enabled(self) -> bool:
         """Gate the expensive proof harness on explicit strict authorization."""
@@ -4023,13 +4047,18 @@ class OrchestratorRunner:
             not isinstance(raw_contract, Mapping)
             or isinstance(raw_version, bool)
             or not isinstance(raw_version, int)
-            or raw_version != EXECUTION_CONTRACT_VERSION
+            or raw_version
+            not in {
+                PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
+                EXECUTION_CONTRACT_VERSION,
+            }
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"contract_version": raw_version},
             )
 
+        migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
@@ -4048,6 +4077,17 @@ class OrchestratorRunner:
                 },
             )
 
+        # Version 2 predates the independent effort and Route B compatibility
+        # fields. Only that exact pre-admission shape is migratable; a malformed
+        # v3 contract must never fall through this compatibility path.
+        if migrate_v2_contract and (
+            "reasoning_effort" in raw_routing or "route_compat" in raw_routing
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "version 2 routing extension"},
+            )
+
         self._restore_guidance_contract(raw_contract)
 
         protocol_version = raw_proof.get("protocol_version")
@@ -4060,7 +4100,9 @@ class OrchestratorRunner:
         persisted_runtime_backend = raw_routing.get("runtime_backend")
         persisted_llm_backend = raw_routing.get("llm_backend")
         persisted_permission_mode = raw_routing.get("permission_mode")
-        persisted_reasoning_effort = raw_routing.get("reasoning_effort")
+        persisted_reasoning_effort = (
+            self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
+        )
         persisted_resume_workspace = raw_resume.get("workspace")
         valid_seed_fingerprint = (
             isinstance(persisted_seed_fingerprint, str)
@@ -4085,8 +4127,13 @@ class OrchestratorRunner:
             or not isinstance(persisted_llm_backend, str)
             or not persisted_llm_backend.strip()
             or not self._valid_permission_mode_contract(persisted_permission_mode)
-            or "reasoning_effort" not in raw_routing
-            or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
+            or (
+                not migrate_v2_contract
+                and (
+                    "reasoning_effort" not in raw_routing
+                    or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
+                )
+            )
             or not isinstance(persisted_resume_workspace, Mapping)
         ):
             raise OrchestratorError(
@@ -4233,8 +4280,26 @@ class OrchestratorRunner:
                     "execution_runtime_backend": persisted_runtime_backend,
                 },
             )
+        authoritative_router = self._authoritative_model_router(persisted_preferences)
+        if (
+            not self._model_routing_override_explicit
+            and restored_router is not None
+            and restored_router != authoritative_router
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with a changed model-routing policy",
+                details={
+                    "runtime_backend": persisted_runtime_backend,
+                    "hint": "Restore the current route policy or start a new session.",
+                },
+            )
         raw_route_compat = raw_routing.get("route_compat")
-        if raw_route_compat is None:
+        if migrate_v2_contract:
+            # The v2 router has already been compared with the router rebuilt
+            # from current config/backend/preferences. Its replacement v3
+            # contract below adds the independently derived Route B projection.
+            pass
+        elif raw_route_compat is None:
             if restored_router is not None:
                 raise OrchestratorError(
                     message="Cannot resume without an enabled route compatibility contract",
@@ -4270,7 +4335,7 @@ class OrchestratorRunner:
                 and not validate_route_compat_projection(
                     restored_projection,
                     self._route_economics,
-                    model_router=restored_router,
+                    model_router=authoritative_router,
                     runtime_backend=persisted_runtime_backend,
                     current_effort=self._reasoning_effort,
                 )
@@ -4282,7 +4347,7 @@ class OrchestratorRunner:
                         "hint": "Restore the original route catalog or start a new session.",
                     },
                 )
-        if persisted_reasoning_effort != self._reasoning_effort:
+        if not migrate_v2_contract and persisted_reasoning_effort != self._reasoning_effort:
             raise OrchestratorError(
                 message="Cannot resume with a changed reasoning-effort contract",
                 details={
@@ -4340,6 +4405,16 @@ class OrchestratorRunner:
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
+        if migrate_v2_contract:
+            replacement = self._build_execution_contract(
+                seed=seed,
+                seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
+                authority_generation=authority_generation,
+            )
+            if authority_generation is None:
+                replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
+            self._execution_contract = replacement
+            return True
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.

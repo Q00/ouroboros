@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING
 
 from ouroboros.config._model_defaults import normalize_tier_model
 from ouroboros.core.security import is_stable_authority_identity
+from ouroboros.orchestrator.contract_numbers import (
+    json_safe_nonnegative_int,
+    parse_positive_contract_int,
+)
 from ouroboros.orchestrator.model_routing import (
     _BACKEND_PROVIDER,
     MODEL_TIER_LADDER,
@@ -228,7 +232,9 @@ class RouteCompatProjection:
             "authority_identity": self.authority_identity,
             "child_tier": self.child_tier,
             "base_tier": self.base_tier,
-            "escalation_retry_threshold": self.escalation_retry_threshold,
+            "escalation_retry_threshold": json_safe_nonnegative_int(
+                self.escalation_retry_threshold
+            ),
             "tier_route_ids": [
                 {"tier": tier, "route_id": route_id} for tier, route_id in self.tier_route_ids
             ],
@@ -625,7 +631,7 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         authority = value["authority_identity"]
         child_tier = value["child_tier"]
         base_tier = value["base_tier"]
-        threshold = value["escalation_retry_threshold"]
+        threshold = parse_positive_contract_int(value["escalation_retry_threshold"])
         raw_registry = value["registry"]
         raw_tiers = value["tier_route_ids"]
     except Exception:
@@ -639,8 +645,7 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         or not isinstance(base_tier, str)
         or child_tier not in MODEL_TIER_LADDER
         or base_tier not in MODEL_TIER_LADDER
-        or type(threshold) is not int
-        or threshold < 1
+        or threshold is None
         or (effort is not None and not isinstance(effort, str))
         or not isinstance(raw_tiers, list)
         or len(raw_tiers) > MAX_ROUTE_CANDIDATES

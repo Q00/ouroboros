@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING, NamedTuple, NoReturn
 import weakref
 
 from ouroboros.core.security import is_stable_authority_identity
+from ouroboros.orchestrator.contract_numbers import (
+    json_safe_nonnegative_int,
+    parse_nonnegative_contract_int,
+)
 
 ROUTE_CONTRACT_VERSION = 1
 MAX_ROUTE_ID_CHARS = 160
@@ -129,7 +133,7 @@ class RouteCandidate:
             "model": self.model,
             "harness": self.harness,
             "effort": self.effort,
-            "cost_units": self.cost_units,
+            "cost_units": json_safe_nonnegative_int(self.cost_units),
             "persona": self.persona,
             "tool_policy": self.tool_policy,
             "authority_identity": self.authority_identity,
@@ -165,12 +169,15 @@ class RouteCandidate:
             capabilities, str | bytes | bytearray
         ):
             raise ValueError("route candidate capabilities must be a list")
+        cost_units = parse_nonnegative_contract_int(value["cost_units"])
+        if cost_units is None:
+            raise ValueError("route candidate cost_units is invalid")
         return cls(
             route_id=value["route_id"],  # type: ignore[arg-type]
             model=value["model"],  # type: ignore[arg-type]
             harness=value["harness"],  # type: ignore[arg-type]
             effort=value["effort"],  # type: ignore[arg-type]
-            cost_units=value["cost_units"],  # type: ignore[arg-type]
+            cost_units=cost_units,
             persona=value["persona"],  # type: ignore[arg-type]
             tool_policy=value["tool_policy"],  # type: ignore[arg-type]
             authority_identity=value["authority_identity"],  # type: ignore[arg-type]

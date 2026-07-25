@@ -3,8 +3,9 @@
 ## Status
 
 The provider-neutral contract and pure Admission Kernel are implemented. The
-first compatibility projection is now wired into the live parallel AC executor;
-provider dispatch, bounded escalation, and acceptance remain separate slices.
+first compatibility projection is now enforced at live direct and parallel
+provider boundaries. Provider execution ownership, bounded escalation policy,
+and Final Gate acceptance remain separate slices.
 
 ## Why this boundary exists
 
