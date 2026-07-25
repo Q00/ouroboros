@@ -1871,35 +1871,35 @@ class CodexCliRuntime:
             return item_id.strip()
         return None
 
-    def _file_change_signature(self, item: dict[str, Any]) -> str:
-        """Pair each changed path with its mutation kind for stable identity.
+    @staticmethod
+    def _extract_cwd(item: dict[str, Any]) -> str:
+        """Extract a normalized working directory from a command item."""
+        candidates = [item.get("cwd"), item.get("working_directory"), item.get("workdir")]
+        nested = item.get("input")
+        if isinstance(nested, dict):
+            candidates.extend([nested.get("cwd"), nested.get("working_directory")])
+        for value in candidates:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
-        Correlating on paths alone would let an ``add`` start pair with a
-        ``delete`` completion for the same path/id (round nine, blocker 1).
+    def _file_change_signature(self, item: dict[str, Any]) -> str:
+        """Fingerprint the complete stable change operation for each path.
+
+        Correlating on path alone (or path + a string kind) let an ``add``
+        start pair with a ``delete`` completion, and collapsed structured
+        kinds, diffs, and move destinations to identical signatures (rounds
+        nine & ten). Serializing the full normalized change captures the
+        mutation kind (any shape), patch content, and move destination.
         """
-        pairs: list[tuple[str, str]] = []
         changes = item.get("changes")
-        if isinstance(changes, list):
-            for change in changes:
-                if not isinstance(change, dict):
-                    continue
-                path = next(
-                    (
-                        str(change[key]).strip()
-                        for key in ("path", "file_path", "target_file")
-                        if isinstance(change.get(key), str) and change[key].strip()
-                    ),
-                    "",
-                )
-                kind = change.get("kind")
-                pairs.append((path, kind.strip() if isinstance(kind, str) else ""))
-        if not pairs:
-            item_kind = item.get("kind")
-            pairs = [
-                (path, item_kind.strip() if isinstance(item_kind, str) else "")
-                for path in self._extract_paths(item)
-            ]
-        return json.dumps(sorted(pairs), ensure_ascii=False)
+        if isinstance(changes, list) and changes:
+            normalized = [change for change in changes if isinstance(change, dict)]
+            if normalized:
+                return json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
+        item_kind = item.get("kind")
+        fallback = [{"path": path, "kind": item_kind} for path in self._extract_paths(item)]
+        return json.dumps(fallback, ensure_ascii=False, sort_keys=True, default=str)
 
     @staticmethod
     def _mcp_tool_name(item: dict[str, Any]) -> str:
@@ -1914,6 +1914,21 @@ class CodexCliRuntime:
         if isinstance(name, str) and name.strip():
             return name.strip()
         return "mcp_tool"
+
+    @staticmethod
+    def _extract_mcp_content_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Preserve supported MCP result content blocks and structured data."""
+        result = item.get("result")
+        if not isinstance(result, dict):
+            return []
+        blocks: list[dict[str, Any]] = []
+        content = result.get("content")
+        if isinstance(content, list):
+            blocks.extend(block for block in content if isinstance(block, dict))
+        structured = result.get("structured_content")
+        if isinstance(structured, (dict, list)) and structured:
+            blocks.append({"type": "structured", "structured": structured})
+        return blocks
 
     @staticmethod
     def _extract_mcp_result_text(item: dict[str, Any]) -> str:
@@ -1955,7 +1970,9 @@ class CodexCliRuntime:
     def _item_lifecycle_signature(self, item_type: str, item: dict[str, Any]) -> str:
         """Build a best-effort identity for id-less legacy thread items."""
         if item_type == "command_execution":
-            return self._extract_command(item)
+            cwd = self._extract_cwd(item)
+            command = self._extract_command(item)
+            return f"{command}\x00{cwd}" if cwd else command
         if item_type == "mcp_tool_call":
             tool_input = self._extract_tool_input(item)
             arguments = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, default=str)
@@ -1977,10 +1994,14 @@ class CodexCliRuntime:
             command = self._extract_command(item)
             if not command:
                 return []
+            tool_input: dict[str, Any] = {"command": command}
+            cwd = self._extract_cwd(item)
+            if cwd:
+                tool_input["cwd"] = cwd
             return [
                 _CodexToolCall(
                     tool_name="Bash",
-                    tool_input={"command": command},
+                    tool_input=tool_input,
                     start_content=f"Calling tool: Bash: {command}",
                     tool_call_id=item_id,
                 )
@@ -2173,8 +2194,9 @@ class CodexCliRuntime:
         if isinstance(exit_code, int) and not isinstance(exit_code, bool):
             tool_result_meta["exit_status"] = exit_code
 
+        content_blocks = metadata.get("__mcp_content_blocks__")
         tool_result: dict[str, Any] = {
-            "content": [],
+            "content": list(content_blocks) if isinstance(content_blocks, list) else [],
             "text_content": result_text,
             "meta": tool_result_meta,
         }
@@ -2184,7 +2206,9 @@ class CodexCliRuntime:
         # The completion verdict is carried exclusively by the tri-state
         # ``is_error`` — never forward a metadata-derived "success" subtype.
         extra_data: dict[str, Any] = {
-            key: value for key, value in metadata.items() if key != "subtype"
+            key: value
+            for key, value in metadata.items()
+            if key not in ("subtype", "__mcp_content_blocks__")
         }
         if is_error is None:
             status = extra_data.get("status")
@@ -2255,13 +2279,17 @@ class CodexCliRuntime:
         if not calls:
             return []
         metadata = self._extract_command_metadata(item)
-        if item_type == "mcp_tool_call" and not any(
-            isinstance(metadata.get(key), str) and metadata[key].strip()
-            for key in ("output", "stdout", "result_preview", "stderr")
-        ):
-            normalized = self._extract_mcp_result_text(item)
-            if normalized:
-                metadata["output"] = normalized
+        if item_type == "mcp_tool_call":
+            if not any(
+                isinstance(metadata.get(key), str) and metadata[key].strip()
+                for key in ("output", "stdout", "result_preview", "stderr")
+            ):
+                normalized = self._extract_mcp_result_text(item)
+                if normalized:
+                    metadata["output"] = normalized
+            content_blocks = self._extract_mcp_content_blocks(item)
+            if content_blocks:
+                metadata["__mcp_content_blocks__"] = content_blocks
         is_error = self._resolve_item_completion_is_error(item_type, item)
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:

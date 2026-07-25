@@ -1024,6 +1024,121 @@ class TestCodexCompletionReviewRoundOne:
             "a same-id MCP completion with different image content was dropped as a replay"
         )
 
+    def test_command_cwd_mismatch_does_not_pair(self) -> None:
+        """A same-id command completion in a different cwd must not inherit the start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "cwd1",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "cwd": "/workspace/a",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cwd1",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "cwd": "/workspace/b",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2, "a command completion in a different cwd paired with the start"
+
+    def test_command_start_persists_cwd_in_tool_input(self) -> None:
+        """The working directory must be visible in the persisted tool input."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "cwd2",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "cwd": "/workspace/a",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        assert len(messages) == 1
+        assert (messages[0].data.get("tool_input") or {}).get("cwd") == "/workspace/a"
+
+    def test_file_change_diff_and_structured_kind_mismatch_do_not_pair(self) -> None:
+        """Different diffs / structured kinds must not share a signature."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "fcd",
+                    "type": "file_change",
+                    "status": "in_progress",
+                    "changes": [{"path": "a.py", "kind": {"update": {"unified_diff": "- old"}}}],
+                },
+            },
+            current_handle=None,
+        )
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "fcd",
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [{"path": "a.py", "kind": {"delete": {}}}],
+                },
+            },
+            current_handle=None,
+        )
+        assert len(messages) == 2, (
+            "a structured delete completion inherited an update start's signature"
+        )
+
+    def test_mcp_content_blocks_are_preserved(self) -> None:
+        """A rich MCP result must keep its content blocks, not just the caption."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "mcprich",
+                    "type": "mcp_tool_call",
+                    "name": "screenshot.capture",
+                    "status": "completed",
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": "here is the shot"},
+                            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+                            {"type": "resource", "resource": {"uri": "file:///x"}},
+                        ],
+                        "structured_content": {"width": 800},
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        tool_result = results[0].data.get("tool_result") or {}
+        blocks = tool_result.get("content") or []
+        types = [b.get("type") for b in blocks if isinstance(b, dict)]
+        assert "image" in types, "the image content block was dropped"
+        assert "resource" in types, "the resource content block was dropped"
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
