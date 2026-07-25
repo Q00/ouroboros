@@ -39,8 +39,8 @@ from ouroboros.orchestrator.verifier import VerifierVerdict
 class _StubAdapter:
     """Minimal adapter satisfying the executor constructor + verify gate cwd."""
 
-    def __init__(self, working_directory: str) -> None:
-        self.runtime_backend = "claude"
+    def __init__(self, working_directory: str, runtime_backend: str = "claude") -> None:
+        self.runtime_backend = runtime_backend
         self.self_governs_rate_limit = True
         self.working_directory = working_directory
         self.permission_mode = "acceptEdits"
@@ -52,9 +52,10 @@ def _make_executor(
     run_verify_commands: bool = True,
     ac_retry_attempts: int = 0,
     verify_command_timeout_seconds: int = 30,
+    runtime_backend: str = "claude",
 ) -> ParallelACExecutor:
     return ParallelACExecutor(
-        adapter=_StubAdapter(working_directory),
+        adapter=_StubAdapter(working_directory, runtime_backend),
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=False,
@@ -132,6 +133,118 @@ async def test_verify_gate_rejects_commands_that_mutate_the_workspace(tmp_path: 
     assert outcome.passed is False
     assert outcome.workspace_mutated is True
     assert "mutated the workspace" in (outcome.reason or "")
+
+
+@pytest.mark.parametrize("runtime_backend", ["claude", "codex"])
+@pytest.mark.asyncio
+async def test_verify_gate_accepts_created_python_bytecode_for_all_backends(
+    tmp_path: Any,
+    runtime_backend: str,
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    executor = _make_executor(
+        working_directory=str(tmp_path),
+        runtime_backend=runtime_backend,
+    )
+    spec = AcceptanceCriterionSpec(
+        description="tests pass",
+        verify_command=(
+            'python3 -c "from pathlib import Path; '
+            "p=Path('pkg/__pycache__/module.cpython-test.pyc'); "
+            "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'cache')\""
+        ),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert outcome.workspace_mutated is False
+    assert (tmp_path / "pkg/__pycache__/module.cpython-test.pyc").is_file()
+
+
+@pytest.mark.asyncio
+async def test_verify_gate_accepts_refreshed_python_bytecode(tmp_path: Any) -> None:
+    bytecode = tmp_path / "pkg/module.pyc"
+    bytecode.parent.mkdir()
+    bytecode.write_bytes(b"old")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="tests pass",
+        verify_command=(
+            'python3 -c "from pathlib import Path; '
+            "Path('pkg/module.pyc').write_bytes(b'refreshed')\""
+        ),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is True
+    assert bytecode.read_bytes() == b"refreshed"
+
+
+@pytest.mark.parametrize("source_exists", [False, True], ids=["created", "modified"])
+@pytest.mark.asyncio
+async def test_verify_gate_still_rejects_source_mutation(
+    tmp_path: Any,
+    source_exists: bool,
+) -> None:
+    source = tmp_path / "module.py"
+    if source_exists:
+        source.write_text("before\n", encoding="utf-8")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="read-only verification",
+        verify_command=(
+            "python3 -c \"from pathlib import Path; Path('module.py').write_text('after\\n')\""
+        ),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.workspace_mutated is True
+
+
+@pytest.mark.asyncio
+async def test_declared_bytecode_artifact_remains_mutation_sensitive(tmp_path: Any) -> None:
+    bytecode = tmp_path / "pkg/__pycache__/module.cpython-test.pyc"
+    bytecode.parent.mkdir(parents=True)
+    bytecode.write_bytes(b"old")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec(
+        description="declared cache artifact is stable",
+        expected_artifacts=("pkg/__pycache__/module.cpython-test.pyc",),
+        verify_command=(
+            'python3 -c "from pathlib import Path; '
+            "Path('pkg/__pycache__/module.cpython-test.pyc').write_bytes(b'refreshed')\""
+        ),
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.workspace_mutated is True
+
+
+@pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+@pytest.mark.parametrize("suffix", [".pyc", ".pyo"])
+def test_workspace_digest_observes_non_regular_bytecode_suffix_paths(
+    tmp_path: Any,
+    entry_kind: str,
+    suffix: str,
+) -> None:
+    target = tmp_path / f"runtime{suffix}"
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    if entry_kind == "directory":
+        target.mkdir()
+    else:
+        target.symlink_to("missing-bytecode-target")
+
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+    assert before is not None
+    assert after is not None
+    assert before != after
 
 
 @pytest.mark.asyncio
@@ -1484,6 +1597,63 @@ def test_workspace_digest_includes_empty_directories(tmp_path: Any) -> None:
     assert before is not None
     assert after is not None
     assert before != after
+
+
+@pytest.mark.asyncio
+async def test_cache_only_verify_finishes_acceptance_and_completed_progress(tmp_path: Any) -> None:
+    from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+    (tmp_path / "pkg").mkdir()
+    spec = AcceptanceCriterionSpec(
+        description="tests pass",
+        verify_command=(
+            'python3 -c "from pathlib import Path; '
+            "p=Path('pkg/__pycache__/module.cpython-test.pyc'); "
+            "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'cache')\""
+        ),
+    )
+    seed = _seed_with_specs(spec)
+    plan = DependencyGraph(
+        nodes=(ACNode(index=0, content="tests pass", depends_on=()),),
+        execution_levels=((0,),),
+    ).to_execution_plan()
+    executor = _make_executor(working_directory=str(tmp_path))
+    executor._execute_ac_batch = AsyncMock(
+        return_value=[
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="tests pass",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+            )
+        ]
+    )
+    executor._emit_workflow_progress = AsyncMock()
+
+    result = await executor.execute_parallel(
+        seed=seed,
+        execution_plan=plan,
+        session_id="cache-session",
+        execution_id="cache-execution",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+    )
+
+    assert result.all_succeeded is True
+    assert result.success_count == 1
+    assert result.results[0].outcome is ACExecutionOutcome.SUCCEEDED
+    assert result.results[0].verify_gate_outcome is not None
+    assert result.results[0].verify_gate_outcome.passed is True
+    assert any(
+        call.kwargs["completed_count"] == 1 and call.kwargs["ac_statuses"] == {0: "completed"}
+        for call in executor._emit_workflow_progress.await_args_list
+    )
+
+    emitted = [call.args[0] for call in executor._event_store.append.await_args_list]
+    judgments = [event for event in emitted if event.type == "execution.ac.attempt_judged"]
+    assert len(judgments) == 1
+    assert judgments[0].data["success"] is True
 
 
 @pytest.mark.asyncio

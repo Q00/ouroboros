@@ -1277,6 +1277,18 @@ MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+_WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
 @dataclass(frozen=True)
@@ -3582,33 +3594,56 @@ class ParallelACExecutor:
         return False
 
     @staticmethod
-    def _workspace_content_digest(cwd: str) -> str | None:
-        """Hash the observable workspace tree for coordinator mutation checks.
+    def _workspace_content_digest(
+        cwd: str,
+        *,
+        expected_artifacts: tuple[str, ...] = (),
+    ) -> str | None:
+        """Hash acceptance-relevant workspace state for mutation checks.
 
-        The digest intentionally excludes runtime/cache directories that are
-        not part of the task workspace contract.  Read failures return
-        ``None`` so the caller fails closed instead of trusting pre-coordinator
-        evidence it could not compare.
+        Runtime/cache paths are excluded unless they overlap an explicitly
+        declared expected artifact. Bytecode suffix exclusions apply only to
+        regular files: same-named directories and symlinks remain observable.
+        Read failures return ``None`` so the caller fails closed instead of
+        trusting evidence it could not compare.
         """
-        ignored_directories = {
-            ".git",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            ".venv",
-            "node_modules",
-        }
         try:
             root = Path(cwd).expanduser().resolve(strict=False)
             if not root.is_dir():
                 return hashlib.sha256(
                     f"missing-workspace\0{root}".encode("utf-8", "surrogateescape")
                 ).hexdigest()
+
+            declared_paths: set[Path] = set()
+            for artifact in expected_artifacts:
+                # Keep both the lexical path and its resolved in-workspace target.
+                # The former binds symlink artifacts themselves; the latter keeps
+                # an artifact reached through an in-workspace symlink observable.
+                candidate = Path(os.path.abspath(root / artifact))
+                for declared in (candidate, candidate.resolve(strict=False)):
+                    if declared.is_relative_to(root):
+                        declared_paths.add(declared.relative_to(root))
+
+            def is_declared_contract_path(relative: Path) -> bool:
+                return any(
+                    relative == declared
+                    or relative in declared.parents
+                    or declared in relative.parents
+                    for declared in declared_paths
+                )
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
-                if any(part in ignored_directories for part in relative.parts):
+                declared_contract_path = is_declared_contract_path(relative)
+                if (
+                    any(
+                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
+                        for part in relative.parts
+                    )
+                    and not declared_contract_path
+                ):
                     continue
                 try:
                     stat = path.lstat()
@@ -3627,6 +3662,11 @@ class ParallelACExecutor:
                         digest.update(b"\0")
                         digest.update(str(stat.st_mode).encode("ascii"))
                     elif path.is_file():
+                        if (
+                            path.suffix in _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES
+                            and not declared_contract_path
+                        ):
+                            continue
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
                         digest.update(b"\0")
@@ -3769,7 +3809,10 @@ class ParallelACExecutor:
                         passed=True,
                         reason=None,
                         output_tail="",
-                        workspace_digest=self._workspace_content_digest(cwd),
+                        workspace_digest=self._workspace_content_digest(
+                            cwd,
+                            expected_artifacts=spec.expected_artifacts,
+                        ),
                     ),
                 )
             )
@@ -3820,7 +3863,6 @@ class ParallelACExecutor:
             return results
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-        final_digest = self._workspace_content_digest(cwd)
         settled: list[ACExecutionResult] = []
         individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
 
@@ -3862,6 +3904,10 @@ class ParallelACExecutor:
                 continue
 
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            final_digest = self._workspace_content_digest(
+                cwd,
+                expected_artifacts=spec.expected_artifacts,
+            )
             if final_digest is None:
                 individual_failures[result.ac_index] = (
                     "Final workspace digest unavailable for acceptance evidence.",
@@ -7209,6 +7255,12 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         import contextlib
 
+        def workspace_digest() -> str | None:
+            return self._workspace_content_digest(
+                cwd,
+                expected_artifacts=spec.expected_artifacts,
+            )
+
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
         if missing_artifacts:
             return _VerifyGateOutcome(
@@ -7216,7 +7268,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
                 output_tail="",
                 missing_artifacts=missing_artifacts,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
 
         command = spec.verify_command
@@ -7225,12 +7277,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=True,
                 reason=None,
                 output_tail="",
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
-        workspace_before = self._workspace_content_digest(cwd)
+        workspace_before = workspace_digest()
 
         def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
-            workspace_after = self._workspace_content_digest(cwd)
+            workspace_after = workspace_digest()
             if (
                 workspace_before is None
                 or workspace_after is None
@@ -7288,7 +7340,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
                 output_tail="",
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
@@ -7302,7 +7354,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -7311,13 +7363,13 @@ Respond with either ATOMIC or the structured JSON object only.
                     f"output_assertion {spec.output_assertion!r} not found in verify_command output"
                 ),
                 output_tail=tail,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
         return _VerifyGateOutcome(
             passed=True,
             reason=None,
             output_tail=tail,
-            workspace_digest=self._workspace_content_digest(cwd),
+            workspace_digest=workspace_digest(),
         )
 
     async def _apply_verify_gate(
