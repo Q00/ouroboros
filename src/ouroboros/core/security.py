@@ -108,9 +108,7 @@ _EMBEDDED_CREDENTIAL_SHAPES: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35,}"),
     re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),
     re.compile(r"(?<![A-Za-z0-9])ASIA[0-9A-Z]{16}"),
-    re.compile(
-        r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
-    ),
+    re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
 )
 
 _CREDENTIAL_NAMESPACE_LABELS = frozenset(
