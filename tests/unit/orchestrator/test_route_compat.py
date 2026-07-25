@@ -265,6 +265,40 @@ def test_model_kwargs_require_admitted_enforced_route() -> None:
     )
 
 
+def test_model_kwargs_revalidate_admission_against_projection() -> None:
+    projection = _projection(effort=None)
+    decision = ModelDecision("standard", "sonnet-x", MODEL_MODE_ENFORCED)
+    admission = admit_compat_route(projection, model_decision=decision, effort=None)
+
+    assert admitted_execute_model_kwargs(
+        admission,
+        model_decision=decision,
+        projection=projection,
+        effort=None,
+    ) == {"model": "sonnet-x"}
+
+    changed = replace(
+        projection,
+        registry=replace(
+            projection.registry,
+            candidates=(
+                projection.registry.candidates[0],
+                replace(projection.registry.candidates[1], model="tampered-model"),
+                *projection.registry.candidates[2:],
+            ),
+        ),
+    )
+    assert (
+        admitted_execute_model_kwargs(
+            admission,
+            model_decision=decision,
+            projection=changed,
+            effort=None,
+        )
+        == {}
+    )
+
+
 def test_projection_contract_round_trip_and_tamper_rejection() -> None:
     projection = _projection()
     restored = deserialize_route_compat_projection(projection.to_contract_data())
@@ -282,13 +316,7 @@ def test_projection_contract_round_trip_and_tamper_rejection() -> None:
     payload = projection.to_contract_data()
     payload["runtime_backend"] = "codex_cli"
     changed_backend = deserialize_route_compat_projection(payload)
-    assert changed_backend is not None
-    assert not validate_route_compat_projection(
-        changed_backend,
-        _economics(),
-        model_router=_router(),
-        runtime_backend="claude",
-    )
+    assert changed_backend is None
 
     tampered = projection.to_contract_data()
     registry = tampered["registry"]
@@ -313,6 +341,17 @@ def test_projection_contract_round_trip_and_tamper_rejection() -> None:
         {"tier": "frugal", "route_id": "compat:claude:frugal"}
     ] * 129
     assert deserialize_route_compat_projection(oversized_tiers) is None
+
+
+def test_projection_parser_rejects_metadata_drift_before_dispatch() -> None:
+    projection = _projection()
+    payload = projection.to_contract_data()
+    payload["persona"] = "different-persona"
+    assert deserialize_route_compat_projection(payload) is None
+
+    payload = projection.to_contract_data()
+    payload["authority_identity"] = "runtime:claude:opaque"
+    assert deserialize_route_compat_projection(payload) is None
 
 
 class _CountingRuntime:
