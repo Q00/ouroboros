@@ -11,6 +11,7 @@ import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     OntologySchema,
     Seed,
     SeedMetadata,
@@ -22,7 +23,7 @@ from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCa
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import build_model_router
-from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _VerifyGateOutcome
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -232,6 +233,19 @@ def _route_event(
             "call_site": "parallel",
             "observation": observation.to_contract_data(),
             "decision": decision_data,
+            "provisional_result": (
+                {
+                    "schema_version": 1,
+                    "final_message_tail": "restored success",
+                    "context_tools": [],
+                    "duration_seconds": 0.0,
+                    "session_id": None,
+                    "retry_attempt": observation.attempt_index,
+                    "verify_gate_outcome": None,
+                }
+                if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+                else None
+            ),
             "human_handoff_required": False,
             "final_acceptance_declared": final_acceptance_declared,
         },
@@ -509,6 +523,121 @@ async def test_route_pause_aborts_remaining_stages_and_is_not_checkpointed_compl
     assert result.recoverable_route_pause is True
     assert result.stages == ()
     checkpoint_store.save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_decomposed_leaf_pause_aborts_remaining_stages() -> None:
+    executor, _store, _events = _executor()
+    seed = _multi_seed()
+    calls: list[list[int]] = []
+    pause_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+
+    async def decomposed_pause(**kwargs: Any) -> list[ACExecutionResult]:
+        indices = kwargs["batch_executable"]
+        calls.append(indices)
+        return [
+            ACExecutionResult(
+                ac_index=indices[0],
+                ac_content="ship first",
+                success=False,
+                is_decomposed=True,
+                sub_results=(
+                    ACExecutionResult(
+                        ac_index=100,
+                        ac_content="paused leaf",
+                        success=False,
+                        messages=(pause_message,),
+                        outcome=ACExecutionOutcome.FAILED,
+                        depth=1,
+                    ),
+                ),
+                outcome=ACExecutionOutcome.FAILED,
+            )
+        ]
+
+    executor._run_batch_with_verify_and_retry = decomposed_pause  # type: ignore[method-assign]
+    graph = DependencyGraph(
+        nodes=(
+            ACNode(index=0, content="ship first", depends_on=()),
+            ACNode(index=1, content="ship second", depends_on=(0,)),
+        ),
+        execution_levels=((0,), (1,)),
+    )
+
+    result = await executor.execute_parallel(
+        seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        system_prompt="sys",
+    )
+
+    assert calls == [[0]]
+    assert result.recoverable_route_pause is True
+    assert result.stages == ()
+
+
+@pytest.mark.asyncio
+async def test_decomposed_root_uses_legacy_retry_without_route_observation() -> None:
+    executor, _store, events = _executor()
+    executor._ac_retry_attempts = 1
+    calls = 0
+    forced_legacy: list[bool] = []
+
+    async def composite_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        forced_legacy.append(bool(kwargs.get("force_legacy_routing", False)))
+        success = calls == 2
+        child = ACExecutionResult(
+            ac_index=100,
+            ac_content="legacy child",
+            success=success,
+            final_message="child complete" if success else "child failed",
+            error=None if success else "evidence missing",
+            outcome=(
+                ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED
+            ),
+            depth=1,
+        )
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=success,
+                final_message="composite complete" if success else "composite failed",
+                error=None if success else "evidence missing",
+                is_decomposed=True,
+                sub_results=(child,),
+                outcome=(
+                    ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED
+                ),
+            )
+        ]
+
+    executor._execute_ac_batch = composite_batch  # type: ignore[method-assign]
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == 2
+    assert forced_legacy == [False, True]
+    assert isinstance(results[0], ACExecutionResult) and results[0].success
+    assert not any(event.type == "execution.ac.route_observed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -1279,7 +1408,105 @@ async def test_provisional_success_resume_seals_provider_and_defers_to_final_gat
     assert result.outcome is ACExecutionOutcome.SUCCEEDED
     assert result.retry_attempt == 0
     assert result.error is None
-    assert "Final Gate remains authoritative" in result.final_message
+    assert result.final_message == "restored success"
+
+
+@pytest.mark.asyncio
+async def test_provisional_success_resume_restores_verify_evidence_and_level_context(
+    tmp_path: Any,
+) -> None:
+    executor, store, events = _executor()
+    executor._run_verify_commands = True
+    executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("ok")
+    spec = AcceptanceCriterionSpec(
+        description="ship it",
+        expected_artifacts=("artifact.txt",),
+    )
+    seed = Seed(
+        goal="bounded routing",
+        acceptance_criteria=(spec,),
+        ontology_schema=OntologySchema(name="n", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+    candidate = _candidate(executor, "compat:claude:frugal")
+    original = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="wrote artifact",
+                tool_name="Write",
+                data={"tool_input": {"file_path": str(artifact)}},
+            ),
+        ),
+        final_message="artifact produced with verified output",
+        duration_seconds=1.25,
+        retry_attempt=0,
+        verify_gate_outcome=_VerifyGateOutcome(
+            passed=True,
+            reason=None,
+            output_tail="verified",
+            workspace_digest=executor._workspace_content_digest(str(tmp_path)),
+        ),
+        route_candidate=candidate,
+    )
+    await executor._emit_ac_attempt_judged(
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        required=True,
+        route_episode_id=_episode_id(seed),
+        route_attempt_index=0,
+    )
+    await executor._persist_route_observation(
+        seed=seed,
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        attempted_route_ids=(candidate.route_id,),
+        failure_class=None,
+        decision=None,
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    provider = AsyncMock()
+    executor._execute_ac_batch = provider  # type: ignore[method-assign]
+    replayed = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    provider.assert_not_awaited()
+    restored = replayed[0]
+    assert isinstance(restored, ACExecutionResult)
+    assert restored.final_message == original.final_message
+    assert restored.messages[0].tool_name == "Write"
+    assert restored.messages[0].data["tool_input"]["file_path"] == str(artifact)
+    assert restored.verify_gate_outcome == original.verify_gate_outcome
+    settled = await executor._settle_verify_gate_results(
+        seed=seed,
+        results=[restored],
+        session_id="session-1",
+        execution_id="execution-1",
+    )
+    assert settled[0].success is True
 
 
 @pytest.mark.asyncio

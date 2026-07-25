@@ -4687,6 +4687,55 @@ class OrchestratorRunner:
                 raise OrchestratorError(message="Invalid persisted parallel resume plan")
         return StagedExecutionPlan(nodes=tuple(nodes), stages=tuple(stages))
 
+    @staticmethod
+    def _serialize_parallel_external_satisfaction(
+        seed: Seed,
+        values: dict[int, dict[str, Any]] | None,
+    ) -> dict[str, dict[str, str | None]]:
+        """Seal the partial-stage ``--skip-completed`` authority for resume."""
+
+        serialized: dict[str, dict[str, str | None]] = {}
+        for ac_index, metadata in (values or {}).items():
+            if type(ac_index) is not int or not 0 <= ac_index < len(seed.acceptance_criteria):
+                raise OrchestratorError(message="Invalid externally satisfied AC index")
+            reason = metadata.get("reason") if isinstance(metadata, Mapping) else None
+            commit = metadata.get("commit") if isinstance(metadata, Mapping) else None
+            if reason is not None and not isinstance(reason, str):
+                raise OrchestratorError(message="Invalid externally satisfied AC reason")
+            if commit is not None and not isinstance(commit, str):
+                raise OrchestratorError(message="Invalid externally satisfied AC commit")
+            serialized[str(ac_index)] = {"reason": reason, "commit": commit}
+        return serialized
+
+    @staticmethod
+    def _deserialize_parallel_external_satisfaction(
+        seed: Seed,
+        raw: object,
+    ) -> dict[int, dict[str, Any]]:
+        """Restore the exact skip map or fail before a provider effect."""
+
+        if not isinstance(raw, Mapping) or len(raw) > len(seed.acceptance_criteria):
+            raise OrchestratorError(message="Invalid persisted external satisfaction state")
+        restored: dict[int, dict[str, Any]] = {}
+        for raw_index, metadata in raw.items():
+            if not isinstance(raw_index, str) or not raw_index.isdecimal():
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            ac_index = int(raw_index)
+            if not 0 <= ac_index < len(seed.acceptance_criteria):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            if not isinstance(metadata, Mapping) or not _mapping_has_exact_keys(
+                metadata, frozenset({"reason", "commit"})
+            ):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            reason = metadata.get("reason")
+            commit = metadata.get("commit")
+            if (reason is not None and not isinstance(reason, str)) or (
+                commit is not None and not isinstance(commit, str)
+            ):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            restored[ac_index] = {"reason": reason, "commit": commit}
+        return restored
+
     def _validate_legacy_resume_identity(
         self,
         progress: Mapping[str, Any],
@@ -8571,6 +8620,12 @@ class OrchestratorRunner:
                 "routing_resume_owner": "parallel",
                 "routing_parallel_force_sequential": force_sequential_levels,
                 "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
+                "routing_parallel_externally_satisfied_acs": (
+                    self._serialize_parallel_external_satisfaction(
+                        seed,
+                        externally_satisfied_acs,
+                    )
+                ),
             }
             owner_result = await self._session_repo.track_progress(
                 tracker.session_id,
@@ -9282,6 +9337,12 @@ Note: This is a resumed session. Please continue from where execution was interr
                     seed,
                     tracker.progress.get("routing_parallel_plan"),
                 )
+                resume_externally_satisfied_acs = (
+                    self._deserialize_parallel_external_satisfaction(
+                        seed,
+                        tracker.progress.get("routing_parallel_externally_satisfied_acs"),
+                    )
+                )
                 return await self._execute_parallel(
                     seed=seed,
                     exec_id=tracker.execution_id,
@@ -9291,6 +9352,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     start_time=start_time,
                     execution_contract=execution_contract,
+                    externally_satisfied_acs=resume_externally_satisfied_acs,
                     force_sequential_levels=force_sequential,
                     resume_execution_plan=resume_execution_plan,
                 )

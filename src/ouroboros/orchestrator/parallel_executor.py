@@ -1307,6 +1307,10 @@ MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+_ROUTE_SUCCESS_CONTEXT_CHARS = 200
+_ROUTE_SUCCESS_CONTEXT_TOOLS = 20
+_ROUTE_SUCCESS_TOOL_NAME_CHARS = 128
+_ROUTE_SUCCESS_FILE_PATH_CHARS = 2048
 
 
 @dataclass(frozen=True)
@@ -1390,6 +1394,143 @@ def _checkpoint_verify_gate_outcomes(
         if outcome is not None:
             serialized[str(result.ac_index)] = outcome
     return serialized
+
+
+def _has_usage_limit_pause(result: ACExecutionResult) -> bool:
+    """Return whether any leaf in an AC result tree carries a quota pause.
+
+    Decomposed aggregate results intentionally keep their own ``messages``
+    empty.  Pause ownership therefore has to follow the result tree down to
+    the atomic leaf instead of treating the aggregate envelope as the effect.
+    """
+    if any(is_usage_limit_pause_message(message) for message in reversed(result.messages)):
+        return True
+    return any(_has_usage_limit_pause(child) for child in result.sub_results)
+
+
+def _serialize_provisional_route_success(result: ACExecutionResult) -> dict[str, object]:
+    """Persist the bounded context required to settle a resumed success.
+
+    Provider transcripts can be unbounded and may contain runtime-private
+    values.  The next-stage context projection only consumes the final-message
+    tail plus tool names and modified file paths, so seal exactly that bounded
+    projection together with the structured verify-gate outcome.
+    """
+    context_tools: list[dict[str, str]] = []
+    seen_tools: set[tuple[str, str]] = set()
+    if (
+        not math.isfinite(result.duration_seconds)
+        or result.duration_seconds < 0
+        or type(result.retry_attempt) is not int
+        or result.retry_attempt < 0
+        or (result.session_id is not None and not isinstance(result.session_id, str))
+    ):
+        raise RuntimeError("provisional route success cannot seal malformed result context")
+    for message in result.messages:
+        tool_name = message.tool_name
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+        if len(tool_name) > _ROUTE_SUCCESS_TOOL_NAME_CHARS:
+            raise RuntimeError("provisional route success tool context exceeds its bound")
+        file_path = ""
+        tool_input = message.data.get("tool_input")
+        if isinstance(tool_input, Mapping):
+            raw_path = tool_input.get("file_path")
+            if isinstance(raw_path, str):
+                file_path = raw_path
+        if len(file_path) > _ROUTE_SUCCESS_FILE_PATH_CHARS:
+            raise RuntimeError("provisional route success file context exceeds its bound")
+        identity = (tool_name, file_path)
+        if identity in seen_tools:
+            continue
+        seen_tools.add(identity)
+        context_tools.append({"tool_name": tool_name, "file_path": file_path})
+        if len(context_tools) >= _ROUTE_SUCCESS_CONTEXT_TOOLS:
+            break
+    return {
+        "schema_version": 1,
+        "final_message_tail": result.final_message[-_ROUTE_SUCCESS_CONTEXT_CHARS:],
+        "context_tools": context_tools,
+        "duration_seconds": result.duration_seconds,
+        "session_id": result.session_id,
+        "retry_attempt": result.retry_attempt,
+        "verify_gate_outcome": _serialize_verify_gate_outcome(result.verify_gate_outcome),
+    }
+
+
+def _deserialize_provisional_route_success(
+    value: object,
+    *,
+    ac_index: int,
+    ac_content: str,
+    route_candidate: RouteCandidate,
+) -> ACExecutionResult:
+    """Restore a sealed provisional success or fail closed on malformed state."""
+    from ouroboros.orchestrator.adapter import AgentMessage
+
+    if not isinstance(value, Mapping) or value.get("schema_version") != 1:
+        raise RuntimeError("provisional route success has invalid durable context")
+    final_message = value.get("final_message_tail")
+    raw_tools = value.get("context_tools")
+    duration_seconds = value.get("duration_seconds")
+    session_id = value.get("session_id")
+    retry_attempt = value.get("retry_attempt")
+    if (
+        not isinstance(final_message, str)
+        or len(final_message) > _ROUTE_SUCCESS_CONTEXT_CHARS
+        or not isinstance(raw_tools, list)
+        or len(raw_tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
+        or not isinstance(duration_seconds, int | float)
+        or isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < 0
+        or (session_id is not None and not isinstance(session_id, str))
+        or type(retry_attempt) is not int
+        or retry_attempt < 0
+    ):
+        raise RuntimeError("provisional route success has malformed bounded context")
+    messages: list[AgentMessage] = []
+    for raw_tool in raw_tools:
+        if not isinstance(raw_tool, Mapping):
+            raise RuntimeError("provisional route success has malformed tool context")
+        tool_name = raw_tool.get("tool_name")
+        file_path = raw_tool.get("file_path")
+        if (
+            not isinstance(tool_name, str)
+            or not tool_name
+            or len(tool_name) > _ROUTE_SUCCESS_TOOL_NAME_CHARS
+            or not isinstance(file_path, str)
+            or len(file_path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
+        ):
+            raise RuntimeError("provisional route success has malformed tool context")
+        data: dict[str, object] = {}
+        if file_path:
+            data["tool_input"] = {"file_path": file_path}
+        messages.append(
+            AgentMessage(
+                type="tool",
+                content="[Restored bounded route context]",
+                tool_name=tool_name,
+                data=data,
+            )
+        )
+    raw_verify = value.get("verify_gate_outcome")
+    verify_outcome = _deserialize_verify_gate_outcome(raw_verify)
+    if raw_verify is not None and verify_outcome is None:
+        raise RuntimeError("provisional route success has malformed verify evidence")
+    return ACExecutionResult(
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=True,
+        messages=tuple(messages),
+        final_message=final_message,
+        duration_seconds=float(duration_seconds),
+        session_id=session_id,
+        retry_attempt=retry_attempt,
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        verify_gate_outcome=verify_outcome,
+        route_candidate=route_candidate,
+    )
 
 
 def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[str, ...]:
@@ -2499,6 +2640,7 @@ class ParallelACExecutor:
         retry_prompts: dict[int, str] | None = None,
         route_overrides: dict[int, RouteCandidate] | None = None,
         same_runtime_budget_exhausted: bool = True,
+        force_legacy_routing: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool.
 
@@ -2540,6 +2682,7 @@ class ParallelACExecutor:
                             expected_route.route_id if expected_route is not None else None
                         ),
                         expected_route_candidate=expected_route,
+                        force_legacy_routing=force_legacy_routing,
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
                         ac_spec=(
                             ac_criterion
@@ -3144,11 +3287,7 @@ class ParallelACExecutor:
                     )
 
                     batch_route_pause = self._bounded_route_escalation_enabled and any(
-                        isinstance(result, ACExecutionResult)
-                        and any(
-                            is_usage_limit_pause_message(message)
-                            for message in reversed(result.messages)
-                        )
+                        isinstance(result, ACExecutionResult) and _has_usage_limit_pause(result)
                         for result in batch_results
                     )
 
@@ -4696,6 +4835,7 @@ class ParallelACExecutor:
         semantic_ac_key: str | None = None,
         route_id_override: str | None = None,
         expected_route_candidate: RouteCandidate | None = None,
+        force_legacy_routing: bool = False,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -4857,8 +4997,14 @@ class ParallelACExecutor:
         # Stall recovery belongs to atomic leaves only. Once this method decides
         # to execute atomically, it can retry the leaf without re-running the
         # decomposition/dispatch branch above.
-        bounded_route_recovery_enabled = self._bounded_route_escalation_enabled and (
-            not is_sub_ac or decomposition_trustworthy
+        # Routing D currently owns only top-level atomic ACs.  A decomposed
+        # child has no durable child-level observation/replay owner yet, so it
+        # must retain the established legacy retry/model-routing path even
+        # when its decomposition attestation is trustworthy.
+        bounded_route_recovery_enabled = (
+            self._bounded_route_escalation_enabled
+            and not is_sub_ac
+            and not force_legacy_routing
         )
         atomic_retry_attempt = retry_attempt
         stall_retry_budget = 0 if bounded_route_recovery_enabled else MAX_STALL_RETRIES
@@ -4889,6 +5035,7 @@ class ParallelACExecutor:
             "semantic_ac_key": semantic_ac_key,
             "route_id_override": route_id_override,
             "expected_route_candidate": expected_route_candidate,
+            "force_legacy_routing": force_legacy_routing,
         }
         while True:
             atomic_result = await _invoke_execution_authority_entry(
@@ -4919,6 +5066,7 @@ class ParallelACExecutor:
                 semantic_ac_key=semantic_ac_key,
                 route_id_override=route_id_override,
                 expected_route_candidate=expected_route_candidate,
+                force_legacy_routing=force_legacy_routing,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if atomic_result.outcome in {
@@ -6020,6 +6168,7 @@ Respond with either ATOMIC or the structured JSON object only.
         semantic_ac_key: str | None = None,
         route_id_override: str | None = None,
         expected_route_candidate: RouteCandidate | None = None,
+        force_legacy_routing: bool = False,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -6050,8 +6199,13 @@ Respond with either ATOMIC or the structured JSON object only.
         route_compat_was_enabled = (
             self._route_economics is not None and model_router_snapshot is not None
         )
-        bounded_route_attempt_enabled = self._bounded_route_escalation_enabled and (
-            not is_sub_ac or decomposition_trustworthy
+        # Child escalation is a deferred slice.  Until it has its own durable
+        # identity and replay authority, bounded routing is top-level atomic
+        # only; children continue through the legacy router.
+        bounded_route_attempt_enabled = (
+            self._bounded_route_escalation_enabled
+            and not is_sub_ac
+            and not force_legacy_routing
         )
         durable_route_projection = self._build_route_compat_projection(
             model_router=model_router_snapshot,
@@ -8047,6 +8201,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     "call_site": "parallel",
                     "observation": observation.to_contract_data(),
                     "decision": decision.to_contract_data() if decision is not None else None,
+                    "provisional_result": (
+                        _serialize_provisional_route_success(result) if result.success else None
+                    ),
                     "human_handoff_required": bool(decision is not None and decision.blocked),
                     "final_acceptance_declared": False,
                 },
@@ -8664,18 +8821,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_attempt=max(0, len(histories[ac_idx]) - 1),
                 outcome=ACExecutionOutcome.BLOCKED,
             )
-        for ac_idx, candidate in provisional_successes.items():
-            results[positions[ac_idx]] = ACExecutionResult(
-                ac_index=ac_idx,
-                ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
-                success=True,
-                final_message=(
-                    "[Restored provisional route success; Final Gate remains authoritative]"
-                ),
-                retry_attempt=max(0, len(histories[ac_idx]) - 1),
-                outcome=ACExecutionOutcome.SUCCEEDED,
-                route_candidate=candidate,
-            )
+        for ac_idx, cached_result in provisional_successes.items():
+            results[positions[ac_idx]] = cached_result
         for ac_idx, history in histories.items():
             ac_retry_attempts[ac_idx] = len(history)
         retry_prompts: dict[int, str] = {}
@@ -8708,9 +8855,32 @@ Respond with either ATOMIC or the structured JSON object only.
                 results[positions[ac_idx]] = value
                 if not isinstance(value, ACExecutionResult):
                     continue
-                if any(
-                    is_usage_limit_pause_message(message) for message in reversed(value.messages)
-                ):
+                if value.is_decomposed:
+                    # Routing D has no child/aggregate replay owner in this
+                    # slice.  Once preflight or bounce execution proves this
+                    # root is composite, finish its established legacy
+                    # verify/retry policy rather than interpreting a missing
+                    # top-level RouteCandidate as a bounded outcome.
+                    legacy_result = await self._continue_decomposed_legacy_recovery(
+                        seed=seed,
+                        ac_idx=ac_idx,
+                        initial_result=value,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        level_contexts=level_contexts,
+                        ac_retry_attempts=ac_retry_attempts,
+                        execution_counters=execution_counters,
+                    )
+                    results[positions[ac_idx]] = legacy_result
+                    if isinstance(legacy_result, ACExecutionResult) and _has_usage_limit_pause(
+                        legacy_result
+                    ):
+                        recoverable_pause_seen = True
+                    continue
+                if _has_usage_limit_pause(value):
                     # Quota windows are nonterminal session pauses, not evidence
                     # that this route lacks capability.  Preserve the untouched
                     # provider result for the runner's pause owner and emit no
@@ -8882,6 +9052,170 @@ Respond with either ATOMIC or the structured JSON object only.
 
         return results
 
+    async def _continue_decomposed_legacy_recovery(
+        self,
+        *,
+        seed: Seed,
+        ac_idx: int,
+        initial_result: ACExecutionResult,
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        ac_retry_attempts: dict[int, int],
+        execution_counters: dict[str, int] | None,
+    ) -> ACExecutionResult | BaseException:
+        """Continue the pre-Routing-D recovery contract for a composite root."""
+
+        current = initial_result
+        if _has_usage_limit_pause(current):
+            return current
+        current = await self._apply_verify_gate(
+            seed=seed,
+            ac_index=ac_idx,
+            result=current,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        await self._emit_ac_attempt_judged(
+            result=current,
+            root_ac_index=ac_idx,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+        last_failure_class = self._failure_class_for_result(current)
+        termination_reason = "not_retryable"
+
+        while self._is_retryable_failure(current) and ac_retry_attempts[ac_idx] < self._ac_retry_attempts:
+            ac_retry_attempts[ac_idx] += 1
+            is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
+            retried = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=[ac_idx],
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                retry_prompts={
+                    ac_idx: self._build_ac_retry_prompt(
+                        result=current,
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        is_final_attempt=is_final,
+                    )
+                },
+                same_runtime_budget_exhausted=is_final,
+                force_legacy_routing=True,
+            )
+            next_value = retried[0]
+            if not isinstance(next_value, ACExecutionResult):
+                return next_value
+            if _has_usage_limit_pause(next_value):
+                return next_value
+            current = await self._apply_verify_gate(
+                seed=seed,
+                ac_index=ac_idx,
+                result=next_value,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            await self._emit_ac_attempt_judged(
+                result=current,
+                root_ac_index=ac_idx,
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            if not self._is_retryable_failure(current):
+                termination_reason = "not_retryable"
+                break
+
+            new_failure_class = self._failure_class_for_result(current)
+            if (
+                new_failure_class is not None
+                and last_failure_class is not None
+                and new_failure_class == last_failure_class
+            ):
+                model_support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    ParamSupport.IGNORED,
+                )
+                pending_model_escalation = False
+                if (
+                    self._model_router is not None
+                    and self._model_router.runtime_backend
+                    == getattr(self._adapter, "runtime_backend", None)
+                    and model_support is ParamSupport.NATIVE
+                    and not is_final
+                ):
+                    just_dispatched = decide_model(
+                        model_support,
+                        router=self._model_router,
+                        is_decomposed_child=True,
+                        decomposition_trustworthy=current.decomposition_trustworthy,
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                    )
+                    next_scheduled = decide_model(
+                        model_support,
+                        router=self._model_router,
+                        is_decomposed_child=True,
+                        decomposition_trustworthy=current.decomposition_trustworthy,
+                        retry_attempt=ac_retry_attempts[ac_idx] + 1,
+                    )
+                    pending_model_escalation = bool(
+                        just_dispatched.is_enforced
+                        and next_scheduled.model is not None
+                        and next_scheduled.model != just_dispatched.model
+                    )
+                if not pending_model_escalation:
+                    termination_reason = "repeated_failure_early_stop"
+                    if not is_final:
+                        alt = await self._maybe_redispatch_alt_harness_for_batch_ac(
+                            seed=seed,
+                            ac_idx=ac_idx,
+                            result=current,
+                            session_id=session_id,
+                            execution_id=execution_id,
+                            tools=tools,
+                            tool_catalog=tool_catalog,
+                            system_prompt=system_prompt,
+                            level_contexts=level_contexts,
+                            execution_counters=execution_counters,
+                            retry_attempt=ac_retry_attempts[ac_idx],
+                        )
+                        if isinstance(alt, ACExecutionResult):
+                            current = await self._apply_verify_gate(
+                                seed=seed,
+                                ac_index=ac_idx,
+                                result=alt,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
+                            await self._emit_ac_attempt_judged(
+                                result=current,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
+                    break
+            last_failure_class = new_failure_class
+            termination_reason = "budget_exhausted"
+
+        await self._emit_recovery_exhausted(
+            seed=seed,
+            result=current,
+            root_ac_index=ac_idx,
+            session_id=session_id,
+            execution_id=execution_id,
+            retry_termination_reason=termination_reason,
+        )
+        return current
+
     async def _load_bounded_route_resume_state(
         self,
         *,
@@ -8893,7 +9227,7 @@ Respond with either ATOMIC or the structured JSON object only.
         dict[int, tuple[str, ...]],
         dict[int, RouteCandidate],
         dict[int, str],
-        dict[int, RouteCandidate],
+        dict[int, ACExecutionResult],
     ]:
         """Replay route observations without repeating a provider effect.
 
@@ -8905,7 +9239,7 @@ Respond with either ATOMIC or the structured JSON object only.
         from ouroboros.orchestrator.route_policy import RouteRequirements
 
         relevant = set(root_ac_indices)
-        grouped: dict[int, list[tuple[RouteObservation, object, bool]]] = {
+        grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices
         }
         events = await self._event_store.query_execution_related_events(
@@ -8956,12 +9290,17 @@ Respond with either ATOMIC or the structured JSON object only.
             if len(grouped[root_ac_index]) >= MAX_ROUTE_ATTEMPTS:
                 raise RuntimeError("route observation replay exceeds the finite route bound")
             grouped[root_ac_index].append(
-                (observation, data.get("decision"), human_handoff_required)
+                (
+                    observation,
+                    data.get("decision"),
+                    human_handoff_required,
+                    data.get("provisional_result"),
+                )
             )
 
         observed_attempts: dict[tuple[int, str, int, str], RouteVerifierOutcome] = {}
         for root_ac_index, rows in grouped.items():
-            for observation, _decision, _handoff in rows:
+            for observation, _decision, _handoff, _provisional_result in rows:
                 key = (
                     root_ac_index,
                     observation.episode_id,
@@ -9044,7 +9383,7 @@ Respond with either ATOMIC or the structured JSON object only.
         histories: dict[int, tuple[str, ...]] = {}
         overrides: dict[int, RouteCandidate] = {}
         terminals: dict[int, str] = {}
-        provisional_successes: dict[int, RouteCandidate] = {}
+        provisional_successes: dict[int, ACExecutionResult] = {}
         for ac_idx, rows in grouped.items():
             rows.sort(key=lambda row: row[0].attempt_index)
             if [row[0].attempt_index for row in rows] != list(range(len(rows))):
@@ -9057,7 +9396,12 @@ Respond with either ATOMIC or the structured JSON object only.
             if not rows:
                 continue
             parsed_decisions: list[RouteEscalationDecision | None] = []
-            for row_index, (observation, raw_decision, handoff_claim) in enumerate(rows):
+            for row_index, (
+                observation,
+                raw_decision,
+                handoff_claim,
+                raw_provisional_result,
+            ) in enumerate(rows):
                 live_projection = self._build_route_compat_projection(
                     model_router=self._model_router,
                     effort=observation.effort,
@@ -9101,12 +9445,19 @@ Respond with either ATOMIC or the structured JSON object only.
 
                 attempted = route_ids[: row_index + 1]
                 if observation.verifier_outcome is RouteVerifierOutcome.ATTEMPT_SUCCEEDED:
-                    if raw_decision is not None or handoff_claim or row_index != len(rows) - 1:
+                    if (
+                        raw_decision is not None
+                        or handoff_claim
+                        or row_index != len(rows) - 1
+                        or raw_provisional_result is None
+                    ):
                         raise RuntimeError(
                             "successful route observation has invalid recovery state"
                         )
                     parsed_decisions.append(None)
                     continue
+                if raw_provisional_result is not None:
+                    raise RuntimeError("failed route observation carries success-only context")
                 if observation.failure_class is None:
                     raise RuntimeError("failed route observation lost its failure classification")
                 try:
@@ -9160,7 +9511,12 @@ Respond with either ATOMIC or the structured JSON object only.
             last_observation = rows[-1][0]
             last_decision = parsed_decisions[-1]
             if last_observation.verifier_outcome is RouteVerifierOutcome.ATTEMPT_SUCCEEDED:
-                provisional_successes[ac_idx] = candidate
+                provisional_successes[ac_idx] = _deserialize_provisional_route_success(
+                    rows[-1][3],
+                    ac_index=ac_idx,
+                    ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                    route_candidate=candidate,
+                )
                 continue
             if last_decision is None:
                 raise RuntimeError("failed route observation lost its durable decision")

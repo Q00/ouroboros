@@ -1308,6 +1308,7 @@ class TestOrchestratorRunner:
                     "routing_parallel_plan": runner._serialize_parallel_resume_plan(
                         graph.to_execution_plan()
                     ),
+                    "routing_parallel_externally_satisfied_acs": {},
                 }
             )
             direct_resume = AsyncMock(side_effect=AssertionError("direct owner entered"))
@@ -1327,6 +1328,86 @@ class TestOrchestratorRunner:
         )
         direct_resume.assert_not_awaited()
         assert analyze.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_parallel_resume_restores_externally_satisfied_partial_stage_state(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    sample_seed.acceptance_criteria[0],
+                    AcceptanceCriterionSpec(description="paused sibling"),
+                )
+            }
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        tracker = SessionTracker.create(
+            "execution-external-resume",
+            seed.metadata.seed_id,
+            session_id="session-external-resume",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=ac_texts(seed)[0]),
+                ACNode(index=1, content=ac_texts(seed)[1]),
+            ),
+            execution_levels=((0, 1),),
+        )
+        external = {0: {"reason": "already verified", "commit": "abc123"}}
+        paused_tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+            {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": False,
+                "routing_parallel_plan": runner._serialize_parallel_resume_plan(
+                    graph.to_execution_plan()
+                ),
+                "routing_parallel_externally_satisfied_acs": (
+                    runner._serialize_parallel_external_satisfaction(seed, external)
+                ),
+            }
+        )
+        parallel_resume = AsyncMock(
+            return_value=Result.ok(
+                OrchestratorResult(
+                    success=True,
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    summary={},
+                    messages_processed=0,
+                    final_message="resumed",
+                    duration_seconds=0.0,
+                )
+            )
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(runner, "_execute_parallel", parallel_resume),
+        ):
+            result = await runner.resume_session(paused_tracker.session_id, seed)
+
+        assert result.is_ok
+        assert parallel_resume.await_args.kwargs["externally_satisfied_acs"] == external
 
     @pytest.mark.asyncio
     async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
