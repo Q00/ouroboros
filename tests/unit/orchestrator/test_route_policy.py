@@ -463,6 +463,9 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         "SG." + "A" * 22 + "." + "B" * 43,
         "hvs." + "A" * 24,
+        "runtime:" + "x" * 200,
+        "runtime:dop_v1_" + "x" * 64,
+        "runtime:opaqueprovider",
     )
     for identity in credential_shapes:
         with pytest.raises(ValueError, match="stable authority descriptor"):

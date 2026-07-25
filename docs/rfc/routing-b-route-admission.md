@@ -38,9 +38,11 @@ Each candidate has:
 - `cost_units`: non-negative configured relative cost;
 - `persona`, `tool_policy`, and `authority_identity`: explicit route identity
   dimensions, never inferred from a provider name. Authority identities use a
-  small allowlisted stable-descriptor grammar (for example
-  `runtime:claude` or `session-a`); opaque values and credential-shaped values
-  are rejected before serialization;
+  small allowlisted stable-descriptor grammar (for example `runtime:claude` or
+  `session-a`). A descriptor has one typed namespace and at most four
+  explicitly registered non-secret label segments (or a bounded numeric
+  ordinal). Unknown labels, opaque values, and credential-shaped values are
+  rejected before serialization;
 
 The route contract uses the shared `core.security.is_stable_authority_identity`
 boundary. The process-local execution-authority module retains its separate

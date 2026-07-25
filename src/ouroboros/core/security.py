@@ -156,13 +156,99 @@ _CREDENTIAL_COMPOUND_PREFIX = re.compile(
     r"(?!(?:budget|default|id|name|plane|scope)(?:$|[-_:/\.]))"
 )
 
-# Authority identities are descriptors, not opaque values.  Requiring a known
-# stable namespace keeps this boundary fail-closed without trying to enumerate
-# every provider's credential prefix (for example SendGrid or Vault tokens).
-_STABLE_AUTHORITY_IDENTITY = re.compile(
-    r"^(?:authority|session|runtime|workspace|process|execution|project|tenant|system|default)"
-    r"(?:[-_:/\.][a-z0-9]+)*$",
+# Authority identities are short typed descriptors, not opaque runtime values.
+# Bound both their namespace and their label structure so an allowlisted prefix
+# cannot be used as a container for an unenumerated provider token.
+_STABLE_AUTHORITY_NAMESPACES = (
+    "authority",
+    "execution",
+    "workspace",
+    "process",
+    "project",
+    "runtime",
+    "session",
+    "system",
+    "tenant",
+    "default",
 )
+_STABLE_AUTHORITY_SEPARATORS = frozenset("-_:/.")
+_STABLE_AUTHORITY_LABELS = frozenset(
+    {
+        "a",
+        "auth",
+        "b",
+        "budget",
+        "claude",
+        "codex",
+        "copilot",
+        "default",
+        "gemini",
+        "gjc",
+        "goose",
+        "hermes",
+        "keycloak",
+        "kiro",
+        "litellm",
+        "local",
+        "opencode",
+        "ourocode",
+        "pi",
+        "plane",
+        "primary",
+        "privateer",
+        "project",
+        "secondary",
+        "shared",
+        "token",
+        "tokenizer",
+        "worker",
+        "zcode",
+    }
+)
+_MAX_STABLE_AUTHORITY_SEGMENTS = 4
+_MAX_STABLE_AUTHORITY_SEGMENT_CHARS = 32
+_MAX_STABLE_AUTHORITY_ORDINAL_CHARS = 10
+
+
+def _has_stable_authority_grammar(value: str) -> bool:
+    """Validate a bounded typed descriptor with one linear scan."""
+
+    namespace = next(
+        (candidate for candidate in _STABLE_AUTHORITY_NAMESPACES if value.startswith(candidate)),
+        None,
+    )
+    if namespace is None:
+        return False
+    tail = value[len(namespace) :]
+    if not tail:
+        return True
+    if tail[0] not in _STABLE_AUTHORITY_SEPARATORS:
+        return False
+
+    segments: list[str] = []
+    segment_chars: list[str] = []
+    for character in tail[1:]:
+        if character in _STABLE_AUTHORITY_SEPARATORS:
+            if not segment_chars:
+                return False
+            segments.append("".join(segment_chars))
+            if len(segments) >= _MAX_STABLE_AUTHORITY_SEGMENTS:
+                return False
+            segment_chars = []
+            continue
+        if not ("a" <= character <= "z" or "0" <= character <= "9"):
+            return False
+        segment_chars.append(character)
+        if len(segment_chars) > _MAX_STABLE_AUTHORITY_SEGMENT_CHARS:
+            return False
+    if not segment_chars:
+        return False
+    segments.append("".join(segment_chars))
+    return all(
+        segment in _STABLE_AUTHORITY_LABELS
+        or (segment.isdecimal() and len(segment) <= _MAX_STABLE_AUTHORITY_ORDINAL_CHARS)
+        for segment in segments
+    )
 
 
 def _is_credential_namespace_label(value: str) -> bool:
@@ -287,7 +373,7 @@ def is_stable_authority_identity(value: str) -> bool:
         return False
     normalized = value.strip()
     return (
-        bool(_STABLE_AUTHORITY_IDENTITY.fullmatch(normalized))
+        _has_stable_authority_grammar(normalized)
         and not is_credential_shaped(normalized)
         and not _has_strict_compact_authority_label(normalized)
     )

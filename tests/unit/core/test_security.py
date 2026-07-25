@@ -179,6 +179,11 @@ class TestSensitiveDetection:
             "authority-default",
             "session-a",
             "runtime:claude",
+            "runtime:keycloak",
+            "runtime:tokenizer",
+            "runtime:privateer",
+            "runtime:token-budget",
+            "runtime:auth-plane:default",
             "workspace/project-1",
             "default",
         ):
@@ -223,9 +228,11 @@ class TestSensitiveDetection:
             "runtime:accesstoken:opaquevalue",
             "runtime:accesskey:opaquevalue",
             "runtime:privatekey:opaquevalue",
+            "runtime:" + "x" * 200,
+            "runtime:dop_v1_" + "x" * 64,
+            "runtime:opaqueprovider",
         ):
             assert is_stable_authority_identity(value) is False
-        assert is_stable_authority_identity("runtime:auth-plane:default") is True
 
     def test_stable_authority_identity_rejects_hostile_input_in_linear_time(self) -> None:
         hostile = "runtime:" + "a-" * 24 + ":"
