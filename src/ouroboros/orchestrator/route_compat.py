@@ -111,10 +111,10 @@ def _has_bounded_mapping_keys(
         try:
             key = next(iterator)
         except StopIteration:
-            return len(keys) == len(expected) and frozenset(keys) == expected
+            return len(keys) == len(expected) and set(keys) == expected
         except Exception:
             return False
-        if index >= len(expected) or not isinstance(key, str):
+        if index >= len(expected) or type(key) is not str or key not in expected or key in keys:
             return False
         keys.append(key)
     return False
