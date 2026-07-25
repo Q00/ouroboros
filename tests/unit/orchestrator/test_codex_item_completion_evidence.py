@@ -1659,6 +1659,135 @@ class TestCodexCompletionReviewRoundOne:
         )
         assert messages[0].tool_name == "fs.write"
 
+    def test_malformed_failure_code_alias_cannot_be_promoted_to_success(self) -> None:
+        """A present-but-malformed failure-code alias must block a status success."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for bad in ({"statusCode": "500"}, {"errorCode": "E_FAIL"}):
+            messages = runtime._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "fc",
+                        "type": "mcp_tool_call",
+                        "name": "t",
+                        "status": "completed",
+                        "result": bad,
+                    },
+                },
+                current_handle=None,
+            )
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert results[0].data.get("is_error") is not False, (
+                f"a malformed failure-code alias {bad} was ignored and status promoted success"
+            )
+
+    def test_command_nested_input_workdir_is_part_of_identity(self) -> None:
+        """input.workdir must be in the command identity and persisted tool input."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        start = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "wd",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "input": {"workdir": "/w/a"},
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        assert (start[0].data.get("tool_input") or {}).get("cwd") == "/w/a"
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "wd",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "input": {"workdir": "/w/b"},
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+        assert len(messages) == 2, "a completion with a different nested workdir mispaired"
+
+    def test_mcp_meta_secrets_are_redacted_before_persistence(self) -> None:
+        """Sensitive MCP _meta keys must not survive into durable journal metadata."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "sec",
+                    "type": "mcp_tool_call",
+                    "name": "t",
+                    "status": "completed",
+                    "result": {
+                        "_meta": {
+                            "trace_id": "t-1",
+                            "authorization": "Bearer xyz",
+                            "nested": {"api_key": "sk-secret", "ok": 1},
+                        }
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        serialized = json.dumps(results[0].data.get("tool_result") or {})
+        assert "xyz" not in serialized, "authorization secret survived into journal metadata"
+        assert "sk-secret" not in serialized, "nested api_key survived into journal metadata"
+        assert "t-1" in serialized, "non-sensitive audit data was lost"
+
+    def test_completion_dedup_stores_bounded_digest(self) -> None:
+        """The dedup set must not retain multi-megabyte completion envelopes."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        big = "x" * 2_000_000
+        runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "big",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "status": "completed",
+                    "aggregated_output": big,
+                },
+            },
+            current_handle=None,
+        )
+        # Reach into the default scope's dedup set and assert entries are bounded.
+        keys = runtime._default_item_scope.completed_item_keys
+        assert keys, "no dedup key recorded"
+        assert all(len(k) < 4096 for k in keys), (
+            "dedup stored an unbounded envelope instead of a fixed-size digest"
+        )
+
+    def test_resumed_tool_start_keeps_started_event_type(self) -> None:
+        """Neutralizing a start handle must not stamp it with a result event type."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        stale = RuntimeHandle(backend="codex_cli", metadata={"runtime_event_type": "run.completed"})
+        messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "st",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=stale,
+        )
+        projected = project_runtime_message(messages[0])
+        event_type = (projected.runtime_metadata or {}).get("runtime_event_type") or ""
+        assert event_type != "tool.result", "a tool start was stamped with the result event type"
+        assert not event_type.endswith((".completed", ".succeeded"))
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")

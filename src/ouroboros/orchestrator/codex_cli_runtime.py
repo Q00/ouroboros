@@ -146,6 +146,11 @@ _TOOL_LIFECYCLE_ITEM_TYPES = frozenset(
     {"command_execution", "mcp_tool_call", "file_change", "web_search"}
 )
 _TOOL_STARTED_RUNTIME_EVENT_TYPE = "tool.started"
+_SENSITIVE_META_KEY_RE = re.compile(
+    r"(authorization|api[_-]?key|access[_-]?token|secret|password|passwd|credential|"
+    r"private[_-]?key|session[_-]?token|bearer|cookie)",
+    re.IGNORECASE,
+)
 _TOOL_RESULT_RUNTIME_EVENT_TYPE = "tool.result"
 # Containers that may hold nested command-result metadata on a thread item.
 # Shared by ``_extract_command_metadata`` and the fail-closed success resolver.
@@ -1884,7 +1889,9 @@ class CodexCliRuntime:
         candidates = [item.get("cwd"), item.get("working_directory"), item.get("workdir")]
         nested = item.get("input")
         if isinstance(nested, dict):
-            candidates.extend([nested.get("cwd"), nested.get("working_directory")])
+            candidates.extend(
+                [nested.get("cwd"), nested.get("working_directory"), nested.get("workdir")]
+            )
         for value in candidates:
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -1939,13 +1946,38 @@ class CodexCliRuntime:
 
     @staticmethod
     def _extract_mcp_result_meta(item: dict[str, Any]) -> dict[str, Any]:
-        """Return an MCP result ``_meta`` mapping for audit transfer."""
+        """Return a redacted MCP result ``_meta`` mapping for audit transfer."""
         result = item.get("result")
         if isinstance(result, dict):
             meta = result.get("_meta")
             if isinstance(meta, dict) and meta:
-                return dict(meta)
+                redacted = CodexCliRuntime._redact_sensitive(meta)
+                return redacted if isinstance(redacted, dict) else {}
         return {}
+
+    @staticmethod
+    def _redact_sensitive(value: Any, _depth: int = 0) -> Any:
+        """Recursively redact secret-bearing keys before durable persistence.
+
+        Opaque MCP audit data is untrusted and may carry credentials
+        (``authorization``, ``api_key``, tokens); those must never reach the
+        journal (round fifteen, blocker 3). Depth is bounded to avoid
+        pathological nesting.
+        """
+        if _depth > 8:
+            return "[…]"
+        if isinstance(value, dict):
+            return {
+                key: (
+                    "[REDACTED]"
+                    if isinstance(key, str) and _SENSITIVE_META_KEY_RE.search(key)
+                    else CodexCliRuntime._redact_sensitive(item, _depth + 1)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [CodexCliRuntime._redact_sensitive(item, _depth + 1) for item in value]
+        return value
 
     @staticmethod
     def _nested_error(item: dict[str, Any]) -> object:
@@ -2224,10 +2256,17 @@ class CodexCliRuntime:
                 if fail_key not in source:
                     continue
                 code = source.get(fail_key)
-                if isinstance(code, bool):
+                if isinstance(code, int) and not isinstance(code, bool):
+                    if code != 0:
+                        has_failure = True
+                elif code in (None, "", 0, False):
+                    # Cleanly absent/zero: no failure signal.
+                    continue
+                else:
+                    # A present but non-integer failure-code alias
+                    # ("500", "E_FAIL", True, ...) is untrustworthy and must
+                    # not let another field promote success (round fifteen).
                     has_malformed = True
-                elif isinstance(code, int) and code != 0:
-                    has_failure = True
 
             for error_flag_key in ("isError", "is_error"):
                 if error_flag_key not in source:
@@ -2296,7 +2335,9 @@ class CodexCliRuntime:
     ) -> AgentMessage:
         """Build the tool-start half of an item lifecycle pair."""
         extra_data: dict[str, Any] = {"runtime_event_type": _TOOL_STARTED_RUNTIME_EVENT_TYPE}
-        handle = self._neutralize_terminal_handle_event_type(handle)
+        handle = self._neutralize_terminal_handle_event_type(
+            handle, _TOOL_STARTED_RUNTIME_EVENT_TYPE
+        )
         if call.tool_call_id is not None:
             extra_data["tool_call_id"] = call.tool_call_id
         return self._build_tool_message(
@@ -2406,12 +2447,16 @@ class CodexCliRuntime:
     @staticmethod
     def _neutralize_terminal_handle_event_type(
         handle: RuntimeHandle | None,
+        neutral_event_type: str = _TOOL_RESULT_RUNTIME_EVENT_TYPE,
     ) -> RuntimeHandle | None:
         """Return a handle whose stale terminal runtime_event_type is cleared.
 
         Projection lets a resume handle's ``runtime_event_type`` override the
         message value, so a terminal ``run.completed``/``session.terminated``
-        would otherwise become the result's event type and forge success.
+        would otherwise become the message's event type and forge success. The
+        replacement matches the message half — ``tool.started`` for starts and
+        ``tool.result`` for results — so a resumed start is not stamped with a
+        result event type (round fifteen follow-up).
         """
         if handle is None:
             return None
@@ -2419,7 +2464,7 @@ class CodexCliRuntime:
         if not isinstance(stale, str) or not stale:
             return handle
         neutralized_metadata = dict(handle.metadata)
-        neutralized_metadata["runtime_event_type"] = _TOOL_RESULT_RUNTIME_EVENT_TYPE
+        neutralized_metadata["runtime_event_type"] = neutral_event_type
         return replace(handle, metadata=neutralized_metadata)
 
     def _convert_tool_item_started(
@@ -2487,7 +2532,11 @@ class CodexCliRuntime:
             # one fingerprint and be silently suppressed; serializing the whole
             # item captures every evidence-bearing field (rounds seven-nine).
             envelope_fingerprint = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
-            dedup_key = f"{item_id}\x00{envelope_fingerprint}"
+            # Store a fixed-size digest, not the raw envelope: completion
+            # output can be multi-megabyte and would otherwise accumulate in
+            # the scope until the stream ends (round fifteen, blocker 4).
+            envelope_digest = hashlib.sha256(envelope_fingerprint.encode("utf-8")).hexdigest()
+            dedup_key = f"{item_id}\x00{envelope_digest}"
             if dedup_key in scope.completed_item_keys:
                 return []
             scope.completed_item_keys.add(dedup_key)
