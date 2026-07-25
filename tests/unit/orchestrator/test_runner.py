@@ -872,7 +872,7 @@ class TestOrchestratorRunner:
         async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             models.append(kwargs["model"])
             resume_handles.append(kwargs.get("resume_handle"))
-            failed = len(models) < 3
+            failed = len(models) < 2
             yield AgentMessage(
                 type="result",
                 content="failed" if failed else "[TASK_COMPLETE]",
@@ -900,19 +900,66 @@ class TestOrchestratorRunner:
             result = await runner.execute_seed(sample_seed, parallel=False)
 
         assert result.is_ok and result.value.success is True
-        assert models == ["haiku-x", "sonnet-x", "opus-x"]
-        assert resume_handles[1:] == [None, None]
+        assert models == ["sonnet-x", "opus-x"]
+        assert resume_handles[1:] == [None]
         route_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
             if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
         ]
         assert [event.data["observation"]["route_id"] for event in route_events] == [
-            "compat:claude:frugal",
             "compat:claude:standard",
             "compat:claude:frontier",
         ]
         assert all(event.data["final_acceptance_declared"] is False for event in route_events)
+
+    @pytest.mark.asyncio
+    async def test_direct_live_successor_cost_drift_blocks_before_second_provider_effect(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="evidence missing",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def append_and_drift(event: BaseEvent) -> None:
+            if event.type != "execution.ac.route_observed":
+                return
+            assert runner._route_economics is not None
+            tiers = dict(runner._route_economics.tiers)
+            tiers["frontier"] = tiers["frontier"].model_copy(update={"cost_factor": 99})
+            runner._route_economics = runner._route_economics.model_copy(update={"tiers": tiers})
+
+        mock_event_store.append.side_effect = append_and_drift
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert models == ["sonnet-x"]
+        assert result.is_err
+        assert "Route admission became stale" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_direct_bounded_route_cancellation_never_dispatches_successor(
@@ -968,7 +1015,7 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_ok and result.value.success is False
-        assert models == ["haiku-x"]
+        assert models == ["sonnet-x"]
         route_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
@@ -1024,7 +1071,7 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_ok and result.value.success is False
-        assert models == ["haiku-x"]
+        assert models == ["sonnet-x"]
         mark_paused.assert_awaited_once()
         route_events = [
             call.args[0]
@@ -1048,12 +1095,102 @@ class TestOrchestratorRunner:
                 execution_id="execution-1",
                 session_id="session-1",
             )
-            == "compat:claude:frugal"
+            == "compat:claude:standard"
         )
         runner._retire_process_local_authority(
             session_id="session-1",
             execution_id="execution-1",
         )
+
+    @pytest.mark.asyncio
+    async def test_parallel_bounded_usage_limit_pauses_without_escalation(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-parallel-quota",
+            seed.metadata.seed_id,
+            session_id="session-parallel-quota",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        provider_calls = 0
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            provider_calls += 1
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="parallel-route-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        mark_failed = AsyncMock(return_value=Result.ok(None))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert provider_calls == 1
+        mark_paused.assert_awaited_once()
+        mark_failed.assert_not_awaited()
+        emitted_types = {
+            call.args[0].type
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) is not None
+        }
+        assert "execution.ac.route_observed" not in emitted_types
+        assert "execution.ac.attempt_judged" not in emitted_types
 
     @pytest.mark.asyncio
     async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
@@ -1106,7 +1243,7 @@ class TestOrchestratorRunner:
         paused_candidate = next(
             candidate
             for candidate in projection.registry.candidates
-            if candidate.route_id == "compat:claude:frugal"
+            if candidate.route_id == "compat:claude:standard"
         )
         pause_event = BaseEvent(
             type="execution.ac.route_paused",
@@ -1151,7 +1288,7 @@ class TestOrchestratorRunner:
         assert len(captured_handles) == 1
         assert captured_handles[0] is not None
         assert captured_handles[0].native_session_id == "route-paused"
-        assert captured_models == ["haiku-x"]
+        assert captured_models == ["sonnet-x"]
 
     @pytest.mark.asyncio
     async def test_direct_pause_after_escalation_resumes_exact_successor_route(
@@ -1215,7 +1352,7 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_ok and result.value.success is False
-        assert models == ["haiku-x", "sonnet-x"]
+        assert models == ["sonnet-x", "opus-x"]
         route_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
@@ -1227,7 +1364,7 @@ class TestOrchestratorRunner:
             if getattr(call.args[0], "type", None) == "execution.ac.route_paused"
         ]
         assert len(route_events) == len(pause_events) == 1
-        assert pause_events[0].data["prior_route_ids"] == ["compat:claude:frugal"]
+        assert pause_events[0].data["prior_route_ids"] == ["compat:claude:standard"]
 
         async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
             if kwargs.get("event_type") == "execution.ac.route_observed":
@@ -1242,7 +1379,7 @@ class TestOrchestratorRunner:
                 execution_id="execution-route-escalated-pause",
                 session_id="session-route-escalated-pause",
             )
-            == "compat:claude:standard"
+            == "compat:claude:frontier"
         )
         runner._retire_process_local_authority(
             session_id="session-route-escalated-pause",

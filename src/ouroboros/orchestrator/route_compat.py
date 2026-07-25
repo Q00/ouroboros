@@ -17,7 +17,7 @@ No provider calls, retry policy, or Final Gate behavior belongs here.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import TYPE_CHECKING
 
@@ -456,11 +456,11 @@ def build_compat_escalation_requirements(
 ) -> RouteRequirements | None:
     """Build hard constraints for cheapest-first or exact-route admission.
 
-    Unlike :func:`_compat_requirements`, the initial form deliberately leaves
-    model and route unpinned so the Admission Kernel—not the legacy base-tier
-    router—selects the cheapest eligible configured route.  An escalation pins
-    the exact next route and its model.  All other authority dimensions remain
-    hard constraints in both forms.
+    Unlike :func:`_compat_requirements`, the initial form leaves model and route
+    unpinned so the Admission Kernel selects the cheapest candidate in the
+    *escalation registry*.  That registry preserves ``projection.base_tier`` as
+    the configured lower bound; this requirements value supplies the remaining
+    authority dimensions.  An escalation pins the exact next route and model.
     """
 
     if not isinstance(projection, RouteCompatProjection):
@@ -498,6 +498,41 @@ def build_compat_escalation_requirements(
         return None
 
 
+def build_compat_escalation_registry(
+    projection: RouteCompatProjection | None,
+) -> RouteRegistry | None:
+    """Return the finite registry eligible at or above the configured base tier.
+
+    Routing D may choose more cheaply than a prior *attempt*, but it may not
+    silently undercut the run's public starting-tier contract.  Candidates below
+    ``base_tier`` remain in the immutable registry with ``enabled=False`` so
+    replay can still resolve their identities while admission and ``advance_route``
+    apply one identical lower-bound policy.
+    """
+
+    if not isinstance(projection, RouteCompatProjection):
+        return None
+    try:
+        floor_index = MODEL_TIER_LADDER.index(projection.base_tier)
+        eligible_route_ids = {
+            route_id
+            for tier, route_id in projection.tier_route_ids
+            if MODEL_TIER_LADDER.index(tier) >= floor_index
+        }
+        return replace(
+            projection.registry,
+            candidates=tuple(
+                replace(
+                    candidate,
+                    enabled=candidate.enabled and candidate.route_id in eligible_route_ids,
+                )
+                for candidate in projection.registry.candidates
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def admit_compat_escalation_route(
     projection: RouteCompatProjection | None,
     *,
@@ -517,8 +552,11 @@ def admit_compat_escalation_route(
     )
     if requirements is None:
         return _blocked_compat_admission(projection)
+    registry = build_compat_escalation_registry(projection)
+    if registry is None:
+        return _blocked_compat_admission(projection)
     try:
-        return admit_route(projection.registry, requirements)
+        return admit_route(registry, requirements)
     except Exception:
         return _blocked_compat_admission(projection)
 
@@ -542,10 +580,15 @@ def validate_compat_escalation_admission(
             route_id=route_id,
             required_capabilities=required_capabilities,
         )
-        return requirements is not None and validate_admission(
-            projection.registry,
-            requirements,
-            admission,
+        registry = build_compat_escalation_registry(projection)
+        return (
+            requirements is not None
+            and registry is not None
+            and validate_admission(
+                registry,
+                requirements,
+                admission,
+            )
         )
     except Exception:
         return False
@@ -898,6 +941,7 @@ __all__ = [
     "admit_compat_route",
     "admitted_execute_model_kwargs",
     "build_compat_escalation_requirements",
+    "build_compat_escalation_registry",
     "build_route_compat_projection",
     "deserialize_route_compat_contract",
     "deserialize_route_compat_projection",

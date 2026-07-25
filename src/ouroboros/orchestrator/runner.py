@@ -139,6 +139,7 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -1040,6 +1041,7 @@ class OrchestratorRunner:
         session_id: str | None,
         bounded_escalation: bool = False,
         route_id_override: str | None = None,
+        expected_route_candidate: Any | None = None,
         selected_route_sink: list[Any] | None = None,
     ) -> dict[str, str]:
         """Lay the runner's own execute_task paths on BOTH investment contracts.
@@ -1115,6 +1117,15 @@ class OrchestratorRunner:
                     route_id=route_id_override,
                 )
                 selected = route_admission.selected
+                if expected_route_candidate is not None and selected != expected_route_candidate:
+                    raise OrchestratorError(
+                        message="Route admission blocked before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": "durable successor snapshot drifted",
+                            "call_site": "runner",
+                        },
+                    )
                 model_support = getattr(
                     getattr(self._adapter, "capabilities", None),
                     "model_override_support",
@@ -1395,6 +1406,7 @@ class OrchestratorRunner:
     ) -> str | None:
         """Resume only an explicitly paused direct route; seal completed effects."""
         from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_registry,
             build_compat_escalation_requirements,
             build_route_compat_projection,
         )
@@ -1581,6 +1593,7 @@ class OrchestratorRunner:
                     runtime_backend=getattr(self._adapter, "runtime_backend", None),
                     effort=observation.effort,
                 )
+                escalation_registry = build_compat_escalation_registry(live_projection)
                 requirements = (
                     build_compat_escalation_requirements(
                         live_projection,
@@ -1592,6 +1605,7 @@ class OrchestratorRunner:
                 try:
                     if (
                         live_projection is None
+                        or escalation_registry is None
                         or requirements is None
                         or observation.failure_class is None
                         or observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
@@ -1620,11 +1634,11 @@ class OrchestratorRunner:
                     )
                     decision = RouteEscalationDecision.from_contract_data(
                         raw_decision,
-                        registry=live_projection.registry,
+                        registry=escalation_registry,
                     )
                     attempted_prefix = prior_route_ids[: row_index + 1]
                     recomputed = advance_route(
-                        live_projection.registry,
+                        escalation_registry,
                         requirements,
                         current_route_id=observation.route_id,
                         attempted_route_ids=attempted_prefix,
@@ -5396,15 +5410,7 @@ class OrchestratorRunner:
         now: datetime,
     ) -> RecoverableFailurePause | None:
         """Return a pause decision for provider usage/quota window failures."""
-        has_runtime_error_shape = self._message_has_runtime_error_shape(message)
-        is_usage_limit = self._usage_limit_failure_from_metadata(
-            message,
-            now=now,
-        ) or self._is_usage_limit_text(
-            message.content,
-            has_runtime_error_shape=has_runtime_error_shape,
-        )
-        if not is_usage_limit:
+        if not is_usage_limit_pause_message(message, now=now):
             return None
 
         from ouroboros.config import get_usage_limit_pause_seconds
@@ -7236,7 +7242,7 @@ class OrchestratorRunner:
                 prompt: str,
                 resume_handle: RuntimeHandle | None,
                 status: Any,
-                route_id_override: str | None = None,
+                expected_route_candidate: Any | None = None,
             ) -> RuntimeHandle | None:
                 nonlocal cancelled_result
                 nonlocal final_message
@@ -7254,11 +7260,17 @@ class OrchestratorRunner:
                     tools=merged_tools,
                 )
                 selected_routes: list[Any] = []
+                route_id_override = (
+                    expected_route_candidate.route_id
+                    if expected_route_candidate is not None
+                    else None
+                )
                 effort_kwargs = await self._route_call_effort(
                     execution_id=exec_id,
                     session_id=tracker.session_id,
                     bounded_escalation=direct_bounded_routing,
                     route_id_override=route_id_override,
+                    expected_route_candidate=expected_route_candidate,
                     selected_route_sink=selected_routes,
                 )
                 direct_route_candidate = selected_routes[0] if selected_routes else None
@@ -7441,14 +7453,14 @@ class OrchestratorRunner:
                     self._inherited_runtime_handle, tool_catalog=tool_catalog
                 )
                 direct_route_history: tuple[str, ...] = ()
-                direct_route_override: str | None = None
+                direct_route_override: Any | None = None
                 direct_prompt = task_prompt
                 while True:
                     runtime_handle = await _consume_task_stream(
                         prompt=direct_prompt,
                         resume_handle=runtime_handle,
                         status=status,
-                        route_id_override=direct_route_override,
+                        expected_route_candidate=direct_route_override,
                     )
                     if cancelled_result is not None:
                         # Cancellation owns the terminal transition.  It is not a
@@ -7492,6 +7504,7 @@ class OrchestratorRunner:
                     from ouroboros.events.base import BaseEvent
                     from ouroboros.orchestrator.failure_taxonomy import FailureClass
                     from ouroboros.orchestrator.route_compat import (
+                        build_compat_escalation_registry,
                         build_compat_escalation_requirements,
                         build_route_compat_projection,
                     )
@@ -7512,6 +7525,7 @@ class OrchestratorRunner:
                         runtime_backend=getattr(self._adapter, "runtime_backend", None),
                         effort=direct_route_candidate.effort,
                     )
+                    escalation_registry = build_compat_escalation_registry(live_projection)
                     requirements = (
                         build_compat_escalation_requirements(
                             live_projection,
@@ -7542,6 +7556,7 @@ class OrchestratorRunner:
                         )
                         if (
                             live_projection is None
+                            or escalation_registry is None
                             or requirements is None
                             or live_candidate != direct_route_candidate
                         ):
@@ -7561,7 +7576,7 @@ class OrchestratorRunner:
                             )
                         else:
                             decision = advance_route(
-                                live_projection.registry,
+                                escalation_registry,
                                 requirements,
                                 current_route_id=direct_route_candidate.route_id,
                                 attempted_route_ids=direct_route_history,
@@ -7615,7 +7630,7 @@ class OrchestratorRunner:
                             )
                         break
                     assert decision.selected is not None
-                    direct_route_override = decision.selected.route_id
+                    direct_route_override = decision.selected
                     direct_prompt = (
                         task_prompt
                         + "\n\nThe prior implementation route failed. Continue in a fresh "

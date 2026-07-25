@@ -26,9 +26,11 @@ rank equal-cost hints   authorize each provider effect  declare AC acceptance
 ```
 
 - An Advisor can rank candidates but cannot dispatch or accept work.
-- The Admission Kernel selects the cheapest eligible initial route. Every
-  escalated route is exactly pinned and revalidated against a freshly rebuilt
-  live registry immediately before the provider call.
+- The Admission Kernel selects the cheapest eligible initial route at or above
+  the run's configured `base_model_tier`. Routing D may save cost within that
+  public starting-tier contract; it cannot silently weaken the contract itself.
+  Every escalated route is exactly pinned and revalidated against a freshly
+  rebuilt live registry immediately before the provider call.
 - A successful route attempt is recorded only as `attempt_succeeded`. It is not
   acceptance. The existing terminal Final Gate remains the only path that can
   durably finalize an AC as accepted.
@@ -45,7 +47,8 @@ next provider effect.
 For one route episode:
 
 1. Build the live compatibility registry and Admission Kernel requirements.
-2. Admit the cheapest eligible unattempted route.
+2. Disable candidates below the configured starting-tier floor, then admit the
+   cheapest eligible unattempted route.
 3. Rebuild and revalidate the exact admission at the provider boundary.
 4. Execute the route once.
 5. Persist the provisional attempt judgment.
@@ -139,9 +142,12 @@ sealed against session replay; an old or exhausted route cannot be executed
 again through resume.
 
 Cancellation is not a route failure and exits before observation or successor
-selection. A recoverable usage/quota limit likewise retains the current route
-and provider handle under `PAUSED`; it emits no terminal route observation.
-Instead, `execution.ac.route_paused` durably binds the full current candidate,
+selection. A recoverable usage/quota limit is also detected before route
+classification: the parallel path preserves the raw failed result so the runner
+can mark the session `PAUSED`, and emits neither a route judgment nor a terminal
+route observation that could authorize escalation. The direct path additionally
+retains the current route and provider handle. Its
+`execution.ac.route_paused` event durably binds the full current candidate,
 attempt index, and prior route prefix. Resume validates that snapshot against
 the live registry and either the cheapest initial admission or the exact last
 escalation decision, then resumes the same provider handle with that exact

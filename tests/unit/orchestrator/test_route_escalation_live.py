@@ -17,7 +17,7 @@ from ouroboros.core.seed import (
     derive_semantic_ac_key,
 )
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.adapter import ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
@@ -82,9 +82,14 @@ def _seed() -> Seed:
 def _executor(
     *,
     model_support: ParamSupport = ParamSupport.NATIVE,
+    base_tier: str = "frugal",
 ) -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
     economics = _economics()
-    router = build_model_router(economics, runtime_backend="claude")
+    router = build_model_router(
+        economics,
+        runtime_backend="claude",
+        base_tier_override=base_tier,
+    )
     assert router is not None
     store = AsyncMock()
     events: list[BaseEvent] = []
@@ -259,7 +264,8 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     calls: list[str] = []
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
-        route_id = kwargs.get("route_overrides", {}).get(0, "compat:claude:frugal")
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
         calls.append(route_id)
         if route_id == "compat:claude:frontier":
             return [
@@ -307,7 +313,8 @@ async def test_route_exhaustion_is_durable_blocked_human_handoff() -> None:
     executor, _store, events = _executor()
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
-        route_id = kwargs.get("route_overrides", {}).get(0, "compat:claude:frugal")
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
         return [_failed(executor, route_id)]
 
     executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
@@ -333,6 +340,55 @@ async def test_route_exhaustion_is_durable_blocked_human_handoff() -> None:
     assert last_route.data["human_handoff_required"] is True
     recovery = [event for event in events if event.type == "execution.ac.recovery_exhausted"][-1]
     assert recovery.data["human_handoff_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_parallel_usage_limit_pauses_before_route_observation_or_escalation() -> None:
+    executor, _store, events = _executor()
+    calls = 0
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Usage limit reached. Please try again in 5 hours.",
+                outcome=ACExecutionOutcome.FAILED,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Usage limit reached. Please try again in 5 hours.",
+                        data={"subtype": "error", "error_type": "CodexCliError"},
+                    ),
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].outcome is ACExecutionOutcome.FAILED
+    assert not any(
+        event.type in {"execution.ac.attempt_judged", "execution.ac.route_observed"}
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -366,6 +422,52 @@ async def test_observation_persistence_failure_prevents_next_provider_effect() -
             execution_counters=None,
         )
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_live_successor_cost_drift_blocks_before_second_provider_effect() -> None:
+    executor, store, events = _executor()
+    provider_calls = 0
+
+    async def execute_task(**_kwargs: Any):
+        nonlocal provider_calls
+        provider_calls += 1
+        yield AgentMessage(
+            type="result",
+            content="evidence missing",
+            data={"subtype": "error"},
+        )
+
+    executor._adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+
+    async def append_and_drift(event: BaseEvent) -> None:
+        events.append(event)
+        if event.type == "execution.ac.route_observed":
+            assert executor._route_economics is not None
+            tiers = dict(executor._route_economics.tiers)
+            tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": 99})
+            executor._route_economics = executor._route_economics.model_copy(
+                update={"tiers": tiers}
+            )
+
+    store.append.side_effect = append_and_drift
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert provider_calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].outcome is ACExecutionOutcome.BLOCKED
+    assert "successor snapshot drifted" in (results[0].error or "")
 
 
 @pytest.mark.asyncio
@@ -478,7 +580,7 @@ async def test_legacy_attempt_judgment_does_not_block_route_observation_replay()
     )
 
     assert histories[0] == ("compat:claude:frugal",)
-    assert overrides[0] == "compat:claude:standard"
+    assert overrides[0].route_id == "compat:claude:standard"
     assert terminals == {}
 
 
@@ -519,7 +621,7 @@ async def test_resume_uses_durable_next_route_without_repeating_cheapest() -> No
     calls: list[str] = []
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
-        route_id = kwargs["route_overrides"][0]
+        route_id = kwargs["route_overrides"][0].route_id
         calls.append(route_id)
         return [
             ACExecutionResult(
@@ -789,7 +891,57 @@ async def test_provisional_success_resume_blocks_replay_without_declaring_accept
     result = results[0]
     assert isinstance(result, ACExecutionResult)
     assert result.outcome is ACExecutionOutcome.BLOCKED
+    assert result.retry_attempt == 0
     assert "Final Gate did not durably accept" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_terminal_route_replay_reports_last_zero_based_attempt() -> None:
+    executor, store, events = _executor()
+
+    async def fail_every_route(**kwargs: Any) -> list[ACExecutionResult]:
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
+        return [_failed(executor, route_id)]
+
+    executor._execute_ac_batch = fail_every_route  # type: ignore[method-assign]
+    await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        event_type = kwargs.get("event_type")
+        return [event for event in events if event.type == event_type]
+
+    store.query_execution_related_events.side_effect = query
+    provider = AsyncMock()
+    executor._execute_ac_batch = provider  # type: ignore[method-assign]
+    replayed = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    provider.assert_not_awaited()
+    assert isinstance(replayed[0], ACExecutionResult)
+    assert replayed[0].outcome is ACExecutionOutcome.BLOCKED
+    assert replayed[0].retry_attempt == 2
 
 
 @pytest.mark.asyncio

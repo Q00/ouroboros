@@ -310,10 +310,12 @@ from ouroboros.orchestrator.rate_limit import (
     build_rate_limit_gate,
     estimate_runtime_request_tokens,
 )
+from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
 from ouroboros.orchestrator.route_compat import (
     admit_compat_escalation_route,
     admit_compat_route,
     admitted_execute_model_kwargs,
+    build_compat_escalation_registry,
     build_compat_escalation_requirements,
     build_route_compat_projection,
     serialize_route_compat_contract,
@@ -331,6 +333,7 @@ from ouroboros.orchestrator.route_escalation import (
 from ouroboros.orchestrator.route_escalation import (
     VerifierOutcome as RouteVerifierOutcome,
 )
+from ouroboros.orchestrator.route_policy import RouteCandidate
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -2454,7 +2457,7 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int],
         execution_counters: dict[str, int] | None = None,
         retry_prompts: dict[int, str] | None = None,
-        route_overrides: dict[int, str] | None = None,
+        route_overrides: dict[int, RouteCandidate] | None = None,
         same_runtime_budget_exhausted: bool = True,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool.
@@ -2475,6 +2478,7 @@ class ParallelACExecutor:
             async with self._semaphore:
                 try:
                     ac_criterion = seed.acceptance_criteria[ac_idx]
+                    expected_route = (route_overrides or {}).get(ac_idx)
                     batch_results[idx] = await _invoke_execution_authority_entry(
                         self,
                         _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
@@ -2492,7 +2496,10 @@ class ParallelACExecutor:
                         retry_attempt=ac_retry_attempts[ac_idx],
                         execution_counters=execution_counters,
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
-                        route_id_override=(route_overrides or {}).get(ac_idx),
+                        route_id_override=(
+                            expected_route.route_id if expected_route is not None else None
+                        ),
+                        expected_route_candidate=expected_route,
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
                         ac_spec=(
                             ac_criterion
@@ -4624,6 +4631,7 @@ class ParallelACExecutor:
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
         route_id_override: str | None = None,
+        expected_route_candidate: RouteCandidate | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -4816,6 +4824,7 @@ class ParallelACExecutor:
             "decomposition_trustworthy": decomposition_trustworthy,
             "semantic_ac_key": semantic_ac_key,
             "route_id_override": route_id_override,
+            "expected_route_candidate": expected_route_candidate,
         }
         while True:
             atomic_result = await _invoke_execution_authority_entry(
@@ -4845,6 +4854,7 @@ class ParallelACExecutor:
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
                 route_id_override=route_id_override,
+                expected_route_candidate=expected_route_candidate,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if atomic_result.outcome in {
@@ -5945,6 +5955,7 @@ Respond with either ATOMIC or the structured JSON object only.
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
         route_id_override: str | None = None,
+        expected_route_candidate: RouteCandidate | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -6030,6 +6041,11 @@ Respond with either ATOMIC or the structured JSON object only.
                         "model_routing": serialize_model_router(model_router_snapshot),
                         "route_compat": serialize_route_compat_contract(durable_route_projection),
                         "route_id_override": route_id_override,
+                        "expected_route_candidate": (
+                            expected_route_candidate.to_contract_data()
+                            if expected_route_candidate is not None
+                            else None
+                        ),
                         "execution_profile": (
                             self._execution_profile.model_dump(mode="json")
                             if self._execution_profile is not None
@@ -6265,6 +6281,19 @@ Respond with either ATOMIC or the structured JSON object only.
                 route_id=route_id_override,
             )
             selected_route = route_admission.selected
+            if expected_route_candidate is not None and selected_route != expected_route_candidate:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    error="route admission blocked: durable successor snapshot drifted",
+                    duration_seconds=duration,
+                    session_id=session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                )
             model_support = getattr(
                 getattr(self._adapter, "capabilities", None),
                 "model_override_support",
@@ -6430,6 +6459,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
                 if (
                     selected is None
+                    or (
+                        expected_route_candidate is not None
+                        and selected != expected_route_candidate
+                    )
                     or model_support is not ParamSupport.NATIVE
                     or selected.model != model_decision.model
                 ):
@@ -8499,7 +8532,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                 success=False,
                 error=reason,
-                retry_attempt=len(histories[ac_idx]),
+                retry_attempt=max(0, len(histories[ac_idx]) - 1),
                 outcome=ACExecutionOutcome.BLOCKED,
             )
         for ac_idx, history in histories.items():
@@ -8526,12 +8559,22 @@ Respond with either ATOMIC or the structured JSON object only.
                 same_runtime_budget_exhausted=False,
             )
             next_pending: set[int] = set()
-            next_overrides: dict[int, str] = {}
+            next_overrides: dict[int, RouteCandidate] = {}
             next_prompts: dict[int, str] = {}
+            recoverable_pause_seen = False
             for round_position, ac_idx in enumerate(round_indices):
                 value = round_results[round_position]
                 results[positions[ac_idx]] = value
                 if not isinstance(value, ACExecutionResult):
+                    continue
+                if any(
+                    is_usage_limit_pause_message(message) for message in reversed(value.messages)
+                ):
+                    # Quota windows are nonterminal session pauses, not evidence
+                    # that this route lacks capability.  Preserve the untouched
+                    # provider result for the runner's pause owner and emit no
+                    # judgment/observation that could authorize a successor.
+                    recoverable_pause_seen = True
                     continue
                 gated = await self._apply_verify_gate(
                     seed=seed,
@@ -8597,6 +8640,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     runtime_backend=getattr(self._adapter, "runtime_backend", None),
                     effort=candidate.effort,
                 )
+                escalation_registry = build_compat_escalation_registry(live_projection)
                 requirements = (
                     build_compat_escalation_requirements(
                         live_projection,
@@ -8617,7 +8661,12 @@ Respond with either ATOMIC or the structured JSON object only.
                     if live_projection is not None
                     else None
                 )
-                if requirements is None or live_projection is None or live_candidate != candidate:
+                if (
+                    requirements is None
+                    or escalation_registry is None
+                    or live_projection is None
+                    or live_candidate != candidate
+                ):
                     decision = RouteEscalationDecision(
                         action=EscalationAction.BLOCKED,
                         failure_class=failure,
@@ -8628,7 +8677,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                 else:
                     decision = advance_route(
-                        live_projection.registry,
+                        escalation_registry,
                         requirements,
                         current_route_id=candidate.route_id,
                         attempted_route_ids=history,
@@ -8648,7 +8697,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     assert decision.selected is not None
                     ac_retry_attempts[ac_idx] += 1
                     next_pending.add(ac_idx)
-                    next_overrides[ac_idx] = decision.selected.route_id
+                    next_overrides[ac_idx] = decision.selected
                     next_prompts[ac_idx] = self._build_ac_retry_prompt(
                         result=gated,
                         ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
@@ -8676,7 +8725,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_termination_reason=decision.reason.value,
                 )
 
-            pending = next_pending
+            # A provider quota is normally shared by every route on this
+            # backend.  Do not dispatch successors accumulated for sibling ACs
+            # in the same round; return raw failures so the runner can durably
+            # mark the session PAUSED.
+            pending = set() if recoverable_pause_seen else next_pending
             route_overrides = next_overrides
             retry_prompts = next_prompts
 
@@ -8689,7 +8742,11 @@ Respond with either ATOMIC or the structured JSON object only.
         execution_id: str,
         session_id: str,
         root_ac_indices: tuple[int, ...],
-    ) -> tuple[dict[int, tuple[str, ...]], dict[int, str], dict[int, str]]:
+    ) -> tuple[
+        dict[int, tuple[str, ...]],
+        dict[int, RouteCandidate],
+        dict[int, str],
+    ]:
         """Replay route observations without repeating a provider effect.
 
         A failed observation with a durable escalation decision resumes at its
@@ -8804,7 +8861,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
 
         histories: dict[int, tuple[str, ...]] = {}
-        overrides: dict[int, str] = {}
+        overrides: dict[int, RouteCandidate] = {}
         terminals: dict[int, str] = {}
         for ac_idx, rows in grouped.items():
             rows.sort(key=lambda row: row[0].attempt_index)
@@ -8825,6 +8882,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     runtime_backend=getattr(self._adapter, "runtime_backend", None),
                     effort=observation.effort,
                 )
+                escalation_registry = build_compat_escalation_registry(live_projection)
                 requirements = (
                     build_compat_escalation_requirements(
                         live_projection,
@@ -8833,7 +8891,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     if live_projection is not None
                     else None
                 )
-                if live_projection is None or requirements is None:
+                if live_projection is None or requirements is None or escalation_registry is None:
                     raise RuntimeError("route observation replay has no compatible live registry")
                 candidate = next(
                     (
@@ -8874,10 +8932,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 try:
                     decision = RouteEscalationDecision.from_contract_data(
                         raw_decision,
-                        registry=live_projection.registry,
+                        registry=escalation_registry,
                     )
                     recomputed = advance_route(
-                        live_projection.registry,
+                        escalation_registry,
                         requirements,
                         current_route_id=observation.route_id,
                         attempted_route_ids=attempted,
@@ -8931,7 +8989,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError("failed route observation lost its durable decision")
             if last_decision.action is EscalationAction.ESCALATE_ROUTE:
                 assert last_decision.selected is not None
-                overrides[ac_idx] = last_decision.selected.route_id
+                overrides[ac_idx] = last_decision.selected
             elif last_decision.action is EscalationAction.BLOCKED:
                 terminals[ac_idx] = (
                     "The durable route set is exhausted or hard-blocked; human handoff is required."
