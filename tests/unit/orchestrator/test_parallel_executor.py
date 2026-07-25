@@ -11499,9 +11499,54 @@ class TestParallelACExecutor:
         assert tool_started.data["tool_call_id"] == "cmd-42"
         assert tool_started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
         assert tool_completed.data["tool_call_id"] == "cmd-42"
-        assert tool_completed.data["runtime_event_type"] == "tool.completed"
+        assert tool_completed.data["runtime_event_type"] == "tool.result"
         assert tool_completed.data["tool_result"]["is_error"] is False
         assert tool_completed.data["tool_result"]["meta"]["exit_status"] == 0
+
+    def test_message_level_tool_completion_event_type_is_not_terminal(self) -> None:
+        """A finished tool must not classify the runtime handle as terminated.
+
+        Message-level `runtime_event_type` now takes priority over stale handle
+        metadata, so the adapter's completion vocabulary reaches lifecycle
+        classification directly. `_runtime_handle_lifecycle_state` maps any value
+        containing "completed" (outside the `message.`/`result.`/`turn.` prefixes)
+        onto the terminal `completed` state, so naming a per-tool completion
+        `tool.completed` would end the runtime after its first tool.
+        """
+        from ouroboros.orchestrator.adapter import (
+            _RUNTIME_TERMINAL_STATES,
+            _runtime_handle_lifecycle_state,
+        )
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        runtime = CodexCliRuntime()
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-99",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            None,
+        )
+
+        event_types = [
+            message.data.get("runtime_event_type")
+            for message in messages
+            if message.data.get("runtime_event_type")
+        ]
+        assert event_types, "completion conversion must stamp a runtime_event_type"
+
+        for event_type in event_types:
+            lifecycle = _runtime_handle_lifecycle_state(event_type, has_session_id=True)
+            assert lifecycle not in _RUNTIME_TERMINAL_STATES, (
+                f"per-tool event type {event_type!r} classifies the runtime as "
+                f"{lifecycle!r}, which is terminal"
+            )
 
     def test_codex_id_bearing_exit_only_test_completion_proves_file_claim(self) -> None:
         from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
