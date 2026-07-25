@@ -23,7 +23,7 @@ import pytest
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.deliver_gate import _event_has_explicit_tool_success
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.evidence.claims import _runtime_message_has_success_signal
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
@@ -1338,9 +1338,8 @@ class TestCodexCompletionReviewRoundOne:
         blocks = tool_result.get("content") or []
         resource_block = next((b for b in blocks if b.get("type") == "resource"), {})
         assert resource_block.get("data") == "QkxPQg==", "resource blob was dropped"
-        assert (tool_result.get("meta") or {}).get("trace_id") == "t-123", (
-            "result _meta was dropped"
-        )
+        mcp_meta = (tool_result.get("meta") or {}).get("mcp_meta") or {}
+        assert mcp_meta.get("trace_id") == "t-123", "result _meta was dropped or de-namespaced"
 
     def test_mcp_iserror_wire_field_fails_closed(self) -> None:
         """The canonical MCP result.isError flag must win over a completed status."""
@@ -1388,6 +1387,277 @@ class TestCodexCompletionReviewRoundOne:
         blocks = (projected.tool_result or {}).get("content") or []
         structured = next((b for b in blocks if b.get("type") == "structured"), {})
         assert "99" in json.dumps(structured), "canonical structuredContent was discarded"
+
+    def test_command_iserror_false_alone_never_claims_success(self) -> None:
+        """isError is not part of the command contract; it cannot grant success."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "ce",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "isError": False,
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is not False, (
+            "a command with only isError=false and no valid exit claimed success"
+        )
+
+    def test_malformed_iserror_string_fails_closed(self) -> None:
+        """A present-but-malformed isError must poison the success claim."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "me",
+                    "type": "mcp_tool_call",
+                    "name": "fs.write",
+                    "status": "completed",
+                    "result": {"isError": "false"},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is not False, (
+            "a malformed isError string was ignored and status granted success"
+        )
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_mcp_result_meta_cannot_forge_authority_keys(self) -> None:
+        """Opaque MCP _meta must not populate the authoritative exit_status key."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        # Unknown verdict (no exit, no explicit success), but _meta forges exit_status=0.
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "meta",
+                    "type": "mcp_tool_call",
+                    "name": "fs.write",
+                    "result": {"_meta": {"exit_status": 0, "trace_id": "t-1"}},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        meta = (results[0].data.get("tool_result") or {}).get("meta") or {}
+        assert meta.get("exit_status") != 0, "opaque MCP _meta forged an authoritative exit_status"
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        ), "forged _meta.exit_status turned an unknown MCP verdict into success"
+        # audit data must still be preserved, just namespaced
+        assert "t-1" in json.dumps(meta), "MCP audit metadata was lost entirely"
+
+    def test_tool_result_does_not_inherit_stale_terminal_handle_event_type(self) -> None:
+        """A resumed handle's terminal runtime_event_type must not leak onto results."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        stale_handle = RuntimeHandle(
+            backend="codex_cli",
+            metadata={"runtime_event_type": "run.completed"},
+        )
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "resume",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "completed",
+                    "exit_code": "1",
+                },
+            },
+            current_handle=stale_handle,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        projected = project_runtime_message(results[0])
+        event_type = (projected.runtime_metadata or {}).get("runtime_event_type") or ""
+        assert not event_type.endswith((".completed", ".succeeded")), (
+            f"the result inherited a stale terminal event type: {event_type!r}"
+        )
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_synthesized_keyed_start_suppresses_later_start_replay(self) -> None:
+        """A completed-only keyed item then a late start must not duplicate the start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        completed = {
+            "type": "item.completed",
+            "item": {
+                "id": "late",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+        started = {
+            "type": "item.started",
+            "item": {
+                "id": "late",
+                "type": "command_execution",
+                "command": "pytest -q",
+                "status": "in_progress",
+            },
+        }
+
+        pair = runtime._convert_event(completed, current_handle=None)
+        late_start = runtime._convert_event(started, current_handle=None)
+
+        assert len(pair) == 2
+        assert late_start == [], (
+            "a late keyed start after a synthesized completion emitted a duplicate start"
+        )
+
+    def test_stray_exit_code_on_noncommand_item_is_not_success(self) -> None:
+        """A stray exit_code=0 on a non-command item must not forge success."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {"id": "w", "type": "web_search", "query": "cats", "exit_code": 0},
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert _runtime_message_has_success_signal(results[0]) is False, (
+            "in-memory verifier read a stray non-command exit_code=0 as success"
+        )
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        ), "deliver gate read a stray non-command exit_status=0 as success"
+
+    def test_voided_command_verdict_does_not_leak_exit_success(self) -> None:
+        """A command verdict voided by a malformed field must not forge success via exit_code."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "c",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "success": "yes",
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is None
+        assert _runtime_message_has_success_signal(results[0]) is False
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_validated_command_success_still_journals_exit_status(self) -> None:
+        """A genuinely successful command (is_error=False) keeps authoritative exit_status."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "ok",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "status": "completed",
+                    "aggregated_output": "1 passed",
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert results[0].data.get("is_error") is False
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0])) is True
+        ), "a validated command success lost its authoritative exit_status"
+
+    def test_tool_start_does_not_inherit_stale_terminal_handle_event_type(self) -> None:
+        """The start half must also not leak a resumed handle's terminal event type."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        stale_handle = RuntimeHandle(
+            backend="codex_cli", metadata={"runtime_event_type": "run.completed"}
+        )
+        messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "s",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=stale_handle,
+        )
+        assert len(messages) == 1
+        projected = project_runtime_message(messages[0])
+        event_type = (projected.runtime_metadata or {}).get("runtime_event_type") or ""
+        assert not event_type.endswith((".completed", ".succeeded")), (
+            f"the start inherited a stale terminal event type: {event_type!r}"
+        )
+
+    def test_failure_under_alternate_wire_keys_is_detected(self) -> None:
+        """A failure token under errorCode/statusCode must not be invisible."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        for fail_field in ("errorCode", "statusCode", "exit"):
+            messages = runtime._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": f"f_{fail_field}",
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{"path": "a.py", "kind": "update"}],
+                        fail_field: 1,
+                    },
+                },
+                current_handle=None,
+            )
+            results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+            assert results[0].data.get("is_error") is True, (
+                f"a nonzero {fail_field} failure token was invisible and left success"
+            )
+
+    def test_mcp_toolname_wire_spelling_is_recognized(self) -> None:
+        """MCP identity must recognize the toolName wire spelling."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "tn",
+                    "type": "mcp_tool_call",
+                    "toolName": "write",
+                    "server": "fs",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        assert messages[0].tool_name == "fs.write"
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""

@@ -146,6 +146,7 @@ _TOOL_LIFECYCLE_ITEM_TYPES = frozenset(
     {"command_execution", "mcp_tool_call", "file_change", "web_search"}
 )
 _TOOL_STARTED_RUNTIME_EVENT_TYPE = "tool.started"
+_TOOL_RESULT_RUNTIME_EVENT_TYPE = "tool.result"
 # Containers that may hold nested command-result metadata on a thread item.
 # Shared by ``_extract_command_metadata`` and the fail-closed success resolver.
 _ITEM_METADATA_CONTAINER_KEYS = ("output", "result", "metadata", "data")
@@ -1918,12 +1919,19 @@ class CodexCliRuntime:
     @staticmethod
     def _mcp_tool_name(item: dict[str, Any]) -> str:
         """Resolve an MCP tool identity from native tool+server or legacy name."""
-        tool = item.get("tool")
-        if isinstance(tool, str) and tool.strip():
+        tool = next(
+            (
+                item[key].strip()
+                for key in ("tool", "toolName", "tool_name")
+                if isinstance(item.get(key), str) and item[key].strip()
+            ),
+            "",
+        )
+        if tool:
             server = item.get("server")
             if isinstance(server, str) and server.strip():
-                return f"{server.strip()}.{tool.strip()}"
-            return tool.strip()
+                return f"{server.strip()}.{tool}"
+            return tool
         name = item.get("name")
         if isinstance(name, str) and name.strip():
             return name.strip()
@@ -2185,26 +2193,54 @@ class CodexCliRuntime:
         """
         has_failure = False
         has_success = False
+        has_malformed = False
 
-        # Scan every metadata source directly: first-value-wins merging must
-        # never let an outer success status shadow a nested failure (review
-        # blocker: failure signals take precedence wherever they appear).
+        # Verdict signals are resolved against a per-item-type authority
+        # contract. Failure takes precedence wherever it appears; a present
+        # but malformed verdict field poisons the success claim (fail closed);
+        # success is only claimed from a signal that is authoritative for this
+        # item type. Every metadata source is scanned directly so a nested
+        # failure is never shadowed by an outer success.
         for source in self._iter_item_metadata_sources(item):
             for exit_key in ("exit_code", "exitCode", "returncode", "return_code"):
+                if exit_key not in source:
+                    continue
                 exit_code = source.get(exit_key)
-                if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-                    if exit_code == 0:
+                if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                    has_malformed = True
+                elif exit_code == 0:
+                    # A validated zero exit is authoritative for commands.
+                    if item_type == "command_execution":
                         has_success = True
-                    else:
-                        has_failure = True
+                else:
+                    has_failure = True
+
+            # Failure-only alternate wire keys: a nonzero code under these
+            # spellings marks failure without ever granting success, so
+            # widening them can only add fail-closed coverage, never forge a
+            # verdict (round fifteen preempt: a failure token must not be
+            # invisible just because it uses a non-canonical field name).
+            for fail_key in ("exit", "statusCode", "status_code", "errorCode", "error_code"):
+                if fail_key not in source:
+                    continue
+                code = source.get(fail_key)
+                if isinstance(code, bool):
+                    has_malformed = True
+                elif isinstance(code, int) and code != 0:
+                    has_failure = True
 
             for error_flag_key in ("isError", "is_error"):
-                if error_flag_key in source:
-                    error_flag = source.get(error_flag_key)
-                    if error_flag is True:
-                        has_failure = True
-                    elif error_flag is False:
-                        has_success = True
+                if error_flag_key not in source:
+                    continue
+                error_flag = source.get(error_flag_key)
+                if not isinstance(error_flag, bool):
+                    has_malformed = True
+                elif error_flag is True:
+                    # A true error flag is a failure for any item type.
+                    has_failure = True
+                elif item_type == "mcp_tool_call":
+                    # isError is authoritative only for MCP calls.
+                    has_success = True
 
             status = source.get("status")
             if isinstance(status, str):
@@ -2213,9 +2249,8 @@ class CodexCliRuntime:
                     has_failure = True
                 elif normalized_status in _ITEM_SUCCESS_STATUSES:
                     # Codex marks command_execution items "completed" even on
-                    # non-zero exits, so lifecycle status alone must never
-                    # claim command success — only a validated zero exit or an
-                    # explicit success/ok flag can (review round four).
+                    # non-zero exits, so lifecycle status is authoritative for
+                    # success only for non-command item types (round four).
                     if item_type != "command_execution":
                         has_success = True
 
@@ -2233,14 +2268,23 @@ class CodexCliRuntime:
                     has_failure = True
 
             for key in ("success", "ok"):
+                if key not in source:
+                    continue
                 flag = source.get(key)
-                if flag is True:
+                if not isinstance(flag, bool):
+                    has_malformed = True
+                elif flag is True:
+                    # An explicit success/ok flag is authoritative for any type.
                     has_success = True
-                elif flag is False:
+                else:
                     has_failure = True
 
         if has_failure:
             return True
+        if has_malformed:
+            # A present but untrustworthy verdict field means the outcome is
+            # unknown — never claim success on ambiguous machine metadata.
+            return None
         if has_success:
             return False
         return None
@@ -2252,6 +2296,7 @@ class CodexCliRuntime:
     ) -> AgentMessage:
         """Build the tool-start half of an item lifecycle pair."""
         extra_data: dict[str, Any] = {"runtime_event_type": _TOOL_STARTED_RUNTIME_EVENT_TYPE}
+        handle = self._neutralize_terminal_handle_event_type(handle)
         if call.tool_call_id is not None:
             extra_data["tool_call_id"] = call.tool_call_id
         return self._build_tool_message(
@@ -2285,12 +2330,23 @@ class CodexCliRuntime:
             tool_result_meta["tool_call_id"] = call.tool_call_id
         exit_code = metadata.get("exit_code")
         if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-            tool_result_meta["exit_status"] = exit_code
+            # exit_status is an authoritative success/failure key the deliver
+            # gate trusts, so it may only ride when the resolver produced a
+            # real verdict. On an unknown verdict (is_error is None) it is
+            # demoted to an audit-only key so a leaked exit 0 cannot forge
+            # success — is_error is the sole authoritative verdict channel
+            # (round fifteen preempt: mirror the round-five status demotion).
+            if is_error is not None:
+                tool_result_meta["exit_status"] = exit_code
+            else:
+                tool_result_meta["reported_exit_status"] = exit_code
 
         result_meta = metadata.get("__mcp_result_meta__")
-        if isinstance(result_meta, dict):
-            for meta_key, meta_value in result_meta.items():
-                tool_result_meta.setdefault(str(meta_key), meta_value)
+        if isinstance(result_meta, dict) and result_meta:
+            # Namespace opaque MCP audit data so it can never populate the
+            # shared authority keys the deliver gate trusts (e.g. exit_status);
+            # it is preserved but isolated under "mcp_meta" (round fourteen).
+            tool_result_meta["mcp_meta"] = dict(result_meta)
         content_blocks = metadata.get("__mcp_content_blocks__")
         tool_result: dict[str, Any] = {
             "content": list(content_blocks) if isinstance(content_blocks, list) else [],
@@ -2319,20 +2375,52 @@ class CodexCliRuntime:
                 # (round seven follow-up P2): runtime metadata serialization
                 # otherwise drops the top-level key.
                 tool_result_meta["reported_status"] = reported
+            # The in-memory verifier reads a top-level exit_code==0 as success,
+            # so an unknown verdict must not forward the raw exit code either;
+            # demote it to an audit-only key (round fifteen preempt).
+            for exit_key in ("exit_code", "exitCode", "returncode", "return_code"):
+                if exit_key in extra_data:
+                    extra_data[f"reported_{exit_key}"] = extra_data.pop(exit_key)
         extra_data["subtype"] = "tool_result"
         if call.tool_call_id is not None:
             extra_data["tool_call_id"] = call.tool_call_id
         if is_error is not None:
             extra_data["is_error"] = is_error
         extra_data["tool_result"] = tool_result
+        # Carry a neutral, non-terminal result event type so a completion
+        # never reads as success via runtime_event_type. Projection overrides
+        # the message value with the handle's own runtime_event_type when
+        # present, so the handle is neutralized too — otherwise a resumed
+        # handle's stale ``run.completed`` would leak onto the result and
+        # forge journal success (round fourteen, blocker 3).
+        extra_data["runtime_event_type"] = _TOOL_RESULT_RUNTIME_EVENT_TYPE
 
         return self._build_tool_message(
             tool_name=call.tool_name,
             tool_input=call.tool_input,
             content=result_text,
-            handle=handle,
+            handle=self._neutralize_terminal_handle_event_type(handle),
             extra_data=extra_data,
         )
+
+    @staticmethod
+    def _neutralize_terminal_handle_event_type(
+        handle: RuntimeHandle | None,
+    ) -> RuntimeHandle | None:
+        """Return a handle whose stale terminal runtime_event_type is cleared.
+
+        Projection lets a resume handle's ``runtime_event_type`` override the
+        message value, so a terminal ``run.completed``/``session.terminated``
+        would otherwise become the result's event type and forge success.
+        """
+        if handle is None:
+            return None
+        stale = handle.metadata.get("runtime_event_type")
+        if not isinstance(stale, str) or not stale:
+            return handle
+        neutralized_metadata = dict(handle.metadata)
+        neutralized_metadata["runtime_event_type"] = _TOOL_RESULT_RUNTIME_EVENT_TYPE
+        return replace(handle, metadata=neutralized_metadata)
 
     def _convert_tool_item_started(
         self,
@@ -2404,6 +2492,12 @@ class CodexCliRuntime:
                 return []
             scope.completed_item_keys.add(dedup_key)
         has_started, correlation_key = self._consume_item_started(item_type, item, scope)
+        if not has_started and item_id is not None:
+            # A completed-only keyed item synthesizes its start here; record it
+            # so a later or replayed keyed item.started for the same id/signature
+            # is suppressed rather than emitting a duplicate start (round
+            # fourteen follow-up).
+            scope.started_item_signatures[item_id] = self._item_lifecycle_signature(item_type, item)
         calls = self._item_tool_calls(item_type, item, correlation_key)
         if not calls:
             return []
