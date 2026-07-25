@@ -932,6 +932,98 @@ class TestCodexCompletionReviewRoundOne:
                 is False
             ), repr(bad_error)
 
+    def test_file_change_conflicting_kind_does_not_pair(self) -> None:
+        """A same-path completion whose mutation kind differs must not inherit the start."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "fc1",
+                    "type": "file_change",
+                    "status": "in_progress",
+                    "changes": [{"path": "src/app.py", "kind": "add"}],
+                },
+            },
+            current_handle=None,
+        )
+
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "fc1",
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [{"path": "src/app.py", "kind": "delete"}],
+                },
+            },
+            current_handle=None,
+        )
+
+        assert len(messages) == 2, (
+            "a file_change completion with a conflicting mutation kind paired "
+            "with the start and would be accepted as its evidence"
+        )
+
+    def test_distinct_websearch_actions_same_id_stay_visible(self) -> None:
+        """Same-id web_search completions differing only in a non-fingerprinted field stay visible."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        base = {
+            "id": "ws1",
+            "type": "web_search",
+            "query": "ouroboros",
+            "status": "completed",
+        }
+
+        first = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "action": "search"}}, current_handle=None
+        )
+        second = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "action": "open"}}, current_handle=None
+        )
+        identical = runtime._convert_event(
+            {"type": "item.completed", "item": {**base, "action": "open"}}, current_handle=None
+        )
+
+        assert len(first) == 2
+        second_results = [m for m in second if m.data.get("subtype") == "tool_result"]
+        assert len(second_results) == 1, (
+            "a distinct same-id web_search completion was dropped as an exact replay"
+        )
+        assert identical == [], "a genuinely identical replay must stay suppressed"
+
+    def test_distinct_mcp_nontext_content_same_id_stays_visible(self) -> None:
+        """Same-id MCP completions with different non-text content must not collapse."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        base = {
+            "id": "mc1",
+            "type": "mcp_tool_call",
+            "name": "screenshot.capture",
+            "status": "completed",
+        }
+
+        first = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {**base, "result": {"content": [{"type": "image", "data": "AAAA"}]}},
+            },
+            current_handle=None,
+        )
+        second = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {**base, "result": {"content": [{"type": "image", "data": "BBBB"}]}},
+            },
+            current_handle=None,
+        )
+
+        assert len(first) == 2
+        second_results = [m for m in second if m.data.get("subtype") == "tool_result"]
+        assert len(second_results) == 1, (
+            "a same-id MCP completion with different image content was dropped as a replay"
+        )
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")

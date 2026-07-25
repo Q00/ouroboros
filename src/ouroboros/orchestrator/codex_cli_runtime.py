@@ -188,8 +188,9 @@ class _CodexItemCorrelationScope:
 
     Each streamed Codex process gets its own scope so parallel or sequential
     ACs sharing one adapter can never suppress another stream's synthetic
-    start with stale item ids. The scope is also cleared on ``thread.started``
-    so a new thread begins with a clean correlation space.
+    start with stale item ids. The scope is cleared on a ``thread.started``
+    event only when the thread identity actually changes, so an exact
+    same-thread header replay does not orphan in-flight starts.
     """
 
     started_item_signatures: dict[str, str] = field(default_factory=dict)
@@ -1870,6 +1871,36 @@ class CodexCliRuntime:
             return item_id.strip()
         return None
 
+    def _file_change_signature(self, item: dict[str, Any]) -> str:
+        """Pair each changed path with its mutation kind for stable identity.
+
+        Correlating on paths alone would let an ``add`` start pair with a
+        ``delete`` completion for the same path/id (round nine, blocker 1).
+        """
+        pairs: list[tuple[str, str]] = []
+        changes = item.get("changes")
+        if isinstance(changes, list):
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                path = next(
+                    (
+                        str(change[key]).strip()
+                        for key in ("path", "file_path", "target_file")
+                        if isinstance(change.get(key), str) and change[key].strip()
+                    ),
+                    "",
+                )
+                kind = change.get("kind")
+                pairs.append((path, kind.strip() if isinstance(kind, str) else ""))
+        if not pairs:
+            item_kind = item.get("kind")
+            pairs = [
+                (path, item_kind.strip() if isinstance(item_kind, str) else "")
+                for path in self._extract_paths(item)
+            ]
+        return json.dumps(sorted(pairs), ensure_ascii=False)
+
     @staticmethod
     def _mcp_tool_name(item: dict[str, Any]) -> str:
         """Resolve an MCP tool identity from native tool+server or legacy name."""
@@ -1930,7 +1961,7 @@ class CodexCliRuntime:
             arguments = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, default=str)
             return f"{self._mcp_tool_name(item)}\x00{arguments}"
         if item_type == "file_change":
-            return "\n".join(self._extract_paths(item))
+            return self._file_change_signature(item)
         if item_type == "web_search":
             # The query is the only stable identity: volatile fields such as
             # status must not change the signature between started/completed,
@@ -2234,27 +2265,14 @@ class CodexCliRuntime:
         is_error = self._resolve_item_completion_is_error(item_type, item)
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:
-            # Dedup on the id, input signature, verdict, AND every
-            # evidence-bearing completion field: an exact replay is
-            # suppressed, but any non-identical completion (a conflicting
-            # verdict, or the same verdict with different output) has a
-            # different fingerprint and stays visible so verification fails
-            # closed (review rounds seven & eight).
-            evidence_fields: dict[str, Any] = {
-                key: metadata.get(key)
-                for key in ("output", "stdout", "stderr", "result_preview", "exit_code", "status")
-            }
-            # The raw error envelope is evidence too: two malformed errors that
-            # produce no result text must not collapse to one fingerprint.
-            if "error" in item:
-                evidence_fields["error"] = item.get("error")
-            evidence_fingerprint = json.dumps(
-                evidence_fields, ensure_ascii=False, sort_keys=True, default=str
-            )
-            dedup_key = (
-                f"{item_id}\x00{self._item_lifecycle_signature(item_type, item)}"
-                f"\x00{is_error}\x00{evidence_fingerprint}"
-            )
+            # Dedup on the id plus the COMPLETE completion envelope so only
+            # a genuinely identical replay is dropped. Cherry-picked fields
+            # let distinct evidence (a changed web_search action, non-text MCP
+            # content, nested metadata, or a secondary exit alias) collapse to
+            # one fingerprint and be silently suppressed; serializing the whole
+            # item captures every evidence-bearing field (rounds seven-nine).
+            envelope_fingerprint = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            dedup_key = f"{item_id}\x00{envelope_fingerprint}"
             if dedup_key in scope.completed_item_keys:
                 return []
             scope.completed_item_keys.add(dedup_key)
