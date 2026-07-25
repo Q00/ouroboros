@@ -377,12 +377,16 @@ _GENERIC_NON_EXECUTING_TEST_OPTIONS = frozenset({"-h", "--help", "-V", "--versio
 _PYTEST_NON_EXECUTING_OPTIONS = frozenset(
     {
         "--collect-only",
+        "--collectonly",
         "--co",
         "--fixtures",
         "--fixtures-per-test",
+        "--funcargs",
         "--markers",
         "--setup-only",
         "--setup-plan",
+        "--setuponly",
+        "--setupplan",
     }
 )
 
@@ -454,6 +458,38 @@ _TRAILING_REDIRECT_RE = re.compile(
 )
 
 
+def _top_level_shell_character_positions(command: str, character: str) -> tuple[int, ...]:
+    """Return unquoted occurrences outside shell grouping and substitutions."""
+    positions: list[int] = []
+    quote: str | None = None
+    escaped = False
+    nesting: list[str] = []
+    closing = {"(": ")", "{": "}"}
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if char in closing:
+            nesting.append(closing[char])
+            continue
+        if nesting and char == nesting[-1]:
+            nesting.pop()
+            continue
+        if not nesting and char == character:
+            positions.append(index)
+    return tuple(positions)
+
+
 def _normalized_shell_words_text(command: str) -> str | None:
     """Return a quote-insensitive normalized argv spelling for one shell command.
 
@@ -500,8 +536,18 @@ def _strip_command_output_plumbing(command: str) -> str:
     if not text:
         return text
     # Peel output-only filter pipes from the tail (``... | tail -n 20``).
-    while "|" in text:
-        head, _, tail_segment = text.rpartition("|")
+    while True:
+        pipe_positions = tuple(
+            position
+            for position in _top_level_shell_character_positions(text, "|")
+            if (position == 0 or text[position - 1] != "|")
+            and (position + 1 >= len(text) or text[position + 1] != "|")
+        )
+        if not pipe_positions:
+            break
+        pipe_position = pipe_positions[-1]
+        head = text[:pipe_position]
+        tail_segment = text[pipe_position + 1 :]
         tail_tokens = tail_segment.split()
         if tail_tokens and tail_tokens[0].lower() in _OUTPUT_FILTER_COMMANDS:
             text = head.strip()
@@ -511,7 +557,13 @@ def _strip_command_output_plumbing(command: str) -> str:
     prev: str | None = None
     while prev != text:
         prev = text
-        text = _TRAILING_REDIRECT_RE.sub("", text).strip()
+        match = _TRAILING_REDIRECT_RE.search(text)
+        if match is None:
+            break
+        redirect_positions = _top_level_shell_character_positions(text, ">")
+        if not any(match.start() <= position < match.end() for position in redirect_positions):
+            break
+        text = text[: match.start()].strip()
     return text
 
 

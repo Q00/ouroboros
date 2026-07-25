@@ -154,6 +154,51 @@ def test_deliver_matching_allows_inert_quote_spelling_differences() -> None:
 
 
 @pytest.mark.parametrize(
+    ("observed", "malformed_claim"),
+    (
+        (
+            "pytest tests/test_app.py --basetemp='cache > out'",
+            "pytest tests/test_app.py --basetemp='cache",
+        ),
+        (
+            "pytest tests/test_app.py -k 'unit|integration'",
+            "pytest tests/test_app.py -k 'unit",
+        ),
+    ),
+)
+def test_deliver_matching_does_not_strip_quoted_shell_metacharacters(
+    observed: str,
+    malformed_claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted_meta", command=observed),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=malformed_claim,
+    )
+
+
+def test_deliver_matching_keeps_equivalent_quoted_metacharacter_argument() -> None:
+    observed = "pytest tests/test_app.py --basetemp='cache > out'"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted_meta", command=observed),),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value='pytest tests/test_app.py --basetemp="cache > out"',
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_quoted_meta",)
+
+
+@pytest.mark.parametrize(
     ("tool_input", "claim"),
     (
         ({"cmd": "pytest tests/test_a.py"}, "pytest tests/test_a.py"),
@@ -376,7 +421,11 @@ def test_tests_passed_rejects_status_masking_shell_chain(command: str) -> None:
     (
         "pytest --version",
         "pytest --collect-only",
+        "pytest --collectonly",
+        "pytest --funcargs",
         "pytest --setup-plan",
+        "pytest --setuponly",
+        "pytest --setupplan",
         "python -m unittest --help",
         "tox --showconfig",
         "nox --list",

@@ -1368,7 +1368,11 @@ def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
                 and _looks_like_test_command(stripped)
                 and not pipefail_protected
             )
-            if not unsafe_test_filter:
+            try:
+                stripped_parts = shlex.split(stripped)
+            except ValueError:
+                stripped_parts = []
+            if not unsafe_test_filter and stripped_parts:
                 variants.append(stripped)
         for variant in variants:
             raw_signature = ("raw", variant)
