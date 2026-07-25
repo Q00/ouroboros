@@ -5002,9 +5002,7 @@ class ParallelACExecutor:
         # must retain the established legacy retry/model-routing path even
         # when its decomposition attestation is trustworthy.
         bounded_route_recovery_enabled = (
-            self._bounded_route_escalation_enabled
-            and not is_sub_ac
-            and not force_legacy_routing
+            self._bounded_route_escalation_enabled and not is_sub_ac and not force_legacy_routing
         )
         atomic_retry_attempt = retry_attempt
         stall_retry_budget = 0 if bounded_route_recovery_enabled else MAX_STALL_RETRIES
@@ -6203,9 +6201,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # identity and replay authority, bounded routing is top-level atomic
         # only; children continue through the legacy router.
         bounded_route_attempt_enabled = (
-            self._bounded_route_escalation_enabled
-            and not is_sub_ac
-            and not force_legacy_routing
+            self._bounded_route_escalation_enabled and not is_sub_ac and not force_legacy_routing
         )
         durable_route_projection = self._build_route_compat_projection(
             model_router=model_router_snapshot,
@@ -9088,7 +9084,10 @@ Respond with either ATOMIC or the structured JSON object only.
         last_failure_class = self._failure_class_for_result(current)
         termination_reason = "not_retryable"
 
-        while self._is_retryable_failure(current) and ac_retry_attempts[ac_idx] < self._ac_retry_attempts:
+        while (
+            self._is_retryable_failure(current)
+            and ac_retry_attempts[ac_idx] < self._ac_retry_attempts
+        ):
             ac_retry_attempts[ac_idx] += 1
             is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
             retried = await self._execute_ac_batch(

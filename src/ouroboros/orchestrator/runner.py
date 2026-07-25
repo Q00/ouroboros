@@ -9337,11 +9337,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                     seed,
                     tracker.progress.get("routing_parallel_plan"),
                 )
-                resume_externally_satisfied_acs = (
-                    self._deserialize_parallel_external_satisfaction(
-                        seed,
-                        tracker.progress.get("routing_parallel_externally_satisfied_acs"),
-                    )
+                resume_externally_satisfied_acs = self._deserialize_parallel_external_satisfaction(
+                    seed,
+                    tracker.progress.get("routing_parallel_externally_satisfied_acs"),
                 )
                 return await self._execute_parallel(
                     seed=seed,

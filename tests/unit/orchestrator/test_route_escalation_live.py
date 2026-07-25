@@ -600,9 +600,7 @@ async def test_decomposed_root_uses_legacy_retry_without_route_observation() -> 
             success=success,
             final_message="child complete" if success else "child failed",
             error=None if success else "evidence missing",
-            outcome=(
-                ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED
-            ),
+            outcome=(ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED),
             depth=1,
         )
         return [
@@ -614,9 +612,7 @@ async def test_decomposed_root_uses_legacy_retry_without_route_observation() -> 
                 error=None if success else "evidence missing",
                 is_decomposed=True,
                 sub_results=(child,),
-                outcome=(
-                    ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED
-                ),
+                outcome=(ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED),
             )
         ]
 
