@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -1417,6 +1417,68 @@ class TestServeTransport:
         assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
 
     @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_required_parameter_default_survives_into_fastmcp_schema(self) -> None:
+        """A required parameter may still carry a `default` annotation.
+
+        `MCPToolDefinition.to_input_schema()` emits `default` for required
+        parameters, and JSON Schema permits it. Pydantic discards the value along
+        with `Field(default=...)`, so the two surfaces must be pinned against each
+        other or they silently describe different tools.
+        """
+        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+
+        class DefaultedRequiredHandler(MockToolHandler):
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="defaulted_tool",
+                    description="A required parameter carrying a default",
+                    parameters=(
+                        MCPToolParameter(
+                            name="mode",
+                            type=ToolInputType.STRING,
+                            required=True,
+                            default="safe",
+                            description="Execution mode",
+                        ),
+                    ),
+                )
+
+        adapter = MCPServerAdapter()
+        handler = DefaultedRequiredHandler(name="defaulted_tool")
+        adapter.register_tool(handler)
+        with patch.object(fastmcp_module.FastMCP, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        tools = await adapter._mcp_server.list_tools()
+        tool = next(t for t in tools if t.name == "defaulted_tool")
+        mode_schema = tool.inputSchema["properties"]["mode"]
+
+        canonical = handler.definition.to_input_schema()["properties"]["mode"]
+        assert canonical["default"] == "safe"
+        assert mode_schema["default"] == "safe", "FastMCP schema dropped the canonical default"
+        assert "mode" in tool.inputSchema["required"], "the default must not make it optional"
+
+    def test_integer_array_items_accept_integral_floats(self) -> None:
+        """JSON Schema `type: integer` matches any number with no fractional part.
+
+        The advertised schema accepts `[1.0]`, so runtime validation must not
+        reject it on Python `int` identity alone.
+        """
+        parameter = MCPToolParameter(
+            name="nums",
+            type=ToolInputType.ARRAY,
+            required=False,
+            items={"type": "integer"},
+        )
+        for accepted in ([1], [1.0], [2.0, 3]):
+            _validate_parameter_constraints((parameter,), {"nums": accepted})
+
+        for rejected in ([1.5], [True], ["1"]):
+            with pytest.raises(ValueError, match="Invalid items for nums"):
+                _validate_parameter_constraints((parameter,), {"nums": rejected})
+
     async def test_real_fastmcp_invocation_omits_unset_optional_parameters(self) -> None:
         """Omitted optionals must not reach the handler as explicit `None`.
 
