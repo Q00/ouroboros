@@ -44,6 +44,8 @@ acceptance authority.
    result or an empty model override. They never fall back to provider defaults.
 4. Persisted projections are parsed with bounded, deterministic containers and
    compared with a freshly rebuilt projection before resume effects are used.
+   A persisted dormant projection remains explicit and is never interpreted as
+   an authorization to bypass the compatibility adapter.
 5. The provider call receives a model override only after the admission has
    been revalidated against the same projection and exact requirements.
 
