@@ -442,7 +442,6 @@ def test_tests_passed_rejects_status_masking_shell_chain(command: str) -> None:
         "tox --showconfig",
         "nox --list",
         "gradle test --dry-run",
-        "npm test --if-present",
     ),
 )
 def test_tests_passed_rejects_non_executing_runner_modes(command: str) -> None:
@@ -464,6 +463,29 @@ def test_tests_passed_rejects_non_executing_runner_modes(command: str) -> None:
         field="tests_passed",
         value=command,
     )
+
+
+def test_npm_if_present_accepts_positive_test_execution_output() -> None:
+    command = "npm test --if-present"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_npm",
+                command=command,
+                result_preview="Tests: 2 passed, 2 total",
+            ),
+        ),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="tests_passed",
+            value=command,
+        )
+    ) == ("ev_npm",)
 
 
 def test_tests_passed_requires_positive_execution_output_despite_environment_mode() -> None:
@@ -1561,6 +1583,23 @@ def test_tests_passed_rejects_collect_only_from_environment_configuration() -> N
     )
 
 
+def test_tests_passed_rejects_tool_call_narration_without_runtime_result() -> None:
+    command = "pytest tests/test_app.py"
+    message = AgentMessage(
+        type="tool",
+        content="Running pytest; 1 passed",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(message,),
+        task_cwd=None,
+    )
+
+
 def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
     """A broad successful run cannot prove a node-id mentioned only by the agent."""
     started = AgentMessage(
@@ -1949,8 +1988,8 @@ def test_gradle_command_claim_supports_quoted_target_and_tail_pipe() -> None:
     )
 
 
-def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> None:
-    """Gradle BUILD SUCCESSFUL output can back a class-level tests_passed claim."""
+def test_gradle_tests_passed_claim_supports_class_target_and_case_result() -> None:
+    """A Gradle case result can back a class-level tests_passed claim."""
     command_message = AgentMessage(
         type="tool",
         content="Bash command started",
@@ -1964,13 +2003,14 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
             }
         },
     )
+    output = "com.example.app.unit.SomeNewTest > createsApp PASSED\nBUILD SUCCESSFUL in 8s"
     result_message = AgentMessage(
         type="tool_result",
-        content="> Task :test\nBUILD SUCCESSFUL in 8s",
+        content=output,
         tool_name=None,
         data={
             "subtype": "tool_result",
-            "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+            "output": output,
         },
     )
 
@@ -2097,11 +2137,16 @@ def test_atomic_verifier_classifies_dependent_masked_test_evidence_as_form_misma
             ),
             AgentMessage(
                 type="tool_result",
-                content="> Task :test\nBUILD SUCCESSFUL in 8s",
+                content=(
+                    "com.example.app.unit.SomeNewTest > createsApp PASSED\nBUILD SUCCESSFUL in 8s"
+                ),
                 tool_name=None,
                 data={
                     "subtype": "tool_result",
-                    "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+                    "output": (
+                        "com.example.app.unit.SomeNewTest > createsApp PASSED\n"
+                        "BUILD SUCCESSFUL in 8s"
+                    ),
                 },
             ),
         ),
@@ -2913,6 +2958,7 @@ def test_maven_tests_passed_supports_explicit_false_skip_properties(command: str
 @pytest.mark.parametrize(
     "output",
     (
+        "> Task :test\nBUILD SUCCESSFUL in 1s",
         "> Task :test NO-SOURCE\nBUILD SUCCESSFUL in 1s",
         "> Task :test SKIPPED\nBUILD SUCCESSFUL in 1s",
         "0 tests completed\nBUILD SUCCESSFUL",
@@ -2934,6 +2980,28 @@ def test_gradle_tests_passed_rejects_successful_build_with_no_tests(output: str)
     )
 
     assert not _runtime_messages_support_test_claim(
+        value="./gradlew test",
+        backed_commands=("./gradlew test",),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+def test_gradle_tests_passed_accepts_individual_test_case_result() -> None:
+    output = "com.example.AppTest > createsApp PASSED\nBUILD SUCCESSFUL in 1s"
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "./gradlew test"}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content=output,
+        data={"subtype": "tool_result", "output": output},
+    )
+
+    assert _runtime_messages_support_test_claim(
         value="./gradlew test",
         backed_commands=("./gradlew test",),
         messages=(command_message, result_message),
@@ -11983,6 +12051,91 @@ class TestParallelACExecutor:
         assert tool_completed.data["runtime_event_type"] == "tool.result"
         assert tool_completed.data["tool_result"]["is_error"] is False
         assert tool_completed.data["tool_result"]["meta"]["exit_status"] == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_projects_gemini_tool_result_to_completed_journal(self) -> None:
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+
+        class StubRuntime:
+            _runtime_handle_backend = "gemini_cli"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                runtime = GeminiCLIRuntime(cli_path="gemini", cwd=self._cwd)
+                events = (
+                    {
+                        "type": "tool_use",
+                        "content": "",
+                        "metadata": {
+                            "name": "Bash",
+                            "input": {"command": "pytest -q tests/test_example.py"},
+                        },
+                        "is_error": False,
+                    },
+                    {
+                        "type": "tool_result",
+                        "content": "1 passed in 0.01s",
+                        "metadata": {"name": "Bash"},
+                        "is_error": False,
+                    },
+                )
+                for event in events:
+                    for message in runtime._convert_event(
+                        event,
+                        current_handle=kwargs["resume_handle"],
+                    ):
+                        yield message
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=StubRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Run the focused test with Gemini",
+            session_id="sess_gemini",
+            tools=["Bash"],
+            system_prompt="test",
+            seed_goal="Ship the fix",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        appended_events = [call.args[0] for call in event_store.append.await_args_list]
+        tool_started = next(
+            event for event in appended_events if event.type == "execution.tool.started"
+        )
+        tool_completed = next(
+            event for event in appended_events if event.type == "execution.tool.completed"
+        )
+
+        assert result.success is True
+        assert tool_started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
+        assert tool_completed.data["tool_name"] == "Bash"
+        assert tool_completed.data["tool_result"]["is_error"] is False
+        assert tool_completed.data["tool_result"]["text_content"] == "1 passed in 0.01s"
 
     def test_message_level_tool_completion_event_type_is_not_terminal(self) -> None:
         """A finished tool must not classify the runtime handle as terminated.

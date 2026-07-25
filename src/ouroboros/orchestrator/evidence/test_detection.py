@@ -146,7 +146,7 @@ def _text_contains_positive_test_execution(text: str) -> bool:
         or re.search(r"\btest\s+result\s*:\s*ok\.[^\n]*\b[1-9]\d*\s+passed\b", normalized)
         or re.search(r"(?m)^\s*pass\s+\S+", text, flags=re.IGNORECASE)
         or re.search(r"(?m)^\s*\S+::\S+\s+passed(?:\s|$)", normalized)
-        or re.search(r"(?m)^\s*>\s*task\s+[:\w.-]*test\b", normalized)
+        or re.search(r"(?m)^\s*\S.*\s+>\s+\S.*\s+passed(?:\s|$)", normalized)
     )
 
 
@@ -156,16 +156,8 @@ def _text_proves_test_execution_success(text: str) -> bool:
 
 
 def _message_contains_test_success(message: AgentMessage) -> bool:
-    """Return True when one message says a test command passed."""
-    parts = [message.content, _runtime_message_test_proof_text(message)]
-    for key in ("result_preview", "output", "stdout", "status", "subtype"):
-        value = message.data.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-    exit_code = message.data.get("exit_code")
-    if type(exit_code) is int:
-        parts.append(f"exit code {exit_code}")
-    return _text_proves_test_execution_success("\n".join(parts))
+    """Return True when normalized runtime-result payload proves test success."""
+    return _text_proves_test_execution_success(_runtime_message_test_proof_text(message))
 
 
 def _test_chunk_has_structured_failure(chunk: list[AgentMessage]) -> bool:

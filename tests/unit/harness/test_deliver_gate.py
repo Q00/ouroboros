@@ -413,6 +413,52 @@ class TestLoadAcEvidenceManifest:
             assert manifest.entries == ()
 
     @pytest.mark.asyncio
+    async def test_same_timestamp_execution_completion_is_ordered_after_start(self) -> None:
+        when = datetime.now(UTC)
+        started = BaseEvent(
+            id="evt_bash_started",
+            type="execution.tool.started",
+            timestamp=when,
+            aggregate_type="execution",
+            aggregate_id="ac_1",
+            data={
+                "ac_id": "ac_1",
+                "execution_id": "exec_1",
+                "tool_name": "Bash",
+                "tool_call_id": "call_bash_1",
+                "tool_input": {"command": "pytest tests/test_app.py"},
+            },
+        )
+        completed = BaseEvent(
+            id="evt_bash_completed",
+            type="execution.tool.completed",
+            timestamp=when,
+            aggregate_type="execution",
+            aggregate_id="ac_1",
+            data={
+                "ac_id": "ac_1",
+                "execution_id": "exec_1",
+                "tool_name": "Bash",
+                "tool_call_id": "call_bash_1",
+                "tool_result": {"is_error": False},
+                "output": "1 passed in 0.01s",
+            },
+        )
+
+        manifest = await load_ac_evidence_manifest(
+            _FakeEventStore([completed, started]),
+            ac_id="ac_1",
+            execution_id="exec_1",
+            admit_accepted_tool_starts=True,
+        )
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == (
+            "evt_bash_started",
+            "evt_bash_completed",
+        )
+
+    @pytest.mark.asyncio
     async def test_bash_start_without_completion_is_not_admitted(self) -> None:
         started = BaseEvent(
             id="evt_bash_started",

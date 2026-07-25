@@ -419,9 +419,7 @@ def _has_non_executing_test_mode(parts: list[str]) -> bool:
         return True
     if runner == "nox" and any(option in {"-l", "--list"} for option in options):
         return True
-    if runner in {"gradle", "gradlew"} and "-m" in options:
-        return True
-    return runner in {"npm", "pnpm", "yarn"} and "--if-present" in options
+    return runner in {"gradle", "gradlew"} and "-m" in options
 
 
 def _unittest_command_invocation(command: str) -> str | None:

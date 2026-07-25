@@ -1261,9 +1261,17 @@ def _event_chronology_key(event: BaseEvent) -> tuple[object, int]:
 
 
 def _event_phase_order(event_type: str) -> int:
-    if event_type in {"tool.call.started", "llm.call.requested"}:
+    if event_type in {
+        "tool.call.started",
+        "llm.call.requested",
+        "execution.tool.started",
+    }:
         return 0
-    if event_type in {"tool.call.returned", "llm.call.returned"}:
+    if event_type in {
+        "tool.call.returned",
+        "llm.call.returned",
+        "execution.tool.completed",
+    }:
         return 1
     return 2
 

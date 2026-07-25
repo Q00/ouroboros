@@ -34,6 +34,7 @@ from ouroboros.orchestrator.codex_cli_runtime import (
     SkillDispatchHandler,
     _CodexItemCorrelationScope,
 )
+from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -411,10 +412,17 @@ class GeminiCLIRuntime(CodexCliRuntime):
             tool_name = metadata.get("name", "")
             return [
                 AgentMessage(
-                    type="tool",
+                    type="tool_result",
                     content=content,
                     tool_name=tool_name,
-                    data={"is_error": is_error},
+                    data={
+                        "subtype": "tool_result",
+                        "is_error": is_error,
+                        "tool_result": normalize_runtime_tool_result(
+                            content,
+                            is_error=is_error,
+                        ),
+                    },
                     resume_handle=current_handle,
                 )
             ]

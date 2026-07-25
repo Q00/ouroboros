@@ -22,6 +22,7 @@ from ouroboros.orchestrator.gemini_cli_runtime import (
     GeminiCLIRuntime,
 )
 from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 
 # ---------------------------------------------------------------------------
 # _convert_event: terminal `result` event
@@ -82,6 +83,28 @@ def test_convert_event_routes_normalizer_response_field_through_result() -> None
     assert len(messages) == 1
     assert messages[0].type == "assistant"
     assert messages[0].content == "final answer text"
+
+
+def test_convert_event_projects_tool_result_as_successful_completion() -> None:
+    runtime = _make_runtime()
+    event = {
+        "type": "tool_result",
+        "content": "1 passed in 0.01s",
+        "metadata": {"name": "Bash"},
+        "is_error": False,
+        "raw": {"type": "tool_result", "name": "Bash"},
+    }
+
+    messages = runtime._convert_event(event, current_handle=None)
+    projected = project_runtime_message(messages[0])
+
+    assert messages[0].type == "tool_result"
+    assert messages[0].data["subtype"] == "tool_result"
+    assert projected.is_tool_result is True
+    assert projected.tool_name == "Bash"
+    assert projected.tool_result is not None
+    assert projected.tool_result["is_error"] is False
+    assert projected.tool_result["text_content"] == "1 passed in 0.01s"
 
 
 # ---------------------------------------------------------------------------
