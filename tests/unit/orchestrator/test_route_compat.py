@@ -359,6 +359,14 @@ def test_projection_parser_rejects_metadata_drift_before_dispatch() -> None:
     tier_route_ids[0] = {"tier": "frugal", "route_id": "compat:claude:unresolved"}
     assert deserialize_route_compat_projection(payload) is None
 
+    payload = projection.to_contract_data()
+    payload["unexpected"] = True
+    assert deserialize_route_compat_projection(payload) is None
+
+    contract = serialize_route_compat_contract(projection)
+    contract["unexpected"] = True
+    assert deserialize_route_compat_contract(contract) == (False, None)
+
 
 class _CountingRuntime:
     runtime_backend = "claude"

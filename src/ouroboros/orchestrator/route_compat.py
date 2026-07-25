@@ -556,7 +556,24 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
     a syntactically valid old contract is not permission to execute a new route.
     """
 
-    if not isinstance(value, Mapping) or value.get("version") != ROUTE_COMPAT_VERSION:
+    expected_fields = {
+        "version",
+        "runtime_backend",
+        "effort",
+        "persona",
+        "tool_policy",
+        "authority_identity",
+        "child_tier",
+        "base_tier",
+        "escalation_retry_threshold",
+        "tier_route_ids",
+        "registry",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected_fields
+        or value.get("version") != ROUTE_COMPAT_VERSION
+    ):
         return None
     backend = value.get("runtime_backend")
     effort = value.get("effort")
@@ -645,7 +662,11 @@ def deserialize_route_compat_contract(
     if not isinstance(enabled, bool):
         return False, None
     if not enabled:
+        if set(value) != {"version", "enabled"}:
+            return False, None
         return True, None
+    if set(value) != {"version", "enabled", "projection"}:
+        return False, None
     projection = deserialize_route_compat_projection(value.get("projection"))
     return (projection is not None), projection
 
