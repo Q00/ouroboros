@@ -194,13 +194,19 @@ class _CodexItemCorrelationScope:
     """
 
     started_item_signatures: dict[str, str] = field(default_factory=dict)
-    started_unkeyed_item_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    unkeyed_started_nonces: dict[tuple[str, str], list[str]] = field(default_factory=dict)
     completed_item_keys: set[str] = field(default_factory=set)
     current_thread_id: str | None = None
+    _nonce_seq: int = 0
+
+    def allocate_nonce(self) -> str:
+        """Return a monotonic, scope-unique correlation nonce for id-less items."""
+        self._nonce_seq += 1
+        return f"syn:{self._nonce_seq}"
 
     def clear(self) -> None:
         self.started_item_signatures.clear()
-        self.started_unkeyed_item_counts.clear()
+        self.unkeyed_started_nonces.clear()
         self.completed_item_keys.clear()
 
 
@@ -1892,14 +1898,22 @@ class CodexCliRuntime:
         nine & ten). Serializing the full normalized change captures the
         mutation kind (any shape), patch content, and move destination.
         """
+        # Include every field _extract_paths turns into a tool call (top-level
+        # path/file_path/target_file) plus the full normalized changes, so a
+        # differing top-level path is not masked by identical changes (round
+        # twelve, blocker 2).
         changes = item.get("changes")
-        if isinstance(changes, list) and changes:
-            normalized = [change for change in changes if isinstance(change, dict)]
-            if normalized:
-                return json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
-        item_kind = item.get("kind")
-        fallback = [{"path": path, "kind": item_kind} for path in self._extract_paths(item)]
-        return json.dumps(fallback, ensure_ascii=False, sort_keys=True, default=str)
+        normalized_changes = (
+            [change for change in changes if isinstance(change, dict)]
+            if isinstance(changes, list)
+            else []
+        )
+        signature_payload = {
+            "paths": list(self._extract_paths(item)),
+            "changes": normalized_changes,
+            "kind": item.get("kind"),
+        }
+        return json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, default=str)
 
     @staticmethod
     def _mcp_tool_name(item: dict[str, Any]) -> str:
@@ -1914,6 +1928,16 @@ class CodexCliRuntime:
         if isinstance(name, str) and name.strip():
             return name.strip()
         return "mcp_tool"
+
+    @staticmethod
+    def _extract_mcp_result_meta(item: dict[str, Any]) -> dict[str, Any]:
+        """Return an MCP result ``_meta`` mapping for audit transfer."""
+        result = item.get("result")
+        if isinstance(result, dict):
+            meta = result.get("_meta")
+            if isinstance(meta, dict) and meta:
+                return dict(meta)
+        return {}
 
     @staticmethod
     def _nested_error(item: dict[str, Any]) -> object:
@@ -1956,6 +1980,9 @@ class CodexCliRuntime:
                     res_text = resource.get("text")
                     if isinstance(res_text, str) and "text" not in block:
                         block["text"] = res_text
+                    blob = resource.get("blob")
+                    if blob is not None and block.get("data") is None:
+                        block["data"] = blob
                     res_mime = resource.get("mime_type") or resource.get("mimeType")
                     if isinstance(res_mime, str) and "mime_type" not in block:
                         block["mime_type"] = res_mime
@@ -2031,9 +2058,11 @@ class CodexCliRuntime:
             return self._extract_web_search_query(item)
         return self._extract_text(item)
 
-    def _item_tool_calls(self, item_type: str, item: dict[str, Any]) -> list[_CodexToolCall]:
+    def _item_tool_calls(
+        self, item_type: str, item: dict[str, Any], correlation_key: str | None = None
+    ) -> list[_CodexToolCall]:
         """Normalize one Codex thread item into shared tool-call descriptors."""
-        item_id = self._item_lifecycle_id(item)
+        item_id = self._item_lifecycle_id(item) if correlation_key is None else correlation_key
 
         if item_type == "command_execution":
             command = self._extract_command(item)
@@ -2072,11 +2101,7 @@ class CodexCliRuntime:
                     tool_name="Edit",
                     tool_input={"file_path": file_path},
                     start_content=f"Calling tool: Edit: {file_path}",
-                    tool_call_id=(
-                        f"{item_id}:{file_path}"
-                        if item_id is not None
-                        else f"filechange:{file_path}"
-                    ),
+                    tool_call_id=(f"{item_id}:{file_path}" if item_id is not None else None),
                 )
                 for file_path in self._extract_paths(item)
             ]
@@ -2101,40 +2126,47 @@ class CodexCliRuntime:
         item_type: str,
         item: dict[str, Any],
         scope: _CodexItemCorrelationScope,
-    ) -> None:
-        """Record that a thread item's tool start was already projected."""
+    ) -> str:
+        """Record a projected tool start and return its correlation key.
+
+        Keyed items correlate by their real id; id-less items get a monotonic
+        scope-unique nonce, queued FIFO per signature so the matching
+        completion recovers the same nonce (review round twelve: synthetic ids
+        must be invocation-unique yet stable across a start/result pair).
+        """
         item_id = self._item_lifecycle_id(item)
         signature = self._item_lifecycle_signature(item_type, item)
         if item_id is not None:
             scope.started_item_signatures[item_id] = signature
-            return
-        key = (item_type, signature)
-        scope.started_unkeyed_item_counts[key] = scope.started_unkeyed_item_counts.get(key, 0) + 1
+            return item_id
+        nonce = scope.allocate_nonce()
+        scope.unkeyed_started_nonces.setdefault((item_type, signature), []).append(nonce)
+        return nonce
 
     def _consume_item_started(
         self,
         item_type: str,
         item: dict[str, Any],
         scope: _CodexItemCorrelationScope,
-    ) -> bool:
-        """Return True when this completion's tool start was already emitted."""
+    ) -> tuple[bool, str]:
+        """Return (has_started, correlation_key) for a completion.
+
+        A completed-only stream with no matching start allocates a fresh nonce
+        so its synthesized start/result pair is invocation-unique.
+        """
         item_id = self._item_lifecycle_id(item)
         signature = self._item_lifecycle_signature(item_type, item)
         if item_id is not None:
             # Pair only when a prior start shares BOTH the id and the stable
-            # tool-input signature; a same-id completion for a different
-            # command must synthesize its own pair, not inherit the start
-            # (review round seven, blocker 2).
-            return scope.started_item_signatures.get(item_id) == signature
-        key = (item_type, signature)
-        count = scope.started_unkeyed_item_counts.get(key, 0)
-        if count <= 0:
-            return False
-        if count == 1:
-            del scope.started_unkeyed_item_counts[key]
-        else:
-            scope.started_unkeyed_item_counts[key] = count - 1
-        return True
+            # tool-input signature (review round seven, blocker 2).
+            return (scope.started_item_signatures.get(item_id) == signature, item_id)
+        queue = scope.unkeyed_started_nonces.get((item_type, signature))
+        if queue:
+            nonce = queue.pop(0)
+            if not queue:
+                del scope.unkeyed_started_nonces[(item_type, signature)]
+            return (True, nonce)
+        return (False, scope.allocate_nonce())
 
     def _resolve_item_completion_is_error(
         self, item_type: str, item: dict[str, Any]
@@ -2243,6 +2275,10 @@ class CodexCliRuntime:
         if isinstance(exit_code, int) and not isinstance(exit_code, bool):
             tool_result_meta["exit_status"] = exit_code
 
+        result_meta = metadata.get("__mcp_result_meta__")
+        if isinstance(result_meta, dict):
+            for meta_key, meta_value in result_meta.items():
+                tool_result_meta.setdefault(str(meta_key), meta_value)
         content_blocks = metadata.get("__mcp_content_blocks__")
         tool_result: dict[str, Any] = {
             "content": list(content_blocks) if isinstance(content_blocks, list) else [],
@@ -2257,7 +2293,7 @@ class CodexCliRuntime:
         extra_data: dict[str, Any] = {
             key: value
             for key, value in metadata.items()
-            if key not in ("subtype", "__mcp_content_blocks__")
+            if key not in ("subtype", "__mcp_content_blocks__", "__mcp_result_meta__")
         }
         if is_error is None:
             status = extra_data.get("status")
@@ -2294,8 +2330,7 @@ class CodexCliRuntime:
         scope: _CodexItemCorrelationScope,
     ) -> list[AgentMessage]:
         """Project ``item.started`` as correlated tool-start messages."""
-        calls = self._item_tool_calls(item_type, item)
-        if not calls:
+        if not self._item_tool_calls(item_type, item, self._item_lifecycle_id(item)):
             return []
         item_id = self._item_lifecycle_id(item)
         if item_id is not None and (
@@ -2304,10 +2339,11 @@ class CodexCliRuntime:
         ):
             # A replayed keyed start (same id and signature) must not emit a
             # duplicate: exact correlation requires one matching start per id
-            # (review round six). Id-less starts keep per-count pairing for
-            # legitimate repeated invocations.
+            # (review round six). Id-less starts keep per-invocation nonces so
+            # legitimate repeated invocations stay distinct.
             return []
-        self._remember_item_started(item_type, item, scope)
+        correlation_key = self._remember_item_started(item_type, item, scope)
+        calls = self._item_tool_calls(item_type, item, correlation_key)
         return [self._build_tool_start_message(call, current_handle) for call in calls]
 
     def _convert_tool_item_completed(
@@ -2324,8 +2360,7 @@ class CodexCliRuntime:
         both invocation and completion evidence — but never duplicate a start
         that already happened (#1692 review blocker 2).
         """
-        calls = self._item_tool_calls(item_type, item)
-        if not calls:
+        if not self._item_tool_calls(item_type, item, self._item_lifecycle_id(item)):
             return []
         metadata = self._extract_command_metadata(item)
         if item_type == "mcp_tool_call":
@@ -2339,6 +2374,9 @@ class CodexCliRuntime:
             content_blocks = self._extract_mcp_content_blocks(item)
             if content_blocks:
                 metadata["__mcp_content_blocks__"] = content_blocks
+            result_meta = self._extract_mcp_result_meta(item)
+            if result_meta:
+                metadata["__mcp_result_meta__"] = result_meta
         is_error = self._resolve_item_completion_is_error(item_type, item)
         item_id = self._item_lifecycle_id(item)
         if item_id is not None:
@@ -2353,14 +2391,10 @@ class CodexCliRuntime:
             if dedup_key in scope.completed_item_keys:
                 return []
             scope.completed_item_keys.add(dedup_key)
-        has_started = self._consume_item_started(item_type, item, scope)
-        if not has_started and item_id is not None:
-            # Record the keyed synthesized start so the lifecycle state stays
-            # consistent; replays are suppressed via completed_item_ids. An
-            # id-less synthesized start is already paired with its own result
-            # and must NOT stay pending, or the next identical completed-only
-            # item would consume it and emit an orphan result (round four).
-            self._remember_item_started(item_type, item, scope)
+        has_started, correlation_key = self._consume_item_started(item_type, item, scope)
+        calls = self._item_tool_calls(item_type, item, correlation_key)
+        if not calls:
+            return []
 
         messages: list[AgentMessage] = []
         for call in calls:

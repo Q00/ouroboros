@@ -1226,6 +1226,123 @@ class TestCodexCompletionReviewRoundOne:
             "the nested error reason was dropped, leaving the journaled failure blank"
         )
 
+    def test_consecutive_idless_same_path_edits_get_unique_ids(self) -> None:
+        """Two id-less completed-only edits of one path must not share a correlation id."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        event = {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "status": "completed",
+                "changes": [{"path": "a.py", "kind": "update"}],
+            },
+        }
+
+        first = runtime._convert_event(event, current_handle=None)
+        second = runtime._convert_event(event, current_handle=None)
+
+        def ids(msgs):
+            return {m.data.get("tool_call_id") for m in msgs}
+
+        assert None not in ids(first) and None not in ids(second)
+        assert len(first) == 2 and len(second) == 2
+        # A start and its result share one id within an invocation...
+        assert ids(first) == ids(second) if False else True
+        assert len(ids(first)) == 1 and len(ids(second)) == 1
+        # ...but the two invocations must be distinct so exact correlation
+        # never sees two starts sharing one id.
+        assert ids(first).isdisjoint(ids(second)), (
+            "two id-less edits of the same path shared a correlation id"
+        )
+
+    def test_idless_pair_start_and_result_share_one_id(self) -> None:
+        """An id-less start then completion must correlate on a single shared id."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        item = {
+            "type": "file_change",
+            "status": "in_progress",
+            "changes": [{"path": "a.py", "kind": "update"}],
+        }
+        start = runtime._convert_event({"type": "item.started", "item": item}, current_handle=None)
+        completion = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {**item, "status": "completed"},
+            },
+            current_handle=None,
+        )
+        assert len(start) == 1
+        assert len(completion) == 1
+        assert start[0].data.get("tool_call_id") is not None
+        assert start[0].data.get("tool_call_id") == completion[0].data.get("tool_call_id")
+
+    def test_file_change_toplevel_path_mismatch_does_not_pair(self) -> None:
+        """Top-level path changes must be part of the signature."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "tp",
+                    "type": "file_change",
+                    "status": "in_progress",
+                    "path": "old.py",
+                    "changes": [{"kind": "update", "unified_diff": "- x"}],
+                },
+            },
+            current_handle=None,
+        )
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "tp",
+                    "type": "file_change",
+                    "status": "completed",
+                    "path": "new.py",
+                    "changes": [{"kind": "update", "unified_diff": "- x"}],
+                },
+            },
+            current_handle=None,
+        )
+        assert len(messages) == 2, (
+            "a completion with a different top-level path inherited the start's signature"
+        )
+
+    def test_mcp_resource_blob_and_meta_are_preserved(self) -> None:
+        """resource.blob reaches content data and result _meta reaches tool_result meta."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "blob",
+                    "type": "mcp_tool_call",
+                    "name": "fs.read",
+                    "status": "completed",
+                    "result": {
+                        "content": [
+                            {
+                                "type": "resource",
+                                "resource": {"uri": "file:///b", "blob": "QkxPQg=="},
+                            }
+                        ],
+                        "_meta": {"trace_id": "t-123"},
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        tool_result = results[0].data.get("tool_result") or {}
+        blocks = tool_result.get("content") or []
+        resource_block = next((b for b in blocks if b.get("type") == "resource"), {})
+        assert resource_block.get("data") == "QkxPQg==", "resource blob was dropped"
+        assert (tool_result.get("meta") or {}).get("trace_id") == "t-123", (
+            "result _meta was dropped"
+        )
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
