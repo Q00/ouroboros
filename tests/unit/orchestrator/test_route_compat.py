@@ -104,7 +104,7 @@ def test_projection_snapshots_configured_models_and_costs() -> None:
         "model": "sonnet-x",
         "harness": "claude",
         "effort": "medium",
-        "cost_units": 10,
+        "cost_units": "10",
         "persona": "default",
         "tool_policy": "default",
         "authority_identity": "runtime:claude",

@@ -4353,11 +4353,10 @@ class OrchestratorRunner:
             # contract below adds the independently derived Route B projection.
             pass
         elif raw_route_compat is None:
-            if restored_router is not None:
-                raise OrchestratorError(
-                    message="Cannot resume without an enabled route compatibility contract",
-                    details={"invalid": "route_compat", "reason": "missing"},
-                )
+            raise OrchestratorError(
+                message="Cannot resume without an explicit route compatibility contract",
+                details={"invalid": "route_compat", "reason": "missing"},
+            )
         else:
             from ouroboros.orchestrator.route_compat import (
                 deserialize_route_compat_contract,

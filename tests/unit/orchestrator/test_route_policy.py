@@ -483,7 +483,7 @@ def test_public_cost_domain_and_bounded_ordinal_are_json_serializable() -> None:
     assert isinstance(candidates, list)
     candidate = candidates[0]
     assert isinstance(candidate, dict)
-    assert candidate["cost_units"] == huge_public_cost
+    assert candidate["cost_units"] == "1" + "0" * 100
 
     with pytest.raises(ValueError, match="ordinal exceeds"):
         _route("huge-ordinal", cost=1, ordinal=10**5000)

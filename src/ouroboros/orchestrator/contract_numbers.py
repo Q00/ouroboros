@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-# CPython rejects decimal conversion above 4,300 digits by default. Keep a
-# margin for interpreter differences and encode larger public-config values as
-# canonical decimal strings without changing their in-memory integer domain.
-_MAX_DIRECT_JSON_DECIMAL_DIGITS = 4_000
+# CPython's decimal digit limit is process-configurable. Durable fingerprints
+# must not change with that setting, so every unbounded contract integer uses
+# one canonical string representation while runtime ordering remains integer.
 _DECIMAL_CHUNK_BASE = 1_000_000_000
 _DECIMAL_CHUNK_WIDTH = 9
 
@@ -24,15 +23,11 @@ def _decimal_digits(value: int) -> str:
     )
 
 
-def json_safe_nonnegative_int(value: int) -> int | str:
-    """Return an int when JSON-safe, otherwise a canonical decimal string."""
+def json_safe_nonnegative_int(value: int) -> str:
+    """Return a canonical decimal string independent of interpreter limits."""
 
     if type(value) is not int or value < 0:
         raise ValueError("contract integer must be a non-negative integer")
-    # log10(2) < 0.302; this conservative bit bound avoids converting a value
-    # that could cross the interpreter's decimal digit guard.
-    if value.bit_length() <= _MAX_DIRECT_JSON_DECIMAL_DIGITS * 3:
-        return value
     return _decimal_digits(value)
 
 

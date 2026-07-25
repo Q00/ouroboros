@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -367,6 +369,33 @@ def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
     )
 
 
+def test_contract_serialization_ignores_constrained_python_digit_limit() -> None:
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("Python integer digit limits are unavailable")
+    previous_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        huge = 10**1000
+        economics = _frontier_custom_economics().model_copy(update={"escalation_threshold": huge})
+        tiers = dict(economics.tiers)
+        tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": huge})
+        economics = economics.model_copy(update={"tiers": tiers})
+        router = replace(_frontier_custom_router(), escalation_retry_threshold=huge)
+        runner = _runner()
+        runner._route_economics = economics
+        runner._model_router = router
+        runner._requested_model_tier = "frontier"
+
+        contract = runner._build_execution_contract()
+
+        assert json.dumps(contract, sort_keys=True)
+        assert contract["model_routing"]["router"]["escalation_retry_threshold"] == (
+            "1" + "0" * 1000
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+
 @pytest.mark.parametrize("requested_tier", ["frugal", "frontier"])
 def test_resume_without_argument_preserves_persisted_non_default_tier(
     requested_tier: str,
@@ -475,7 +504,7 @@ def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
     replacement = resumed._execution_contract
     assert replacement is not None
     projection = replacement["model_routing"]["route_compat"]["projection"]
-    assert projection["registry"]["candidates"][1]["cost_units"] == 999
+    assert projection["registry"]["candidates"][1]["cost_units"] == "999"
 
 
 def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
@@ -488,6 +517,20 @@ def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
     )
 
     with pytest.raises(OrchestratorError, match="enabled route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_dormant_current_contract_requires_explicit_route_compat() -> None:
+    original = _runner()
+    original._model_router = None
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    del routing["route_compat"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="explicit route compatibility"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
