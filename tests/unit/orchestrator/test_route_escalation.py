@@ -128,6 +128,36 @@ def test_observation_rejects_credential_shaped_route_metadata(secret: str) -> No
         )
 
 
+def test_observation_rejects_overloaded_integer_subclasses() -> None:
+    class ExplodingInt(int):
+        def __lt__(self, other: object) -> bool:
+            raise RuntimeError("comparison")
+
+    candidate = _route("cheap", cost=1)
+    with pytest.raises(ValueError, match="integer"):
+        RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id="episode-1",
+            attempt_index=ExplodingInt(0),  # type: ignore[arg-type]
+            verifier_outcome=VerifierOutcome.ACCEPTED,
+        )
+    with pytest.raises(ValueError, match="integer"):
+        RouteObservation(
+            episode_id="episode-1",
+            attempt_index=0,
+            route_id="cheap",
+            model="model-cheap",
+            harness="harness-a",
+            effort="medium",
+            cost_units=ExplodingInt(1),  # type: ignore[arg-type]
+            capabilities=(),
+            required_capabilities=(),
+            capability_match=True,
+            verifier_outcome=VerifierOutcome.ACCEPTED,
+        )
+
+
 def test_observation_rejects_accepted_failure_metadata_and_invalid_blocked_class() -> None:
     candidate = _route("cheap", cost=1)
     with pytest.raises(ValueError, match="accepted observations"):

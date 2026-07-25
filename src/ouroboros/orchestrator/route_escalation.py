@@ -171,11 +171,11 @@ class RouteObservation:
         model = _bounded_token(self.model, field="model")
         harness = _bounded_token(self.harness, field="harness")
         effort = None if self.effort is None else _bounded_token(self.effort, field="effort")
-        if isinstance(self.attempt_index, bool) or not isinstance(self.attempt_index, int):
+        if type(self.attempt_index) is not int:
             raise ValueError("attempt_index must be an integer")
         if not 0 <= self.attempt_index < MAX_ROUTE_ATTEMPTS:
             raise ValueError("attempt_index exceeds its bound")
-        if isinstance(self.cost_units, bool) or not isinstance(self.cost_units, int):
+        if type(self.cost_units) is not int:
             raise ValueError("cost_units must be an integer")
         if not 0 <= self.cost_units <= MAX_ROUTE_COST_UNITS:
             raise ValueError("cost_units exceeds its bound")
