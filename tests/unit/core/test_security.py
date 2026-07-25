@@ -174,6 +174,7 @@ class TestSensitiveDetection:
             "runtime:accesstokenabc123",
             "runtime:password123",
             "runtime:keyabc123",
+            "runtime:openai-api-key-sk-abcdefghijklmnopqrstuvwxyz",
             "runtime:clientsecret:opaquevalue",
             "runtime:accesstoken:opaquevalue",
             "runtime:accesskey:opaquevalue",

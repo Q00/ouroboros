@@ -118,7 +118,10 @@ _CREDENTIAL_COMPOUND_PREFIX = re.compile(
     r"(?:password|api[-_]?key|apikey|secret|access[-_]?token|client[-_]?secret|"
     r"token|credential|credentials|auth|authorization|key|private|bearer|passwd)"
     r"[-_]"
-    r"(?=(?:opaque|credential|secret|token|key|value))"
+    # A known-safe descriptor suffix (``token-budget`` or ``auth-plane``)
+    # remains usable as metadata. Any other suffix is treated as an opaque
+    # value, including embedded provider prefixes such as ``api-key-sk-...``.
+    r"(?!(?:budget|default|id|name|plane|scope)(?:$|[-_:/\.]))"
 )
 
 # Authority identities are descriptors, not opaque values.  Requiring a known
