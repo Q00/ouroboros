@@ -111,12 +111,9 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
-1. Keep the compatibility projection contract in
-   [`routing-c-route-compat.md`](./routing-c-route-compat.md) and extend it only
-   through the same Admission Kernel boundary.
-2. Add Routing C observations and bounded escalation. Escalation may choose the
+1. Add bounded observations and escalation. Escalation may choose the
    next configured route only after a classified failure and a finite budget.
-3. Emit the route fingerprint into the frugality proof and shared projection.
+2. Emit the route fingerprint into the frugality proof and shared projection.
 
 ## Compatibility projection (implemented slice)
 
@@ -125,14 +122,16 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 the mapping must exactly match the normalized provider catalog for the active
 runtime backend, and every candidate carries the configured cost factor. The
 current model/effort decisions are pinned by route ID, model, harness, effort,
-persona, tool policy, and authority identity before a live parallel AC enters
-the provider dispatcher.
+persona, tool policy, and authority identity before a parallel, direct, or
+direct-resume call enters the provider dispatcher.
 
 The projection is deliberately opt-in at the low-level executor constructor so
 legacy test/embedding callers retain byte-identical behavior. The real runner
 passes the resolved economics snapshot. A missing projection, unknown model,
 catalog/cost/backend mismatch, or any other failed pin produces a Kernel
 `blocked` result and returns before `execute_task`; it never falls back to the
-provider's default model. Resume restores the model router as before, then the
-effect-boundary projection rechecks it against the current catalog, preventing a
-tampered resume payload from authorizing a new model or cost.
+provider's default model. Resume requires enabled router and projection state to
+agree, then rebuilds the projection from the current catalog and default route
+identity rather than persisted metadata. A tampered resume payload therefore
+cannot authorize a new model, cost, persona, tool policy, authority, or
+capability set.

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -63,7 +65,7 @@ def _runner(
     )
 
 
-def _frontier_custom_router() -> ModelRouter:
+def _frontier_custom_router(*, base_tier: str = "frontier") -> ModelRouter:
     return ModelRouter(
         tier_models={
             "frugal": "custom-haiku",
@@ -72,9 +74,35 @@ def _frontier_custom_router() -> ModelRouter:
         },
         runtime_backend="claude",
         child_tier="frugal",
-        base_tier="frontier",
+        base_tier=base_tier,
         escalation_retry_threshold=7,
     )
+
+
+def _frontier_custom_economics() -> EconomicsConfig:
+    return EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=7,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[ModelConfig(provider="anthropic", model="custom-haiku")],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[ModelConfig(provider="anthropic", model="custom-opus")],
+            ),
+        },
+    )
+
+
+def _use_frontier_custom_routing(runner: OrchestratorRunner) -> None:
+    runner._route_economics = _frontier_custom_economics()
+    runner._model_router = _frontier_custom_router()
 
 
 def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing survives") -> Seed:
@@ -175,10 +203,11 @@ def test_router_contract_rejects_semantically_invalid_ladder(router_payload: dic
 
 def test_resume_restores_persisted_custom_frontier_router() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner()
+    resumed._route_economics = _frontier_custom_economics()
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
 
@@ -203,16 +232,31 @@ def test_resume_restores_persisted_kill_switch() -> None:
 
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner(base_model_tier="standard")
+    resumed._route_economics = _frontier_custom_economics()
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is True
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
-    assert resumed._model_router.tier_models != _frontier_custom_router().tier_models
+    assert resumed._model_router.tier_models == _frontier_custom_router().tier_models
+
+
+def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    routing["route_compat"] = {"version": 1, "enabled": False}
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="enabled route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_present_malformed_resume_contract_fails_closed() -> None:

@@ -37,7 +37,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
-from ouroboros.orchestrator.runner import OrchestratorRunner
+from ouroboros.orchestrator.runner import OrchestratorError, OrchestratorRunner
 
 
 def _economics() -> EconomicsConfig:
@@ -432,6 +432,7 @@ class TestRunnerRouterConstruction:
         store = AsyncMock()
         runner = OrchestratorRunner(adapter, store, MagicMock())
         runner._model_router = _claude_router()
+        runner._route_economics = _economics()
 
         kwargs = await runner._route_call_effort(
             execution_id="exec_direct",
@@ -446,6 +447,26 @@ class TestRunnerRouterConstruction:
         assert routed[0].data["decomposition_trustworthy"] is False
         assert routed[0].data["child_downgrade_authorized"] is False
         assert routed[0].data["call_site"] == "runner"
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_blocks_catalog_drift_before_provider_kwargs(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+        runner._model_router.tier_models["standard"] = "unconfigured-attacker-model"  # type: ignore[index]
+
+        with pytest.raises(OrchestratorError, match="Route admission blocked"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
 
     def test_execution_model_pin_env_keeps_router_none(
         self, monkeypatch: pytest.MonkeyPatch

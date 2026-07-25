@@ -1037,6 +1037,11 @@ class OrchestratorRunner:
         """
         from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
         from ouroboros.orchestrator.model_routing import resolve_execute_model
+        from ouroboros.orchestrator.route_compat import (
+            admit_compat_route,
+            admitted_execute_model_kwargs,
+            build_route_compat_projection,
+        )
 
         investment_assessment = assess_investment(None)
         decision, kwargs = resolve_execute_effort(
@@ -1045,12 +1050,54 @@ class OrchestratorRunner:
             is_decomposed_child=False,
             investment_assessment=investment_assessment,
         )
-        model_decision, model_kwargs = resolve_execute_model(
+        model_decision, legacy_model_kwargs = resolve_execute_model(
             self._adapter,
             router=self._model_router,
             is_decomposed_child=False,
             decomposition_trustworthy=False,
         )
+        if self._model_router is None:
+            model_kwargs = legacy_model_kwargs
+        else:
+            projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=self._model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=decision.level,
+            )
+            route_admission = admit_compat_route(
+                projection,
+                model_decision=model_decision,
+                effort=decision.level,
+            )
+            if not route_admission.admitted:
+                raise OrchestratorError(
+                    message="Route admission blocked before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": route_admission.reason,
+                        "call_site": "runner",
+                    },
+                )
+            model_kwargs = admitted_execute_model_kwargs(
+                route_admission,
+                model_decision=model_decision,
+                projection=projection,
+                effort=decision.level,
+            )
+            if (
+                model_decision.is_enforced
+                and model_decision.model is not None
+                and model_kwargs.get("model") != model_decision.model
+            ):
+                raise OrchestratorError(
+                    message="Route admission could not authorize the provider model",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "model_tier": model_decision.tier,
+                        "call_site": "runner",
+                    },
+                )
         # Merge the model override; kwargs carry a parameter ONLY for runtimes that
         # enforce it, so an advised runtime is never handed one.
         kwargs = {**kwargs, **model_kwargs}
@@ -4119,7 +4166,13 @@ class OrchestratorRunner:
                 },
             )
         raw_route_compat = raw_routing.get("route_compat")
-        if raw_route_compat is not None:
+        if raw_route_compat is None:
+            if restored_router is not None:
+                raise OrchestratorError(
+                    message="Cannot resume without an enabled route compatibility contract",
+                    details={"invalid": "route_compat", "reason": "missing"},
+                )
+        else:
             from ouroboros.orchestrator.route_compat import (
                 deserialize_route_compat_contract,
                 validate_route_compat_projection,
@@ -4132,6 +4185,16 @@ class OrchestratorRunner:
                 raise OrchestratorError(
                     message="Cannot resume with an invalid execution contract",
                     details={"invalid": "route_compat"},
+                )
+            if restored_router is not None and restored_projection is None:
+                raise OrchestratorError(
+                    message="Cannot resume without an enabled route compatibility contract",
+                    details={"invalid": "route_compat", "reason": "dormant"},
+                )
+            if restored_router is None and restored_projection is not None:
+                raise OrchestratorError(
+                    message="Cannot resume with an enabled route compatibility contract",
+                    details={"invalid": "route_compat", "reason": "router_dormant"},
                 )
             if restored_projection is not None and not validate_route_compat_projection(
                 restored_projection,

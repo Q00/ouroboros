@@ -52,6 +52,20 @@ def _economics() -> EconomicsConfig:
     )
 
 
+def _provider_economics(provider: str) -> EconomicsConfig:
+    return EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=2,
+        tiers={
+            tier: TierConfig(
+                cost_factor=index + 1,
+                models=[ModelConfig(provider=provider, model=f"{tier}-model")],
+            )
+            for index, tier in enumerate(("frugal", "standard", "frontier"))
+        },
+    )
+
+
 def _router(models: dict[str, str] | None = None) -> ModelRouter:
     tier_models = models or {
         "frugal": "haiku-x",
@@ -97,6 +111,39 @@ def test_projection_snapshots_configured_models_and_costs() -> None:
         "enabled": True,
         "ordinal": 1,
     }
+
+
+@pytest.mark.parametrize(
+    ("runtime_backend", "provider"),
+    (
+        ("claude", "anthropic"),
+        ("claude_code", "anthropic"),
+        ("claude_mcp", "anthropic"),
+        ("codex_cli", "openai"),
+        ("codex_mcp", "openai"),
+        ("gemini_cli", "google"),
+    ),
+)
+def test_projection_supports_every_model_routing_backend(
+    runtime_backend: str,
+    provider: str,
+) -> None:
+    router = ModelRouter(
+        tier_models={tier: f"{tier}-model" for tier in ("frugal", "standard", "frontier")},
+        runtime_backend=runtime_backend,
+        child_tier="frugal",
+        base_tier="standard",
+        escalation_retry_threshold=2,
+    )
+
+    projection = build_route_compat_projection(
+        _provider_economics(provider),
+        model_router=router,
+        runtime_backend=runtime_backend,
+    )
+
+    assert projection is not None
+    assert projection.authority_identity == f"runtime:{runtime_backend}"
 
 
 def test_projection_rejects_router_catalog_or_backend_drift() -> None:
@@ -389,6 +436,48 @@ def test_projection_contract_round_trip_and_tamper_rejection() -> None:
     # The parser preserves a syntactically valid payload; the caller must
     # compare it with a freshly built economics snapshot before dispatch.
     assert changed.registry.candidates[0].cost_units == 999999
+    assert not validate_route_compat_projection(
+        changed,
+        _economics(),
+        model_router=_router(),
+        runtime_backend="claude",
+        current_effort="medium",
+    )
+
+
+def test_current_projection_validation_does_not_trust_persisted_identity_metadata() -> None:
+    projection = build_route_compat_projection(
+        _economics(),
+        model_router=_router(),
+        runtime_backend="claude",
+    )
+    assert projection is not None
+    changed_candidates = tuple(
+        replace(
+            candidate,
+            effort="high",
+            persona="worker",
+            tool_policy="worker",
+            authority_identity="runtime:claude:worker",
+            capabilities=("tampered",),
+        )
+        for candidate in projection.registry.candidates
+    )
+    changed = replace(
+        projection,
+        registry=replace(projection.registry, candidates=changed_candidates),
+        effort="high",
+        persona="worker",
+        tool_policy="worker",
+        authority_identity="runtime:claude:worker",
+    )
+
+    assert validate_route_compat_projection(
+        projection,
+        _economics(),
+        model_router=_router(),
+        runtime_backend="claude",
+    )
     assert not validate_route_compat_projection(
         changed,
         _economics(),

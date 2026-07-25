@@ -740,6 +740,11 @@ def validate_route_compat_projection(
     *,
     model_router: ModelRouter | None,
     runtime_backend: str | None,
+    current_effort: str | None = None,
+    current_persona: str = DEFAULT_ROUTE_PERSONA,
+    current_tool_policy: str = DEFAULT_ROUTE_TOOL_POLICY,
+    current_authority_identity: str | None = None,
+    current_capabilities: Iterable[object] = (),
 ) -> bool:
     """Compare a persisted projection with a freshly resolved catalog.
 
@@ -754,15 +759,11 @@ def validate_route_compat_projection(
         economics,
         model_router=model_router,
         runtime_backend=runtime_backend,
-        effort=projection.effort,
-        persona=projection.persona,
-        tool_policy=projection.tool_policy,
-        authority_identity=projection.authority_identity,
-        capabilities=tuple(
-            capability
-            for candidate in projection.registry.candidates[:1]
-            for capability in candidate.capabilities
-        ),
+        effort=current_effort,
+        persona=current_persona,
+        tool_policy=current_tool_policy,
+        authority_identity=current_authority_identity,
+        capabilities=current_capabilities,
     )
     return expected == projection
 
