@@ -465,7 +465,7 @@ def _blocked_compat_admission(projection: RouteCompatProjection | None) -> Route
                         cost_units=0,
                         persona=DEFAULT_ROUTE_PERSONA,
                         tool_policy=DEFAULT_ROUTE_TOOL_POLICY,
-                        authority_identity="runtime:unresolved",
+                        authority_identity="authority-default",
                         enabled=False,
                     ),
                 )
@@ -485,7 +485,7 @@ def _blocked_compat_admission(projection: RouteCompatProjection | None) -> Route
                     cost_units=0,
                     persona=DEFAULT_ROUTE_PERSONA,
                     tool_policy=DEFAULT_ROUTE_TOOL_POLICY,
-                    authority_identity="runtime:unresolved",
+                    authority_identity="authority-default",
                     enabled=False,
                 ),
             )
