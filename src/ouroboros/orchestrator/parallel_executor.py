@@ -1336,9 +1336,7 @@ def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
         candidates.append((body, _output_filter_pipeline_is_pipefail_protected(body)))
         inner = tuple(_segments_after_safe_shell_preamble(body))
         if len(inner) == 1:
-            candidates.append(
-                (inner[0], _output_filter_pipeline_is_pipefail_protected(body))
-            )
+            candidates.append((inner[0], _output_filter_pipeline_is_pipefail_protected(body)))
 
     signatures: list[tuple[str, ...]] = []
     for candidate, pipefail_protected in candidates:
