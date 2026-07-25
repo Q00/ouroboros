@@ -39,6 +39,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
@@ -1262,23 +1263,103 @@ def _matching_journal_entries(
         else:
             if tool_name != "Bash":
                 continue
-            observed = payload.get("command")
-            if not isinstance(observed, str):
-                observed = payload.get("args_preview")
-        if not isinstance(observed, str):
-            continue
-        if field == "commands_run" or field == "tests_passed":
-            # The verifier already treats a concise claim and a runtime shell
-            # wrapper (and safe output plumbing) as the same exact command.
-            # Deliver evidence must use the same aliases or it will reject
-            # claims that the preceding verifier accepted.
-            if set(_normalized_command_claim_aliases(observed)).intersection(
-                _normalized_command_claim_aliases(value)
-            ):
+            observed_commands = _journal_command_values(payload)
+            if any(_commands_are_strictly_equivalent(value, item) for item in observed_commands):
                 matches.append(entry)
-        elif observed.strip() == value:
+            continue
+        if isinstance(observed, str) and observed.strip() == value:
             matches.append(entry)
     return tuple(matches)
+
+
+_JOURNAL_COMMAND_KEYS: tuple[str, ...] = ("command", "cmd", "command_line")
+
+
+def _journal_command_values(payload: Mapping[str, object]) -> tuple[object, ...]:
+    """Extract structured command values from one journal manifest payload.
+
+    Accepted-tool projection keeps the original ``tool_input`` only as bounded
+    JSON in ``args_preview`` for adapters that use ``cmd`` / ``command_line`` or
+    argv-list values. Preserve those structures until signature generation so
+    argument boundaries cannot be flattened into an unsafe string comparison.
+    """
+    values: list[object] = []
+
+    def append_from(container: Mapping[str, object]) -> None:
+        for key in _JOURNAL_COMMAND_KEYS:
+            candidate = container.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                values.append(candidate.strip())
+            elif isinstance(candidate, (list, tuple)) and candidate:
+                values.append(tuple(str(part) for part in candidate))
+
+    append_from(payload)
+    preview = payload.get("args_preview")
+    if isinstance(preview, str) and preview.strip():
+        try:
+            decoded = json.loads(preview)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Legacy normalizer rows store the raw command directly.
+            values.append(preview.strip())
+        else:
+            if isinstance(decoded, Mapping):
+                append_from(decoded)
+            elif isinstance(decoded, str) and decoded.strip():
+                values.append(decoded.strip())
+    return tuple(values)
+
+
+def _commands_are_strictly_equivalent(claim: str, observed: object) -> bool:
+    """Compare command evidence using case-sensitive argv signatures.
+
+    Quoting differences that preserve one argv token are equivalent, while case
+    changes and flattened token boundaries are not. Safe shell wrappers and
+    setup-only preambles may expose their single inner command. Output-only
+    plumbing follows the verifier's existing masking guard.
+    """
+    claim_signatures = set(_strict_command_signatures(claim))
+    observed_signatures = set(_strict_command_signatures(observed))
+    return bool(claim_signatures.intersection(observed_signatures))
+
+
+def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
+    if isinstance(command, (list, tuple)):
+        signature = tuple(str(part) for part in command)
+        return (signature,) if signature and all(signature) else ()
+    if not isinstance(command, str) or not command.strip():
+        return ()
+
+    raw = command.strip()
+    candidates: list[tuple[str, bool]] = [(raw, False)]
+    body = _shell_command_body(raw)
+    if body is not None:
+        candidates.append((body, _output_filter_pipeline_is_pipefail_protected(body)))
+        inner = tuple(_segments_after_safe_shell_preamble(body))
+        if len(inner) == 1:
+            candidates.append(
+                (inner[0], _output_filter_pipeline_is_pipefail_protected(body))
+            )
+
+    signatures: list[tuple[str, ...]] = []
+    for candidate, pipefail_protected in candidates:
+        variants = [candidate.strip()]
+        stripped = _strip_command_output_plumbing(candidate)
+        if stripped and stripped != candidate.strip():
+            unsafe_test_filter = (
+                _has_trailing_output_filter_pipeline(candidate)
+                and _looks_like_test_command(stripped)
+                and not pipefail_protected
+            )
+            if not unsafe_test_filter:
+                variants.append(stripped)
+        for variant in variants:
+            try:
+                signature = tuple(shlex.split(variant))
+            except ValueError:
+                continue
+            if signature and signature not in signatures:
+                signatures.append(signature)
+    return tuple(signatures)
 
 
 def _structured_literal(value: str) -> str | None:

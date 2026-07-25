@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import os
 from types import SimpleNamespace
 from typing import Any
@@ -69,13 +70,20 @@ def test_stall_timeout_default_allows_realistic_test_suites() -> None:
 
 
 def _journal_entry(*, handle: str, command: str) -> EvidenceEntry:
+    return _journal_payload_entry(
+        handle=handle,
+        payload={"tool_name": "Bash", "command": command},
+    )
+
+
+def _journal_payload_entry(*, handle: str, payload: dict[str, object]) -> EvidenceEntry:
     return EvidenceEntry(
         handle=handle,
         kind=EvidenceKind.COMMAND_EXECUTED,
         ok=True,
         started_at=datetime.now(UTC),
         ended_at=datetime.now(UTC),
-        payload={"tool_name": "Bash", "command": command},
+        payload=payload,
         source_event_ids=(f"event-{handle}",),
     )
 
@@ -99,6 +107,66 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_wrapped",)
+
+
+@pytest.mark.parametrize(
+    ("observed", "claim"),
+    (
+        ("pytest Tests/test_app.py", "pytest tests/test_app.py"),
+        ('python script.py "a b"', "python script.py a b"),
+    ),
+)
+def test_deliver_matching_preserves_case_and_argument_boundaries(
+    observed: str,
+    claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_distinct", command=observed),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=claim,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "claim"),
+    (
+        ({"cmd": "pytest tests/test_a.py"}, "pytest tests/test_a.py"),
+        (
+            {"cmd": ["python", "-m", "unittest", "test_slugify.py"]},
+            "python -m unittest test_slugify.py",
+        ),
+        ({"command_line": "ruff check src"}, "ruff check src"),
+    ),
+)
+def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
+    tool_input: dict[str, object],
+    claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_structured",
+                payload={
+                    "tool_name": "Bash",
+                    "args_preview": json.dumps(tool_input, separators=(",", ":")),
+                },
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=claim,
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_structured",)
 
 
 def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:
