@@ -444,6 +444,19 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "runtime:secretopaquevalue",
         "runtime:tokenopaquevalue",
         "runtime:credentialopaquevalue",
+        *(
+            f"runtime:auth{label}value"
+            for label in (
+                "bearer",
+                "credential",
+                "key",
+                "opaque",
+                "password",
+                "secret",
+                "token",
+                "value",
+            )
+        ),
         "runtime:prod-ghp_abcdefghijklmnopqrstuvwxyz",
         "runtime:prod-sk_live_abcdefghijklmnopqrstuvwxyz",
         "runtime:prod-hvs.abcdefghijklmnopqrstuvwxyz",
@@ -511,7 +524,7 @@ def test_admission_cannot_be_dataclass_replaced_or_mutated() -> None:
     assert not hasattr(decision, "_kernel_token")
     assert not hasattr(RouteAdmission, "_from_kernel")
     with pytest.raises(TypeError, match="Admission Kernel"):
-        RouteAdmission.__new__(RouteAdmission)
+        RouteAdmission.__new__(RouteAdmission)  # type: ignore[call-overload]
 
     with pytest.raises(TypeError, match="pickled"):
         pickle.dumps(decision)
@@ -522,7 +535,7 @@ def test_object_protocol_cannot_forge_or_rewrite_admission_state() -> None:
     outside = _route("outside-registry", cost=2)
     decision = admit_route(_registry(original), RouteRequirements())
 
-    forged = object.__new__(RouteAdmission)
+    forged: RouteAdmission = object.__new__(RouteAdmission)
     object.__setattr__(forged, "_sealed_state", object.__getattribute__(decision, "_sealed_state"))
     with pytest.raises(TypeError, match="unpublished"):
         _ = forged.admitted
@@ -549,7 +562,7 @@ def test_effect_boundary_revalidates_admission_against_live_registry() -> None:
 
     assert validate_admission(registry, requirements, decision) is True
 
-    forged = object.__new__(RouteAdmission)
+    forged: RouteAdmission = object.__new__(RouteAdmission)
     object.__setattr__(forged, "_sealed_state", object.__getattribute__(decision, "_sealed_state"))
     assert validate_admission(registry, requirements, forged) is False
 
@@ -619,7 +632,7 @@ def test_effect_boundary_rejects_closure_registered_outside_route() -> None:
         (),
         "cheapest_eligible_route",
     )
-    forged = object.__new__(kernel_type)
+    forged: RouteAdmission = object.__new__(kernel_type)
     object.__setattr__(forged, "_sealed_state", state)
     trusted[id(forged)] = (weakref.ref(forged), state)
 

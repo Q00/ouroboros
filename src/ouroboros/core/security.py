@@ -132,6 +132,16 @@ _COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
 _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS = frozenset(
     {"secret", "token", "credential", "credentials", "authorization", "key", "private", "bearer"}
 )
+_COMPACT_AUTH_CREDENTIAL_PREFIXES = (
+    "authbearer",
+    "authcredential",
+    "authkey",
+    "authopaque",
+    "authpassword",
+    "authsecret",
+    "authtoken",
+    "authvalue",
+)
 _SAFE_COMPACT_AUTHORITY_IDENTIFIERS = frozenset({"keycloak", "tokenizer", "privateer"})
 _SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
@@ -151,7 +161,7 @@ _CREDENTIAL_COMPOUND_PREFIX = re.compile(
 # every provider's credential prefix (for example SendGrid or Vault tokens).
 _STABLE_AUTHORITY_IDENTITY = re.compile(
     r"^(?:authority|session|runtime|workspace|process|execution|project|tenant|system|default)"
-    r"(?:[-_:/\.][a-z0-9]+(?:[-_.][a-z0-9]+)*)*$",
+    r"(?:[-_:/\.][a-z0-9]+)*$",
 )
 
 
@@ -161,6 +171,8 @@ def _is_credential_namespace_label(value: str) -> bool:
     label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
     label = label.lower().replace("-", "_")
     compact_label = label.replace("_", "")
+    if compact_label.startswith(_COMPACT_AUTH_CREDENTIAL_PREFIXES):
+        return True
     # Providers commonly omit separators in labels (``clientsecret``,
     # ``accesstoken``, ``privatekey``).  Treat those aliases like their
     # delimiter-bearing forms before any opaque payload can be serialized.

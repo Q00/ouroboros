@@ -8,6 +8,8 @@ Tests cover:
 - Sanitization for logging
 """
 
+from time import perf_counter
+
 from ouroboros.core.security import (
     MAX_INITIAL_CONTEXT_LENGTH,
     MAX_LLM_RESPONSE_LENGTH,
@@ -139,6 +141,19 @@ class TestSensitiveDetection:
             "passwd:opaquevalue",
             "glpat-opaque-provider-credential",
             "hf_opaque-provider-credential",
+            *(
+                f"runtime:auth{label}value"
+                for label in (
+                    "bearer",
+                    "credential",
+                    "key",
+                    "opaque",
+                    "password",
+                    "secret",
+                    "token",
+                    "value",
+                )
+            ),
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
             "SG." + "A" * 22 + "." + "B" * 43,
             "hvs." + "A" * 24,
@@ -191,12 +206,33 @@ class TestSensitiveDetection:
             "runtime:secretopaquevalue",
             "runtime:tokenopaquevalue",
             "runtime:credentialopaquevalue",
+            *(
+                f"runtime:auth{label}value"
+                for label in (
+                    "bearer",
+                    "credential",
+                    "key",
+                    "opaque",
+                    "password",
+                    "secret",
+                    "token",
+                    "value",
+                )
+            ),
             "runtime:clientsecret:opaquevalue",
             "runtime:accesstoken:opaquevalue",
             "runtime:accesskey:opaquevalue",
             "runtime:privatekey:opaquevalue",
         ):
             assert is_stable_authority_identity(value) is False
+        assert is_stable_authority_identity("runtime:auth-plane:default") is True
+
+    def test_stable_authority_identity_rejects_hostile_input_in_linear_time(self) -> None:
+        hostile = "runtime:" + "a-" * 24 + ":"
+
+        started = perf_counter()
+        assert is_stable_authority_identity(hostile) is False
+        assert perf_counter() - started < 0.25
 
 
 class TestMaskSensitiveValue:
@@ -215,6 +251,9 @@ class TestMaskSensitiveValue:
         result = mask_sensitive_value("sk-1234567890abcdef")
         assert "REDACTED" not in result  # Pattern detection uses mask_api_key
         assert "sk-" in result
+
+        compact_auth_result = mask_sensitive_value("runtime:authsecretvalue")
+        assert compact_auth_result != "runtime:authsecretvalue"
 
     def test_truncate_long_string(self) -> None:
         """Long strings are truncated."""
