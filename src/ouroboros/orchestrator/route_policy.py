@@ -657,6 +657,7 @@ def _build_admission_kernel() -> tuple[type[object], object]:
 
 
 if TYPE_CHECKING:
+
     class RouteAdmission:
         """Public static contract for a Kernel-produced admission result.
 
