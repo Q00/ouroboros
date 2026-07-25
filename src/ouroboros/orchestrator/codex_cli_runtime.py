@@ -147,7 +147,7 @@ _TOOL_LIFECYCLE_ITEM_TYPES = frozenset(
 )
 _TOOL_STARTED_RUNTIME_EVENT_TYPE = "tool.started"
 _SENSITIVE_META_KEY_RE = re.compile(
-    r"(authorization|api[_-]?key|access[_-]?token|secret|password|passwd|credential|"
+    r"(authorization|api[_-]?key|token|secret|password|passwd|credential|"
     r"private[_-]?key|session[_-]?token|bearer|cookie)",
     re.IGNORECASE,
 )
@@ -2058,11 +2058,15 @@ class CodexCliRuntime:
         if isinstance(result, dict):
             content = result.get("content")
             if isinstance(content, list):
-                texts = [
-                    block.get("text", "").strip()
-                    for block in content
-                    if isinstance(block, dict) and isinstance(block.get("text"), str)
-                ]
+                texts: list[str] = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if isinstance(block.get("text"), str):
+                        texts.append(block["text"].strip())
+                    nested = block.get("resource")
+                    if isinstance(nested, dict) and isinstance(nested.get("text"), str):
+                        texts.append(nested["text"].strip())
                 joined = "\n".join(text for text in texts if text)
                 if joined:
                     return joined
@@ -2084,7 +2088,15 @@ class CodexCliRuntime:
         return query.strip() if isinstance(query, str) else ""
 
     def _item_lifecycle_signature(self, item_type: str, item: dict[str, Any]) -> str:
-        """Build a best-effort identity for id-less legacy thread items."""
+        """Build a best-effort identity, scoped by tool type.
+
+        The type prefix stops a reused id from correlating across different
+        tool types (e.g. a Bash ``cats`` start and a WebSearch ``cats``
+        completion), which would otherwise pair on the bare payload.
+        """
+        return f"{item_type}\x00{self._item_lifecycle_payload_signature(item_type, item)}"
+
+    def _item_lifecycle_payload_signature(self, item_type: str, item: dict[str, Any]) -> str:
         if item_type == "command_execution":
             cwd = self._extract_cwd(item)
             command = self._extract_command(item)
@@ -2282,7 +2294,9 @@ class CodexCliRuntime:
                     has_success = True
 
             status = source.get("status")
-            if isinstance(status, str):
+            if status is not None and not isinstance(status, str):
+                has_malformed = True
+            elif isinstance(status, str):
                 normalized_status = status.strip().lower()
                 if normalized_status in _ITEM_FAILURE_STATUSES:
                     has_failure = True

@@ -1788,6 +1788,113 @@ class TestCodexCompletionReviewRoundOne:
         assert event_type != "tool.result", "a tool start was stamped with the result event type"
         assert not event_type.endswith((".completed", ".succeeded"))
 
+    def test_oauth_token_meta_keys_are_redacted(self) -> None:
+        """Common OAuth token keys must be redacted from durable meta."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "tk",
+                    "type": "mcp_tool_call",
+                    "name": "t",
+                    "status": "completed",
+                    "result": {
+                        "_meta": {
+                            "token": "tok-1",
+                            "refresh_token": "ref-2",
+                            "idToken": "id-3",
+                            "trace_id": "keep",
+                        }
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        serialized = json.dumps(results[0].data.get("tool_result") or {})
+        for secret in ("tok-1", "ref-2", "id-3"):
+            assert secret not in serialized, f"{secret} survived into journal metadata"
+        assert "keep" in serialized
+
+    def test_nonstring_status_is_malformed_not_ignored(self) -> None:
+        """A present non-string status must poison the success claim."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "st",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "status": 7,
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert results[0].data.get("is_error") is None, (
+            "a non-string status was ignored and exit 0 claimed success"
+        )
+        assert (
+            _event_has_explicit_tool_success(_as_journaled_tool_completed_event(results[0]))
+            is False
+        )
+
+    def test_same_id_different_tool_type_does_not_pair(self) -> None:
+        """A reused id across different tool types must not correlate."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        runtime._convert_event(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "reuse",
+                    "type": "command_execution",
+                    "command": "cats",
+                    "status": "in_progress",
+                },
+            },
+            current_handle=None,
+        )
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "reuse",
+                    "type": "web_search",
+                    "query": "cats",
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+        assert len(messages) == 2, (
+            "a WebSearch completion inherited a Bash start under the same reused id"
+        )
+
+    def test_mcp_resource_text_reaches_result_summary(self) -> None:
+        """A resource block's text must populate the human-readable result text."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "rt",
+                    "type": "mcp_tool_call",
+                    "name": "fs.read",
+                    "status": "completed",
+                    "result": {
+                        "content": [{"type": "resource", "resource": {"text": "file body"}}]
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        text = (results[0].data.get("tool_result") or {}).get("text_content") or ""
+        assert "file body" in text, "resource text was lost from the result summary"
+
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
         runtime = CodexCliRuntime(cli_path="codex")
