@@ -118,7 +118,7 @@ def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
         ):
             return None
         if option in {"-c", "-lc", "-cl"}:
-            if index + 1 >= len(argv):
+            if index + 1 >= len(argv) or index + 2 != len(argv):
                 return None
             return argv[index + 1].strip()
         if option in _SHELL_OPTIONS_WITH_ARGUMENT:

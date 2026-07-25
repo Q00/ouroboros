@@ -215,34 +215,34 @@ def _runtime_message_test_proof_text(message: AgentMessage) -> str:
     is not runtime output for that command. Keep summary matching tied to the
     Bash output/result payloads and tool-result messages that runtimes emit.
     """
-    resultish = (
-        message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
-    )
+    resultish = _is_tool_result_message(message)
+    carries_runtime_output = resultish or message.tool_name == "Bash"
     parts: list[str] = []
     if resultish:
         parts.append(message.content)
-    for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
-        value = message.data.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-    tool_result = message.data.get("tool_result")
-    if isinstance(tool_result, dict):
-        for key in ("text_content", "content", "output", "stdout", "stderr"):
-            value = tool_result.get(key)
+    if carries_runtime_output:
+        for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
+            value = message.data.get(key)
             if isinstance(value, str):
                 parts.append(value)
-        meta = tool_result.get("meta")
-        exit_status = meta.get("exit_status") if isinstance(meta, dict) else None
-        if type(exit_status) is int:
-            parts.append(f"exit code {exit_status}")
-    elif isinstance(tool_result, str):
-        parts.append(tool_result)
+        tool_result = message.data.get("tool_result")
+        if isinstance(tool_result, dict):
+            for key in ("text_content", "content", "output", "stdout", "stderr"):
+                value = tool_result.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+            meta = tool_result.get("meta")
+            exit_status = meta.get("exit_status") if isinstance(meta, dict) else None
+            if type(exit_status) is int:
+                parts.append(f"exit code {exit_status}")
+        elif isinstance(tool_result, str):
+            parts.append(tool_result)
     return "\n".join(parts)
 
 
 def _is_tool_result_message(message: AgentMessage) -> bool:
     """Return True for runtime tool-result messages, including named-tool variants."""
-    return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
+    return message.type == "tool_result" or message.data.get("subtype") == "tool_result"
 
 
 def _test_claim_file_part(value: str) -> str | None:

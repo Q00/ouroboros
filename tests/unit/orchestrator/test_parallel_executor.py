@@ -538,6 +538,33 @@ def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:
     assert facts[0].evidence_handle == "ambiguous:commands_run:0"
 
 
+@pytest.mark.parametrize(
+    "observed",
+    (
+        "bash -c 'pytest \"$@\"' ignored tests/test_a.py",
+        ("bash", "-c", 'pytest "$@"', "ignored", "tests/test_a.py"),
+    ),
+)
+def test_shell_wrapper_with_post_body_argv_does_not_expose_inner_alias(
+    observed: object,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_wrapper",
+                payload={"tool_name": "Bash", "cmd": observed},
+            ),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value='pytest "$@"',
+    )
+
+
 class _RateGateStubAdapter:
     """Minimal adapter exposing only what the dispatch rate gate inspects."""
 
@@ -1494,7 +1521,11 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
     expected: bool,
 ) -> None:
     """Verifier accepts explicit zero-failure summaries without allowing failures."""
-    message = AgentMessage(type="result", content=content, data={})
+    message = AgentMessage(
+        type="tool_result",
+        content=content,
+        data={"subtype": "tool_result"},
+    )
     assert _message_contains_test_success(message) is expected
 
 
@@ -1600,6 +1631,35 @@ def test_tests_passed_rejects_tool_call_narration_without_runtime_result() -> No
     )
 
 
+def test_atomic_verifier_rejects_intermediate_result_narration_as_test_proof() -> None:
+    command = "pytest tests/test_app.py"
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="Bash command started",
+                tool_name="Bash",
+                data={"tool_input": {"command": command}},
+            ),
+            AgentMessage(type="result", content="1 passed", data={"subtype": "success"}),
+            AgentMessage(type="result", content="Evidence follows", data={}),
+        ),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+
+    assert verdict.passed is False
+
+
 def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
     """A broad successful run cannot prove a node-id mentioned only by the agent."""
     started = AgentMessage(
@@ -1698,6 +1758,62 @@ def test_codex_completion_receipts_prove_exact_test_and_file_claims(tmp_path) ->
         )
         == []
     )
+
+
+def test_gemini_native_shell_result_passes_fat_harness_test_verifier() -> None:
+    from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+
+    command = "pytest -q tests/test_example.py"
+    runtime = GeminiCLIRuntime(cli_path="gemini")
+    messages: list[AgentMessage] = []
+    for raw_event in (
+        {"type": "tool_use", "name": "run_shell", "input": {"command": command}},
+        {
+            "type": "tool_result",
+            "name": "run_shell",
+            "output": "1 passed in 0.01s",
+            "is_error": False,
+        },
+    ):
+        event = runtime._parse_json_event(json.dumps(raw_event))
+        assert event is not None
+        messages.extend(runtime._convert_event(event, current_handle=None))
+
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=tuple(messages),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+
+    assert verdict.passed is True
+    assert all(message.tool_name == "Bash" for message in messages)
+    assert isinstance(messages[1].data["tool_result"], dict)
+    malformed_event = runtime._parse_json_event(
+        json.dumps(
+            {
+                "type": "tool_result",
+                "name": "run_shell",
+                "output": "1 passed in 0.01s",
+                "is_error": "true",
+            }
+        )
+    )
+    assert malformed_event is not None
+    malformed_result = runtime._convert_event(malformed_event, current_handle=None)[0]
+    malformed_verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(messages[0], malformed_result),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+    assert malformed_verdict.passed is False
 
 
 @pytest.mark.parametrize(
@@ -5012,9 +5128,9 @@ class TestParallelACExecutor:
                     data={"tool_input": {"command": "python -m pytest test_slugify.py"}},
                 ),
                 AgentMessage(
-                    type="result",
+                    type="tool_result",
                     content="test_slugify.py passed\n1 passed in 0.01s",
-                    data={"subtype": "success"},
+                    data={"subtype": "tool_result"},
                 ),
             ),
         )
@@ -5097,9 +5213,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest test_hello.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="test_hello.py::test_hello passed\n1 passed in 0.01s",
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
             ),
@@ -5260,9 +5376,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest tests/test_analysis.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="tests/test_analysis.py passed; 1 passed",
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -5688,9 +5804,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest tests/test_app.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="tests/test_app.py passed\n1 passed in 0.01s",
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
             ),
@@ -5751,9 +5867,9 @@ class TestParallelACExecutor:
                     data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                 ),
                 AgentMessage(
-                    type="result",
+                    type="tool_result",
                     content="Ran 6 tests in 0.002s\n\nOK",
-                    data={"subtype": "success", "exit_code": 0},
+                    data={"subtype": "tool_result", "exit_code": 0},
                 ),
             ),
         )
@@ -5830,9 +5946,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 6 tests in 0.002s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
             ),
@@ -5896,9 +6012,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 6 tests in 0.002s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
             ),
@@ -6020,12 +6136,12 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content=(
                             "generated.py updated; tests/test_generated.py passed; "
                             "0 failed, 0 errors, 1 passed"
                         ),
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -6091,9 +6207,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 1 test in 0.001s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -12075,24 +12191,22 @@ class TestParallelACExecutor:
 
             async def execute_task(self, **kwargs: Any):
                 runtime = GeminiCLIRuntime(cli_path="gemini", cwd=self._cwd)
-                events = (
+                raw_events = (
                     {
                         "type": "tool_use",
-                        "content": "",
-                        "metadata": {
-                            "name": "Bash",
-                            "input": {"command": "pytest -q tests/test_example.py"},
-                        },
-                        "is_error": False,
+                        "name": "run_shell",
+                        "input": {"command": "pytest -q tests/test_example.py"},
                     },
                     {
                         "type": "tool_result",
-                        "content": "1 passed in 0.01s",
-                        "metadata": {"name": "Bash"},
+                        "name": "run_shell",
+                        "output": "1 passed in 0.01s",
                         "is_error": False,
                     },
                 )
-                for event in events:
+                for raw_event in raw_events:
+                    event = runtime._parse_json_event(json.dumps(raw_event))
+                    assert event is not None
                     for message in runtime._convert_event(
                         event,
                         current_handle=kwargs["resume_handle"],
