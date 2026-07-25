@@ -140,8 +140,7 @@ class RouteCompatProjection:
         if self.base_tier not in MODEL_TIER_LADDER:
             raise ValueError("base_tier is invalid")
         if (
-            isinstance(self.escalation_retry_threshold, bool)
-            or not isinstance(self.escalation_retry_threshold, int)
+            type(self.escalation_retry_threshold) is not int
             or not 1 <= self.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
         ):
             raise ValueError("escalation_retry_threshold is invalid")
@@ -320,8 +319,7 @@ def build_route_compat_projection(
         or not isinstance(model_router.base_tier, str)
         or model_router.child_tier not in MODEL_TIER_LADDER
         or model_router.base_tier not in MODEL_TIER_LADDER
-        or isinstance(model_router.escalation_retry_threshold, bool)
-        or not isinstance(model_router.escalation_retry_threshold, int)
+        or type(model_router.escalation_retry_threshold) is not int
         or not 1 <= model_router.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
     ):
         return None
@@ -603,8 +601,7 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         or not isinstance(base_tier, str)
         or child_tier not in MODEL_TIER_LADDER
         or base_tier not in MODEL_TIER_LADDER
-        or isinstance(threshold, bool)
-        or not isinstance(threshold, int)
+        or type(threshold) is not int
         or not 1 <= threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
         or (effort is not None and not isinstance(effort, str))
         or not isinstance(raw_tiers, list)

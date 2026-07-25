@@ -177,6 +177,24 @@ def test_projection_rejects_unordered_capabilities_and_invalid_router_bounds() -
         is None
     )
 
+    class ExplodingInt(int):
+        def __lt__(self, other: object) -> bool:
+            raise RuntimeError("comparison")
+
+    overloaded_threshold_router = ModelRouter(
+        tier_models=_router().tier_models,
+        runtime_backend="claude",
+        child_tier="frugal",
+        base_tier="standard",
+        escalation_retry_threshold=ExplodingInt(2),  # type: ignore[arg-type]
+    )
+    assert (
+        build_route_compat_projection(
+            _economics(), model_router=overloaded_threshold_router, runtime_backend="claude"
+        )
+        is None
+    )
+
 
 def test_projection_does_not_turn_explicit_empty_authority_into_default() -> None:
     assert (
