@@ -1263,6 +1263,8 @@ def _matching_journal_entries(
         else:
             if tool_name != "Bash":
                 continue
+            if field == "tests_passed" and not _looks_like_test_command(value):
+                continue
             observed_commands = _journal_command_values(payload)
             if any(_commands_are_strictly_equivalent(value, item) for item in observed_commands):
                 matches.append(entry)
@@ -1325,7 +1327,13 @@ def _commands_are_strictly_equivalent(claim: str, observed: object) -> bool:
 def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
     if isinstance(command, (list, tuple)):
         signature = tuple(str(part) for part in command)
-        return (signature,) if signature and all(signature) else ()
+        if not signature:
+            return ()
+        argv_signatures = [("argv", *signature)]
+        body = _shell_command_body_from_argv(signature)
+        if body is not None:
+            argv_signatures.extend(_strict_command_signatures(body))
+        return tuple(dict.fromkeys(argv_signatures))
     if not isinstance(command, str) or not command.strip():
         return ()
 
@@ -1351,13 +1359,97 @@ def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
             if not unsafe_test_filter:
                 variants.append(stripped)
         for variant in variants:
+            raw_signature = ("raw", variant)
+            if raw_signature not in signatures:
+                signatures.append(raw_signature)
+            if not _shell_text_is_argv_safe(variant):
+                continue
             try:
-                signature = tuple(shlex.split(variant))
+                signature = ("argv", *shlex.split(variant))
             except ValueError:
                 continue
-            if signature and signature not in signatures:
+            if len(signature) > 1 and signature not in signatures:
                 signatures.append(signature)
     return tuple(signatures)
+
+
+def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
+    if len(argv) < 3 or Path(argv[0]).name not in {"bash", "zsh", "sh"}:
+        return None
+    option_index = next(
+        (index for index, part in enumerate(argv[1:], start=1) if part in {"-c", "-lc", "-cl"}),
+        None,
+    )
+    if option_index is None or option_index + 1 >= len(argv):
+        return None
+    return argv[option_index + 1].strip()
+
+
+_SHELL_ACTIVE_UNQUOTED = frozenset("$*?[]><;|&`(){}~#!=^\n\r")
+_SHELL_ACTIVE_DOUBLE_QUOTED = frozenset("$`")
+_SHELL_RESERVED_WORDS = frozenset(
+    {
+        "case",
+        "coproc",
+        "do",
+        "done",
+        "elif",
+        "else",
+        "esac",
+        "fi",
+        "for",
+        "function",
+        "if",
+        "in",
+        "select",
+        "then",
+        "time",
+        "until",
+        "while",
+    }
+)
+
+
+def _shell_text_is_argv_safe(command: str) -> bool:
+    """Return whether quote removal cannot change this command's shell effects.
+
+    ``shlex.split`` is an argv oracle only when every shell-active token is
+    inert. Single quotes make those tokens literal; double quotes still permit
+    parameter and command substitution. Unsafe strings retain only their exact
+    raw signature, so ``echo $HOME`` cannot equal ``echo '$HOME'`` and quoted
+    redirections/globs cannot equal active ones.
+    """
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            elif char in _SHELL_ACTIVE_DOUBLE_QUOTED:
+                return False
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in _SHELL_ACTIVE_UNQUOTED:
+            return False
+    if quote is not None or escaped:
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return not any(part in _SHELL_RESERVED_WORDS for part in parts)
 
 
 def _structured_literal(value: str) -> str | None:

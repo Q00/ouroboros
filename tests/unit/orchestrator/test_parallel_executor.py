@@ -114,6 +114,12 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
     (
         ("pytest Tests/test_app.py", "pytest tests/test_app.py"),
         ('python script.py "a b"', "python script.py a b"),
+        ("echo $HOME", "echo '$HOME'"),
+        ("echo x > out", "echo x '>' out"),
+        ("echo *.py", "echo '*.py'"),
+        ("echo x; touch out", "echo 'x;' touch out"),
+        ("FOO=bar command", "'FOO=bar' command"),
+        ("if true", "'if' true"),
     ),
 )
 def test_deliver_matching_preserves_case_and_argument_boundaries(
@@ -132,6 +138,21 @@ def test_deliver_matching_preserves_case_and_argument_boundaries(
     )
 
 
+def test_deliver_matching_allows_inert_quote_spelling_differences() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted", command='python script.py "a b"'),),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="python script.py 'a b'",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_quoted",)
+
+
 @pytest.mark.parametrize(
     ("tool_input", "claim"),
     (
@@ -140,6 +161,11 @@ def test_deliver_matching_preserves_case_and_argument_boundaries(
             {"cmd": ["python", "-m", "unittest", "test_slugify.py"]},
             "python -m unittest test_slugify.py",
         ),
+        (
+            {"cmd": ["/bin/zsh", "-lc", "pytest tests/test_app.py"]},
+            "pytest tests/test_app.py",
+        ),
+        ({"cmd": ["python", "script.py", ""]}, "python script.py ''"),
         ({"command_line": "ruff check src"}, "ruff check src"),
     ),
 )
@@ -167,6 +193,40 @@ def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_structured",)
+
+
+def test_tests_passed_requires_a_successful_test_command() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(handle="ev_echo", command="echo ready"),
+            _journal_entry(handle="ev_pytest", command="pytest tests/test_app.py"),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="echo ready",
+    )
+    matches = _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="pytest tests/test_app.py",
+    )
+    assert tuple(entry.handle for entry in matches) == ("ev_pytest",)
+
+    facts = _standard_deliver_facts(
+        EvidenceRecord(data={"commands_run": ["echo ready"], "tests_passed": ["echo ready"]}),
+        manifest,
+        task_cwd=None,
+        verifier_passed=True,
+    )
+    assert facts is not None
+    assert tuple(fact.evidence_handle for fact in facts) == (
+        "ev_echo",
+        "missing:tests_passed:0",
+    )
 
 
 def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:

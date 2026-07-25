@@ -291,10 +291,11 @@ def _accepted_tool_start_entries(
     """Project accepted-leaf tool dispatches into claim-independent entries.
 
     The accepted-leaf + exact-match + verifier-PASS preconditions are necessary
-    but not sufficient for file mutation: a failed Edit/Write can still be
-    followed by an overall successful assistant result. Mutation starts therefore
-    require their own explicit success signal or one exact successful completion.
-    Missing, failed, or ambiguous correlation is omitted fail-closed.
+    but not sufficient for file mutation or command success: a failed Edit/Write
+    or Bash call can still be followed by an overall successful assistant result.
+    Mutation and command starts therefore require their own explicit success
+    signal or one exact successful completion. Missing, failed, or ambiguous
+    correlation is omitted fail-closed.
     """
     chronological = tuple(events)
     entries: list[EvidenceEntry] = []
@@ -312,7 +313,7 @@ def _accepted_tool_start_entries(
             continue
         normalized_tool_name = tool_name.strip()
         completion: BaseEvent | None = None
-        if normalized_tool_name in {"Edit", "Write", "NotebookEdit"}:
+        if normalized_tool_name in {"Bash", "Edit", "Write", "NotebookEdit"}:
             call_id = _event_tool_call_id(event)
             if call_id is not None:
                 matching_starts = tuple(
