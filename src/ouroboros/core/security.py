@@ -92,9 +92,7 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
         "client_secret",
     )
 )
-_SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset(
-    {"budget", "default", "id", "name", "plane", "scope"}
-)
+_SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
 _CREDENTIAL_COMPOUND_PREFIX = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
