@@ -16,8 +16,10 @@ from ouroboros.core.seed import (
     SeedMetadata,
     derive_semantic_ac_key,
 )
+from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
@@ -74,6 +76,15 @@ def _seed() -> Seed:
     return Seed(
         goal="bounded routing",
         acceptance_criteria=("ship it",),
+        ontology_schema=OntologySchema(name="n", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+
+
+def _multi_seed() -> Seed:
+    return Seed(
+        goal="bounded routing",
+        acceptance_criteria=("ship first", "ship second"),
         ontology_schema=OntologySchema(name="n", description="d"),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
@@ -441,6 +452,194 @@ async def test_parallel_usage_limit_pauses_before_route_observation_or_escalatio
         event.type in {"execution.ac.attempt_judged", "execution.ac.route_observed"}
         for event in events
     )
+    pause = next(event for event in events if event.type == "execution.ac.route_paused")
+    assert pause.data["route"]["route_id"] == "compat:claude:frugal"
+    assert pause.data["prior_route_ids"] == []
+    assert pause.data["attempt_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_route_pause_aborts_remaining_stages_and_is_not_checkpointed_complete() -> None:
+    executor, _store, _events = _executor()
+    checkpoint_store = MagicMock()
+    checkpoint_store.load.return_value = Result.ok(None)
+    executor._checkpoint_store = checkpoint_store
+    seed = _multi_seed()
+    calls: list[list[int]] = []
+
+    async def paused_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        indices = kwargs["batch_executable"]
+        calls.append(indices)
+        return [
+            ACExecutionResult(
+                ac_index=indices[0],
+                ac_content="ship first",
+                success=False,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Usage limit reached. Please try again in 5 hours.",
+                        data={"subtype": "error", "error_type": "CodexCliError"},
+                    ),
+                ),
+                outcome=ACExecutionOutcome.FAILED,
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    executor._run_batch_with_verify_and_retry = paused_batch  # type: ignore[method-assign]
+    graph = DependencyGraph(
+        nodes=(
+            ACNode(index=0, content="ship first", depends_on=()),
+            ACNode(index=1, content="ship second", depends_on=(0,)),
+        ),
+        execution_levels=((0,), (1,)),
+    )
+
+    result = await executor.execute_parallel(
+        seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        system_prompt="sys",
+    )
+
+    assert calls == [[0]]
+    assert result.recoverable_route_pause is True
+    assert result.stages == ()
+    checkpoint_store.save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_route() -> None:
+    executor, store, events = _executor()
+    seed = _multi_seed()
+    cheap = _candidate(executor, "compat:claude:frugal")
+
+    async def first_round(**_kwargs: Any) -> list[ACExecutionResult]:
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship first",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                route_candidate=cheap,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="ship second",
+                success=False,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Quota window exhausted. Retry after 2 hours.",
+                        data={"subtype": "error", "error_type": "OpenCodeError"},
+                    ),
+                ),
+                outcome=ACExecutionOutcome.FAILED,
+                route_candidate=cheap,
+            ),
+        ]
+
+    executor._execute_ac_batch = first_round  # type: ignore[method-assign]
+    first = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0, 1],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0, 1: 0},
+        execution_counters=None,
+    )
+    assert isinstance(first[0], ACExecutionResult) and first[0].success
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    resumed_indices: list[list[int]] = []
+
+    async def resumed_round(**kwargs: Any) -> list[ACExecutionResult]:
+        indices = kwargs["batch_indices"]
+        resumed_indices.append(indices)
+        assert kwargs["route_overrides"][1] == cheap
+        return [
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="ship second",
+                success=True,
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                route_candidate=cheap,
+            )
+        ]
+
+    executor._execute_ac_batch = resumed_round  # type: ignore[method-assign]
+    resumed = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0, 1],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0, 1: 0},
+        execution_counters=None,
+    )
+
+    assert resumed_indices == [[1]]
+    assert all(isinstance(result, ACExecutionResult) and result.success for result in resumed)
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> None:
+    native, _native_store, events = _executor()
+    cheap = _candidate(native, "compat:claude:frugal")
+    await native._persist_parallel_route_pause(
+        seed=_seed(),
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            outcome=ACExecutionOutcome.FAILED,
+            route_candidate=cheap,
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        prior_route_ids=(),
+    )
+    paused_event = next(event for event in events if event.type == "execution.ac.route_paused")
+
+    degraded, store, _degraded_events = _executor(model_support=ParamSupport.IGNORED)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.route_paused":
+            return [paused_event]
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    provider = AsyncMock()
+    degraded._execute_ac_batch = provider  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="live routing is unavailable"):
+        await degraded._run_batch_with_verify_and_retry(
+            seed=_seed(),
+            batch_executable=[0],
+            session_id="session-1",
+            execution_id="execution-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="sys",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+    provider.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -745,7 +944,12 @@ async def test_legacy_attempt_judgment_does_not_block_route_observation_replay()
         judgments=[legacy_judgment, _judgment_for_route_event(route_event)],
     )
 
-    histories, overrides, terminals = await executor._load_bounded_route_resume_state(
+    (
+        histories,
+        overrides,
+        terminals,
+        provisional_successes,
+    ) = await executor._load_bounded_route_resume_state(
         seed=seed,
         execution_id="execution-1",
         session_id="session-1",
@@ -755,6 +959,7 @@ async def test_legacy_attempt_judgment_does_not_block_route_observation_replay()
     assert histories[0] == ("compat:claude:frugal",)
     assert overrides[0].route_id == "compat:claude:standard"
     assert terminals == {}
+    assert provisional_successes == {}
 
 
 @pytest.mark.asyncio
@@ -1037,7 +1242,7 @@ async def test_route_observation_cannot_claim_final_gate_acceptance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provisional_success_resume_blocks_replay_without_declaring_acceptance() -> None:
+async def test_provisional_success_resume_seals_provider_and_defers_to_final_gate() -> None:
     executor, store, _events = _executor()
     seed = _seed()
     cheap = _candidate(executor, "compat:claude:frugal")
@@ -1071,9 +1276,10 @@ async def test_provisional_success_resume_blocks_replay_without_declaring_accept
     provider.assert_not_awaited()
     result = results[0]
     assert isinstance(result, ACExecutionResult)
-    assert result.outcome is ACExecutionOutcome.BLOCKED
+    assert result.outcome is ACExecutionOutcome.SUCCEEDED
     assert result.retry_attempt == 0
-    assert "Final Gate did not durably accept" in (result.error or "")
+    assert result.error is None
+    assert "Final Gate remains authoritative" in result.final_message
 
 
 @pytest.mark.asyncio

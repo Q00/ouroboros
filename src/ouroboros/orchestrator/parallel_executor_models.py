@@ -269,6 +269,10 @@ class ParallelExecutionResult:
     reconciled_level_contexts: tuple[LevelContext, ...] = field(default_factory=tuple)
     total_messages: int = 0
     total_duration_seconds: float = 0.0
+    # A bounded-routing quota pause is not an ordinary failed execution.  The
+    # owner uses this durable signal to publish PAUSED even when another AC in
+    # the same round already persisted a valid next-route decision.
+    recoverable_route_pause: bool = False
 
     @property
     def all_succeeded(self) -> bool:

@@ -1433,6 +1433,61 @@ class OrchestratorRunner:
                 selected_route_sink.append(selected)
         return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
 
+    @staticmethod
+    def _classify_direct_route_failure(message: AgentMessage | None) -> Any:
+        """Classify a direct final error without inventing retry permission.
+
+        Direct execution has no leaf ``Attempt`` object, so consume explicit
+        provider/verifier metadata first and recognize only unambiguous hard
+        preconditions in the final error text.  Everything else remains the
+        conservative evidence-missing class.
+        """
+
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        if message is None or not (message.is_final and message.is_error):
+            return FailureClass.EVIDENCE_MISSING
+
+        pending: list[object] = [message.data]
+        seen: set[int] = set()
+        metadata_text: list[str] = []
+        while pending and len(seen) < 32:
+            value = pending.pop()
+            if not isinstance(value, Mapping) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            for key in (
+                "failure_class",
+                "status",
+                "code",
+                "error_code",
+                "error_type",
+                "type",
+                "reason",
+            ):
+                raw = value.get(key)
+                if isinstance(raw, str):
+                    normalized = raw.strip().upper().replace("-", "_").replace(" ", "_")
+                    if normalized == FailureClass.BLOCKED.value:
+                        return FailureClass.BLOCKED
+                    metadata_text.append(raw)
+            for key in ("blocker", "error", "details", "metadata", "response"):
+                pending.append(value.get(key))
+
+        normalized_text = " ".join([message.content, *metadata_text]).lower()
+        hard_block_patterns = (
+            r"\b(?:permission|access) denied\b",
+            r"\b(?:unauthorized|forbidden|authentication required)\b",
+            r"\bmissing (?:required )?(?:tool|access|authority|credential|credentials|"
+            r"configuration|config|environment variable|env var)\b",
+            r"\b(?:tool|access|authority|credential|credentials|configuration|config|"
+            r"environment variable|env var) (?:is |are )?(?:required|unavailable|"
+            r"not available|not configured)\b",
+        )
+        if any(re.search(pattern, normalized_text) for pattern in hard_block_patterns):
+            return FailureClass.BLOCKED
+        return FailureClass.EVIDENCE_MISSING
+
     async def _persist_direct_route_outcome(
         self,
         *,
@@ -1442,6 +1497,7 @@ class OrchestratorRunner:
         prior_route_ids: tuple[str, ...],
         candidate: RouteCandidate,
         success: bool,
+        failure_class: object | None = None,
     ) -> tuple[RouteEscalationDecision | None, tuple[str, ...]]:
         """Persist one direct provisional outcome and compute its exact successor."""
 
@@ -1493,7 +1549,13 @@ class OrchestratorRunner:
             if projection is not None
             else None
         )
-        failure_class = None if success else FailureClass.EVIDENCE_MISSING
+        classified_failure = (
+            None
+            if success
+            else failure_class
+            if isinstance(failure_class, FailureClass)
+            else FailureClass.EVIDENCE_MISSING
+        )
         decision: RouteEscalationDecision | None = None
         if not success:
             if (
@@ -1504,7 +1566,7 @@ class OrchestratorRunner:
             ):
                 decision = RouteEscalationDecision(
                     action=EscalationAction.BLOCKED,
-                    failure_class=FailureClass.EVIDENCE_MISSING,
+                    failure_class=classified_failure,
                     selected=None,
                     attempted_route_ids=history,
                     remaining_route_ids=(),
@@ -1516,7 +1578,7 @@ class OrchestratorRunner:
                     requirements,
                     current_route_id=candidate.route_id,
                     attempted_route_ids=history,
-                    failure_class=FailureClass.EVIDENCE_MISSING,
+                    failure_class=classified_failure,
                 )
         observation = RouteObservation.from_candidate(
             candidate,
@@ -1524,9 +1586,13 @@ class OrchestratorRunner:
             episode_id=episode_id,
             attempt_index=len(history) - 1,
             verifier_outcome=(
-                VerifierOutcome.ATTEMPT_SUCCEEDED if success else VerifierOutcome.FAILED
+                VerifierOutcome.ATTEMPT_SUCCEEDED
+                if success
+                else VerifierOutcome.BLOCKED
+                if classified_failure is FailureClass.BLOCKED
+                else VerifierOutcome.FAILED
             ),
-            failure_class=failure_class,
+            failure_class=classified_failure,
             escalation_reason=decision.reason if decision is not None else None,
         )
         await self._event_store.append(
@@ -5813,8 +5879,9 @@ class OrchestratorRunner:
         parallel_result: Any,
         *,
         now: datetime | None = None,
+        require_all_failures_recoverable: bool = True,
     ) -> RecoverableFailurePause | None:
-        """Return a pause only when every executed failure is recoverable."""
+        """Resolve a parallel pause under the caller's explicit ownership rule."""
 
         def iter_leaf_ac_results(results: tuple[Any, ...]) -> Any:
             for result in results:
@@ -5848,14 +5915,19 @@ class OrchestratorRunner:
 
         for ac_result in iter_leaf_ac_results(results):
             if bool(getattr(ac_result, "is_invalid", False)):
-                return None
-            if not bool(getattr(ac_result, "is_failure", False)):
+                if require_all_failures_recoverable:
+                    return None
                 continue
+            if not bool(getattr(ac_result, "is_failure", False)):
+                if require_all_failures_recoverable or bool(getattr(ac_result, "success", False)):
+                    continue
 
             found_failure = True
             messages = getattr(ac_result, "messages", ())
             if not isinstance(messages, tuple):
-                return None
+                if require_all_failures_recoverable:
+                    return None
+                continue
 
             failure_pause = None
             for message in reversed(messages):
@@ -5865,7 +5937,9 @@ class OrchestratorRunner:
                     break
 
             if failure_pause is None:
-                return None
+                if require_all_failures_recoverable:
+                    return None
+                continue
 
             selected_pause = (
                 failure_pause
@@ -7560,6 +7634,7 @@ class OrchestratorRunner:
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
             recoverable_failure_pause: RecoverableFailurePause | None = None
+            last_direct_final_message: AgentMessage | None = None
             direct_route_candidate: Any | None = None
             direct_bounded_routing = (
                 self._model_router is not None
@@ -7590,6 +7665,7 @@ class OrchestratorRunner:
                 nonlocal success
                 nonlocal tracker
                 nonlocal direct_route_candidate
+                nonlocal last_direct_final_message
 
                 active_runtime_handle = resume_handle
                 self._announce_param_degradations(
@@ -7744,6 +7820,7 @@ class OrchestratorRunner:
 
                         # Handle final message
                         if message.is_final:
+                            last_direct_final_message = message
                             final_message = message.content
                             success = not message.is_error
                             recoverable_failure_pause = self._recoverable_failure_pause(
@@ -7846,6 +7923,9 @@ class OrchestratorRunner:
                         prior_route_ids=direct_route_history,
                         candidate=direct_route_candidate,
                         success=success,
+                        failure_class=self._classify_direct_route_failure(
+                            last_direct_final_message
+                        ),
                     )
                     if success or decision is None or decision.blocked:
                         if decision is not None and decision.blocked:
@@ -8414,6 +8494,9 @@ class OrchestratorRunner:
             recoverable_failure_pause = self._recoverable_failure_pause_from_parallel_result(
                 parallel_result,
                 now=datetime.now(UTC),
+                require_all_failures_recoverable=not bool(
+                    getattr(parallel_result, "recoverable_route_pause", False)
+                ),
             )
 
         final_message = render_parallel_completion_message(
@@ -9278,6 +9361,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             live_runtime_handle = runtime_handle
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
             resume_route_state: _DirectRouteResumeState | None = None
+            last_resume_final_message: AgentMessage | None = None
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
@@ -9416,6 +9500,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                             await self._event_store.append(progress_event)
 
                         if message.is_final:
+                            last_resume_final_message = message
                             final_message = message.content
                             success = not message.is_error
                             recoverable_resume_failure = self._recoverable_failure_pause(
@@ -9435,6 +9520,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     prior_route_ids=resume_route_state.prior_route_ids,
                     candidate=resume_route_state.candidate,
                     success=success,
+                    failure_class=self._classify_direct_route_failure(last_resume_final_message),
                 )
                 while not success and decision is not None and not decision.blocked:
                     assert decision.selected is not None
@@ -9453,6 +9539,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         expected_route_candidate=successor,
                     )
                     final_message = ""
+                    last_resume_final_message = None
                     recoverable_resume_failure = None
                     async with (
                         aclosing(
@@ -9493,6 +9580,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 live_runtime_handle = message.resume_handle
                             state_tracker.process_runtime_message(message)
                             if message.is_final:
+                                last_resume_final_message = message
                                 final_message = message.content
                                 success = not message.is_error
                                 recoverable_resume_failure = self._recoverable_failure_pause(
@@ -9532,6 +9620,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                         prior_route_ids=route_history,
                         candidate=successor,
                         success=success,
+                        failure_class=self._classify_direct_route_failure(
+                            last_resume_final_message
+                        ),
                     )
                 if not success and decision is not None and decision.blocked:
                     final_message = (

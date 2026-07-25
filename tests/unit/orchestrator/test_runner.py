@@ -37,7 +37,11 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelExecutionResult,
+)
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
@@ -3624,6 +3628,52 @@ class TestOrchestratorRunner:
         )
 
         assert pause is None
+
+    def test_bounded_route_pause_preserves_mixed_failure_round_for_resume(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """A typed route pause owns the round even with a pending sibling route."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        usage_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        ordinary_message = AgentMessage(
+            type="result",
+            content="Tests failed: expected 2 rows, got 1.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Patch the runner",
+                    success=False,
+                    messages=(usage_message,),
+                    outcome=ACExecutionOutcome.BLOCKED,
+                ),
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Patch the tests",
+                    success=False,
+                    messages=(ordinary_message,),
+                ),
+            ),
+            success_count=0,
+            failure_count=2,
+            recoverable_route_pause=True,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+            require_all_failures_recoverable=False,
+        )
+
+        assert pause is not None
+        assert pause.resume_after == now + timedelta(hours=5)
 
     def test_parallel_result_uses_latest_recoverable_resume_after(
         self,

@@ -352,6 +352,8 @@ from ouroboros.orchestrator.verifier import (
     verifier_operational_failure_verdict,
 )
 
+_MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
+
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.mcp.types import MCPToolDefinition
@@ -2637,6 +2639,7 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
         resume_from_level = 0
+        recoverable_route_pause = False
 
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
@@ -3140,6 +3143,15 @@ class ParallelACExecutor:
                         execution_counters=execution_counters,
                     )
 
+                    batch_route_pause = self._bounded_route_escalation_enabled and any(
+                        isinstance(result, ACExecutionResult)
+                        and any(
+                            is_usage_limit_pause_message(message)
+                            for message in reversed(result.messages)
+                        )
+                        for result in batch_results
+                    )
+
                     for ac_idx, result in zip(batch_executable, batch_results, strict=False):
                         if isinstance(result, BaseException):
                             # Exception during execution
@@ -3223,6 +3235,19 @@ class ParallelACExecutor:
 
                         all_results.append(ac_result)
                         stage_ac_results.append(ac_result)
+
+                    if batch_route_pause:
+                        # A quota window belongs to the complete execution plan,
+                        # not merely this route loop.  Do not start another batch
+                        # or stage, and do not run sibling/coordinator effects.
+                        recoverable_route_pause = True
+                        break
+
+                if recoverable_route_pause:
+                    # In particular, do not emit level_completed or checkpoint
+                    # this incomplete stage as completed.  Durable route events
+                    # below are the replay authority for the interrupted round.
+                    break
 
                 flip_gated_out = await self._compute_sibling_flip_gated_out(
                     seed=seed,
@@ -3650,6 +3675,7 @@ class ParallelACExecutor:
             reconciled_level_contexts=tuple(level_contexts),
             total_messages=total_messages,
             total_duration_seconds=total_duration,
+            recoverable_route_pause=recoverable_route_pause,
         )
 
     @staticmethod
@@ -6222,11 +6248,15 @@ Respond with either ATOMIC or the structured JSON object only.
         # chosen runtime will honor it from its declared capability — enforced via a
         # native knob, or advised. The level is passed to execute_task; an advised
         # runtime ignores it. Dormant by default (base effort None → level None).
+        # Routing D's attempt index orders a finite route set; it is not the
+        # legacy same-route retry counter.  Feeding it into effort escalation
+        # would mutate the successor after that successor was durably selected.
+        effort_retry_attempt = 0 if bounded_route_attempt_enabled else retry_attempt
         effort_decision, execute_effort_kwargs = resolve_execute_effort(
             self._adapter,
             base_effort=self._reasoning_effort,
             is_decomposed_child=is_sub_ac,
-            retry_attempt=retry_attempt,
+            retry_attempt=effort_retry_attempt,
             investment_assessment=investment_assessment,
         )
         if effort_decision.level is not None:
@@ -6461,7 +6491,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 self._adapter,
                 base_effort=self._reasoning_effort,
                 is_decomposed_child=is_sub_ac,
-                retry_attempt=retry_attempt,
+                retry_attempt=effort_retry_attempt,
                 investment_assessment=investment_assessment,
             )
             if live_effort_decision != effort_decision:
@@ -8024,6 +8054,52 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         return observation
 
+    async def _persist_parallel_route_pause(
+        self,
+        *,
+        seed: Seed,
+        result: ACExecutionResult,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+        prior_route_ids: tuple[str, ...],
+    ) -> None:
+        """Bind a recoverable quota pause to its exact unconsumed route."""
+
+        from ouroboros.events.base import BaseEvent
+
+        candidate = result.route_candidate
+        if candidate is None:
+            raise RuntimeError("bounded route pause lost its active route candidate")
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.route_paused",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": root_ac_index,
+                    "semantic_ac_key": semantic_ac_key,
+                    "call_site": "parallel",
+                    "episode_id": self._bounded_route_episode_id(
+                        seed,
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        root_ac_index=root_ac_index,
+                    ),
+                    "attempt_index": len(prior_route_ids),
+                    "prior_route_ids": list(prior_route_ids),
+                    "route": candidate.to_contract_data(),
+                    "recoverable_pause": True,
+                    "final_acceptance_declared": False,
+                },
+            )
+        )
+
     async def _emit_recovery_exhausted(
         self,
         *,
@@ -8512,6 +8588,7 @@ Respond with either ATOMIC or the structured JSON object only.
         for event_type in (
             "execution.ac.route_observed",
             "execution.ac.attempt_judged",
+            "execution.ac.route_paused",
         ):
             events = await self._event_store.query_execution_related_events(
                 execution_id,
@@ -8527,7 +8604,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 if data.get("session_id") != session_id:
                     continue
                 root_ac_index = data.get("root_ac_index")
-                if event_type == "execution.ac.route_observed":
+                if event_type in {
+                    "execution.ac.route_observed",
+                    "execution.ac.route_paused",
+                }:
                     if root_ac_index in relevant or type(root_ac_index) is not int:
                         return True
                 elif data.get("route_contract_version") is not None and (
@@ -8567,13 +8647,14 @@ Respond with either ATOMIC or the structured JSON object only.
             histories,
             route_overrides,
             terminal_resume_reasons,
+            provisional_successes,
         ) = await self._load_bounded_route_resume_state(
             seed=seed,
             execution_id=execution_id,
             session_id=session_id,
             root_ac_indices=tuple(batch_executable),
         )
-        pending = set(batch_executable) - set(terminal_resume_reasons)
+        pending = set(batch_executable) - set(terminal_resume_reasons) - set(provisional_successes)
         for ac_idx, reason in terminal_resume_reasons.items():
             results[positions[ac_idx]] = ACExecutionResult(
                 ac_index=ac_idx,
@@ -8582,6 +8663,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=reason,
                 retry_attempt=max(0, len(histories[ac_idx]) - 1),
                 outcome=ACExecutionOutcome.BLOCKED,
+            )
+        for ac_idx, candidate in provisional_successes.items():
+            results[positions[ac_idx]] = ACExecutionResult(
+                ac_index=ac_idx,
+                ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                success=True,
+                final_message=(
+                    "[Restored provisional route success; Final Gate remains authoritative]"
+                ),
+                retry_attempt=max(0, len(histories[ac_idx]) - 1),
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                route_candidate=candidate,
             )
         for ac_idx, history in histories.items():
             ac_retry_attempts[ac_idx] = len(history)
@@ -8622,6 +8715,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     # that this route lacks capability.  Preserve the untouched
                     # provider result for the runner's pause owner and emit no
                     # judgment/observation that could authorize a successor.
+                    await self._persist_parallel_route_pause(
+                        seed=seed,
+                        result=value,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        prior_route_ids=histories[ac_idx],
+                    )
                     recoverable_pause_seen = True
                     continue
                 gated = await self._apply_verify_gate(
@@ -8792,13 +8893,14 @@ Respond with either ATOMIC or the structured JSON object only.
         dict[int, tuple[str, ...]],
         dict[int, RouteCandidate],
         dict[int, str],
+        dict[int, RouteCandidate],
     ]:
         """Replay route observations without repeating a provider effect.
 
         A failed observation with a durable escalation decision resumes at its
-        exact selected successor.  A provisional success or terminal block may
-        not be converted into acceptance and may not be replayed, so it becomes
-        an explicit human handoff.
+        exact selected successor.  A provisional success seals the provider
+        effect but remains subject to the existing Final Gate.  A paused route
+        resumes only its exact durable candidate.
         """
         from ouroboros.orchestrator.route_policy import RouteRequirements
 
@@ -8942,6 +9044,7 @@ Respond with either ATOMIC or the structured JSON object only.
         histories: dict[int, tuple[str, ...]] = {}
         overrides: dict[int, RouteCandidate] = {}
         terminals: dict[int, str] = {}
+        provisional_successes: dict[int, RouteCandidate] = {}
         for ac_idx, rows in grouped.items():
             rows.sort(key=lambda row: row[0].attempt_index)
             if [row[0].attempt_index for row in rows] != list(range(len(rows))):
@@ -9057,10 +9160,7 @@ Respond with either ATOMIC or the structured JSON object only.
             last_observation = rows[-1][0]
             last_decision = parsed_decisions[-1]
             if last_observation.verifier_outcome is RouteVerifierOutcome.ATTEMPT_SUCCEEDED:
-                terminals[ac_idx] = (
-                    "A route attempt succeeded before interruption, but Final Gate did not "
-                    "durably accept it; provider replay is sealed and human handoff is required."
-                )
+                provisional_successes[ac_idx] = candidate
                 continue
             if last_decision is None:
                 raise RuntimeError("failed route observation lost its durable decision")
@@ -9073,7 +9173,103 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             else:
                 raise RuntimeError("route escalation replay contains an unknown action")
-        return histories, overrides, terminals
+
+        pause_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.route_paused",
+            limit=None,
+        )
+        unresolved_pauses: dict[int, RouteCandidate] = {}
+        pause_counts: dict[int, int] = {}
+        for event in pause_events:
+            if event.type != "execution.ac.route_paused":
+                continue
+            data = event.data
+            if data.get("session_id") != session_id:
+                continue
+            root_ac_index = data.get("root_ac_index")
+            if type(root_ac_index) is not int:
+                raise RuntimeError("parallel route pause has an invalid root AC index")
+            if root_ac_index not in relevant:
+                continue
+            if (
+                type(data.get("schema_version")) is not int
+                or data.get("schema_version") != 1
+                or data.get("execution_id") != execution_id
+                or data.get("call_site") != "parallel"
+                or data.get("recoverable_pause") is not True
+                or data.get("final_acceptance_declared") is not False
+            ):
+                raise RuntimeError("parallel route pause has invalid authority metadata")
+            pause_counts[root_ac_index] = pause_counts.get(root_ac_index, 0) + 1
+            if pause_counts[root_ac_index] > _MAX_PARALLEL_ROUTE_PAUSE_EVENTS:
+                raise RuntimeError("parallel route pause replay exceeds the finite bound")
+            criterion = seed.acceptance_criteria[root_ac_index]
+            semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+            expected_episode = self._bounded_route_episode_id(
+                seed,
+                execution_id=execution_id,
+                session_id=session_id,
+                root_ac_index=root_ac_index,
+            )
+            raw_prior = data.get("prior_route_ids")
+            if (
+                data.get("semantic_ac_key") != semantic_ac_key
+                or data.get("episode_id") != expected_episode
+                or type(data.get("attempt_index")) is not int
+                or not isinstance(raw_prior, list)
+                or not all(type(route_id) is str for route_id in raw_prior)
+            ):
+                raise RuntimeError("parallel route pause crossed route identity")
+            attempt_index = data["attempt_index"]
+            prior_route_ids = tuple(raw_prior)
+            if attempt_index != len(prior_route_ids) or attempt_index >= MAX_ROUTE_ATTEMPTS:
+                raise RuntimeError("parallel route pause has an invalid attempt index")
+            try:
+                paused_candidate = RouteCandidate.from_contract_data(data.get("route"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("parallel route pause has an invalid route snapshot") from exc
+
+            history = histories[root_ac_index]
+            if attempt_index < len(history):
+                # A later judgment/observation consumed this pause.  It must be
+                # the exact same attempt, otherwise replay crossed identities.
+                if (
+                    prior_route_ids != history[:attempt_index]
+                    or history[attempt_index] != paused_candidate.route_id
+                ):
+                    raise RuntimeError("parallel route pause was consumed by a different route")
+                continue
+            if attempt_index != len(history) or prior_route_ids != history:
+                raise RuntimeError("parallel route pause does not follow durable route history")
+            if root_ac_index in terminals or root_ac_index in provisional_successes:
+                raise RuntimeError("parallel route pause contradicts a terminal route state")
+
+            live_projection = self._build_route_compat_projection(
+                model_router=self._model_router,
+                effort=paused_candidate.effort,
+            )
+            live_candidate = (
+                next(
+                    (
+                        candidate
+                        for candidate in live_projection.registry.candidates
+                        if candidate.route_id == paused_candidate.route_id
+                    ),
+                    None,
+                )
+                if live_projection is not None
+                else None
+            )
+            if live_candidate != paused_candidate:
+                raise RuntimeError("parallel route pause detected route configuration drift")
+            prior_unresolved = unresolved_pauses.get(root_ac_index)
+            if prior_unresolved is not None and prior_unresolved != paused_candidate:
+                raise RuntimeError("parallel route pause has conflicting unconsumed snapshots")
+            unresolved_pauses[root_ac_index] = paused_candidate
+
+        overrides.update(unresolved_pauses)
+        return histories, overrides, terminals, provisional_successes
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(
         self,
