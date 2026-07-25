@@ -129,8 +129,7 @@ def _is_credential_namespace_label(value: str) -> bool:
         if compact_label.startswith(f"{compact_credential_label}_"):
             suffix = compact_label[len(compact_credential_label) + 1 :]
             safe_suffixes = {
-                safe_suffix.replace("_", "")
-                for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+                safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
             }
             return suffix not in safe_suffixes
     if label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(

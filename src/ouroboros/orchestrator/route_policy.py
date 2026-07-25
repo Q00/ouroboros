@@ -147,19 +147,21 @@ class RouteCandidate:
 
         if not isinstance(value, Mapping):
             raise ValueError("route candidate must be an object")
-        expected = frozenset({
-            "route_id",
-            "model",
-            "harness",
-            "effort",
-            "cost_units",
-            "persona",
-            "tool_policy",
-            "authority_identity",
-            "capabilities",
-            "enabled",
-            "ordinal",
-        })
+        expected = frozenset(
+            {
+                "route_id",
+                "model",
+                "harness",
+                "effort",
+                "cost_units",
+                "persona",
+                "tool_policy",
+                "authority_identity",
+                "capabilities",
+                "enabled",
+                "ordinal",
+            }
+        )
         _bounded_mapping_keys(value, expected=expected, field="route candidate")
         capabilities = value["capabilities"]
         if not isinstance(capabilities, Sequence) or isinstance(
@@ -349,9 +351,7 @@ def _strict_candidate_fingerprint(candidate: object) -> tuple[object, ...] | Non
     )
     if any(
         type(value) is not str
-        for value in values[:3]
-        + values[5:8]
-        + (() if values[3] is None else (values[3],))
+        for value in values[:3] + values[5:8] + (() if values[3] is None else (values[3],))
     ):
         raise TypeError("candidate contains non-canonical string fields")
     if type(values[4]) is not int or type(values[8]) is not tuple:
@@ -793,9 +793,7 @@ def validate_admission(
             == _strict_candidate_fingerprint(expected.selected)
             and _strict_route_id_tuple(admission.eligible_route_ids)
             == _strict_route_id_tuple(expected.eligible_route_ids)
-            and tuple(
-                _strict_rejection_fingerprint(item) for item in admission.rejections
-            )
+            and tuple(_strict_rejection_fingerprint(item) for item in admission.rejections)
             == tuple(_strict_rejection_fingerprint(item) for item in expected.rejections)
             and type(admission.reason) is str
             and admission.reason == expected.reason
