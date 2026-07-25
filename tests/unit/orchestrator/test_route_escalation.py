@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 
 import pytest
@@ -82,6 +83,23 @@ def test_observation_round_trip_is_deterministic_and_strict() -> None:
     malformed["unexpected"] = True
     with pytest.raises(ValueError, match="unsupported shape"):
         RouteObservation.from_contract_data(malformed)
+
+    class InfiniteMapping(Mapping[str, object]):
+        def __iter__(self):
+            yield from malformed
+            index = 0
+            while True:
+                yield f"unexpected-{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            return malformed[key]
+
+    with pytest.raises(ValueError, match="unsupported shape"):
+        RouteObservation.from_contract_data(InfiniteMapping())
     malformed = observation.to_contract_data()
     malformed["version"] = True
     with pytest.raises(ValueError, match="unsupported shape"):

@@ -117,6 +117,31 @@ def _bounded_ordered(values: Iterable[object], *, field: str, max_count: int) ->
     return tuple(result)
 
 
+def _has_bounded_mapping_keys(
+    value: Mapping[object, object],
+    *,
+    expected: frozenset[str],
+) -> bool:
+    """Check exact contract keys without materializing an untrusted tail."""
+
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    keys: list[str] = []
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(keys) == len(expected) and frozenset(keys) == expected
+        except Exception:
+            return False
+        if index >= len(expected) or not isinstance(key, str):
+            return False
+        keys.append(key)
+    return False
+
+
 def _normalize_tokens(
     values: Iterable[object],
     *,
@@ -290,11 +315,13 @@ class RouteObservation:
             "failure_class",
             "escalation_reason",
         }
-        if (
-            set(value) != expected
-            or type(value.get("version")) is not int
-            or value.get("version") != ROUTE_OBSERVATION_CONTRACT_VERSION
-        ):
+        if not _has_bounded_mapping_keys(value, expected=frozenset(expected)):
+            raise ValueError("route observation has an unsupported shape")
+        try:
+            version = value["version"]
+        except Exception as exc:
+            raise ValueError("route observation has an unsupported shape") from exc
+        if type(version) is not int or version != ROUTE_OBSERVATION_CONTRACT_VERSION:
             raise ValueError("route observation has an unsupported shape")
         effort = value["effort"]
         if effort is not None and not isinstance(effort, str):
