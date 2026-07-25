@@ -1112,6 +1112,80 @@ def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
     )
 
 
+def test_codex_completion_receipts_prove_exact_test_and_file_claims(tmp_path) -> None:
+    from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+    runtime = CodexCliRuntime(cli_path="codex", cwd=tmp_path)
+    command = "pytest -q tests/test_example.py"
+    success_messages = tuple(
+        runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-42",
+                    "type": "command_execution",
+                    "command": command,
+                    "stdout": "1 passed in 0.01s",
+                    "exit_code": 0,
+                },
+            },
+            current_handle=None,
+        )
+        + runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "change-7",
+                    "type": "file_change",
+                    "path": "src/example.py",
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=success_messages,
+        task_cwd=str(tmp_path),
+    )
+    assert _runtime_messages_support_file_claim(
+        "src/example.py",
+        success_messages,
+        task_cwd=str(tmp_path),
+    )
+    failed_messages = tuple(
+        runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-failed",
+                    "type": "command_execution",
+                    "command": command,
+                    "stderr": "1 failed in 0.01s",
+                    "exit_code": 1,
+                },
+            },
+            current_handle=None,
+        )
+    )
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=failed_messages,
+        task_cwd=str(tmp_path),
+    )
+    assert (
+        runtime._convert_event(
+            {"type": "item.completed", "item": {"id": "cmd-empty", "type": "command_execution"}},
+            current_handle=None,
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize(
     "ac_content",
     (
@@ -11350,6 +11424,110 @@ class TestParallelACExecutor:
         assert tool_completed.data["tool_name"] == "Edit"
         assert tool_completed.data["tool_result"]["text_content"] == "Updated src/app.py"
         assert tool_completed.data["runtime_event_type"] == "tool.completed"
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_projects_codex_completion_receipt_to_journal(self) -> None:
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        class StubRuntime:
+            _runtime_handle_backend = "codex_cli"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                runtime = CodexCliRuntime(cli_path="codex", cwd=self._cwd)
+                for message in runtime._convert_event(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "cmd-42",
+                            "type": "command_execution",
+                            "command": "pytest -q tests/test_example.py",
+                            "stdout": "1 passed in 0.01s",
+                            "exit_code": 0,
+                        },
+                    },
+                    current_handle=kwargs["resume_handle"],
+                ):
+                    yield message
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=StubRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Run the focused test",
+            session_id="sess_codex",
+            tools=["Bash"],
+            system_prompt="test",
+            seed_goal="Ship the fix",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        appended_events = [call.args[0] for call in event_store.append.await_args_list]
+        tool_started = next(
+            event for event in appended_events if event.type == "execution.tool.started"
+        )
+        tool_completed = next(
+            event for event in appended_events if event.type == "execution.tool.completed"
+        )
+
+        assert result.success is True
+        assert tool_started.data["tool_call_id"] == "cmd-42"
+        assert tool_started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
+        assert tool_completed.data["tool_call_id"] == "cmd-42"
+        assert tool_completed.data["runtime_event_type"] == "tool.completed"
+        assert tool_completed.data["tool_result"]["is_error"] is False
+        assert tool_completed.data["tool_result"]["meta"]["exit_status"] == 0
+
+    def test_codex_id_bearing_exit_only_test_completion_proves_file_claim(self) -> None:
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        command = "pytest -q tests/test_example.py"
+        messages = tuple(
+            CodexCliRuntime(cli_path="codex", cwd="/tmp/project")._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "cmd-exit-only",
+                        "type": "command_execution",
+                        "command": command,
+                        "exit_code": 0,
+                    },
+                },
+                current_handle=None,
+            )
+        )
+
+        assert _runtime_messages_support_test_claim(
+            value="tests/test_example.py",
+            backed_commands=(command,),
+            messages=messages,
+            task_cwd=None,
+        )
 
     @pytest.mark.asyncio
     async def test_atomic_ac_projects_empty_tool_result_content_into_completion_events(

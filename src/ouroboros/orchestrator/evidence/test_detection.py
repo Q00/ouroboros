@@ -126,7 +126,7 @@ def _text_contains_test_success(text: str) -> bool:
 
 def _message_contains_test_success(message: AgentMessage) -> bool:
     """Return True when one message says a test command passed."""
-    parts = [message.content]
+    parts = [message.content, _runtime_message_test_proof_text(message)]
     for key in ("result_preview", "output", "stdout", "status", "subtype"):
         value = message.data.get(key)
         if isinstance(value, str):
@@ -208,6 +208,10 @@ def _runtime_message_test_proof_text(message: AgentMessage) -> str:
             value = tool_result.get(key)
             if isinstance(value, str):
                 parts.append(value)
+        meta = tool_result.get("meta")
+        exit_status = meta.get("exit_status") if isinstance(meta, dict) else None
+        if type(exit_status) is int:
+            parts.append(f"exit code {exit_status}")
     elif isinstance(tool_result, str):
         parts.append(tool_result)
     return "\n".join(parts)
