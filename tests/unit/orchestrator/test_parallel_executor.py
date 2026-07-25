@@ -69,10 +69,18 @@ def test_stall_timeout_default_allows_realistic_test_suites() -> None:
     assert STALL_TIMEOUT_SECONDS == 900.0
 
 
-def _journal_entry(*, handle: str, command: str) -> EvidenceEntry:
+def _journal_entry(
+    *,
+    handle: str,
+    command: str,
+    result_preview: str | None = None,
+) -> EvidenceEntry:
+    payload: dict[str, object] = {"tool_name": "Bash", "command": command}
+    if result_preview is not None:
+        payload["result_preview"] = result_preview
     return _journal_payload_entry(
         handle=handle,
-        payload={"tool_name": "Bash", "command": command},
+        payload=payload,
     )
 
 
@@ -358,7 +366,11 @@ def test_tests_passed_requires_a_successful_test_command() -> None:
         ac_id="AC-1",
         entries=(
             _journal_entry(handle="ev_echo", command="echo ready"),
-            _journal_entry(handle="ev_pytest", command="pytest tests/test_app.py"),
+            _journal_entry(
+                handle="ev_pytest",
+                command="pytest tests/test_app.py",
+                result_preview="1 passed in 0.01s",
+            ),
         ),
     )
 
@@ -447,6 +459,34 @@ def test_tests_passed_rejects_non_executing_runner_modes(command: str) -> None:
             value=command,
         )
     ) == ("ev_no_tests",)
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
+
+
+def test_tests_passed_requires_positive_execution_output_despite_environment_mode() -> None:
+    command = "PYTEST_ADDOPTS=--collect-only pytest tests/test_app.py"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_collected",
+                command=command,
+                result_preview="collected 1 item\n\n1 test collected",
+            ),
+        ),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="commands_run",
+            value=command,
+        )
+    ) == ("ev_collected",)
     assert not _matching_journal_entries(
         manifest,
         field="tests_passed",
@@ -1413,10 +1453,13 @@ async def test_dispatch_append_failure_does_not_cache_phantom_predecessor() -> N
         ("Tests run: 3, Failures=0, Errors=0, Skipped=0\n[INFO] BUILD SUCCESS", True),
         ("no errors, 3 passed", True),
         ("no tests failed, 3 passed", True),
-        ("exit code 0", True),
+        ("exit code 0", False),
         ("Ran 4 tests in 0.000s\nOK", True),
         ("python -m unittest test_slugify.py: Ran 4 tests in 0.000s OK", True),
-        ("success", True),
+        ("success", False),
+        ("collected 1 item\n1 test collected\nexit code 0", False),
+        ("PASS tests/test_app.py", True),
+        ("tests/test_app.py::test_auth PASSED", True),
         ("FAILED (failures=1)\nRan 4 tests in 0.000s", False),
         ("1 failed, 3 passed", False),
         ("2 errors, 1 passed", False),
@@ -1494,6 +1537,27 @@ def test_tests_passed_respects_correlated_bash_result_status(
             task_cwd=None,
         )
         is expected
+    )
+
+
+def test_tests_passed_rejects_collect_only_from_environment_configuration() -> None:
+    command = "PYTEST_ADDOPTS=--collect-only pytest tests/test_app.py"
+    message = AgentMessage(
+        type="tool",
+        content="run tests",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": command},
+            "output": "collected 1 item\n\n1 test collected",
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(message,),
+        task_cwd=None,
     )
 
 
@@ -2830,9 +2894,12 @@ def test_maven_tests_passed_supports_explicit_false_skip_properties(command: str
     )
     result_message = AgentMessage(
         type="tool_result",
-        content="[INFO] BUILD SUCCESS",
+        content="[INFO] Tests run: 1, Failures: 0, Errors: 0\n[INFO] BUILD SUCCESS",
         tool_name=None,
-        data={"subtype": "tool_result", "output": "[INFO] BUILD SUCCESS"},
+        data={
+            "subtype": "tool_result",
+            "output": "[INFO] Tests run: 1, Failures: 0, Errors: 0\n[INFO] BUILD SUCCESS",
+        },
     )
 
     assert _runtime_messages_support_test_claim(
@@ -4248,9 +4315,12 @@ class TestParallelACExecutor:
                 ),
                 AgentMessage(
                     type="tool",
-                    content="pytest passed",
+                    content="pytest passed\n1 passed in 0.01s",
                     tool_name="Bash",
-                    data={"input": {"command": "pytest"}},
+                    data={
+                        "input": {"command": "pytest"},
+                        "output": "1 passed in 0.01s",
+                    },
                 ),
             ),
         )
@@ -4875,7 +4945,7 @@ class TestParallelACExecutor:
                 ),
                 AgentMessage(
                     type="result",
-                    content="test_slugify.py passed",
+                    content="test_slugify.py passed\n1 passed in 0.01s",
                     data={"subtype": "success"},
                 ),
             ),
@@ -4960,7 +5030,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="test_hello.py::test_hello passed",
+                        content="test_hello.py::test_hello passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -5551,7 +5621,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_app.py passed",
+                        content="tests/test_app.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6311,7 +6381,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="tool_result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
@@ -6386,7 +6456,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6459,7 +6529,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6533,7 +6603,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6569,8 +6639,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
-    async def test_fat_harness_verifier_accepts_exit_code_only_test_success(self, tmp_path) -> None:
-        """Regression for #978 observation: Codex may omit pytest stdout but keep exit_code=0."""
+    async def test_fat_harness_verifier_rejects_exit_code_only_test_success(self, tmp_path) -> None:
+        """A zero exit without execution output cannot prove that tests ran."""
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")
@@ -6639,15 +6709,15 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is True
+        assert result.success is False
         assert result.atomic_verifier_verdict is not None
-        assert result.atomic_verifier_verdict.passed is True
+        assert result.atomic_verifier_verdict.passed is False
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_accepts_unittest_command_summary_claim(
@@ -11959,7 +12029,7 @@ class TestParallelACExecutor:
                 f"{lifecycle!r}, which is terminal"
             )
 
-    def test_codex_id_bearing_exit_only_test_completion_proves_file_claim(self) -> None:
+    def test_codex_id_bearing_exit_only_test_completion_does_not_prove_file_claim(self) -> None:
         from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 
         command = "pytest -q tests/test_example.py"
@@ -11978,7 +12048,7 @@ class TestParallelACExecutor:
             )
         )
 
-        assert _runtime_messages_support_test_claim(
+        assert not _runtime_messages_support_test_claim(
             value="tests/test_example.py",
             backed_commands=(command,),
             messages=messages,

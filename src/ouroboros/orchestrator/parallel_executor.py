@@ -242,6 +242,7 @@ from ouroboros.orchestrator.evidence.test_detection import (  # noqa: F401
     _test_command_targets_claim,
     _text_contains_test_success,
     _text_contains_unittest_success,
+    _text_proves_test_execution_success,
 )
 from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
     _add_runtime_command_evidence,
@@ -1264,8 +1265,12 @@ def _matching_journal_entries(
         else:
             if tool_name != "Bash":
                 continue
-            if field == "tests_passed" and not _looks_like_test_command(value):
-                continue
+            if field == "tests_passed":
+                if not _looks_like_test_command(value):
+                    continue
+                result_text = _journal_result_text(payload)
+                if not _text_proves_test_execution_success(result_text):
+                    continue
             observed_commands = _journal_command_values(payload)
             if any(_commands_are_strictly_equivalent(value, item) for item in observed_commands):
                 matches.append(entry)
@@ -1276,6 +1281,22 @@ def _matching_journal_entries(
 
 
 _JOURNAL_COMMAND_KEYS: tuple[str, ...] = ("command", "cmd", "command_line")
+
+
+def _journal_result_text(payload: Mapping[str, object]) -> str:
+    """Return runtime-produced result text attached to one journal entry."""
+    parts: list[str] = []
+    for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    tool_result = payload.get("tool_result")
+    if isinstance(tool_result, Mapping):
+        for key in ("text_content", "content", "output", "stdout", "stderr"):
+            value = tool_result.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return "\n".join(dict.fromkeys(parts))
 
 
 def _journal_command_values(payload: Mapping[str, object]) -> tuple[object, ...]:
