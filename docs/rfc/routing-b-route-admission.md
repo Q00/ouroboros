@@ -52,9 +52,10 @@ does not make free-form route identities admissible.
 - `enabled`: configuration kill switch;
 - `ordinal`: stable configuration order for the final deterministic tie-break.
 
-Cost and ordinal integers have finite bounds so the contract remains safe for
-ordinary JSON serialization and future fingerprints, including hostile numeric
-inputs.
+Cost preserves the existing public economics contract (`int >= 1`) exactly;
+the projected candidate count remains bounded, and ordinal is a bounded internal
+tie-breaker. This keeps configured costs fingerprint-stable without narrowing
+previously valid economics values.
 
 The serialized contract is intentionally strict: unknown fields, unsupported
 versions, duplicate route IDs, malformed tokens, and an empty registry fail

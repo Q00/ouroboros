@@ -260,7 +260,7 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
     for raw_tier, raw_model in raw_tier_models.items():
         if not isinstance(raw_tier, str) or not raw_tier.strip():
             return False, None
-        if not isinstance(raw_model, str) or not raw_model.strip():
+        if not isinstance(raw_model, str) or not raw_model:
             return False, None
         normalized_tier = raw_tier.strip()
         if normalized_tier not in MODEL_TIER_LADDER:
@@ -271,7 +271,7 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
             # versioned execution contract must have one unambiguous model per
             # tier, so fail closed instead of accepting last-write-wins.
             return False, None
-        tier_models[normalized_tier] = raw_model.strip()
+        tier_models[normalized_tier] = raw_model
 
     runtime_backend = raw_router.get("runtime_backend")
     child_tier = raw_router.get("child_tier")

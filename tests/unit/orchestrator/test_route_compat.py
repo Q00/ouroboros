@@ -16,6 +16,7 @@ from ouroboros.orchestrator.model_routing import (
     MODEL_MODE_ENFORCED,
     ModelDecision,
     ModelRouter,
+    build_model_router,
 )
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 from ouroboros.orchestrator.parallel_executor_models import ACExecutionOutcome
@@ -339,6 +340,38 @@ def test_projection_preserves_existing_model_and_cost_domains() -> None:
     assert projection.candidate_for_tier("standard").model == model
     assert projection.candidate_for_tier("standard").cost_units == cost
     assert projection.escalation_retry_threshold == 10**12
+
+
+def test_projection_does_not_bound_materialized_source_model_list() -> None:
+    target_model = "claude-sonnet@late-index"
+    economics = EconomicsConfig(
+        default_tier="standard",
+        escalation_threshold=2,
+        tiers={
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[
+                    *(
+                        ModelConfig(provider="openai", model=f"nonmatch-{index}")
+                        for index in range(128)
+                    ),
+                    ModelConfig(provider="anthropic", model=target_model),
+                ],
+            )
+        },
+    )
+    router = build_model_router(economics, runtime_backend="claude")
+    assert router is not None
+    assert router.tier_models["standard"] == target_model
+
+    projection = build_route_compat_projection(
+        economics,
+        model_router=router,
+        runtime_backend="claude",
+    )
+
+    assert projection is not None
+    assert projection.candidate_for_tier("standard").model == target_model
 
 
 def test_admission_pins_model_backend_effort_and_route_dimensions() -> None:

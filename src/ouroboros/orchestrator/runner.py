@@ -1041,6 +1041,7 @@ class OrchestratorRunner:
             admit_compat_route,
             admitted_execute_model_kwargs,
             build_route_compat_projection,
+            deserialize_route_compat_contract,
         )
 
         investment_assessment = assess_investment(None)
@@ -1057,6 +1058,36 @@ class OrchestratorRunner:
             is_decomposed_child=False,
             decomposition_trustworthy=False,
         )
+        route_admission = None
+        if initial_model_router is not None:
+            admission_projection = build_route_compat_projection(
+                self._route_economics,
+                model_router=initial_model_router,
+                runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                effort=decision.level,
+            )
+            if isinstance(self._execution_contract, Mapping):
+                persisted_routing = self._execution_contract.get("model_routing")
+                if isinstance(persisted_routing, Mapping):
+                    recognized, persisted_projection = deserialize_route_compat_contract(
+                        persisted_routing.get("route_compat")
+                    )
+                    if recognized:
+                        admission_projection = persisted_projection
+            route_admission = admit_compat_route(
+                admission_projection,
+                model_decision=model_decision,
+                effort=decision.level,
+            )
+            if not route_admission.admitted:
+                raise OrchestratorError(
+                    message="Route admission blocked before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": route_admission.reason,
+                        "call_site": "runner",
+                    },
+                )
         from ouroboros.events.base import BaseEvent
 
         try:
@@ -1188,30 +1219,17 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
-            projection = build_route_compat_projection(
+            live_projection = build_route_compat_projection(
                 self._route_economics,
                 model_router=live_model_router,
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
                 effort=live_effort_decision.level,
             )
-            route_admission = admit_compat_route(
-                projection,
-                model_decision=model_decision,
-                effort=live_effort_decision.level,
-            )
-            if not route_admission.admitted:
-                raise OrchestratorError(
-                    message="Route admission blocked before provider dispatch",
-                    details={
-                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-                        "reason": route_admission.reason,
-                        "call_site": "runner",
-                    },
-                )
+            assert route_admission is not None
             model_kwargs = admitted_execute_model_kwargs(
                 route_admission,
                 model_decision=model_decision,
-                projection=projection,
+                projection=live_projection,
                 effort=live_effort_decision.level,
             )
             if (
@@ -4246,12 +4264,16 @@ class OrchestratorRunner:
                     message="Cannot resume with an enabled route compatibility contract",
                     details={"invalid": "route_compat", "reason": "router_dormant"},
                 )
-            if restored_projection is not None and not validate_route_compat_projection(
-                restored_projection,
-                self._route_economics,
-                model_router=restored_router,
-                runtime_backend=persisted_runtime_backend,
-                current_effort=self._reasoning_effort,
+            if (
+                restored_projection is not None
+                and not self._model_routing_override_explicit
+                and not validate_route_compat_projection(
+                    restored_projection,
+                    self._route_economics,
+                    model_router=restored_router,
+                    runtime_backend=persisted_runtime_backend,
+                    current_effort=self._reasoning_effort,
+                )
             ):
                 raise OrchestratorError(
                     message="Cannot resume with a changed route compatibility catalog",

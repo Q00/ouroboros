@@ -5909,6 +5909,24 @@ Respond with either ATOMIC or the structured JSON object only.
             node_identity=node_identity,
             retry_attempt=retry_attempt,
         )
+        initial_model_router = self._model_router
+        model_router_snapshot = (
+            None
+            if initial_model_router is None
+            else replace(
+                initial_model_router,
+                tier_models=dict(initial_model_router.tier_models),
+            )
+        )
+        route_compat_was_enabled = (
+            self._route_economics is not None and model_router_snapshot is not None
+        )
+        durable_route_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=model_router_snapshot,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=None,
+        )
         capsule = compile_ac_execution_capsule(
             runtime_identity=runtime_identity,
             execution_id=execution_context_id,
@@ -5952,19 +5970,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         "is_sub_ac": is_sub_ac,
                         "decomposition_trustworthy": decomposition_trustworthy,
                         "base_reasoning_effort": self._reasoning_effort,
-                        "model_routing": serialize_model_router(self._model_router),
-                        "route_compat": serialize_route_compat_contract(
-                            build_route_compat_projection(
-                                self._route_economics,
-                                model_router=self._model_router,
-                                runtime_backend=getattr(
-                                    self._adapter,
-                                    "runtime_backend",
-                                    None,
-                                ),
-                                effort=None,
-                            )
-                        ),
+                        "model_routing": serialize_model_router(model_router_snapshot),
+                        "route_compat": serialize_route_compat_contract(durable_route_projection),
                         "execution_profile": (
                             self._execution_profile.model_dump(mode="json")
                             if self._execution_profile is not None
@@ -6166,7 +6173,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=model_router_snapshot,
             is_decomposed_child=is_sub_ac,
             decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=retry_attempt,
@@ -6174,7 +6181,7 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         initial_model_decision, _initial_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=model_router_snapshot,
             is_decomposed_child=is_sub_ac,
             decomposition_trustworthy=decomposition_trustworthy,
             retry_attempt=0,
@@ -6210,26 +6217,34 @@ Respond with either ATOMIC or the structured JSON object only.
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
                 base_model_tier=(
-                    self._model_router.base_tier if self._model_router is not None else None
+                    model_router_snapshot.base_tier if model_router_snapshot is not None else None
                 ),
                 escalation_retry_threshold=(
-                    self._model_router.escalation_retry_threshold
-                    if self._model_router is not None
+                    model_router_snapshot.escalation_retry_threshold
+                    if model_router_snapshot is not None
                     else None
                 ),
                 model_escalated=model_escalated,
             )
         route_admission = None
-        if self._route_economics is not None and self._model_router is not None:
-            # Rebuild the compatibility projection from the immutable economics
-            # catalog for this exact effort decision.  The router's mutable map
-            # is checked against that catalog; a mismatch becomes a blocked AC,
-            # never a default-provider dispatch.
-            projection = build_route_compat_projection(
-                self._route_economics,
-                model_router=self._model_router,
-                runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                effort=effort_decision.level,
+        if route_compat_was_enabled:
+            # Admission is derived from the same immutable catalog snapshot that
+            # was fingerprinted into the durable capsule above. Live state is
+            # independently rebuilt again at the provider boundary.
+            projection = (
+                None
+                if durable_route_projection is None
+                else replace(
+                    durable_route_projection,
+                    registry=replace(
+                        durable_route_projection.registry,
+                        candidates=tuple(
+                            replace(candidate, effort=effort_decision.level)
+                            for candidate in durable_route_projection.registry.candidates
+                        ),
+                    ),
+                    effort=effort_decision.level,
+                )
             )
             route_admission = admit_compat_route(
                 projection,

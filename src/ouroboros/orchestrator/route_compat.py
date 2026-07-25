@@ -50,7 +50,6 @@ DEFAULT_ROUTE_TOOL_POLICY = "default"
 DEFAULT_ROUTE_AUTHORITY_PREFIX = "runtime:"
 UNRESOLVED_ROUTE_ID = "compat:unresolved"
 INVALID_CAPABILITY = "compat:invalid-capability"
-MAX_ROUTE_MODELS_PER_TIER = MAX_ROUTE_CANDIDATES
 _SAFE_COMPAT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}$")
 
 
@@ -252,9 +251,7 @@ def _configured_models(
         tier_config = economics.tiers.get(tier)
         if tier_config is None:
             continue
-        for index, model_config in enumerate(tier_config.models):
-            if index >= MAX_ROUTE_MODELS_PER_TIER:
-                return None
+        for model_config in tier_config.models:
             if model_config.provider == provider:
                 configured[tier] = normalize_tier_model(
                     model_config.model,

@@ -154,6 +154,22 @@ def test_router_contract_round_trips_custom_frontier_policy() -> None:
     assert restored == router
 
 
+def test_router_contract_preserves_exact_model_whitespace() -> None:
+    router = _frontier_custom_router()
+    router = ModelRouter(
+        tier_models={**router.tier_models, "standard": " exact-model "},
+        runtime_backend=router.runtime_backend,
+        child_tier=router.child_tier,
+        base_tier=router.base_tier,
+        escalation_retry_threshold=router.escalation_retry_threshold,
+    )
+
+    recognized, restored = deserialize_model_router(serialize_model_router(router))
+
+    assert recognized is True
+    assert restored == router
+
+
 def test_router_contract_distinguishes_disabled_from_malformed() -> None:
     recognized, disabled = deserialize_model_router(serialize_model_router(None))
     assert recognized is True
@@ -281,6 +297,34 @@ def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
     assert resumed._model_router.tier_models == _frontier_custom_router().tier_models
+
+
+def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
+    original = _runner()
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract()
+
+    resumed = _runner(base_model_tier="standard")
+    changed_economics = _frontier_custom_economics()
+    tiers = dict(changed_economics.tiers)
+    tiers["standard"] = TierConfig(
+        cost_factor=999,
+        models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+    )
+    resumed._route_economics = EconomicsConfig(
+        default_tier=changed_economics.default_tier,
+        escalation_threshold=changed_economics.escalation_threshold,
+        tiers=tiers,
+    )
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
+
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    replacement = resumed._execution_contract
+    assert replacement is not None
+    projection = replacement["model_routing"]["route_compat"]["projection"]
+    assert projection["registry"]["candidates"][1]["cost_units"] == 999
 
 
 def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
