@@ -7796,6 +7796,8 @@ Respond with either ATOMIC or the structured JSON object only.
         session_id: str,
         execution_id: str,
         required: bool = False,
+        route_episode_id: str | None = None,
+        route_attempt_index: int | None = None,
     ) -> None:
         """Persist one provisional outer verify/retry attempt judgment.
 
@@ -7807,22 +7809,44 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         from ouroboros.events.base import BaseEvent
 
+        route_candidate = result.route_candidate
+        if required and (
+            route_candidate is None
+            or route_episode_id is None
+            or type(route_attempt_index) is not int
+            or not 0 <= route_attempt_index < MAX_ROUTE_ATTEMPTS
+        ):
+            raise ValueError("route-aware attempt judgment requires bounded correlation metadata")
+        event_data: dict[str, object] = {
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "root_ac_index": root_ac_index,
+            "ac_index": root_ac_index,
+            "retry_attempt": result.retry_attempt,
+            "attempt_number": result.attempt_number,
+            "success": result.success,
+            "outcome": result.outcome.value if result.outcome is not None else "failed",
+            "is_decomposed": result.is_decomposed,
+            "is_decomposed_child": result.is_decomposed,
+        }
+        if required:
+            assert route_candidate is not None
+            assert route_episode_id is not None
+            assert route_attempt_index is not None
+            event_data.update(
+                {
+                    "route_contract_version": 1,
+                    "route_episode_id": route_episode_id,
+                    "route_attempt_index": route_attempt_index,
+                    "route_id": route_candidate.route_id,
+                    "call_site": "parallel",
+                }
+            )
         event = BaseEvent(
             type="execution.ac.attempt_judged",
             aggregate_type="execution",
             aggregate_id=execution_id or session_id,
-            data={
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "root_ac_index": root_ac_index,
-                "ac_index": root_ac_index,
-                "retry_attempt": result.retry_attempt,
-                "attempt_number": result.attempt_number,
-                "success": result.success,
-                "outcome": result.outcome.value if result.outcome is not None else "failed",
-                "is_decomposed": result.is_decomposed,
-                "is_decomposed_child": result.is_decomposed,
-            },
+            data=event_data,
         )
         if required:
             # Bounded escalation cannot authorize another provider effect until
@@ -7830,6 +7854,21 @@ Respond with either ATOMIC or the structured JSON object only.
             await self._event_store.append(event)
         else:
             await self._safe_emit_event(event)
+
+    @staticmethod
+    def _bounded_route_episode_id(
+        seed: Seed,
+        *,
+        execution_id: str,
+        session_id: str,
+        root_ac_index: int,
+    ) -> str:
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        digest = hashlib.sha256(
+            f"{execution_id or session_id}\0{root_ac_index}\0{semantic_ac_key}".encode()
+        ).hexdigest()
+        return f"route:{digest}"
 
     async def _persist_route_observation(
         self,
@@ -7869,13 +7908,15 @@ Respond with either ATOMIC or the structured JSON object only.
             reason = decision.reason if decision is not None else EscalationReason.NO_ELIGIBLE_ROUTE
         criterion = seed.acceptance_criteria[root_ac_index]
         semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
-        episode_digest = hashlib.sha256(
-            f"{execution_id or session_id}\0{root_ac_index}\0{semantic_ac_key}".encode()
-        ).hexdigest()
         observation = RouteObservation.from_candidate(
             candidate,
             RouteRequirements(),
-            episode_id=f"route:{episode_digest}",
+            episode_id=self._bounded_route_episode_id(
+                seed,
+                execution_id=execution_id,
+                session_id=session_id,
+                root_ac_index=root_ac_index,
+            ),
             attempt_index=len(attempted_route_ids) - 1,
             verifier_outcome=outcome,
             failure_class=classified,
@@ -7892,6 +7933,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     "session_id": session_id,
                     "root_ac_index": root_ac_index,
                     "semantic_ac_key": semantic_ac_key,
+                    "call_site": "parallel",
                     "observation": observation.to_contract_data(),
                     "decision": decision.to_contract_data() if decision is not None else None,
                     "human_handoff_required": bool(decision is not None and decision.blocked),
@@ -8078,6 +8120,16 @@ Respond with either ATOMIC or the structured JSON object only.
         retries reduce to a single ``_execute_ac_batch`` call plus the identity
         gate, so today's behavior is preserved.
         """
+        persisted_route_state = await self._has_persisted_bounded_route_state(
+            execution_id=execution_id,
+            session_id=session_id,
+            root_ac_indices=tuple(batch_executable),
+        )
+        if persisted_route_state and not self._bounded_route_escalation_enabled:
+            # Once an episode has durable Routing D evidence it may never fall
+            # back to retry-count/legacy dispatch merely because current config
+            # or provider capability no longer enables Routing D.
+            raise RuntimeError("durable bounded-route state exists but live routing is unavailable")
         if self._bounded_route_escalation_enabled:
             return await self._run_batch_with_bounded_route_escalation(
                 seed=seed,
@@ -8366,6 +8418,43 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
         return results
 
+    async def _has_persisted_bounded_route_state(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        root_ac_indices: tuple[int, ...],
+    ) -> bool:
+        """Detect any same-session Routing D evidence before choosing a dispatch path."""
+
+        relevant = set(root_ac_indices)
+        for event_type in (
+            "execution.ac.route_observed",
+            "execution.ac.attempt_judged",
+        ):
+            events = await self._event_store.query_execution_related_events(
+                execution_id,
+                event_type=event_type,
+                limit=None,
+            )
+            if not isinstance(events, list | tuple):
+                continue
+            for event in events:
+                if getattr(event, "type", None) != event_type:
+                    continue
+                data = event.data
+                if data.get("session_id") != session_id:
+                    continue
+                root_ac_index = data.get("root_ac_index")
+                if event_type == "execution.ac.route_observed":
+                    if root_ac_index in relevant or type(root_ac_index) is not int:
+                        return True
+                elif data.get("route_contract_version") is not None and (
+                    root_ac_index in relevant or type(root_ac_index) is not int
+                ):
+                    return True
+        return False
+
     async def _run_batch_with_bounded_route_escalation(
         self,
         *,
@@ -8452,14 +8541,26 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                 )
                 results[positions[ac_idx]] = gated
+                candidate = gated.route_candidate
+                route_attempt_index = len(histories[ac_idx])
                 await self._emit_ac_attempt_judged(
                     result=gated,
                     root_ac_index=ac_idx,
                     session_id=session_id,
                     execution_id=execution_id,
-                    required=gated.route_candidate is not None,
+                    required=candidate is not None,
+                    route_episode_id=(
+                        self._bounded_route_episode_id(
+                            seed,
+                            execution_id=execution_id,
+                            session_id=session_id,
+                            root_ac_index=ac_idx,
+                        )
+                        if candidate is not None
+                        else None
+                    ),
+                    route_attempt_index=(route_attempt_index if candidate is not None else None),
                 )
-                candidate = gated.route_candidate
                 if candidate is None:
                     continue
                 history = (*histories[ac_idx], candidate.route_id)
@@ -8608,13 +8709,15 @@ Respond with either ATOMIC or the structured JSON object only.
             limit=None,
         )
         for event in events:
+            if event.type != "execution.ac.route_observed":
+                continue
             data = event.data
             if data.get("session_id") != session_id:
                 continue
-            if data.get("call_site") == "runner":
-                # A session cannot change from whole-Seed direct routing to
-                # parallel root-AC routing during replay.  Ignoring the direct
-                # observation would repeat an already-completed provider effect.
+            if data.get("call_site") != "parallel":
+                # A session cannot change routing call sites during replay.
+                # Missing legacy scope is ambiguous and therefore cannot be
+                # treated as parallel evidence.
                 raise RuntimeError("route observation replay crossed routing call sites")
             if data.get("execution_id") != execution_id:
                 raise RuntimeError("route observation replay crossed execution identity")
@@ -8649,6 +8752,55 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError("route observation replay exceeds the finite route bound")
             grouped[root_ac_index].append(
                 (observation, data.get("decision"), human_handoff_required)
+            )
+
+        observed_attempts = {
+            (root_ac_index, observation.episode_id, observation.attempt_index, observation.route_id)
+            for root_ac_index, rows in grouped.items()
+            for observation, _decision, _handoff in rows
+        }
+        judged_attempts: set[tuple[int, str, int, str]] = set()
+        judgment_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.attempt_judged",
+            limit=None,
+        )
+        for event in judgment_events:
+            if event.type != "execution.ac.attempt_judged":
+                continue
+            data = event.data
+            if data.get("session_id") != session_id:
+                continue
+            # Legacy and non-routing judgments have no Routing D marker and do
+            # not participate in this replay episode.
+            if data.get("route_contract_version") is None:
+                continue
+            root_ac_index = data.get("root_ac_index")
+            if (
+                data.get("route_contract_version") != 1
+                or data.get("execution_id") != execution_id
+                or data.get("call_site") != "parallel"
+                or type(root_ac_index) is not int
+                or type(data.get("route_episode_id")) is not str
+                or type(data.get("route_attempt_index")) is not int
+                or type(data.get("route_id")) is not str
+            ):
+                raise RuntimeError("route-aware attempt judgment has invalid correlation metadata")
+            assert isinstance(root_ac_index, int)
+            if root_ac_index not in relevant:
+                continue
+            key = (
+                root_ac_index,
+                data["route_episode_id"],
+                data["route_attempt_index"],
+                data["route_id"],
+            )
+            if key in judged_attempts:
+                raise RuntimeError("route-aware attempt judgment is duplicated")
+            judged_attempts.add(key)
+        if judged_attempts - observed_attempts:
+            raise RuntimeError(
+                "route-aware attempt judgment has no matching durable route observation"
             )
 
         histories: dict[int, tuple[str, ...]] = {}

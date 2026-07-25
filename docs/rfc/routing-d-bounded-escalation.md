@@ -80,7 +80,8 @@ impossible.
 - route ID, model, harness, effort, configured cost, and capabilities;
 - provisional verifier outcome and classified failure;
 - stable escalation reason;
-- a deterministic next-route or terminal decision;
+- a deterministic next-route or terminal decision, including the complete
+  effect-relevant successor candidate snapshot;
 - `final_acceptance_declared: false`.
 
 It deliberately excludes credentials, provider output, arbitrary verifier
@@ -104,20 +105,29 @@ before a fresh successor session can start.
 
 ## Resume and drift rules
 
-Parallel resume does not trust a persisted `selected_route_id` by itself. It:
+Parallel resume does not trust a persisted route ID by itself. The durable
+decision carries the complete successor candidate and replay:
 
 1. validates execution, session, root AC, semantic AC, episode, schema, and
    contiguous attempt indices;
 2. rebuilds the current compatible registry using the observed effort;
 3. requires the observed model, harness, effort, cost, and capabilities to
    equal the live candidate snapshot;
-4. strictly parses the persisted decision against that registry;
+4. strictly parses the persisted successor snapshot and requires every model,
+   harness, effort, cost, persona, tool-policy, authority, capability, enabled,
+   and ordinal field to equal the same-ID live candidate;
 5. recomputes `advance_route()` from the complete attempted-route prefix; and
 6. requires the recomputed and persisted decisions to be identical.
 
 Unknown fields, removed routes, model/cost/config drift, duplicate or gapped
 indices, a broken successor chain, or an observation claiming Final Gate
 authority all stop replay before another provider effect.
+
+The route-aware `execution.ac.attempt_judged` row carries the same episode ID,
+attempt index, route ID, root AC, execution, session, and parallel call-site
+identity. Replay reconciles it with `execution.ac.route_observed`; a judgment
+left unmatched by a crash is a completed-effect ambiguity and fails closed.
+Legacy judgments without the Routing D marker remain unrelated telemetry.
 
 A provisional success observed before interruption is not promoted to
 acceptance and is not replayed. It becomes a human handoff because the provider
@@ -127,6 +137,16 @@ The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is
 sealed against session replay; an old or exhausted route cannot be executed
 again through resume.
+
+Cancellation is not a route failure and exits before observation or successor
+selection. A recoverable usage/quota limit likewise retains the current route
+and provider handle under `PAUSED`; it emits no terminal route observation.
+Instead, `execution.ac.route_paused` durably binds the full current candidate,
+attempt index, and prior route prefix. Resume validates that snapshot against
+the live registry and either the cheapest initial admission or the exact last
+escalation decision, then resumes the same provider handle with that exact
+route. Any same-session route evidence with a missing or non-runner call site
+blocks direct replay.
 
 ## Parallel and direct scope
 

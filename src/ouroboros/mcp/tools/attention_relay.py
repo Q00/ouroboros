@@ -512,6 +512,11 @@ def _proactive_relays(
             )
         elif event.type == "execution.ac.route_observed":
             decision = data.get("decision") if isinstance(data.get("decision"), Mapping) else {}
+            selected_route = (
+                decision.get("selected_route")
+                if isinstance(decision.get("selected_route"), Mapping)
+                else {}
+            )
             observation = (
                 data.get("observation") if isinstance(data.get("observation"), Mapping) else {}
             )
@@ -525,7 +530,7 @@ def _proactive_relays(
                         evidence={
                             "root_ac_index": data.get("root_ac_index"),
                             "from_route_id": observation.get("route_id"),
-                            "to_route_id": decision.get("selected_route_id"),
+                            "to_route_id": selected_route.get("route_id"),
                             "failure_class": observation.get("failure_class"),
                             "reason": decision.get("reason"),
                         },

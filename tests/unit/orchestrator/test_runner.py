@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+import hashlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -88,6 +89,43 @@ def _attach_live_process_local_contract(
         generation=generation,
     )
     return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+
+
+def _enable_direct_bounded_routes(
+    runner: OrchestratorRunner,
+    adapter: MagicMock,
+) -> None:
+    from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+    from ouroboros.orchestrator.model_routing import build_model_router
+
+    economics = EconomicsConfig(  # type: ignore[arg-type]
+        default_tier="frugal",
+        escalation_threshold=2,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[ModelConfig(provider="anthropic", model="haiku-x")],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[ModelConfig(provider="anthropic", model="opus-x")],
+            ),
+        },
+    )
+    adapter.runtime_backend = "claude"
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=ParamSupport.NATIVE,
+    )
+    runner._route_economics = economics
+    runner._model_router = build_model_router(economics, runtime_backend="claude")
+    assert runner._model_router is not None
 
 
 def test_seed_investment_detection_supports_legacy_string_criteria(sample_seed: Seed) -> None:
@@ -877,6 +915,341 @@ class TestOrchestratorRunner:
         assert all(event.data["final_acceptance_declared"] is False for event in route_events)
 
     @pytest.mark.asyncio
+    async def test_direct_bounded_route_cancellation_never_dispatches_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            for index in range(CANCELLATION_CHECK_INTERVAL + 1):
+                yield AgentMessage(type="assistant", content=f"Message {index}")
+            yield AgentMessage(
+                type="result",
+                content="failed after cancellation",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        cancel_event = create_session_cancelled_event("session-1", "User requested")
+        mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event], [], [], [], []])
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["haiku-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_usage_limit_pause_remains_resume_eligible(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="route-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["haiku-x"]
+        mark_paused.assert_awaited_once()
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+        pause_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_paused"
+        ]
+        assert len(pause_events) == 1
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return pause_events if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        assert (
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+            == "compat:claude:frugal"
+        )
+        runner._retire_process_local_authority(
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="route-paused",
+        )
+        paused_tracker = SessionTracker.create(
+            "execution-route-resume",
+            sample_seed.metadata.seed_id,
+            session_id="session-route-resume",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = paused_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="session-route-resume",
+        )
+        captured_handles: list[RuntimeHandle | None] = []
+        captured_models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            captured_handles.append(kwargs.get("resume_handle"))
+            captured_models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="Resumed successfully",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        paused_candidate = next(
+            candidate
+            for candidate in projection.registry.candidates
+            if candidate.route_id == "compat:claude:frugal"
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id="execution-route-resume",
+            data={
+                "schema_version": 1,
+                "execution_id": "execution-route-resume",
+                "session_id": "session-route-resume",
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": (
+                    "route:" + hashlib.sha256(b"execution-route-resume\0direct").hexdigest()
+                ),
+                "attempt_index": 0,
+                "prior_route_ids": [],
+                "route": paused_candidate.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [pause_event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("session-route-resume", sample_seed)
+
+        assert result.is_ok and result.value.success is True
+        assert len(captured_handles) == 1
+        assert captured_handles[0] is not None
+        assert captured_handles[0].native_session_id == "route-paused"
+        assert captured_models == ["haiku-x"]
+
+    @pytest.mark.asyncio
+    async def test_direct_pause_after_escalation_resumes_exact_successor_route(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            if len(models) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="evidence missing",
+                    data={"subtype": "error"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="route-frugal",
+                    ),
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="route-standard-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_paused",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-route-escalated-pause",
+                session_id="session-route-escalated-pause",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["haiku-x", "sonnet-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        pause_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_paused"
+        ]
+        assert len(route_events) == len(pause_events) == 1
+        assert pause_events[0].data["prior_route_ids"] == ["compat:claude:frugal"]
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            if kwargs.get("event_type") == "execution.ac.route_observed":
+                return route_events
+            if kwargs.get("event_type") == "execution.ac.route_paused":
+                return pause_events
+            return []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        assert (
+            await runner._direct_resume_route_id(
+                execution_id="execution-route-escalated-pause",
+                session_id="session-route-escalated-pause",
+            )
+            == "compat:claude:standard"
+        )
+        runner._retire_process_local_authority(
+            session_id="session-route-escalated-pause",
+            execution_id="execution-route-escalated-pause",
+        )
+
+    @pytest.mark.asyncio
     async def test_direct_resume_refuses_blocked_route_replay(
         self,
         runner: OrchestratorRunner,
@@ -945,6 +1318,34 @@ class TestOrchestratorRunner:
         ]
 
         with pytest.raises(OrchestratorError, match="human handoff"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call_site", ["parallel", None])
+    async def test_direct_resume_rejects_non_runner_route_evidence(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+        call_site: str | None,
+    ) -> None:
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": 0,
+                    "call_site": call_site,
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="another call site"):
             await runner._direct_resume_route_id(
                 execution_id="execution-1",
                 session_id="session-1",

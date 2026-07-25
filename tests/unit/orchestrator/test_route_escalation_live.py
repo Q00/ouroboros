@@ -79,7 +79,10 @@ def _seed() -> Seed:
     )
 
 
-def _executor() -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
+def _executor(
+    *,
+    model_support: ParamSupport = ParamSupport.NATIVE,
+) -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
     economics = _economics()
     router = build_model_router(economics, runtime_backend="claude")
     assert router is not None
@@ -91,8 +94,15 @@ def _executor() -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
 
     store.append.side_effect = append
     store.query_execution_related_events.return_value = []
+    adapter = _Adapter()
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=model_support,
+    )
     executor = ParallelACExecutor(
-        adapter=_Adapter(),  # type: ignore[arg-type]
+        adapter=adapter,  # type: ignore[arg-type]
         event_store=store,
         console=MagicMock(),
         enable_decomposition=False,
@@ -102,6 +112,32 @@ def _executor() -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
         ac_retry_attempts=99,
     )
     return executor, store, events
+
+
+def _route_judgment(
+    seed: Seed,
+    *,
+    route_id: str = "compat:claude:frugal",
+    attempt_index: int = 0,
+) -> BaseEvent:
+    return BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id="execution-1",
+        data={
+            "execution_id": "execution-1",
+            "session_id": "session-1",
+            "root_ac_index": 0,
+            "ac_index": 0,
+            "route_contract_version": 1,
+            "route_episode_id": _episode_id(seed),
+            "route_attempt_index": attempt_index,
+            "route_id": route_id,
+            "call_site": "parallel",
+            "success": False,
+            "outcome": "failed",
+        },
+    )
 
 
 def _candidate(executor: ParallelACExecutor, route_id: str):
@@ -175,6 +211,7 @@ def _route_event(
             "session_id": session_id,
             "root_ac_index": root_ac_index,
             "semantic_ac_key": semantic_ac_key,
+            "call_site": "parallel",
             "observation": observation.to_contract_data(),
             "decision": decision_data,
             "human_handoff_required": False,
@@ -257,7 +294,12 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     assert isinstance(results[0], ACExecutionResult) and results[0].success is True
     route_events = [event for event in events if event.type == "execution.ac.route_observed"]
     assert [event.data["observation"]["route_id"] for event in route_events] == calls
+    assert all(event.data["call_site"] == "parallel" for event in route_events)
     assert all(event.data["final_acceptance_declared"] is False for event in route_events)
+    judgments = [event for event in events if event.type == "execution.ac.attempt_judged"]
+    assert [event.data["route_id"] for event in judgments] == calls
+    assert [event.data["route_attempt_index"] for event in judgments] == [0, 1, 2]
+    assert all(event.data["route_episode_id"] == _episode_id(_seed()) for event in judgments)
 
 
 @pytest.mark.asyncio
@@ -324,6 +366,120 @@ async def test_observation_persistence_failure_prevents_next_provider_effect() -
             execution_counters=None,
         )
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prior_route_state_with_current_non_native_support_fails_before_provider() -> None:
+    executor, store, _events = _executor(model_support=ParamSupport.IGNORED)
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [route_event] if kwargs.get("event_type") == "execution.ac.route_observed" else []
+
+    store.query_execution_related_events.side_effect = query
+    provider_calls = 0
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return [_failed(executor, "compat:claude:frugal")]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    assert executor._bounded_route_escalation_enabled is False
+
+    with pytest.raises(RuntimeError, match="live routing is unavailable"):
+        await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="session-1",
+            execution_id="execution-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="sys",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+    assert provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_unmatched_route_judgment_seals_replay_before_provider() -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    judgment = _route_judgment(seed)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [judgment] if kwargs.get("event_type") == "execution.ac.attempt_judged" else []
+
+    store.query_execution_related_events.side_effect = query
+    provider_calls = 0
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return [_failed(executor, "compat:claude:frugal")]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="no matching durable route observation"):
+        await executor._run_batch_with_bounded_route_escalation(
+            seed=seed,
+            batch_executable=[0],
+            session_id="session-1",
+            execution_id="execution-1",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="sys",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+    assert provider_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_attempt_judgment_does_not_block_route_observation_replay() -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    legacy_judgment = BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id="execution-1",
+        data={
+            "execution_id": "execution-1",
+            "session_id": "session-1",
+            "root_ac_index": 0,
+            "success": False,
+            "outcome": "failed",
+        },
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return (
+            [route_event]
+            if kwargs.get("event_type") == "execution.ac.route_observed"
+            else [legacy_judgment]
+        )
+
+    store.query_execution_related_events.side_effect = query
+
+    histories, overrides, terminals = await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+
+    assert histories[0] == ("compat:claude:frugal",)
+    assert overrides[0] == "compat:claude:standard"
+    assert terminals == {}
 
 
 @pytest.mark.asyncio
@@ -416,7 +572,8 @@ async def test_resume_recomputes_and_rejects_changed_selected_route() -> None:
     seed = _seed()
     observation, decision = _durable_first_failure(executor, seed)
     changed = decision.to_contract_data()
-    changed["selected_route_id"] = "compat:claude:frontier"
+    assert isinstance(changed["selected_route"], dict)
+    changed["selected_route"] = _candidate(executor, "compat:claude:frontier").to_contract_data()
     changed["remaining_route_ids"] = ["compat:claude:standard"]
     store.query_execution_related_events.return_value = [
         _route_event(seed, observation=observation, decision=changed)

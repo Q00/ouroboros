@@ -467,7 +467,10 @@ class RouteEscalationDecision:
             "version": ROUTE_OBSERVATION_CONTRACT_VERSION,
             "action": self.action.value,
             "failure_class": self.failure_class.value,
-            "selected_route_id": self.selected.route_id if self.selected else None,
+            # The successor is effect-relevant authorization input.  Persisting
+            # only its id lets a changed live registry silently rebind that id to
+            # different model/cost/policy semantics during replay.
+            "selected_route": self.selected.to_contract_data() if self.selected else None,
             "attempted_route_ids": list(self.attempted_route_ids),
             "remaining_route_ids": list(self.remaining_route_ids),
             "reason": self.reason.value,
@@ -490,7 +493,7 @@ class RouteEscalationDecision:
                     "version",
                     "action",
                     "failure_class",
-                    "selected_route_id",
+                    "selected_route",
                     "attempted_route_ids",
                     "remaining_route_ids",
                     "reason",
@@ -505,7 +508,7 @@ class RouteEscalationDecision:
             raw_reason = value["reason"]
             attempted = value["attempted_route_ids"]
             remaining = value["remaining_route_ids"]
-            selected_id = value["selected_route_id"]
+            raw_selected = value["selected_route"]
         except Exception as exc:
             raise ValueError("route escalation decision could not be read") from exc
         if type(version) is not int or version != ROUTE_OBSERVATION_CONTRACT_VERSION:
@@ -526,11 +529,18 @@ class RouteEscalationDecision:
             raise ValueError("attempted_route_ids must be a list")
         if type(remaining) is not list:
             raise ValueError("remaining_route_ids must be a list")
-        if selected_id is not None and type(selected_id) is not str:
-            raise ValueError("selected_route_id is invalid")
-        selected = _candidate_by_id(registry, selected_id) if selected_id is not None else None
-        if selected_id is not None and selected is None:
-            raise ValueError("selected_route_id is unknown")
+        if raw_selected is None:
+            selected = None
+        else:
+            try:
+                selected_snapshot = RouteCandidate.from_contract_data(raw_selected)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("selected_route snapshot is invalid") from exc
+            selected = _candidate_by_id(registry, selected_snapshot.route_id)
+            if selected is None:
+                raise ValueError("selected_route references an unknown route")
+            if selected != selected_snapshot:
+                raise ValueError("selected_route semantics drifted from the live registry")
         decision = cls(
             action=action,
             failure_class=failure,

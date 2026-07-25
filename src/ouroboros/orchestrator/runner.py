@@ -1393,62 +1393,278 @@ class OrchestratorRunner:
         execution_id: str,
         session_id: str,
     ) -> str | None:
-        """Seal completed direct-route effects before a session resume.
+        """Resume only an explicitly paused direct route; seal completed effects."""
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationAction,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
 
-        No observation means the provider effect did not reach Routing D's
-        durable judgment boundary, so the legacy in-flight resume path remains
-        available.  Once an observation exists, success, escalation, blocking,
-        and malformed recovery state are all non-replayable.
-        """
-        from ouroboros.orchestrator.route_escalation import RouteObservation, VerifierOutcome
-
-        events = await self._event_store.query_execution_related_events(
+        observation_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.route_observed",
             limit=None,
         )
+        pause_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.route_paused",
+            limit=None,
+        )
         direct_events = [
             event
-            for event in events
+            for event in observation_events
+            if event.type == "execution.ac.route_observed"
             if event.data.get("session_id") == session_id
-            and event.data.get("call_site") == "runner"
         ]
-        if not direct_events:
+        direct_pauses = [
+            event
+            for event in pause_events
+            if event.type == "execution.ac.route_paused"
+            if event.data.get("session_id") == session_id
+        ]
+        session_events = [*direct_events, *direct_pauses]
+        if not session_events:
             return None
-        latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
-        data = latest.data
-        if (
-            data.get("execution_id") != execution_id
-            or type(data.get("schema_version")) is not int
-            or data.get("schema_version") != 1
-            or data.get("final_acceptance_declared") is not False
+        if any(
+            event.data.get("call_site") != "runner"
+            or event.data.get("execution_id") != execution_id
+            for event in session_events
         ):
             raise OrchestratorError(
-                message="Refusing to replay an invalid direct route observation",
+                message="Refusing to replay route evidence from another call site",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        if len(direct_pauses) > 1:
+            raise OrchestratorError(
+                message="Refusing to replay duplicate direct route pause state",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        if not direct_pauses:
+            latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
+            data = latest.data
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
+                raise OrchestratorError(
+                    message="Refusing to replay a successful direct route before Final Gate",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            raise OrchestratorError(
+                message="Refusing to replay a completed direct route; human handoff is required",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+
+        pause_data = direct_pauses[0].data
+        expected_pause_keys = {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "root_ac_index",
+            "call_site",
+            "episode_id",
+            "attempt_index",
+            "prior_route_ids",
+            "route",
+            "recoverable_pause",
+            "final_acceptance_declared",
+        }
+        if (
+            set(pause_data) != expected_pause_keys
+            or type(pause_data.get("schema_version")) is not int
+            or pause_data.get("schema_version") != 1
+            or pause_data.get("root_ac_index") is not None
+            or pause_data.get("episode_id") != expected_episode
+            or pause_data.get("recoverable_pause") is not True
+            or pause_data.get("final_acceptance_declared") is not False
+            or type(pause_data.get("attempt_index")) is not int
+            or type(pause_data.get("prior_route_ids")) is not list
+        ):
+            raise OrchestratorError(
+                message="Refusing to replay invalid direct route pause state",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         try:
-            observation = RouteObservation.from_contract_data(data.get("observation"))
+            paused_candidate = RouteCandidate.from_contract_data(pause_data.get("route"))
         except (TypeError, ValueError) as exc:
             raise OrchestratorError(
-                message="Refusing to replay an invalid direct route observation",
+                message="Refusing to replay invalid direct route pause state",
                 details={"execution_id": execution_id, "session_id": session_id},
             ) from exc
-        expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
-        if observation.episode_id != expected_episode:
+
+        parsed_rows: list[tuple[RouteObservation, object, object]] = []
+        for event in direct_events:
+            data = event.data
+            if (
+                type(data.get("schema_version")) is not int
+                or data.get("schema_version") != 1
+                or data.get("final_acceptance_declared") is not False
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if observation.episode_id != expected_episode:
+                raise OrchestratorError(
+                    message="Refusing to replay a direct route from another episode",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            parsed_rows.append(
+                (observation, data.get("decision"), data.get("human_handoff_required"))
+            )
+        parsed_rows.sort(key=lambda row: row[0].attempt_index)
+        if [row[0].attempt_index for row in parsed_rows] != list(range(len(parsed_rows))):
             raise OrchestratorError(
-                message="Refusing to replay a direct route from another episode",
+                message="Refusing to replay gapped direct route history",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
-        if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
+        prior_route_ids = tuple(row[0].route_id for row in parsed_rows)
+        if (
+            pause_data["attempt_index"] != len(parsed_rows)
+            or tuple(pause_data["prior_route_ids"]) != prior_route_ids
+            or len(set(prior_route_ids) | {paused_candidate.route_id}) != len(prior_route_ids) + 1
+        ):
             raise OrchestratorError(
-                message="Refusing to replay a successful direct route before Final Gate",
+                message="Refusing to replay inconsistent direct route pause history",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
-        raise OrchestratorError(
-            message="Refusing to replay a completed direct route; human handoff is required",
-            details={"execution_id": execution_id, "session_id": session_id},
+
+        live_paused_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=paused_candidate.effort,
         )
+        if live_paused_projection is None:
+            raise OrchestratorError(
+                message="Refusing to replay a paused route without a live registry",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        live_paused_candidate = next(
+            (
+                candidate
+                for candidate in live_paused_projection.registry.candidates
+                if candidate.route_id == paused_candidate.route_id
+            ),
+            None,
+        )
+        if live_paused_candidate != paused_candidate:
+            raise OrchestratorError(
+                message="Refusing to replay a drifted direct route pause",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+
+        if parsed_rows:
+            for row_index, (observation, raw_decision, handoff_claim) in enumerate(parsed_rows):
+                live_projection = build_route_compat_projection(
+                    self._route_economics,
+                    model_router=self._model_router,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    effort=observation.effort,
+                )
+                requirements = (
+                    build_compat_escalation_requirements(
+                        live_projection,
+                        effort=observation.effort,
+                    )
+                    if live_projection is not None
+                    else None
+                )
+                try:
+                    if (
+                        live_projection is None
+                        or requirements is None
+                        or observation.failure_class is None
+                        or observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+                    ):
+                        raise ValueError("live route failure state is unavailable")
+                    live_candidate = next(
+                        (
+                            candidate
+                            for candidate in live_projection.registry.candidates
+                            if candidate.route_id == observation.route_id
+                        ),
+                        None,
+                    )
+                    if live_candidate is None:
+                        raise ValueError("observed route was removed")
+                    expected_observation = RouteObservation.from_candidate(
+                        live_candidate,
+                        RouteRequirements(
+                            required_capabilities=requirements.required_capabilities,
+                        ),
+                        episode_id=observation.episode_id,
+                        attempt_index=observation.attempt_index,
+                        verifier_outcome=observation.verifier_outcome,
+                        failure_class=observation.failure_class,
+                        escalation_reason=observation.escalation_reason,
+                    )
+                    decision = RouteEscalationDecision.from_contract_data(
+                        raw_decision,
+                        registry=live_projection.registry,
+                    )
+                    attempted_prefix = prior_route_ids[: row_index + 1]
+                    recomputed = advance_route(
+                        live_projection.registry,
+                        requirements,
+                        current_route_id=observation.route_id,
+                        attempted_route_ids=attempted_prefix,
+                        failure_class=observation.failure_class,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise OrchestratorError(
+                        message="Refusing to replay invalid direct route escalation state",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    ) from exc
+                expected_successor = (
+                    parsed_rows[row_index + 1][0]
+                    if row_index + 1 < len(parsed_rows)
+                    else paused_candidate
+                )
+                if (
+                    expected_observation != observation
+                    or decision != recomputed
+                    or decision.action is not EscalationAction.ESCALATE_ROUTE
+                    or decision.selected is None
+                    or decision.selected.route_id != expected_successor.route_id
+                    or handoff_claim is not False
+                ):
+                    raise OrchestratorError(
+                        message="Refusing to replay a paused route outside its escalation chain",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    )
+        else:
+            from ouroboros.orchestrator.route_compat import admit_compat_escalation_route
+
+            initial = admit_compat_escalation_route(
+                live_paused_projection,
+                effort=paused_candidate.effort,
+            )
+            if initial.selected != paused_candidate:
+                raise OrchestratorError(
+                    message="Refusing to replay a paused route that was not cheapest eligible",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+        return paused_candidate.route_id
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.
@@ -7234,6 +7450,42 @@ class OrchestratorRunner:
                         status=status,
                         route_id_override=direct_route_override,
                     )
+                    if cancelled_result is not None:
+                        # Cancellation owns the terminal transition.  It is not a
+                        # classified route failure and must never authorize a
+                        # successor provider effect or route observation.
+                        break
+                    if recoverable_failure_pause is not None:
+                        # Usage/quota pauses retain the current provider session
+                        # for resume.  Persisting a terminal BLOCKED observation
+                        # would seal the very continuation advertised by PAUSED.
+                        if direct_bounded_routing and direct_route_candidate is not None:
+                            from ouroboros.events.base import BaseEvent
+
+                            pause_episode = (
+                                "route:" + hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
+                            )
+                            await self._event_store.append(
+                                BaseEvent(
+                                    type="execution.ac.route_paused",
+                                    aggregate_type="execution",
+                                    aggregate_id=exec_id,
+                                    data={
+                                        "schema_version": 1,
+                                        "execution_id": exec_id,
+                                        "session_id": tracker.session_id,
+                                        "root_ac_index": None,
+                                        "call_site": "runner",
+                                        "episode_id": pause_episode,
+                                        "attempt_index": len(direct_route_history),
+                                        "prior_route_ids": list(direct_route_history),
+                                        "route": direct_route_candidate.to_contract_data(),
+                                        "recoverable_pause": True,
+                                        "final_acceptance_declared": False,
+                                    },
+                                )
+                            )
+                        break
                     if not direct_bounded_routing or direct_route_candidate is None:
                         break
 

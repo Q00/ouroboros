@@ -69,7 +69,7 @@ def test_route_progress_and_exhaustion_surface_to_the_human() -> None:
             },
             "decision": {
                 "action": "escalate_route",
-                "selected_route_id": "standard",
+                "selected_route": {"route_id": "standard"},
                 "reason": "classified_failure",
             },
             "human_handoff_required": False,
@@ -86,7 +86,7 @@ def test_route_progress_and_exhaustion_surface_to_the_human() -> None:
             },
             "decision": {
                 "action": "blocked",
-                "selected_route_id": None,
+                "selected_route": None,
                 "attempted_route_ids": ["cheap", "standard", "frontier"],
                 "reason": "routes_exhausted",
             },
@@ -116,7 +116,7 @@ def test_hard_block_is_not_mislabeled_as_route_exhaustion() -> None:
             },
             "decision": {
                 "action": "blocked",
-                "selected_route_id": None,
+                "selected_route": None,
                 "attempted_route_ids": ["cheap"],
                 "remaining_route_ids": ["standard", "frontier"],
                 "reason": "human_handoff_required",

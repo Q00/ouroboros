@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import json
 
 import pytest
@@ -239,7 +240,8 @@ def test_decision_round_trip_is_strict_and_registry_bound() -> None:
         RouteEscalationDecision.from_contract_data(malformed, registry=registry)
 
     unknown_selected = decision.to_contract_data()
-    unknown_selected["selected_route_id"] = "removed"
+    assert isinstance(unknown_selected["selected_route"], dict)
+    unknown_selected["selected_route"]["route_id"] = "removed"
     with pytest.raises(ValueError, match="unknown"):
         RouteEscalationDecision.from_contract_data(unknown_selected, registry=registry)
 
@@ -247,6 +249,29 @@ def test_decision_round_trip_is_strict_and_registry_bound() -> None:
     unknown_history["attempted_route_ids"] = ["removed"]
     with pytest.raises(ValueError, match="unknown"):
         RouteEscalationDecision.from_contract_data(unknown_history, registry=registry)
+
+
+def test_decision_rejects_same_id_successor_semantic_drift() -> None:
+    registry = _registry()
+    decision = advance_route(
+        registry,
+        RouteRequirements(),
+        current_route_id="cheap",
+        attempted_route_ids=("cheap",),
+        failure_class=FailureClass.EVIDENCE_MISSING,
+    )
+    drifted_registry = RouteRegistry(
+        candidates=tuple(
+            replace(candidate, cost_units=99) if candidate.route_id == "standard" else candidate
+            for candidate in registry.candidates
+        )
+    )
+
+    with pytest.raises(ValueError, match="semantics drifted"):
+        RouteEscalationDecision.from_contract_data(
+            decision.to_contract_data(),
+            registry=drifted_registry,
+        )
 
 
 def test_escalation_respects_hard_capability_constraints() -> None:
