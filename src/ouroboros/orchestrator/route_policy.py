@@ -96,13 +96,13 @@ class RouteCandidate:
             self.authority_identity,
             field="authority_identity",
         )
-        if isinstance(self.cost_units, bool) or not isinstance(self.cost_units, int):
+        if type(self.cost_units) is not int:
             raise ValueError("cost_units must be an integer")
         if self.cost_units < 0:
             raise ValueError("cost_units must be >= 0")
         if self.cost_units > MAX_ROUTE_COST_UNITS:
             raise ValueError("cost_units exceeds its bound")
-        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int):
+        if type(self.ordinal) is not int:
             raise ValueError("ordinal must be an integer")
         if self.ordinal < 0:
             raise ValueError("ordinal must be >= 0")

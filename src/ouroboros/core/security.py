@@ -93,7 +93,23 @@ _CREDENTIAL_NAMESPACE_LABELS = frozenset(
     )
 )
 _COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
-    {"apikey", "accesstoken", "clientsecret", "accesskey", "privatekey"}
+    {
+        "apikey",
+        "accesstoken",
+        "clientsecret",
+        "accesskey",
+        "privatekey",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "credentials",
+        "authorization",
+        "key",
+        "private",
+        "bearer",
+    }
 )
 _SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
@@ -126,8 +142,12 @@ def _is_credential_namespace_label(value: str) -> bool:
     for compact_credential_label in _COMPACT_CREDENTIAL_NAMESPACE_LABELS:
         if compact_label == compact_credential_label:
             return True
-        if compact_label.startswith(f"{compact_credential_label}_"):
-            suffix = compact_label[len(compact_credential_label) + 1 :]
+        # ``compact_label`` has separators removed, so a direct value suffix
+        # must be checked without looking for an underscore.  For example,
+        # ``accesstokenabc123`` and ``password123`` are credential-labelled
+        # values even though no delimiter separates the label from its value.
+        if compact_label.startswith(compact_credential_label):
+            suffix = compact_label[len(compact_credential_label) :]
             safe_suffixes = {
                 safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
             }

@@ -95,8 +95,10 @@ The returned `RouteAdmission` is a deterministic result value, not a
 self-authenticating capability. It validates disposition, selected-route
 membership, eligible/rejected-set coherence, and bounded ordered collections,
 but Python object/closure introspection can still manufacture an object-shaped
-value. Every effect boundary must call `validate_admission(registry,
-requirements, admission)` against the live registry and exact requirements;
+value. Every effect boundary must call
+`validate_admission(registry, requirements, admission, advisor_order=original_order)`
+against the live registry, exact requirements, and the same normalized Advisor
+order used for the original admission;
 only that revalidated `selected` route may enter dispatch. A serialized route
 contract is configuration evidence only and must likewise be rebuilt and
 compared before side effects. Revalidation compares the complete selected

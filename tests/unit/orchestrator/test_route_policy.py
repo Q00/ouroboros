@@ -577,6 +577,20 @@ def test_effect_boundary_uses_plain_scalar_semantics_not_overloaded_equality() -
     assert validate_admission(_registry(changed), requirements, stale_admission) is False
 
 
+def test_route_numeric_fields_reject_overloaded_integer_subclasses() -> None:
+    class ExplodingInt(int):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            raise RuntimeError("hash")
+
+    with pytest.raises(ValueError, match="integer"):
+        _route("bad-cost", cost=ExplodingInt(1))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="integer"):
+        _route("bad-ordinal", cost=1, ordinal=ExplodingInt(1))  # type: ignore[arg-type]
+
+
 def test_effect_boundary_rejects_closure_registered_outside_route() -> None:
     original = _route("original", cost=1)
     outside = _route("outside-registry", cost=1)
