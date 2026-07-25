@@ -1038,6 +1038,9 @@ class OrchestratorRunner:
         *,
         execution_id: str | None,
         session_id: str | None,
+        bounded_escalation: bool = False,
+        route_id_override: str | None = None,
+        selected_route_sink: list[Any] | None = None,
     ) -> dict[str, str]:
         """Lay the runner's own execute_task paths on BOTH investment contracts.
 
@@ -1065,11 +1068,13 @@ class OrchestratorRunner:
         from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
         from ouroboros.orchestrator.model_routing import resolve_execute_model
         from ouroboros.orchestrator.route_compat import (
+            admit_compat_escalation_route,
             admit_compat_route,
             admitted_execute_model_kwargs,
             build_route_compat_projection,
             deserialize_route_compat_contract,
             validate_compat_admission,
+            validate_compat_escalation_admission,
         )
 
         investment_assessment = assess_investment(None)
@@ -1087,6 +1092,7 @@ class OrchestratorRunner:
             decomposition_trustworthy=False,
         )
         route_admission = None
+        admission_projection = None
         if initial_model_router is not None:
             admission_projection = build_route_compat_projection(
                 self._route_economics,
@@ -1102,11 +1108,62 @@ class OrchestratorRunner:
                     )
                     if recognized:
                         admission_projection = persisted_projection
-            route_admission = admit_compat_route(
-                admission_projection,
-                model_decision=model_decision,
-                effort=decision.level,
-            )
+            if bounded_escalation:
+                route_admission = admit_compat_escalation_route(
+                    admission_projection,
+                    effort=decision.level,
+                    route_id=route_id_override,
+                )
+                selected = route_admission.selected
+                model_support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    None,
+                )
+                if selected is not None and admission_projection is not None:
+                    from ouroboros.orchestrator.adapter import ParamSupport
+                    from ouroboros.orchestrator.model_routing import (
+                        MODEL_MODE_ENFORCED,
+                        ModelDecision,
+                    )
+
+                    tier = next(
+                        (
+                            tier
+                            for tier, candidate_route_id in admission_projection.tier_route_ids
+                            if candidate_route_id == selected.route_id
+                        ),
+                        None,
+                    )
+                    model_decision = ModelDecision(
+                        tier=tier,
+                        model=selected.model,
+                        mode=(
+                            MODEL_MODE_ENFORCED
+                            if model_support is ParamSupport.NATIVE
+                            else "advised"
+                        ),
+                    )
+                if not route_admission.admitted or not model_decision.is_enforced:
+                    reason = (
+                        route_admission.reason
+                        if not route_admission.admitted
+                        else "runtime cannot enforce the admitted model"
+                    )
+                    raise OrchestratorError(
+                        message="Route admission blocked before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": reason,
+                            "call_site": "runner",
+                        },
+                    )
+            else:
+                route_admission = admit_compat_route(
+                    admission_projection,
+                    model_decision=model_decision,
+                    effort=decision.level,
+                )
             if not route_admission.admitted:
                 raise OrchestratorError(
                     message="Route admission blocked before provider dispatch",
@@ -1217,13 +1274,7 @@ class OrchestratorRunner:
         if live_model_router is None:
             model_kwargs = legacy_model_kwargs
         else:
-            live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
-                self._adapter,
-                router=live_model_router,
-                is_decomposed_child=False,
-                decomposition_trustworthy=False,
-            )
-            if live_model_decision != model_decision:
+            if live_model_router != initial_model_router:
                 raise OrchestratorError(
                     message="Route admission became stale before provider dispatch",
                     details={
@@ -1232,6 +1283,22 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
+            if not bounded_escalation:
+                live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
+                    self._adapter,
+                    router=live_model_router,
+                    is_decomposed_child=False,
+                    decomposition_trustworthy=False,
+                )
+                if live_model_decision != model_decision:
+                    raise OrchestratorError(
+                        message="Route admission became stale before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": "model routing policy changed during pre-dispatch awaits",
+                            "call_site": "runner",
+                        },
+                    )
             live_effort_decision, live_effort_kwargs = resolve_execute_effort(
                 self._adapter,
                 base_effort=self._reasoning_effort,
@@ -1254,12 +1321,22 @@ class OrchestratorRunner:
                 effort=live_effort_decision.level,
             )
             assert route_admission is not None
-            if not validate_compat_admission(
-                live_projection,
-                route_admission,
-                model_decision=model_decision,
-                effort=live_effort_decision.level,
-            ):
+            admission_valid = (
+                validate_compat_escalation_admission(
+                    live_projection,
+                    route_admission,
+                    effort=live_effort_decision.level,
+                    route_id=route_id_override,
+                )
+                if bounded_escalation
+                else validate_compat_admission(
+                    live_projection,
+                    route_admission,
+                    model_decision=model_decision,
+                    effort=live_effort_decision.level,
+                )
+            )
+            if not admission_valid:
                 raise OrchestratorError(
                     message="Route admission became stale before provider dispatch",
                     details={
@@ -1268,12 +1345,27 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
-            model_kwargs = admitted_execute_model_kwargs(
-                route_admission,
-                model_decision=model_decision,
-                projection=live_projection,
-                effort=live_effort_decision.level,
-            )
+            if bounded_escalation:
+                selected = route_admission.selected
+                from ouroboros.orchestrator.adapter import ParamSupport
+
+                support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    None,
+                )
+                model_kwargs = (
+                    {"model": selected.model}
+                    if selected is not None and support is ParamSupport.NATIVE
+                    else {}
+                )
+            else:
+                model_kwargs = admitted_execute_model_kwargs(
+                    route_admission,
+                    model_decision=model_decision,
+                    projection=live_projection,
+                    effort=live_effort_decision.level,
+                )
             if (
                 model_decision.is_enforced
                 and model_decision.model is not None
@@ -1289,7 +1381,74 @@ class OrchestratorRunner:
                 )
         # Model kwargs are collapsed only after live admission above. Callers
         # invoke execute_task on the next statement without another await.
+        if selected_route_sink is not None and route_admission is not None:
+            selected = route_admission.selected
+            if selected is not None:
+                selected_route_sink.append(selected)
         return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
+
+    async def _direct_resume_route_id(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> str | None:
+        """Seal completed direct-route effects before a session resume.
+
+        No observation means the provider effect did not reach Routing D's
+        durable judgment boundary, so the legacy in-flight resume path remains
+        available.  Once an observation exists, success, escalation, blocking,
+        and malformed recovery state are all non-replayable.
+        """
+        from ouroboros.orchestrator.route_escalation import RouteObservation, VerifierOutcome
+
+        events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.route_observed",
+            limit=None,
+        )
+        direct_events = [
+            event
+            for event in events
+            if event.data.get("session_id") == session_id
+            and event.data.get("call_site") == "runner"
+        ]
+        if not direct_events:
+            return None
+        latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
+        data = latest.data
+        if (
+            data.get("execution_id") != execution_id
+            or type(data.get("schema_version")) is not int
+            or data.get("schema_version") != 1
+            or data.get("final_acceptance_declared") is not False
+        ):
+            raise OrchestratorError(
+                message="Refusing to replay an invalid direct route observation",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        try:
+            observation = RouteObservation.from_contract_data(data.get("observation"))
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Refusing to replay an invalid direct route observation",
+                details={"execution_id": execution_id, "session_id": session_id},
+            ) from exc
+        expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        if observation.episode_id != expected_episode:
+            raise OrchestratorError(
+                message="Refusing to replay a direct route from another episode",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
+            raise OrchestratorError(
+                message="Refusing to replay a successful direct route before Final Gate",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        raise OrchestratorError(
+            message="Refusing to replay a completed direct route; human handoff is required",
+            details={"execution_id": execution_id, "session_id": session_id},
+        )
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.
@@ -6842,6 +7001,17 @@ class OrchestratorRunner:
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
             recoverable_failure_pause: RecoverableFailurePause | None = None
+            direct_route_candidate: Any | None = None
+            direct_bounded_routing = (
+                self._model_router is not None
+                and self._route_economics is not None
+                and getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    ParamSupport.IGNORED,
+                )
+                is ParamSupport.NATIVE
+            )
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -6850,6 +7020,7 @@ class OrchestratorRunner:
                 prompt: str,
                 resume_handle: RuntimeHandle | None,
                 status: Any,
+                route_id_override: str | None = None,
             ) -> RuntimeHandle | None:
                 nonlocal cancelled_result
                 nonlocal final_message
@@ -6859,16 +7030,22 @@ class OrchestratorRunner:
                 nonlocal recoverable_failure_pause
                 nonlocal success
                 nonlocal tracker
+                nonlocal direct_route_candidate
 
                 active_runtime_handle = resume_handle
                 self._announce_param_degradations(
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                selected_routes: list[Any] = []
                 effort_kwargs = await self._route_call_effort(
                     execution_id=exec_id,
                     session_id=tracker.session_id,
+                    bounded_escalation=direct_bounded_routing,
+                    route_id_override=route_id_override,
+                    selected_route_sink=selected_routes,
                 )
+                direct_route_candidate = selected_routes[0] if selected_routes else None
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
@@ -7047,11 +7224,160 @@ class OrchestratorRunner:
                 runtime_handle = self._seed_runtime_handle(
                     self._inherited_runtime_handle, tool_catalog=tool_catalog
                 )
-                runtime_handle = await _consume_task_stream(
-                    prompt=task_prompt,
-                    resume_handle=runtime_handle,
-                    status=status,
-                )
+                direct_route_history: tuple[str, ...] = ()
+                direct_route_override: str | None = None
+                direct_prompt = task_prompt
+                while True:
+                    runtime_handle = await _consume_task_stream(
+                        prompt=direct_prompt,
+                        resume_handle=runtime_handle,
+                        status=status,
+                        route_id_override=direct_route_override,
+                    )
+                    if not direct_bounded_routing or direct_route_candidate is None:
+                        break
+
+                    from ouroboros.events.base import BaseEvent
+                    from ouroboros.orchestrator.failure_taxonomy import FailureClass
+                    from ouroboros.orchestrator.route_compat import (
+                        build_compat_escalation_requirements,
+                        build_route_compat_projection,
+                    )
+                    from ouroboros.orchestrator.route_escalation import (
+                        RouteObservation,
+                        VerifierOutcome,
+                        advance_route,
+                    )
+                    from ouroboros.orchestrator.route_policy import RouteRequirements
+
+                    direct_route_history = (
+                        *direct_route_history,
+                        direct_route_candidate.route_id,
+                    )
+                    live_projection = build_route_compat_projection(
+                        self._route_economics,
+                        model_router=self._model_router,
+                        runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                        effort=direct_route_candidate.effort,
+                    )
+                    requirements = (
+                        build_compat_escalation_requirements(
+                            live_projection,
+                            effort=direct_route_candidate.effort,
+                        )
+                        if live_projection is not None
+                        else None
+                    )
+                    live_candidate = (
+                        next(
+                            (
+                                configured
+                                for configured in live_projection.registry.candidates
+                                if configured.route_id == direct_route_candidate.route_id
+                            ),
+                            None,
+                        )
+                        if live_projection is not None
+                        else None
+                    )
+                    failure_class = None
+                    decision = None
+                    if not success:
+                        failure_class = (
+                            FailureClass.BLOCKED
+                            if recoverable_failure_pause is not None
+                            else FailureClass.EVIDENCE_MISSING
+                        )
+                        if (
+                            live_projection is None
+                            or requirements is None
+                            or live_candidate != direct_route_candidate
+                        ):
+                            from ouroboros.orchestrator.route_escalation import (
+                                EscalationAction,
+                                EscalationReason,
+                                RouteEscalationDecision,
+                            )
+
+                            decision = RouteEscalationDecision(
+                                action=EscalationAction.BLOCKED,
+                                failure_class=failure_class,
+                                selected=None,
+                                attempted_route_ids=direct_route_history,
+                                remaining_route_ids=(),
+                                reason=EscalationReason.NO_ELIGIBLE_ROUTE,
+                            )
+                        else:
+                            decision = advance_route(
+                                live_projection.registry,
+                                requirements,
+                                current_route_id=direct_route_candidate.route_id,
+                                attempted_route_ids=direct_route_history,
+                                failure_class=failure_class,
+                            )
+                    episode_digest = hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
+                    observation = RouteObservation.from_candidate(
+                        direct_route_candidate,
+                        requirements or RouteRequirements(),
+                        episode_id=f"route:{episode_digest}",
+                        attempt_index=len(direct_route_history) - 1,
+                        verifier_outcome=(
+                            VerifierOutcome.ATTEMPT_SUCCEEDED
+                            if success
+                            else (
+                                VerifierOutcome.BLOCKED
+                                if failure_class is FailureClass.BLOCKED
+                                else VerifierOutcome.FAILED
+                            )
+                        ),
+                        failure_class=failure_class,
+                        escalation_reason=(decision.reason if decision is not None else None),
+                    )
+                    await self._event_store.append(
+                        BaseEvent(
+                            type="execution.ac.route_observed",
+                            aggregate_type="execution",
+                            aggregate_id=exec_id,
+                            data={
+                                "schema_version": 1,
+                                "execution_id": exec_id,
+                                "session_id": tracker.session_id,
+                                "root_ac_index": None,
+                                "call_site": "runner",
+                                "observation": observation.to_contract_data(),
+                                "decision": (
+                                    decision.to_contract_data() if decision is not None else None
+                                ),
+                                "human_handoff_required": bool(
+                                    decision is not None and decision.blocked
+                                ),
+                                "final_acceptance_declared": False,
+                            },
+                        )
+                    )
+                    if success or decision is None or decision.blocked:
+                        if decision is not None and decision.blocked:
+                            final_message = (
+                                f"{final_message}\nRoute escalation stopped: "
+                                f"{decision.reason.value}; human handoff required."
+                            )
+                        break
+                    assert decision.selected is not None
+                    direct_route_override = decision.selected.route_id
+                    direct_prompt = (
+                        task_prompt
+                        + "\n\nThe prior implementation route failed. Continue in a fresh "
+                        "session and satisfy the same Seed contracts."
+                    )
+                    # A route change never resumes the previous provider session.
+                    await self._terminate_runtime_handle(
+                        runtime_handle,
+                        session_id=tracker.session_id,
+                        context="bounded_route_escalation",
+                    )
+                    runtime_handle = None
+                    success = False
+                    recoverable_failure_pause = None
 
                 # Same-session recovery is limited to the sequential runner.
                 # Parallel execution owns per-AC retry semantics, and resume_session
@@ -7061,6 +7387,7 @@ class OrchestratorRunner:
                     and not success
                     and recoverable_failure_pause is None
                     and runtime_handle is not None
+                    and not direct_bounded_routing
                 ):
                     planner = RecoveryPlanner()
                     recovery_action = planner.plan(_build_recovery_snapshot())
@@ -8411,9 +8738,15 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                resume_route_id = await self._direct_resume_route_id(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                )
                 effort_kwargs = await self._route_call_effort(
                     execution_id=None,
                     session_id=session_id,
+                    bounded_escalation=resume_route_id is not None,
+                    route_id_override=resume_route_id,
                 )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]

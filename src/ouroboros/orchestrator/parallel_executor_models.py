@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
     from ouroboros.orchestrator.level_context import LevelContext
+    from ouroboros.orchestrator.route_policy import RouteCandidate
     from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
@@ -91,6 +92,10 @@ class ACExecutionResult:
     atomic_verifier_verdict: VerifierVerdict | None = None
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
+    # Provisional dispatch metadata only.  The selected candidate authorizes no
+    # future effect and says nothing about Final Gate acceptance; the outer
+    # bounded-escalation owner uses it to durably observe the attempt.
+    route_candidate: RouteCandidate | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

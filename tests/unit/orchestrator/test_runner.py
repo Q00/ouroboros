@@ -789,6 +789,168 @@ class TestOrchestratorRunner:
         assert recovery_event.data["persona"] == "hacker"
 
     @pytest.mark.asyncio
+    async def test_execute_seed_direct_walks_bounded_routes_in_fresh_sessions(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+        from ouroboros.orchestrator.model_routing import build_model_router
+
+        economics = EconomicsConfig(  # type: ignore[arg-type]
+            default_tier="frugal",
+            escalation_threshold=2,
+            tiers={
+                "frugal": TierConfig(
+                    cost_factor=1,
+                    models=[ModelConfig(provider="anthropic", model="haiku-x")],
+                ),
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+                ),
+                "frontier": TierConfig(
+                    cost_factor=30,
+                    models=[ModelConfig(provider="anthropic", model="opus-x")],
+                ),
+            },
+        )
+        mock_adapter.runtime_backend = "claude"
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner._route_economics = economics
+        runner._model_router = build_model_router(economics, runtime_backend="claude")
+        assert runner._model_router is not None
+        models: list[str] = []
+        resume_handles: list[RuntimeHandle | None] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            resume_handles.append(kwargs.get("resume_handle"))
+            failed = len(models) < 3
+            yield AgentMessage(
+                type="result",
+                content="failed" if failed else "[TASK_COMPLETE]",
+                data={"subtype": "error" if failed else "success"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id=f"route-{len(models)}",
+                    cwd="/tmp/project",
+                    approval_mode="acceptEdits",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with patch.object(runner._session_repo, "create_session", mock_create_session):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok and result.value.success is True
+        assert models == ["haiku-x", "sonnet-x", "opus-x"]
+        assert resume_handles[1:] == [None, None]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert [event.data["observation"]["route_id"] for event in route_events] == [
+            "compat:claude:frugal",
+            "compat:claude:standard",
+            "compat:claude:frontier",
+        ]
+        assert all(event.data["final_acceptance_declared"] is False for event in route_events)
+
+    @pytest.mark.asyncio
+    async def test_direct_resume_refuses_blocked_route_replay(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        import hashlib
+
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationAction,
+            EscalationReason,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
+
+        candidate = RouteCandidate(
+            route_id="compat:claude:frontier",
+            model="opus-x",
+            harness="claude",
+            effort=None,
+            cost_units=30,
+            persona="default",
+            tool_policy="default",
+            authority_identity="runtime:claude",
+            ordinal=2,
+        )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id=("route:" + hashlib.sha256(b"execution-1\0direct").hexdigest()),
+            attempt_index=2,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.ROUTES_EXHAUSTED,
+        )
+        decision = RouteEscalationDecision(
+            action=EscalationAction.BLOCKED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            selected=None,
+            attempted_route_ids=(
+                "compat:claude:frugal",
+                "compat:claude:standard",
+                "compat:claude:frontier",
+            ),
+            remaining_route_ids=(),
+            reason=EscalationReason.ROUTES_EXHAUSTED,
+        )
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": decision.to_contract_data(),
+                    "final_acceptance_declared": False,
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="human handoff"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+    @pytest.mark.asyncio
     async def test_prepare_session_forwards_seed_goal(
         self,
         runner: OrchestratorRunner,

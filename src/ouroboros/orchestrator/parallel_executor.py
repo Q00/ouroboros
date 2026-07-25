@@ -288,6 +288,8 @@ from ouroboros.orchestrator.level_context import (
 )
 from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 from ouroboros.orchestrator.model_routing import (
+    MODEL_MODE_ENFORCED,
+    ModelDecision,
     decide_model,
     resolve_execute_model,
     serialize_model_router,
@@ -309,11 +311,25 @@ from ouroboros.orchestrator.rate_limit import (
     estimate_runtime_request_tokens,
 )
 from ouroboros.orchestrator.route_compat import (
+    admit_compat_escalation_route,
     admit_compat_route,
     admitted_execute_model_kwargs,
+    build_compat_escalation_requirements,
     build_route_compat_projection,
     serialize_route_compat_contract,
     validate_compat_admission,
+    validate_compat_escalation_admission,
+)
+from ouroboros.orchestrator.route_escalation import (
+    MAX_ROUTE_ATTEMPTS,
+    EscalationAction,
+    EscalationReason,
+    RouteEscalationDecision,
+    RouteObservation,
+    advance_route,
+)
+from ouroboros.orchestrator.route_escalation import (
+    VerifierOutcome as RouteVerifierOutcome,
 )
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
@@ -1666,6 +1682,16 @@ class ParallelACExecutor:
         # runner supplies the resolved economics; direct/test callers retain the
         # historical dispatch path until they opt into the bridge.
         self._route_economics = route_economics
+        self._bounded_route_escalation_enabled = (
+            route_economics is not None
+            and model_router is not None
+            and getattr(
+                getattr(adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            is ParamSupport.NATIVE
+        )
         # Opt-in shadow-replay baseline harness (frugality-proof AC5). Default OFF:
         # replaying a decomposed child at the parent tier doubles token cost, so
         # this is an experiment lever, never a production default. When on, a
@@ -2428,6 +2454,7 @@ class ParallelACExecutor:
         ac_retry_attempts: dict[int, int],
         execution_counters: dict[str, int] | None = None,
         retry_prompts: dict[int, str] | None = None,
+        route_overrides: dict[int, str] | None = None,
         same_runtime_budget_exhausted: bool = True,
     ) -> list[ACExecutionResult | BaseException]:
         """Execute one batch of stage-ready ACs using the shared worker pool.
@@ -2465,6 +2492,7 @@ class ParallelACExecutor:
                         retry_attempt=ac_retry_attempts[ac_idx],
                         execution_counters=execution_counters,
                         retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
+                        route_id_override=(route_overrides or {}).get(ac_idx),
                         same_runtime_budget_exhausted=same_runtime_budget_exhausted,
                         ac_spec=(
                             ac_criterion
@@ -4595,6 +4623,7 @@ class ParallelACExecutor:
         investment_spec: InvestmentSpec | None = None,
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
+        route_id_override: str | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -4756,8 +4785,12 @@ class ParallelACExecutor:
         # Stall recovery belongs to atomic leaves only. Once this method decides
         # to execute atomically, it can retry the leaf without re-running the
         # decomposition/dispatch branch above.
+        bounded_route_recovery_enabled = self._bounded_route_escalation_enabled and (
+            not is_sub_ac or decomposition_trustworthy
+        )
         atomic_retry_attempt = retry_attempt
-        max_attempts = retry_attempt + MAX_STALL_RETRIES + 1
+        stall_retry_budget = 0 if bounded_route_recovery_enabled else MAX_STALL_RETRIES
+        max_attempts = retry_attempt + stall_retry_budget + 1
         # Stable re-run bundle for a possible cross-harness redispatch (PR-X X1):
         # every param except retry_attempt is fixed across the atomic loop, so it
         # can be replayed verbatim on an alternative runtime.
@@ -4782,6 +4815,7 @@ class ParallelACExecutor:
             "investment_spec": investment_spec,
             "decomposition_trustworthy": decomposition_trustworthy,
             "semantic_ac_key": semantic_ac_key,
+            "route_id_override": route_id_override,
         }
         while True:
             atomic_result = await _invoke_execution_authority_entry(
@@ -4810,6 +4844,7 @@ class ParallelACExecutor:
                 investment_spec=investment_spec,
                 decomposition_trustworthy=decomposition_trustworthy,
                 semantic_ac_key=semantic_ac_key,
+                route_id_override=route_id_override,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if atomic_result.outcome in {
@@ -4820,7 +4855,7 @@ class ParallelACExecutor:
                     # Bounce classification and alternate-harness redispatch are
                     # provider effects too; neither may bypass a fail-closed route.
                     return _finalize_node_result(atomic_result)
-                if not atomic_result.success:
+                if not atomic_result.success and not bounded_route_recovery_enabled:
                     (
                         bounce_result,
                         bounce_decision,
@@ -4850,7 +4885,11 @@ class ParallelACExecutor:
                             decomposition_depth_warning = True
                     if bounce_result is not None:
                         return _finalize_node_result(bounce_result)
-                if not atomic_result.success and same_runtime_budget_exhausted:
+                if (
+                    not atomic_result.success
+                    and same_runtime_budget_exhausted
+                    and not bounded_route_recovery_enabled
+                ):
                     # Non-stall terminal failure (e.g. fabrication, exhausted
                     # transient 429/529) on the FINAL same-runtime attempt: try
                     # one cross-harness redispatch. Earlier attempts fall through
@@ -4875,7 +4914,7 @@ class ParallelACExecutor:
                 node_identity=node_identity,
                 retry_attempt=atomic_retry_attempt,
             )
-            should_retry = atomic_retry_attempt - retry_attempt < MAX_STALL_RETRIES
+            should_retry = atomic_retry_attempt - retry_attempt < stall_retry_budget
             stall_event = create_ac_stall_detected_event(
                 session_id=session_id,
                 ac_index=ac_index,
@@ -4901,29 +4940,43 @@ class ParallelACExecutor:
                     atomic_result,
                     error=f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)",
                 )
-                (
-                    bounce_result,
-                    bounce_decision,
-                ) = await self._maybe_recover_with_bounce_decomposition(
-                    result=failed_result,
-                    ac_index=ac_index,
-                    ac_content=ac_content,
-                    session_id=session_id,
-                    tools=tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    seed_goal=seed_goal,
-                    depth=depth,
-                    execution_id=execution_id,
-                    level_contexts=level_contexts,
-                    retry_attempt=atomic_retry_attempt,
-                    execution_counters=execution_counters,
-                    node_identity=node_identity,
-                    ac_spec=ac_spec,
-                    start_time=start_time,
-                    semantic_ac_key=semantic_ac_key,
-                    investment_spec=investment_spec,
-                )
+                if bounded_route_recovery_enabled:
+                    from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+                    failed_result = replace(
+                        failed_result,
+                        atomic_verifier_verdict=VerifierVerdict(
+                            passed=False,
+                            reasons=("atomic route stalled",),
+                            failure_class=FailureClass.STALL.value,
+                        ),
+                    )
+                bounce_result = None
+                bounce_decision = None
+                if not bounded_route_recovery_enabled:
+                    (
+                        bounce_result,
+                        bounce_decision,
+                    ) = await self._maybe_recover_with_bounce_decomposition(
+                        result=failed_result,
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed_goal,
+                        depth=depth,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        retry_attempt=atomic_retry_attempt,
+                        execution_counters=execution_counters,
+                        node_identity=node_identity,
+                        ac_spec=ac_spec,
+                        start_time=start_time,
+                        semantic_ac_key=semantic_ac_key,
+                        investment_spec=investment_spec,
+                    )
                 if bounce_decision is not None:
                     node_decision = bounce_decision
                     if bounce_decision.compromise_reason == "depth_cap_forced_atomic":
@@ -4935,7 +4988,7 @@ class ParallelACExecutor:
                 # sentinel), so only try a cross-harness redispatch once that
                 # budget is also spent — i.e. this is the final same-runtime
                 # attempt — before the AC is finally marked FAILED.
-                if same_runtime_budget_exhausted:
+                if same_runtime_budget_exhausted and not bounded_route_recovery_enabled:
                     alt_result = await self._maybe_redispatch_alt_harness(
                         result=failed_result,
                         execution_context_id=execution_context_id,
@@ -5891,6 +5944,7 @@ Respond with either ATOMIC or the structured JSON object only.
         investment_spec: InvestmentSpec | None = None,
         decomposition_trustworthy: bool = False,
         semantic_ac_key: str | None = None,
+        route_id_override: str | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -5920,6 +5974,9 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         route_compat_was_enabled = (
             self._route_economics is not None and model_router_snapshot is not None
+        )
+        bounded_route_attempt_enabled = self._bounded_route_escalation_enabled and (
+            not is_sub_ac or decomposition_trustworthy
         )
         durable_route_projection = build_route_compat_projection(
             self._route_economics,
@@ -5972,6 +6029,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         "base_reasoning_effort": self._reasoning_effort,
                         "model_routing": serialize_model_router(model_router_snapshot),
                         "route_compat": serialize_route_compat_contract(durable_route_projection),
+                        "route_id_override": route_id_override,
                         "execution_profile": (
                             self._execution_profile.model_dump(mode="json")
                             if self._execution_profile is not None
@@ -6171,7 +6229,7 @@ Respond with either ATOMIC or the structured JSON object only.
             suggested_tier = tier_from_profile_hint(
                 self._execution_profile.suggested_model_tier.value
             )
-        model_decision, execute_model_kwargs = resolve_execute_model(
+        legacy_model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
             router=model_router_snapshot,
             is_decomposed_child=is_sub_ac,
@@ -6179,20 +6237,127 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_attempt=retry_attempt,
             suggested_tier=suggested_tier,
         )
-        initial_model_decision, _initial_model_kwargs = resolve_execute_model(
-            self._adapter,
-            router=model_router_snapshot,
-            is_decomposed_child=is_sub_ac,
-            decomposition_trustworthy=decomposition_trustworthy,
-            retry_attempt=0,
-            suggested_tier=suggested_tier,
+        model_decision = legacy_model_decision
+        projection = (
+            None
+            if durable_route_projection is None
+            else replace(
+                durable_route_projection,
+                registry=replace(
+                    durable_route_projection.registry,
+                    candidates=tuple(
+                        replace(candidate, effort=effort_decision.level)
+                        for candidate in durable_route_projection.registry.candidates
+                    ),
+                ),
+                effort=effort_decision.level,
+            )
         )
-        model_escalated = bool(
-            retry_attempt > 0
-            and model_decision.model is not None
-            and initial_model_decision.model is not None
-            and model_decision.model != initial_model_decision.model
+        route_admission = None
+        if bounded_route_attempt_enabled:
+            # Routing D deliberately bypasses the legacy base-tier/retry-count
+            # choice.  The Kernel selects the cheapest eligible candidate on
+            # the first attempt; later attempts pin the exact next route chosen
+            # by the bounded escalation state machine.
+            route_admission = admit_compat_escalation_route(
+                projection,
+                effort=effort_decision.level,
+                route_id=route_id_override,
+            )
+            selected_route = route_admission.selected
+            model_support = getattr(
+                getattr(self._adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            if selected_route is not None and projection is not None:
+                selected_tier = next(
+                    (
+                        tier
+                        for tier, route_id in projection.tier_route_ids
+                        if route_id == selected_route.route_id
+                    ),
+                    None,
+                )
+                model_decision = ModelDecision(
+                    tier=selected_tier,
+                    model=selected_route.model,
+                    mode=(
+                        MODEL_MODE_ENFORCED if model_support is ParamSupport.NATIVE else "advised"
+                    ),
+                )
+                execute_model_kwargs = (
+                    {"model": selected_route.model} if model_support is ParamSupport.NATIVE else {}
+                )
+            if not route_admission.admitted or not model_decision.is_enforced:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                reason = (
+                    route_admission.reason
+                    if not route_admission.admitted
+                    else "runtime cannot enforce the admitted model"
+                )
+                log.warning(
+                    "parallel_executor.ac.route_admission_blocked",
+                    ac_index=ac_index,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    reason=reason,
+                )
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    error=f"route admission blocked: {reason}",
+                    duration_seconds=duration,
+                    session_id=session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                )
+        elif route_compat_was_enabled:
+            route_admission = admit_compat_route(
+                projection,
+                model_decision=model_decision,
+                effort=effort_decision.level,
+            )
+            if not route_admission.admitted:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    error=f"route admission blocked: {route_admission.reason}",
+                    duration_seconds=duration,
+                    session_id=session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                )
+        else:
+            # Dormant compatibility preserves the legacy model kwarg exactly.
+            execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
+        observed_route_candidate = (
+            route_admission.selected
+            if bounded_route_attempt_enabled and route_admission is not None
+            else None
         )
+
+        if bounded_route_attempt_enabled:
+            model_escalated = route_id_override is not None
+        else:
+            initial_model_decision, _initial_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=model_router_snapshot,
+                is_decomposed_child=is_sub_ac,
+                decomposition_trustworthy=decomposition_trustworthy,
+                retry_attempt=0,
+                suggested_tier=suggested_tier,
+            )
+            model_escalated = bool(
+                retry_attempt > 0
+                and model_decision.model is not None
+                and initial_model_decision.model is not None
+                and model_decision.model != initial_model_decision.model
+            )
         if model_decision.model is not None:
             log.debug(
                 "orchestrator.executor.model_routed",
@@ -6226,69 +6391,13 @@ Respond with either ATOMIC or the structured JSON object only.
                 ),
                 model_escalated=model_escalated,
             )
-        route_admission = None
-        if route_compat_was_enabled:
-            # Admission is derived from the same immutable catalog snapshot that
-            # was fingerprinted into the durable capsule above. Live state is
-            # independently rebuilt again at the provider boundary.
-            projection = (
-                None
-                if durable_route_projection is None
-                else replace(
-                    durable_route_projection,
-                    registry=replace(
-                        durable_route_projection.registry,
-                        candidates=tuple(
-                            replace(candidate, effort=effort_decision.level)
-                            for candidate in durable_route_projection.registry.candidates
-                        ),
-                    ),
-                    effort=effort_decision.level,
-                )
-            )
-            route_admission = admit_compat_route(
-                projection,
-                model_decision=model_decision,
-                effort=effort_decision.level,
-            )
-            if not route_admission.admitted:
-                duration = (datetime.now(UTC) - start_time).total_seconds()
-                reason = route_admission.reason
-                log.warning(
-                    "parallel_executor.ac.route_admission_blocked",
-                    ac_index=ac_index,
-                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                    reason=reason,
-                )
-                return ACExecutionResult(
-                    ac_index=ac_index,
-                    ac_content=ac_content,
-                    success=False,
-                    error=f"route admission blocked: {reason}",
-                    duration_seconds=duration,
-                    session_id=session_id,
-                    retry_attempt=retry_attempt,
-                    depth=depth,
-                    outcome=ACExecutionOutcome.BLOCKED,
-                )
-        if route_admission is None:
-            # Dormant compatibility preserves the legacy model kwarg exactly.
-            execute_effort_kwargs = {**execute_effort_kwargs, **execute_model_kwargs}
 
         def _live_provider_kwargs() -> dict[str, Any] | None:
             """Revalidate carried admission against live state at provider entry."""
 
             if route_admission is None:
                 return dict(execute_effort_kwargs)
-            live_model_decision, _live_model_kwargs = resolve_execute_model(
-                self._adapter,
-                router=self._model_router,
-                is_decomposed_child=is_sub_ac,
-                decomposition_trustworthy=decomposition_trustworthy,
-                retry_attempt=retry_attempt,
-                suggested_tier=suggested_tier,
-            )
-            if live_model_decision != model_decision:
+            if self._model_router != model_router_snapshot:
                 return None
             live_effort_decision, live_effort_kwargs = resolve_execute_effort(
                 self._adapter,
@@ -6305,7 +6414,36 @@ Respond with either ATOMIC or the structured JSON object only.
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
                 effort=live_effort_decision.level,
             )
-            if not validate_compat_admission(
+            if bounded_route_attempt_enabled:
+                if not validate_compat_escalation_admission(
+                    live_projection,
+                    route_admission,
+                    effort=live_effort_decision.level,
+                    route_id=route_id_override,
+                ):
+                    return None
+                selected = route_admission.selected
+                model_support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    ParamSupport.IGNORED,
+                )
+                if (
+                    selected is None
+                    or model_support is not ParamSupport.NATIVE
+                    or selected.model != model_decision.model
+                ):
+                    return None
+                return {**live_effort_kwargs, "model": selected.model}
+            live_model_decision, _live_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=self._model_router,
+                is_decomposed_child=is_sub_ac,
+                decomposition_trustworthy=decomposition_trustworthy,
+                retry_attempt=retry_attempt,
+                suggested_tier=suggested_tier,
+            )
+            if live_model_decision != model_decision or not validate_compat_admission(
                 live_projection,
                 route_admission,
                 model_decision=model_decision,
@@ -6318,12 +6456,6 @@ Respond with either ATOMIC or the structured JSON object only.
                 projection=live_projection,
                 effort=live_effort_decision.level,
             )
-            if (
-                model_decision.is_enforced
-                and model_decision.model is not None
-                and live_model_kwargs.get("model") != model_decision.model
-            ):
-                return None
             return {**live_effort_kwargs, **live_model_kwargs}
 
         def _route_drift_blocked_result() -> ACExecutionResult:
@@ -6344,6 +6476,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_attempt=retry_attempt,
                 depth=depth,
                 outcome=ACExecutionOutcome.BLOCKED,
+                route_candidate=observed_route_candidate,
             )
 
         # Runtime dispatch + streaming/heartbeat consumption. The dispatcher owns
@@ -6541,6 +6674,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=ac_session_id,
                     retry_attempt=retry_attempt,
                     depth=depth,
+                    route_candidate=observed_route_candidate,
                 )
 
             if signal_target is not None and self._session_signal_hub is not None:
@@ -7062,6 +7196,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 atomic_verifier_verdict=verifier_verdict,
                 verify_gate_outcome=verify_gate_outcome,
                 error=fat_harness_error,
+                route_candidate=observed_route_candidate,
             )
 
         except anyio.get_cancelled_exc_class():
@@ -7142,6 +7277,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_attempt=retry_attempt,
                 depth=depth,
                 runtime_handle=dispatch_state.runtime_handle,
+                route_candidate=observed_route_candidate,
             )
         finally:
             try:
@@ -7659,6 +7795,7 @@ Respond with either ATOMIC or the structured JSON object only.
         root_ac_index: int,
         session_id: str,
         execution_id: str,
+        required: bool = False,
     ) -> None:
         """Persist one provisional outer verify/retry attempt judgment.
 
@@ -7670,25 +7807,99 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         from ouroboros.events.base import BaseEvent
 
-        await self._safe_emit_event(
+        event = BaseEvent(
+            type="execution.ac.attempt_judged",
+            aggregate_type="execution",
+            aggregate_id=execution_id or session_id,
+            data={
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": root_ac_index,
+                "ac_index": root_ac_index,
+                "retry_attempt": result.retry_attempt,
+                "attempt_number": result.attempt_number,
+                "success": result.success,
+                "outcome": result.outcome.value if result.outcome is not None else "failed",
+                "is_decomposed": result.is_decomposed,
+                "is_decomposed_child": result.is_decomposed,
+            },
+        )
+        if required:
+            # Bounded escalation cannot authorize another provider effect until
+            # the outcome it reacts to is durable.
+            await self._event_store.append(event)
+        else:
+            await self._safe_emit_event(event)
+
+    async def _persist_route_observation(
+        self,
+        *,
+        seed: Seed,
+        result: ACExecutionResult,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+        attempted_route_ids: tuple[str, ...],
+        failure_class: object | None,
+        decision: RouteEscalationDecision | None,
+    ) -> RouteObservation:
+        """Commit one provisional route outcome before any next-route effect."""
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        candidate = result.route_candidate
+        if candidate is None:
+            raise ValueError("route observation requires the attempted candidate")
+        if result.success:
+            outcome = RouteVerifierOutcome.ATTEMPT_SUCCEEDED
+            classified = None
+            reason = None
+        else:
+            classified = (
+                failure_class
+                if isinstance(failure_class, FailureClass)
+                else FailureClass.EVIDENCE_MISSING
+            )
+            outcome = (
+                RouteVerifierOutcome.BLOCKED
+                if classified is FailureClass.BLOCKED
+                else RouteVerifierOutcome.FAILED
+            )
+            reason = decision.reason if decision is not None else EscalationReason.NO_ELIGIBLE_ROUTE
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        episode_digest = hashlib.sha256(
+            f"{execution_id or session_id}\0{root_ac_index}\0{semantic_ac_key}".encode()
+        ).hexdigest()
+        observation = RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id=f"route:{episode_digest}",
+            attempt_index=len(attempted_route_ids) - 1,
+            verifier_outcome=outcome,
+            failure_class=classified,
+            escalation_reason=reason,
+        )
+        await self._event_store.append(
             BaseEvent(
-                type="execution.ac.attempt_judged",
+                type="execution.ac.route_observed",
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
+                    "schema_version": 1,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": root_ac_index,
-                    "ac_index": root_ac_index,
-                    "retry_attempt": result.retry_attempt,
-                    "attempt_number": result.attempt_number,
-                    "success": result.success,
-                    "outcome": result.outcome.value if result.outcome is not None else "failed",
-                    "is_decomposed": result.is_decomposed,
-                    "is_decomposed_child": result.is_decomposed,
+                    "semantic_ac_key": semantic_ac_key,
+                    "observation": observation.to_contract_data(),
+                    "decision": decision.to_contract_data() if decision is not None else None,
+                    "human_handoff_required": bool(decision is not None and decision.blocked),
+                    "final_acceptance_declared": False,
                 },
             )
         )
+        return observation
 
     async def _emit_recovery_exhausted(
         self,
@@ -7703,7 +7914,10 @@ Respond with either ATOMIC or the structured JSON object only.
         """Emit the authoritative root-AC recovery-closure fact exactly once."""
         from ouroboros.events.base import BaseEvent
 
-        if result.success or result.outcome is not ACExecutionOutcome.FAILED:
+        if result.success or result.outcome not in {
+            ACExecutionOutcome.FAILED,
+            ACExecutionOutcome.BLOCKED,
+        }:
             return
         emission_key = (execution_id or session_id, root_ac_index)
         if emission_key in self._recovery_exhausted_emitted:
@@ -7735,6 +7949,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     "alternate_redispatch_status": alternate_status,
                     "last_failure_class": self._failure_class_for_result(result) or "unknown",
                     "success": False,
+                    "human_handoff_required": result.outcome is ACExecutionOutcome.BLOCKED,
                 },
             )
         )
@@ -7863,6 +8078,19 @@ Respond with either ATOMIC or the structured JSON object only.
         retries reduce to a single ``_execute_ac_batch`` call plus the identity
         gate, so today's behavior is preserved.
         """
+        if self._bounded_route_escalation_enabled:
+            return await self._run_batch_with_bounded_route_escalation(
+                seed=seed,
+                batch_executable=batch_executable,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+            )
         results = await self._execute_ac_batch(
             seed=seed,
             batch_indices=batch_executable,
@@ -8137,6 +8365,428 @@ Respond with either ATOMIC or the structured JSON object only.
                     ),
                 )
         return results
+
+    async def _run_batch_with_bounded_route_escalation(
+        self,
+        *,
+        seed: Seed,
+        batch_executable: list[int],
+        session_id: str,
+        execution_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        level_contexts: list[LevelContext],
+        ac_retry_attempts: dict[int, int],
+        execution_counters: dict[str, int] | None,
+    ) -> list[ACExecutionResult | BaseException]:
+        """Run cheapest-first classified escalation with a finite route set.
+
+        Every next provider effect is preceded by two hard persistence
+        boundaries: the provisional attempt judgment and its RouteObservation.
+        A successful attempt remains provisional; only the existing seed-level
+        Final Gate may later declare acceptance.
+        """
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
+        positions = {ac_idx: pos for pos, ac_idx in enumerate(batch_executable)}
+        results: list[ACExecutionResult | BaseException] = [
+            RuntimeError("route attempt not started") for _ in batch_executable
+        ]
+        (
+            histories,
+            route_overrides,
+            terminal_resume_reasons,
+        ) = await self._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id=execution_id,
+            session_id=session_id,
+            root_ac_indices=tuple(batch_executable),
+        )
+        pending = set(batch_executable) - set(terminal_resume_reasons)
+        for ac_idx, reason in terminal_resume_reasons.items():
+            results[positions[ac_idx]] = ACExecutionResult(
+                ac_index=ac_idx,
+                ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                success=False,
+                error=reason,
+                retry_attempt=len(histories[ac_idx]),
+                outcome=ACExecutionOutcome.BLOCKED,
+            )
+        for ac_idx, history in histories.items():
+            ac_retry_attempts[ac_idx] = len(history)
+        retry_prompts: dict[int, str] = {}
+
+        while pending:
+            round_indices = [ac_idx for ac_idx in batch_executable if ac_idx in pending]
+            round_results = await self._execute_ac_batch(
+                seed=seed,
+                batch_indices=round_indices,
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                level_contexts=level_contexts,
+                ac_retry_attempts=ac_retry_attempts,
+                execution_counters=execution_counters,
+                retry_prompts=retry_prompts,
+                route_overrides=route_overrides,
+                # Route D owns recovery while active.  Legacy cross-harness and
+                # retry-count paths cannot run ahead of the finite route set.
+                same_runtime_budget_exhausted=False,
+            )
+            next_pending: set[int] = set()
+            next_overrides: dict[int, str] = {}
+            next_prompts: dict[int, str] = {}
+            for round_position, ac_idx in enumerate(round_indices):
+                value = round_results[round_position]
+                results[positions[ac_idx]] = value
+                if not isinstance(value, ACExecutionResult):
+                    continue
+                gated = await self._apply_verify_gate(
+                    seed=seed,
+                    ac_index=ac_idx,
+                    result=value,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                )
+                results[positions[ac_idx]] = gated
+                await self._emit_ac_attempt_judged(
+                    result=gated,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    required=gated.route_candidate is not None,
+                )
+                candidate = gated.route_candidate
+                if candidate is None:
+                    continue
+                history = (*histories[ac_idx], candidate.route_id)
+                if len(set(history)) != len(history):
+                    raise RuntimeError("bounded route episode attempted a route more than once")
+                histories[ac_idx] = history
+
+                if gated.success:
+                    await self._persist_route_observation(
+                        seed=seed,
+                        result=gated,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        attempted_route_ids=history,
+                        failure_class=None,
+                        decision=None,
+                    )
+                    continue
+
+                raw_failure = self._failure_class_for_result(gated)
+                try:
+                    failure = (
+                        FailureClass(raw_failure) if raw_failure else FailureClass.EVIDENCE_MISSING
+                    )
+                except ValueError:
+                    failure = FailureClass.EVIDENCE_MISSING
+                if gated.outcome is ACExecutionOutcome.BLOCKED:
+                    failure = FailureClass.BLOCKED
+
+                live_projection = build_route_compat_projection(
+                    self._route_economics,
+                    model_router=self._model_router,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    effort=candidate.effort,
+                )
+                requirements = (
+                    build_compat_escalation_requirements(
+                        live_projection,
+                        effort=candidate.effort,
+                    )
+                    if live_projection is not None
+                    else None
+                )
+                live_candidate = (
+                    next(
+                        (
+                            configured
+                            for configured in live_projection.registry.candidates
+                            if configured.route_id == candidate.route_id
+                        ),
+                        None,
+                    )
+                    if live_projection is not None
+                    else None
+                )
+                if requirements is None or live_projection is None or live_candidate != candidate:
+                    decision = RouteEscalationDecision(
+                        action=EscalationAction.BLOCKED,
+                        failure_class=failure,
+                        selected=None,
+                        attempted_route_ids=history,
+                        remaining_route_ids=(),
+                        reason=EscalationReason.NO_ELIGIBLE_ROUTE,
+                    )
+                else:
+                    decision = advance_route(
+                        live_projection.registry,
+                        requirements,
+                        current_route_id=candidate.route_id,
+                        attempted_route_ids=history,
+                        failure_class=failure,
+                    )
+                await self._persist_route_observation(
+                    seed=seed,
+                    result=gated,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    attempted_route_ids=history,
+                    failure_class=failure,
+                    decision=decision,
+                )
+                if decision.action is EscalationAction.ESCALATE_ROUTE:
+                    assert decision.selected is not None
+                    ac_retry_attempts[ac_idx] += 1
+                    next_pending.add(ac_idx)
+                    next_overrides[ac_idx] = decision.selected.route_id
+                    next_prompts[ac_idx] = self._build_ac_retry_prompt(
+                        result=gated,
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        is_final_attempt=not decision.remaining_route_ids,
+                    )
+                    continue
+
+                blocked = replace(
+                    gated,
+                    success=False,
+                    outcome=ACExecutionOutcome.BLOCKED,
+                    error=(
+                        f"{gated.error or gated.final_message or 'Route attempt failed'}\n"
+                        f"Route escalation stopped: {decision.reason.value}; "
+                        "human handoff required."
+                    ),
+                )
+                results[positions[ac_idx]] = blocked
+                await self._emit_recovery_exhausted(
+                    seed=seed,
+                    result=blocked,
+                    root_ac_index=ac_idx,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    retry_termination_reason=decision.reason.value,
+                )
+
+            pending = next_pending
+            route_overrides = next_overrides
+            retry_prompts = next_prompts
+
+        return results
+
+    async def _load_bounded_route_resume_state(
+        self,
+        *,
+        seed: Seed,
+        execution_id: str,
+        session_id: str,
+        root_ac_indices: tuple[int, ...],
+    ) -> tuple[dict[int, tuple[str, ...]], dict[int, str], dict[int, str]]:
+        """Replay route observations without repeating a provider effect.
+
+        A failed observation with a durable escalation decision resumes at its
+        exact selected successor.  A provisional success or terminal block may
+        not be converted into acceptance and may not be replayed, so it becomes
+        an explicit human handoff.
+        """
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        relevant = set(root_ac_indices)
+        grouped: dict[int, list[tuple[RouteObservation, object, bool]]] = {
+            ac_idx: [] for ac_idx in root_ac_indices
+        }
+        events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.route_observed",
+            limit=None,
+        )
+        for event in events:
+            data = event.data
+            if data.get("session_id") != session_id:
+                continue
+            if data.get("call_site") == "runner":
+                # A session cannot change from whole-Seed direct routing to
+                # parallel root-AC routing during replay.  Ignoring the direct
+                # observation would repeat an already-completed provider effect.
+                raise RuntimeError("route observation replay crossed routing call sites")
+            if data.get("execution_id") != execution_id:
+                raise RuntimeError("route observation replay crossed execution identity")
+            root_ac_index = data.get("root_ac_index")
+            if type(root_ac_index) is not int:
+                raise RuntimeError("route observation replay has an invalid root AC index")
+            if root_ac_index not in relevant:
+                continue
+            if type(data.get("schema_version")) is not int or data.get("schema_version") != 1:
+                raise RuntimeError("route observation replay has an invalid event schema")
+            if data.get("final_acceptance_declared") is not False:
+                raise RuntimeError("route observation cannot declare Final Gate acceptance")
+            human_handoff_required = data.get("human_handoff_required")
+            if type(human_handoff_required) is not bool:
+                raise RuntimeError("route observation replay has an invalid handoff claim")
+            criterion = seed.acceptance_criteria[root_ac_index]
+            semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+            if data.get("semantic_ac_key") != semantic_ac_key:
+                raise RuntimeError("route observation replay crossed AC identity")
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "route observation replay contains an invalid observation"
+                ) from exc
+            episode_digest = hashlib.sha256(
+                f"{execution_id or session_id}\0{root_ac_index}\0{semantic_ac_key}".encode()
+            ).hexdigest()
+            if observation.episode_id != f"route:{episode_digest}":
+                raise RuntimeError("route observation replay crossed route episode identity")
+            if len(grouped[root_ac_index]) >= MAX_ROUTE_ATTEMPTS:
+                raise RuntimeError("route observation replay exceeds the finite route bound")
+            grouped[root_ac_index].append(
+                (observation, data.get("decision"), human_handoff_required)
+            )
+
+        histories: dict[int, tuple[str, ...]] = {}
+        overrides: dict[int, str] = {}
+        terminals: dict[int, str] = {}
+        for ac_idx, rows in grouped.items():
+            rows.sort(key=lambda row: row[0].attempt_index)
+            if [row[0].attempt_index for row in rows] != list(range(len(rows))):
+                raise RuntimeError("route observation replay has a gap or duplicate")
+            episode_ids = {row[0].episode_id for row in rows}
+            route_ids = tuple(row[0].route_id for row in rows)
+            if len(episode_ids) > 1 or len(route_ids) != len(set(route_ids)):
+                raise RuntimeError("route observation replay is inconsistent")
+            histories[ac_idx] = route_ids
+            if not rows:
+                continue
+            parsed_decisions: list[RouteEscalationDecision | None] = []
+            for row_index, (observation, raw_decision, handoff_claim) in enumerate(rows):
+                live_projection = build_route_compat_projection(
+                    self._route_economics,
+                    model_router=self._model_router,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    effort=observation.effort,
+                )
+                requirements = (
+                    build_compat_escalation_requirements(
+                        live_projection,
+                        effort=observation.effort,
+                    )
+                    if live_projection is not None
+                    else None
+                )
+                if live_projection is None or requirements is None:
+                    raise RuntimeError("route observation replay has no compatible live registry")
+                candidate = next(
+                    (
+                        configured
+                        for configured in live_projection.registry.candidates
+                        if configured.route_id == observation.route_id
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    raise RuntimeError("route observation replay references a removed route")
+                expected_observation = RouteObservation.from_candidate(
+                    candidate,
+                    RouteRequirements(
+                        required_capabilities=requirements.required_capabilities,
+                    ),
+                    episode_id=observation.episode_id,
+                    attempt_index=observation.attempt_index,
+                    verifier_outcome=observation.verifier_outcome,
+                    failure_class=observation.failure_class,
+                    escalation_reason=observation.escalation_reason,
+                )
+                if expected_observation != observation:
+                    raise RuntimeError(
+                        "route observation replay detected route configuration drift"
+                    )
+
+                attempted = route_ids[: row_index + 1]
+                if observation.verifier_outcome is RouteVerifierOutcome.ATTEMPT_SUCCEEDED:
+                    if raw_decision is not None or handoff_claim or row_index != len(rows) - 1:
+                        raise RuntimeError(
+                            "successful route observation has invalid recovery state"
+                        )
+                    parsed_decisions.append(None)
+                    continue
+                if observation.failure_class is None:
+                    raise RuntimeError("failed route observation lost its failure classification")
+                try:
+                    decision = RouteEscalationDecision.from_contract_data(
+                        raw_decision,
+                        registry=live_projection.registry,
+                    )
+                    recomputed = advance_route(
+                        live_projection.registry,
+                        requirements,
+                        current_route_id=observation.route_id,
+                        attempted_route_ids=attempted,
+                        failure_class=observation.failure_class,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "route escalation replay contains an invalid decision"
+                    ) from exc
+                if decision != recomputed or observation.escalation_reason is not decision.reason:
+                    raise RuntimeError("route escalation replay decision drifted from live policy")
+                if handoff_claim is not decision.blocked:
+                    raise RuntimeError("route observation replay has a false handoff claim")
+                if row_index < len(rows) - 1:
+                    next_observation = rows[row_index + 1][0]
+                    selected_snapshot = decision.selected
+                    if (
+                        decision.action is not EscalationAction.ESCALATE_ROUTE
+                        or selected_snapshot is None
+                        or (
+                            selected_snapshot.route_id,
+                            selected_snapshot.model,
+                            selected_snapshot.harness,
+                            selected_snapshot.effort,
+                            selected_snapshot.cost_units,
+                            selected_snapshot.capabilities,
+                        )
+                        != (
+                            next_observation.route_id,
+                            next_observation.model,
+                            next_observation.harness,
+                            next_observation.effort,
+                            next_observation.cost_units,
+                            next_observation.capabilities,
+                        )
+                    ):
+                        raise RuntimeError(
+                            "route observation replay broke its durable successor chain"
+                        )
+                parsed_decisions.append(decision)
+
+            last_observation = rows[-1][0]
+            last_decision = parsed_decisions[-1]
+            if last_observation.verifier_outcome is RouteVerifierOutcome.ATTEMPT_SUCCEEDED:
+                terminals[ac_idx] = (
+                    "A route attempt succeeded before interruption, but Final Gate did not "
+                    "durably accept it; provider replay is sealed and human handoff is required."
+                )
+                continue
+            if last_decision is None:
+                raise RuntimeError("failed route observation lost its durable decision")
+            if last_decision.action is EscalationAction.ESCALATE_ROUTE:
+                assert last_decision.selected is not None
+                overrides[ac_idx] = last_decision.selected.route_id
+            elif last_decision.action is EscalationAction.BLOCKED:
+                terminals[ac_idx] = (
+                    "The durable route set is exhausted or hard-blocked; human handoff is required."
+                )
+            else:
+                raise RuntimeError("route escalation replay contains an unknown action")
+        return histories, overrides, terminals
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(
         self,

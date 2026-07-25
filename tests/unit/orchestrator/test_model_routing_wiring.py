@@ -543,6 +543,59 @@ class TestRunnerRouterConstruction:
         assert routed[0].data["call_site"] == "runner"
 
     @pytest.mark.asyncio
+    async def test_direct_bounded_routing_starts_at_cheapest_and_can_pin_successor(
+        self,
+    ) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._model_router = _claude_router()
+        runner._route_economics = _economics()
+        selected: list = []
+
+        cheapest = await runner._route_call_effort(
+            execution_id="exec_direct",
+            session_id="sess_direct",
+            bounded_escalation=True,
+            selected_route_sink=selected,
+        )
+        successor = await runner._route_call_effort(
+            execution_id="exec_direct",
+            session_id="sess_direct",
+            bounded_escalation=True,
+            route_id_override="compat:claude:standard",
+        )
+
+        assert cheapest["model"] == "haiku-x"
+        assert selected[0].route_id == "compat:claude:frugal"
+        assert successor["model"] == "sonnet-x"
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_routing_requires_native_model_enforcement(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._model_router = _claude_router()
+        runner._route_economics = _economics()
+
+        with pytest.raises(OrchestratorError, match="Route admission blocked"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+                bounded_escalation=True,
+            )
+
+    @pytest.mark.asyncio
     async def test_direct_runner_blocks_catalog_drift_before_provider_kwargs(self) -> None:
         adapter = self._adapter("claude")
         adapter.capabilities = RuntimeCapabilities(

@@ -11,6 +11,7 @@ from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.route_escalation import (
     EscalationAction,
     EscalationReason,
+    RouteEscalationDecision,
     RouteObservation,
     VerifierOutcome,
     advance_route,
@@ -62,7 +63,7 @@ def test_observation_snapshots_route_and_capability_match_without_authority_iden
     payload = observation.to_contract_data()
 
     assert payload["route_id"] == "cheap"
-    assert payload["cost_units"] == 1
+    assert payload["cost_units"] == "1"
     assert payload["capability_match"] is True
     assert "authority_identity" not in payload
     assert json.loads(json.dumps(payload)) == payload
@@ -75,7 +76,7 @@ def test_observation_round_trip_is_deterministic_and_strict() -> None:
         RouteRequirements(),
         episode_id="episode-1",
         attempt_index=0,
-        verifier_outcome=VerifierOutcome.ACCEPTED,
+        verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
     )
 
     assert RouteObservation.from_contract_data(observation.to_contract_data()) == observation
@@ -158,7 +159,7 @@ def test_observation_rejects_overloaded_integer_subclasses() -> None:
             RouteRequirements(),
             episode_id="episode-1",
             attempt_index=ExplodingInt(0),  # type: ignore[arg-type]
-            verifier_outcome=VerifierOutcome.ACCEPTED,
+            verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
         )
     with pytest.raises(ValueError, match="integer"):
         RouteObservation(
@@ -172,19 +173,19 @@ def test_observation_rejects_overloaded_integer_subclasses() -> None:
             capabilities=(),
             required_capabilities=(),
             capability_match=True,
-            verifier_outcome=VerifierOutcome.ACCEPTED,
+            verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
         )
 
 
-def test_observation_rejects_accepted_failure_metadata_and_invalid_blocked_class() -> None:
+def test_observation_rejects_success_failure_metadata_and_invalid_blocked_class() -> None:
     candidate = _route("cheap", cost=1)
-    with pytest.raises(ValueError, match="accepted observations"):
+    with pytest.raises(ValueError, match="successful attempt observations"):
         RouteObservation.from_candidate(
             candidate,
             RouteRequirements(),
             episode_id="episode-1",
             attempt_index=0,
-            verifier_outcome=VerifierOutcome.ACCEPTED,
+            verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
             failure_class=FailureClass.STALL,
         )
     with pytest.raises(ValueError, match="blocked observations"):
@@ -212,6 +213,40 @@ def test_fabrication_escalates_to_next_eligible_route_in_cost_order() -> None:
     assert decision.selected.route_id == "standard"
     assert decision.remaining_route_ids == ("frontier",)
     assert decision.reason is EscalationReason.CLASSIFIED_FAILURE
+
+
+def test_decision_round_trip_is_strict_and_registry_bound() -> None:
+    registry = _registry()
+    decision = advance_route(
+        registry,
+        RouteRequirements(),
+        current_route_id="cheap",
+        attempted_route_ids=("cheap",),
+        failure_class=FailureClass.EVIDENCE_MISSING,
+    )
+
+    assert (
+        RouteEscalationDecision.from_contract_data(
+            decision.to_contract_data(),
+            registry=registry,
+        )
+        == decision
+    )
+
+    malformed = decision.to_contract_data()
+    malformed["unexpected"] = True
+    with pytest.raises(ValueError, match="unsupported shape"):
+        RouteEscalationDecision.from_contract_data(malformed, registry=registry)
+
+    unknown_selected = decision.to_contract_data()
+    unknown_selected["selected_route_id"] = "removed"
+    with pytest.raises(ValueError, match="unknown"):
+        RouteEscalationDecision.from_contract_data(unknown_selected, registry=registry)
+
+    unknown_history = decision.to_contract_data()
+    unknown_history["attempted_route_ids"] = ["removed"]
+    with pytest.raises(ValueError, match="unknown"):
+        RouteEscalationDecision.from_contract_data(unknown_history, registry=registry)
 
 
 def test_escalation_respects_hard_capability_constraints() -> None:
@@ -261,33 +296,30 @@ def test_attempt_history_cannot_skip_an_eligible_route() -> None:
         )
 
 
-def test_retryable_evidence_failure_retries_current_route_without_escalating() -> None:
+@pytest.mark.parametrize(
+    "failure_class",
+    [
+        FailureClass.EVIDENCE_MISSING,
+        FailureClass.EVIDENCE_FORM_MISMATCH,
+        FailureClass.SCOPE_CREEP,
+        FailureClass.STALL,
+    ],
+)
+def test_every_non_blocked_classified_failure_advances_one_route(
+    failure_class: FailureClass,
+) -> None:
     decision = advance_route(
         _registry(),
         RouteRequirements(),
         current_route_id="cheap",
         attempted_route_ids=("cheap",),
-        failure_class=FailureClass.EVIDENCE_MISSING,
+        failure_class=failure_class,
     )
 
-    assert decision.action is EscalationAction.RETRY_SAME_ROUTE
+    assert decision.action is EscalationAction.ESCALATE_ROUTE
     assert decision.selected is not None
-    assert decision.selected.route_id == "cheap"
-    assert decision.reason is EscalationReason.RETRYABLE_FAILURE
-
-
-def test_scope_drift_requests_redispatch_without_authorizing_a_route() -> None:
-    decision = advance_route(
-        _registry(),
-        RouteRequirements(),
-        current_route_id="cheap",
-        attempted_route_ids=("cheap",),
-        failure_class=FailureClass.SCOPE_CREEP,
-    )
-
-    assert decision.action is EscalationAction.REDISPATCH
-    assert decision.selected is None
-    assert decision.reason is EscalationReason.REDISPATCH_REQUIRED
+    assert decision.selected.route_id == "standard"
+    assert decision.reason is EscalationReason.CLASSIFIED_FAILURE
 
 
 def test_hard_block_hands_off_even_when_routes_remain() -> None:

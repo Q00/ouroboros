@@ -1,10 +1,10 @@
 """Bounded route escalation and raw route observations.
 
 This module is the next policy slice after the Route B admission kernel.  It
-does not dispatch a provider, retry a process, or declare acceptance.  It
-only records the result of an attempt and deterministically decides whether a
-classified failure may retry the same route, move to the next eligible route,
-redispatch for decomposition, or end the episode as ``BLOCKED``.
+does not dispatch a provider or declare acceptance.  It records the result of
+an implementation attempt and deterministically decides whether a classified
+route failure may move to the next eligible route or must end the episode as
+``BLOCKED``.
 
 The returned route is configuration evidence.  An effect owner must still
 rebuild and validate a fresh :class:`~ouroboros.orchestrator.route_policy.RouteAdmission`
@@ -19,15 +19,14 @@ from enum import StrEnum
 import re
 
 from ouroboros.core.security import is_credential_shaped
-from ouroboros.orchestrator.failure_taxonomy import (
-    FailureClass,
-    RecoveryAction,
-    policy_for,
+from ouroboros.orchestrator.contract_numbers import (
+    json_safe_nonnegative_int,
+    parse_nonnegative_contract_int,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.route_policy import (
     MAX_ROUTE_CANDIDATES,
     MAX_ROUTE_CAPABILITIES,
-    MAX_ROUTE_COST_UNITS,
     MAX_ROUTE_FIELD_CHARS,
     MAX_ROUTE_ID_CHARS,
     RouteCandidate,
@@ -42,15 +41,13 @@ MAX_ROUTE_ATTEMPTS = MAX_ROUTE_CANDIDATES
 MAX_REASON_CHARS = MAX_ROUTE_FIELD_CHARS
 
 _SAFE_TOKEN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_REASON_CHARS - 1}}}$")
-_SAFE_EPISODE_ID = re.compile(
-    rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_EPISODE_ID_CHARS - 1}}}$"
-)
+_SAFE_EPISODE_ID = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9._:/-]{{0,{MAX_EPISODE_ID_CHARS - 1}}}$")
 
 
 class VerifierOutcome(StrEnum):
-    """The small, durable outcome vocabulary for one route attempt."""
+    """Provisional attempt outcomes; none can declare final acceptance."""
 
-    ACCEPTED = "accepted"
+    ATTEMPT_SUCCEEDED = "attempt_succeeded"
     FAILED = "failed"
     BLOCKED = "blocked"
 
@@ -58,18 +55,14 @@ class VerifierOutcome(StrEnum):
 class EscalationAction(StrEnum):
     """What the deterministic policy permits after an attempt."""
 
-    RETRY_SAME_ROUTE = "retry_same_route"
     ESCALATE_ROUTE = "escalate_route"
-    REDISPATCH = "redispatch"
     BLOCKED = "blocked"
 
 
 class EscalationReason(StrEnum):
     """Stable reason codes; arbitrary verifier prose is never persisted."""
 
-    RETRYABLE_FAILURE = "retryable_failure"
     CLASSIFIED_FAILURE = "classified_failure"
-    REDISPATCH_REQUIRED = "redispatch_required"
     HUMAN_HANDOFF_REQUIRED = "human_handoff_required"
     ROUTES_EXHAUSTED = "routes_exhausted"
     NO_ELIGIBLE_ROUTE = "no_eligible_route"
@@ -202,8 +195,8 @@ class RouteObservation:
             raise ValueError("attempt_index exceeds its bound")
         if type(self.cost_units) is not int:
             raise ValueError("cost_units must be an integer")
-        if not 0 <= self.cost_units <= MAX_ROUTE_COST_UNITS:
-            raise ValueError("cost_units exceeds its bound")
+        if self.cost_units < 0:
+            raise ValueError("cost_units must be >= 0")
         if not isinstance(self.capability_match, bool):
             raise ValueError("capability_match must be a boolean")
         if not isinstance(self.verifier_outcome, VerifierOutcome):
@@ -227,13 +220,16 @@ class RouteObservation:
         expected_match = set(required).issubset(capabilities)
         if self.capability_match is not expected_match:
             raise ValueError("capability_match does not match the route capabilities")
-        if self.verifier_outcome is VerifierOutcome.ACCEPTED:
+        if self.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
             if self.failure_class is not None or self.escalation_reason is not None:
-                raise ValueError("accepted observations cannot carry failure metadata")
+                raise ValueError("successful attempt observations cannot carry failure metadata")
         else:
             if self.failure_class is None:
                 raise ValueError("failed observations require a failure_class")
-            if self.verifier_outcome is VerifierOutcome.BLOCKED and self.failure_class is not FailureClass.BLOCKED:
+            if (
+                self.verifier_outcome is VerifierOutcome.BLOCKED
+                and self.failure_class is not FailureClass.BLOCKED
+            ):
                 raise ValueError("blocked observations require the BLOCKED failure class")
         object.__setattr__(self, "episode_id", episode_id)
         object.__setattr__(self, "route_id", route_id)
@@ -271,7 +267,9 @@ class RouteObservation:
             cost_units=candidate.cost_units,
             capabilities=candidate.capabilities,
             required_capabilities=requirements.required_capabilities,
-            capability_match=set(requirements.required_capabilities).issubset(candidate.capabilities),
+            capability_match=set(requirements.required_capabilities).issubset(
+                candidate.capabilities
+            ),
             verifier_outcome=verifier_outcome,
             failure_class=failure_class,
             escalation_reason=escalation_reason,
@@ -286,7 +284,7 @@ class RouteObservation:
             "model": self.model,
             "harness": self.harness,
             "effort": self.effort,
-            "cost_units": self.cost_units,
+            "cost_units": json_safe_nonnegative_int(self.cost_units),
             "capabilities": list(self.capabilities),
             "required_capabilities": list(self.required_capabilities),
             "capability_match": self.capability_match,
@@ -319,51 +317,78 @@ class RouteObservation:
             raise ValueError("route observation has an unsupported shape")
         try:
             version = value["version"]
+            episode_id = value["episode_id"]
+            attempt_index = value["attempt_index"]
+            route_id = value["route_id"]
+            model = value["model"]
+            harness = value["harness"]
+            effort = value["effort"]
+            raw_cost_units = value["cost_units"]
+            capabilities = value["capabilities"]
+            required = value["required_capabilities"]
+            capability_match = value["capability_match"]
+            raw_outcome = value["verifier_outcome"]
+            raw_failure = value["failure_class"]
+            raw_reason = value["escalation_reason"]
         except Exception as exc:
             raise ValueError("route observation has an unsupported shape") from exc
         if type(version) is not int or version != ROUTE_OBSERVATION_CONTRACT_VERSION:
             raise ValueError("route observation has an unsupported shape")
-        effort = value["effort"]
-        if effort is not None and not isinstance(effort, str):
-            raise ValueError("route observation effort is invalid")
-        raw_failure = value["failure_class"]
+        if (
+            type(episode_id) is not str
+            or type(attempt_index) is not int
+            or type(route_id) is not str
+            or type(model) is not str
+            or type(harness) is not str
+            or (effort is not None and type(effort) is not str)
+            or type(capability_match) is not bool
+        ):
+            raise ValueError("route observation scalar fields are invalid")
         failure_class: FailureClass | None
         if raw_failure is None:
             failure_class = None
         else:
+            if type(raw_failure) is not str:
+                raise ValueError("route observation failure_class is invalid")
             try:
                 failure_class = FailureClass(raw_failure)
             except (TypeError, ValueError) as exc:
                 raise ValueError("route observation failure_class is invalid") from exc
-        raw_reason = value["escalation_reason"]
         reason: EscalationReason | None
         if raw_reason is None:
             reason = None
         else:
+            if type(raw_reason) is not str:
+                raise ValueError("route observation escalation_reason is invalid")
             try:
                 reason = EscalationReason(raw_reason)
             except (TypeError, ValueError) as exc:
                 raise ValueError("route observation escalation_reason is invalid") from exc
+        if type(raw_outcome) is not str:
+            raise ValueError("route observation verifier_outcome is invalid")
         try:
-            outcome = VerifierOutcome(value["verifier_outcome"])
+            outcome = VerifierOutcome(raw_outcome)
         except (TypeError, ValueError) as exc:
             raise ValueError("route observation verifier_outcome is invalid") from exc
-        capabilities = value["capabilities"]
-        required = value["required_capabilities"]
-        if not isinstance(capabilities, Sequence) or isinstance(capabilities, (str, bytes, bytearray)):
+        if type(capabilities) is not list:
             raise ValueError("route observation capabilities must be a list")
-        if not isinstance(required, Sequence) or isinstance(required, (str, bytes, bytearray)):
+        if type(required) is not list:
             raise ValueError("route observation required_capabilities must be a list")
+        cost_units = parse_nonnegative_contract_int(raw_cost_units)
+        if cost_units is None:
+            raise ValueError("route observation cost_units is invalid")
         return cls(
-            episode_id=value["episode_id"],  # type: ignore[arg-type]
-            attempt_index=value["attempt_index"],  # type: ignore[arg-type]
-            route_id=value["route_id"],  # type: ignore[arg-type]
-            model=value["model"],  # type: ignore[arg-type]
-            harness=value["harness"],  # type: ignore[arg-type]
+            episode_id=episode_id,
+            attempt_index=attempt_index,
+            route_id=route_id,
+            model=model,
+            harness=harness,
             effort=effort,
-            cost_units=value["cost_units"],  # type: ignore[arg-type]
+            cost_units=cost_units,
             capabilities=tuple(
-                _bounded_ordered(capabilities, field="capabilities", max_count=MAX_ROUTE_CAPABILITIES)
+                _bounded_ordered(
+                    capabilities, field="capabilities", max_count=MAX_ROUTE_CAPABILITIES
+                )
             ),
             required_capabilities=tuple(
                 _bounded_ordered(
@@ -372,7 +397,7 @@ class RouteObservation:
                     max_count=MAX_ROUTE_CAPABILITIES,
                 )
             ),
-            capability_match=value["capability_match"],  # type: ignore[arg-type]
+            capability_match=capability_match,
             verifier_outcome=outcome,
             failure_class=failure_class,
             escalation_reason=reason,
@@ -409,13 +434,27 @@ class RouteEscalationDecision:
         )
         if set(attempted).intersection(remaining):
             raise ValueError("a route cannot be attempted and remaining")
-        if self.action in {EscalationAction.RETRY_SAME_ROUTE, EscalationAction.ESCALATE_ROUTE}:
-            if not isinstance(self.selected, RouteCandidate):
-                raise ValueError("route actions require a selected candidate")
-        elif self.selected is not None:
-            raise ValueError("terminal/non-route actions cannot select a candidate")
         if not isinstance(self.reason, EscalationReason):
             raise ValueError("reason must be an EscalationReason")
+        if self.action is EscalationAction.ESCALATE_ROUTE:
+            if not isinstance(self.selected, RouteCandidate):
+                raise ValueError("route actions require a selected candidate")
+            if self.selected.route_id in attempted or self.selected.route_id in remaining:
+                raise ValueError("selected route must be the unattempted immediate successor")
+            if self.failure_class is FailureClass.BLOCKED:
+                raise ValueError("blocked failures cannot escalate")
+            if self.reason is not EscalationReason.CLASSIFIED_FAILURE:
+                raise ValueError("route escalation requires the classified-failure reason")
+        elif self.selected is not None:
+            raise ValueError("terminal/non-route actions cannot select a candidate")
+        if self.action is EscalationAction.BLOCKED:
+            if self.reason is EscalationReason.ROUTES_EXHAUSTED and remaining:
+                raise ValueError("route exhaustion cannot retain remaining routes")
+            if (
+                self.reason is EscalationReason.HUMAN_HANDOFF_REQUIRED
+                and self.failure_class is not FailureClass.BLOCKED
+            ):
+                raise ValueError("human handoff requires a blocked failure")
         object.__setattr__(self, "attempted_route_ids", attempted)
         object.__setattr__(self, "remaining_route_ids", remaining)
 
@@ -434,6 +473,91 @@ class RouteEscalationDecision:
             "reason": self.reason.value,
         }
 
+    @classmethod
+    def from_contract_data(
+        cls,
+        value: object,
+        *,
+        registry: RouteRegistry,
+    ) -> RouteEscalationDecision:
+        """Strictly parse a persisted decision against its live registry."""
+        if not isinstance(registry, RouteRegistry):
+            raise TypeError("registry must be a RouteRegistry")
+        if not isinstance(value, Mapping) or not _has_bounded_mapping_keys(
+            value,
+            expected=frozenset(
+                {
+                    "version",
+                    "action",
+                    "failure_class",
+                    "selected_route_id",
+                    "attempted_route_ids",
+                    "remaining_route_ids",
+                    "reason",
+                }
+            ),
+        ):
+            raise ValueError("route escalation decision has an unsupported shape")
+        try:
+            version = value["version"]
+            raw_action = value["action"]
+            raw_failure = value["failure_class"]
+            raw_reason = value["reason"]
+            attempted = value["attempted_route_ids"]
+            remaining = value["remaining_route_ids"]
+            selected_id = value["selected_route_id"]
+        except Exception as exc:
+            raise ValueError("route escalation decision could not be read") from exc
+        if type(version) is not int or version != ROUTE_OBSERVATION_CONTRACT_VERSION:
+            raise ValueError("route escalation decision version is invalid")
+        if (
+            type(raw_action) is not str
+            or type(raw_failure) is not str
+            or type(raw_reason) is not str
+        ):
+            raise ValueError("route escalation decision enum is invalid")
+        try:
+            action = EscalationAction(raw_action)
+            failure = FailureClass(raw_failure)
+            reason = EscalationReason(raw_reason)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("route escalation decision enum is invalid") from exc
+        if type(attempted) is not list:
+            raise ValueError("attempted_route_ids must be a list")
+        if type(remaining) is not list:
+            raise ValueError("remaining_route_ids must be a list")
+        if selected_id is not None and type(selected_id) is not str:
+            raise ValueError("selected_route_id is invalid")
+        selected = _candidate_by_id(registry, selected_id) if selected_id is not None else None
+        if selected_id is not None and selected is None:
+            raise ValueError("selected_route_id is unknown")
+        decision = cls(
+            action=action,
+            failure_class=failure,
+            selected=selected,
+            attempted_route_ids=tuple(
+                _bounded_ordered(
+                    attempted,
+                    field="attempted_route_ids",
+                    max_count=MAX_ROUTE_ATTEMPTS,
+                )
+            ),  # type: ignore[arg-type]
+            remaining_route_ids=tuple(
+                _bounded_ordered(
+                    remaining,
+                    field="remaining_route_ids",
+                    max_count=MAX_ROUTE_CANDIDATES,
+                )
+            ),  # type: ignore[arg-type]
+            reason=reason,
+        )
+        known = {candidate.route_id for candidate in registry.candidates}
+        if not set(decision.attempted_route_ids).issubset(known) or not set(
+            decision.remaining_route_ids
+        ).issubset(known):
+            raise ValueError("route escalation decision references an unknown route")
+        return decision
+
 
 def _normalize_failure(value: FailureClass | str) -> FailureClass:
     try:
@@ -443,7 +567,9 @@ def _normalize_failure(value: FailureClass | str) -> FailureClass:
 
 
 def _candidate_by_id(registry: RouteRegistry, route_id: str) -> RouteCandidate | None:
-    return next((candidate for candidate in registry.candidates if candidate.route_id == route_id), None)
+    return next(
+        (candidate for candidate in registry.candidates if candidate.route_id == route_id), None
+    )
 
 
 def advance_route(
@@ -498,9 +624,7 @@ def advance_route(
     if any(route_id not in attempted for route_id in eligible[:current_position]):
         raise ValueError("attempt history skipped an eligible route")
     remaining = tuple(route_id for route_id in eligible if route_id not in attempted)
-    policy = policy_for(failure)
-
-    if failure is FailureClass.BLOCKED or policy.action is RecoveryAction.ESCALATE_HUMAN:
+    if failure is FailureClass.BLOCKED:
         return RouteEscalationDecision(
             EscalationAction.BLOCKED,
             failure,
@@ -509,63 +633,33 @@ def advance_route(
             remaining,
             EscalationReason.HUMAN_HANDOFF_REQUIRED,
         )
-    if policy.action is RecoveryAction.REDISPATCH:
+    if not remaining:
         return RouteEscalationDecision(
-            EscalationAction.REDISPATCH,
+            EscalationAction.BLOCKED,
             failure,
             None,
             attempted,
             remaining,
-            EscalationReason.REDISPATCH_REQUIRED,
+            EscalationReason.ROUTES_EXHAUSTED,
         )
-    if policy.action is RecoveryAction.RETRY:
-        candidate = _candidate_by_id(registry, current)
-        if candidate is None:
-            return RouteEscalationDecision(
-                EscalationAction.BLOCKED,
-                failure,
-                None,
-                attempted,
-                remaining,
-                EscalationReason.NO_ELIGIBLE_ROUTE,
-            )
+    selected = _candidate_by_id(registry, remaining[0])
+    if selected is None:  # pragma: no cover - registry/admission invariant
         return RouteEscalationDecision(
-            EscalationAction.RETRY_SAME_ROUTE,
+            EscalationAction.BLOCKED,
             failure,
-            candidate,
+            None,
             attempted,
             remaining,
-            EscalationReason.RETRYABLE_FAILURE,
+            EscalationReason.NO_ELIGIBLE_ROUTE,
         )
-    if policy.action is RecoveryAction.ESCALATE_MODEL:
-        if not remaining:
-            return RouteEscalationDecision(
-                EscalationAction.BLOCKED,
-                failure,
-                None,
-                attempted,
-                remaining,
-                EscalationReason.ROUTES_EXHAUSTED,
-            )
-        selected = _candidate_by_id(registry, remaining[0])
-        if selected is None:  # pragma: no cover - registry/admission invariant
-            return RouteEscalationDecision(
-                EscalationAction.BLOCKED,
-                failure,
-                None,
-                attempted,
-                remaining,
-                EscalationReason.NO_ELIGIBLE_ROUTE,
-            )
-        return RouteEscalationDecision(
-            EscalationAction.ESCALATE_ROUTE,
-            failure,
-            selected,
-            attempted,
-            remaining[1:],
-            EscalationReason.CLASSIFIED_FAILURE,
-        )
-    raise ValueError(f"unsupported recovery action: {policy.action!r}")
+    return RouteEscalationDecision(
+        EscalationAction.ESCALATE_ROUTE,
+        failure,
+        selected,
+        attempted,
+        remaining[1:],
+        EscalationReason.CLASSIFIED_FAILURE,
+    )
 
 
 __all__ = [
