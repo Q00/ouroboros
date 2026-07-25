@@ -343,6 +343,7 @@ def build_route_compat_projection(
         or model_router.base_tier not in MODEL_TIER_LADDER
         or type(model_router.escalation_retry_threshold) is not int
         or model_router.escalation_retry_threshold < 1
+        or model_router.escalation_retry_threshold != economics.escalation_threshold
     ):
         return None
     try:
@@ -512,10 +513,9 @@ def _compat_requirements(
             max_count=MAX_ROUTE_CAPABILITIES,
         )
     except (TypeError, ValueError):
-        # Preserve fail-closed semantics for a malformed hostile iterable.  A
-        # capability that no compatibility candidate advertises guarantees a
-        # genuine blocked Kernel result instead of silently dropping constraints.
-        normalized_required_capabilities = (INVALID_CAPABILITY,)
+        # A sentinel can collide with configured capabilities. Return no
+        # requirements so callers produce a guaranteed Kernel block instead.
+        return None
     requirements = RouteRequirements(
         required_capabilities=normalized_required_capabilities,
         allowed_harnesses=(projection.runtime_backend,),

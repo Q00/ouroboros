@@ -105,6 +105,7 @@ def _frontier_custom_economics() -> EconomicsConfig:
 def _use_frontier_custom_routing(runner: OrchestratorRunner) -> None:
     runner._route_economics = _frontier_custom_economics()
     runner._model_router = _frontier_custom_router()
+    runner._requested_model_tier = "frontier"
 
 
 def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing survives") -> Seed:
@@ -250,13 +251,14 @@ def test_resume_rejects_router_policy_that_validates_its_own_projection() -> Non
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
-def test_pre_admission_v2_contract_migrates_once_to_v3() -> None:
+def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
     persisted["version"] = 2
     routing = persisted["model_routing"]
     del routing["reasoning_effort"]
     del routing["route_compat"]
+    del routing["requested_model_tier"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
     )
@@ -274,8 +276,47 @@ def test_pre_admission_v2_contract_migrates_once_to_v3() -> None:
     assert "route_compat" in resumed._execution_contract["model_routing"]
 
 
-@pytest.mark.parametrize("missing", ["reasoning_effort", "route_compat"])
-def test_v3_contract_missing_admission_field_is_not_treated_as_legacy(missing: str) -> None:
+def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> None:
+    original = _runner(base_model_tier="frontier")
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
+    assert resumed._execution_contract["model_routing"]["requested_model_tier"] == "frontier"
+
+
+def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    del routing["reasoning_effort"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("missing", ["reasoning_effort", "route_compat", "requested_model_tier"])
+def test_current_contract_missing_admission_field_is_not_treated_as_legacy(
+    missing: str,
+) -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract())
     routing = persisted["model_routing"]
@@ -305,6 +346,7 @@ def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
     original = _runner()
     original._route_economics = economics
     original._model_router = router
+    original._requested_model_tier = "frontier"
 
     persisted = original._build_execution_contract()
     encoded = json.dumps(persisted, sort_keys=True)
@@ -323,6 +365,23 @@ def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: json.loads(encoded)})
         is False
     )
+
+
+@pytest.mark.parametrize("requested_tier", ["frugal", "frontier"])
+def test_resume_without_argument_preserves_persisted_non_default_tier(
+    requested_tier: str,
+) -> None:
+    original = _runner(base_model_tier=requested_tier)
+    persisted = original._build_execution_contract()
+    assert persisted["model_routing"]["requested_model_tier"] == requested_tier
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is False
+    assert resumed._requested_model_tier == requested_tier
+    assert resumed._model_router is not None
+    assert resumed._model_router.base_tier == requested_tier
 
 
 @pytest.mark.parametrize(

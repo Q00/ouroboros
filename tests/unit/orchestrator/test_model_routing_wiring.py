@@ -644,7 +644,42 @@ class TestRunnerRouterConstruction:
 
         store.append.side_effect = _append
 
-        with pytest.raises(OrchestratorError, match="could not authorize"):
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_advised_direct_runner_revalidates_cost_after_telemetry(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            economics = _economics()
+            tiers = dict(economics.tiers)
+            tiers["standard"] = TierConfig(
+                cost_factor=999,
+                models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+            )
+            runner._route_economics = EconomicsConfig(
+                default_tier=economics.default_tier,
+                escalation_threshold=economics.escalation_threshold,
+                tiers=tiers,
+            )
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
             await runner._route_call_effort(
                 execution_id="exec_direct",
                 session_id="sess_direct",

@@ -164,6 +164,17 @@ def test_projection_rejects_router_catalog_or_backend_drift() -> None:
     )
 
 
+def test_projection_rejects_router_escalation_drift_from_economics() -> None:
+    assert (
+        build_route_compat_projection(
+            _economics(),
+            model_router=replace(_router(), escalation_retry_threshold=999),
+            runtime_backend="claude",
+        )
+        is None
+    )
+
+
 def test_projection_bounds_hostile_capability_iterables() -> None:
     def infinite():
         while True:
@@ -187,6 +198,22 @@ def test_projection_bounds_hostile_capability_iterables() -> None:
         required_capabilities=infinite(),
     )
     assert blocked.disposition is RouteDecisionDisposition.BLOCKED
+
+    sentinel_projection = build_route_compat_projection(
+        _economics(),
+        model_router=_router(),
+        runtime_backend="claude",
+        effort="medium",
+        capabilities=("compat:invalid-capability",),
+    )
+    assert sentinel_projection is not None
+    sentinel_collision = admit_compat_route(
+        sentinel_projection,
+        model_decision=ModelDecision("standard", "sonnet-x", MODEL_MODE_ENFORCED),
+        effort="medium",
+        required_capabilities=infinite(),
+    )
+    assert sentinel_collision.disposition is RouteDecisionDisposition.BLOCKED
 
 
 def test_persisted_mapping_keys_are_checked_with_a_finite_budget() -> None:
@@ -256,7 +283,9 @@ def test_projection_rejects_unordered_capabilities_and_invalid_router_bounds() -
         escalation_retry_threshold=10**9 + 1,
     )
     huge_threshold_projection = build_route_compat_projection(
-        _economics(), model_router=huge_threshold_router, runtime_backend="claude"
+        _economics().model_copy(update={"escalation_threshold": 10**9 + 1}),
+        model_router=huge_threshold_router,
+        runtime_backend="claude",
     )
     assert huge_threshold_projection is not None
     assert huge_threshold_projection.escalation_retry_threshold == 10**9 + 1

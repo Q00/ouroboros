@@ -611,8 +611,9 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 3
+EXECUTION_CONTRACT_VERSION = 4
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
+PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -926,6 +927,8 @@ class OrchestratorRunner:
     def _authoritative_model_router(
         self,
         preferences: ResolvedExecutionPreferences,
+        *,
+        requested_model_tier: str | None,
     ) -> ModelRouter | None:
         """Rebuild current route policy without trusting a mutable/restored router."""
 
@@ -937,7 +940,7 @@ class OrchestratorRunner:
             self._route_economics,
             runtime_backend=getattr(self._adapter, "runtime_backend", None),
             pinned_model=self._model_pin,
-            base_tier_override=self._requested_model_tier,
+            base_tier_override=requested_model_tier,
         )
         if router is not None and not preferences.child_model_lowering_enabled:
             router = replace(router, child_tier=router.base_tier)
@@ -1066,6 +1069,7 @@ class OrchestratorRunner:
             admitted_execute_model_kwargs,
             build_route_compat_projection,
             deserialize_route_compat_contract,
+            validate_compat_admission,
         )
 
         investment_assessment = assess_investment(None)
@@ -1250,6 +1254,20 @@ class OrchestratorRunner:
                 effort=live_effort_decision.level,
             )
             assert route_admission is not None
+            if not validate_compat_admission(
+                live_projection,
+                route_admission,
+                model_decision=model_decision,
+                effort=live_effort_decision.level,
+            ):
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "live route compatibility changed",
+                        "call_site": "runner",
+                    },
+                )
             model_kwargs = admitted_execute_model_kwargs(
                 route_admission,
                 model_decision=model_decision,
@@ -3730,6 +3748,7 @@ class OrchestratorRunner:
 
         guidance_bundle = self._ensure_new_run_guidance()
         routing_contract = serialize_model_router(self._model_router)
+        routing_contract["requested_model_tier"] = self._requested_model_tier
         # Effort routing is independent of model-tier routing. Persist it even
         # when the optional model router is dormant so resume cannot silently
         # adopt a different provider-effect policy.
@@ -4050,6 +4069,7 @@ class OrchestratorRunner:
             or raw_version
             not in {
                 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
+                PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -4059,6 +4079,7 @@ class OrchestratorRunner:
             )
 
         migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
+        migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
@@ -4077,15 +4098,22 @@ class OrchestratorRunner:
                 },
             )
 
-        # Version 2 predates the independent effort and Route B compatibility
-        # fields. Only that exact pre-admission shape is migratable; a malformed
-        # v3 contract must never fall through this compatibility path.
+        # Version 2 predates effort/Route B fields; version 3 predates the
+        # independent requested-tier field. Only those exact shapes migrate.
+        # A malformed current contract must never fall through either path.
         if migrate_v2_contract and (
-            "reasoning_effort" in raw_routing or "route_compat" in raw_routing
+            "reasoning_effort" in raw_routing
+            or "route_compat" in raw_routing
+            or "requested_model_tier" in raw_routing
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"invalid": "version 2 routing extension"},
+            )
+        if migrate_v3_contract and "requested_model_tier" in raw_routing:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "version 3 routing extension"},
             )
 
         self._restore_guidance_contract(raw_contract)
@@ -4100,6 +4128,7 @@ class OrchestratorRunner:
         persisted_runtime_backend = raw_routing.get("runtime_backend")
         persisted_llm_backend = raw_routing.get("llm_backend")
         persisted_permission_mode = raw_routing.get("permission_mode")
+        persisted_requested_model_tier = raw_routing.get("requested_model_tier")
         persisted_reasoning_effort = (
             self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
         )
@@ -4132,6 +4161,14 @@ class OrchestratorRunner:
                 and (
                     "reasoning_effort" not in raw_routing
                     or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
+                )
+            )
+            or (
+                not (migrate_v2_contract or migrate_v3_contract)
+                and (
+                    "requested_model_tier" not in raw_routing
+                    or persisted_requested_model_tier
+                    not in {None, "frugal", "standard", "frontier"}
                 )
             )
             or not isinstance(persisted_resume_workspace, Mapping)
@@ -4268,6 +4305,15 @@ class OrchestratorRunner:
                 message="Cannot resume with an invalid execution contract",
                 details={"invalid": "model_routing"},
             )
+        if (
+            not (migrate_v2_contract or migrate_v3_contract)
+            and restored_router is None
+            and persisted_requested_model_tier is not None
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": "requested_model_tier"},
+            )
 
         if (
             restored_router is not None
@@ -4280,7 +4326,14 @@ class OrchestratorRunner:
                     "execution_runtime_backend": persisted_runtime_backend,
                 },
             )
-        authoritative_router = self._authoritative_model_router(persisted_preferences)
+        if migrate_v2_contract or migrate_v3_contract:
+            persisted_requested_model_tier = (
+                restored_router.base_tier if restored_router is not None else None
+            )
+        authoritative_router = self._authoritative_model_router(
+            persisted_preferences,
+            requested_model_tier=persisted_requested_model_tier,
+        )
         if (
             not self._model_routing_override_explicit
             and restored_router is not None
@@ -4405,7 +4458,8 @@ class OrchestratorRunner:
             return self._execution_contract != raw_contract
 
         self._model_router = restored_router
-        if migrate_v2_contract:
+        self._requested_model_tier = persisted_requested_model_tier
+        if migrate_v2_contract or migrate_v3_contract:
             replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
