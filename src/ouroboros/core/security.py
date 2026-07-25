@@ -85,6 +85,34 @@ _CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"),
 )
 
+# The stable authority grammar permits ``-`` and ``_`` inside a descriptor,
+# so anchored provider patterns must also be checked at every non-alphanumeric
+# boundary.  Otherwise ``runtime:prod-ghp_...`` and ``runtime:prod-hvs....``
+# would evade the segment-based checks below.
+_EMBEDDED_CREDENTIAL_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?<![A-Za-z0-9])gh[oprsu]_"),
+    re.compile(r"(?<![A-Za-z0-9])github_pat_"),
+    re.compile(r"(?<![A-Za-z0-9])sk-"),
+    re.compile(r"(?<![A-Za-z0-9])sk_(?:live|test)_"),
+    re.compile(r"(?<![A-Za-z0-9])rk_(?:live|test)_"),
+    re.compile(r"(?<![A-Za-z0-9])pk-"),
+    re.compile(r"(?<![A-Za-z0-9])api-"),
+    re.compile(r"(?<![A-Za-z0-9])xox[bpa]-"),
+    re.compile(r"(?<![A-Za-z0-9])xapp-"),
+    re.compile(r"(?<![A-Za-z0-9])npm_"),
+    re.compile(r"(?<![A-Za-z0-9])pypi-"),
+    re.compile(r"(?<![A-Za-z0-9])glpat-"),
+    re.compile(r"(?<![A-Za-z0-9])hf_"),
+    re.compile(r"(?<![A-Za-z0-9])SG\.[A-Za-z0-9]{22}\.[A-Za-z0-9]{43}"),
+    re.compile(r"(?<![A-Za-z0-9])hvs\.[A-Za-z0-9_-]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35,}"),
+    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),
+    re.compile(r"(?<![A-Za-z0-9])ASIA[0-9A-Z]{16}"),
+    re.compile(
+        r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    ),
+)
+
 _CREDENTIAL_NAMESPACE_LABELS = frozenset(
     (
         *SENSITIVE_FIELD_NAMES,
@@ -101,15 +129,10 @@ _COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
         "privatekey",
         "password",
         "passwd",
-        "secret",
-        "token",
-        "credential",
-        "credentials",
-        "authorization",
-        "key",
-        "private",
-        "bearer",
     }
+)
+_COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS = frozenset(
+    {"secret", "token", "credential", "credentials", "authorization", "key", "private", "bearer"}
 )
 _SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
@@ -155,6 +178,14 @@ def _is_credential_namespace_label(value: str) -> bool:
                 safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
             }
             return suffix not in safe_suffixes
+    # Generic one-word labels overlap with ordinary identifiers (``keycloak``
+    # and ``tokenizer``). Treat them as compact credentials only when the
+    # suffix has the stronger opaque-value signal of a digit.
+    for compact_credential_label in _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS:
+        if compact_label.startswith(compact_credential_label):
+            suffix = compact_label[len(compact_credential_label) :]
+            if suffix and any(character.isdigit() for character in suffix):
+                return True
     if label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
         ("_key", "_token", "_secret", "_credential")
     ):
@@ -181,6 +212,8 @@ def is_credential_shaped(value: str) -> bool:
     if not normalized:
         return False
     if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
+        return True
+    if any(pattern.search(normalized) for pattern in _EMBEDDED_CREDENTIAL_SHAPES):
         return True
     candidates = [normalized]
     # Preserve the opaque payload after a stable namespace delimiter so a

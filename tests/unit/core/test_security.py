@@ -148,6 +148,9 @@ class TestSensitiveDetection:
         assert is_credential_shaped("github:read") is False
         assert is_credential_shaped("token-budget") is False
         assert is_credential_shaped("auth-plane:default") is False
+        assert is_credential_shaped("keycloak") is False
+        assert is_credential_shaped("tokenizer") is False
+        assert is_credential_shaped("privateer") is False
 
     def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
         for value in (
@@ -175,6 +178,9 @@ class TestSensitiveDetection:
             "runtime:password123",
             "runtime:keyabc123",
             "runtime:openai-api-key-sk-abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-ghp_abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-sk_live_abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-hvs.abcdefghijklmnopqrstuvwxyz",
             "runtime:clientsecret:opaquevalue",
             "runtime:accesstoken:opaquevalue",
             "runtime:accesskey:opaquevalue",
