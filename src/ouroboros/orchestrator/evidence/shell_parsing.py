@@ -77,18 +77,39 @@ def _shell_command_body(command: str) -> str | None:
         parts = shlex.split(command)
     except ValueError:
         return None
-    if len(parts) < 3:
+    return _shell_command_body_from_argv(tuple(parts))
+
+
+_SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"})
+
+
+def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
+    """Return a shell ``-c`` body only while parsing the option prefix.
+
+    Once a script operand is encountered, later values are positional
+    arguments even when they happen to be spelled ``-c``. Options that consume
+    a following value remain within the prefix but cannot expose that value as
+    a command body.
+    """
+    if len(argv) < 3:
         return None
-    shell_name = Path(parts[0]).name
+    shell_name = Path(argv[0]).name
     if shell_name not in {"bash", "zsh", "sh"}:
         return None
-    option_index = next(
-        (index for index, part in enumerate(parts[1:], start=1) if part in {"-c", "-lc", "-cl"}),
-        None,
-    )
-    if option_index is None or option_index + 1 >= len(parts):
-        return None
-    return parts[option_index + 1].strip()
+    index = 1
+    while index < len(argv):
+        option = argv[index]
+        if option in {"-c", "-lc", "-cl"}:
+            if index + 1 >= len(argv):
+                return None
+            return argv[index + 1].strip()
+        if option in _SHELL_OPTIONS_WITH_ARGUMENT:
+            index += 2
+            continue
+        if option == "--" or option == "-" or not option.startswith(("-", "+")):
+            return None
+        index += 1
+    return None
 
 
 def _test_invocation_from_shell_body(body: str) -> str | None:

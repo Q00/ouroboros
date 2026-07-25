@@ -627,6 +627,13 @@ class TestDeliverVerdict:
                 tool_input={"command": command},
                 runtime_cwd=str(tmp_path),
             ),
+            _tool_completed_event(
+                identity=identity,
+                execution_id="exec_frugal",
+                event_id="evt-test-completed",
+                tool_name="Bash",
+                tool_call_id="evt-test",
+            ),
             # Same command from a different failed attempt must not make the
             # accepted attempt ambiguous.
             _tool_start_event(

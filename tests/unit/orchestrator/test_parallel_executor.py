@@ -165,6 +165,8 @@ def test_deliver_matching_allows_inert_quote_spelling_differences() -> None:
             {"cmd": ["/bin/zsh", "-lc", "pytest tests/test_app.py"]},
             "pytest tests/test_app.py",
         ),
+        ({"cmd": ["pytest", "--maxfail=1"]}, "pytest --maxfail=1"),
+        ({"cmd": ["pytest", "-k", "time"]}, "pytest -k time"),
         ({"cmd": ["python", "script.py", ""]}, "python script.py ''"),
         ({"command_line": "ruff check src"}, "ruff check src"),
     ),
@@ -193,6 +195,54 @@ def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_structured",)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"tool_name": "Bash", "command": "bash /dev/null -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "/dev/null", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+    ),
+)
+def test_deliver_matching_does_not_extract_shell_body_after_script_operand(
+    payload: dict[str, object],
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_payload_entry(handle="ev_script", payload=payload),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="pytest tests/test_app.py",
+    )
+
+
+def test_deliver_matching_preserves_legacy_json_scalar_preview() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_true",
+                payload={"tool_name": "Bash", "args_preview": "true"},
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="true",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_true",)
 
 
 def test_tests_passed_requires_a_successful_test_command() -> None:

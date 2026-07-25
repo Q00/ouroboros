@@ -211,6 +211,7 @@ from ouroboros.orchestrator.evidence.shell_parsing import (  # noqa: F401
     _segments_after_safe_shell_preamble,
     _segments_after_safe_shell_preamble_with_pipefail,
     _shell_command_body,
+    _shell_command_body_from_argv,
     _single_command_after_safe_shell_preamble,
     _single_exact_command_after_safe_shell_preamble,
     _strip_command_output_plumbing,
@@ -1308,6 +1309,11 @@ def _journal_command_values(payload: Mapping[str, object]) -> tuple[object, ...]
                 append_from(decoded)
             elif isinstance(decoded, str) and decoded.strip():
                 values.append(decoded.strip())
+            else:
+                # JSON scalars and unsupported containers may be legacy raw
+                # command spellings (for example ``true``). Preserve the
+                # preview rather than silently dropping exact evidence.
+                values.append(preview.strip())
     return tuple(values)
 
 
@@ -1373,19 +1379,7 @@ def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
     return tuple(signatures)
 
 
-def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
-    if len(argv) < 3 or Path(argv[0]).name not in {"bash", "zsh", "sh"}:
-        return None
-    option_index = next(
-        (index for index, part in enumerate(argv[1:], start=1) if part in {"-c", "-lc", "-cl"}),
-        None,
-    )
-    if option_index is None or option_index + 1 >= len(argv):
-        return None
-    return argv[option_index + 1].strip()
-
-
-_SHELL_ACTIVE_UNQUOTED = frozenset("$*?[]><;|&`(){}~#!=^\n\r")
+_SHELL_ACTIVE_UNQUOTED = frozenset("$*?[]><;|&`(){}~#!^\n\r")
 _SHELL_ACTIVE_DOUBLE_QUOTED = frozenset("$`")
 _SHELL_RESERVED_WORDS = frozenset(
     {
@@ -1449,7 +1443,9 @@ def _shell_text_is_argv_safe(command: str) -> bool:
         parts = shlex.split(command)
     except ValueError:
         return False
-    return not any(part in _SHELL_RESERVED_WORDS for part in parts)
+    if not parts:
+        return False
+    return parts[0] not in _SHELL_RESERVED_WORDS and not _is_env_assignment(parts[0])
 
 
 def _structured_literal(value: str) -> str | None:
