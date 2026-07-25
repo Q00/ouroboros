@@ -16,7 +16,6 @@ import ouroboros.orchestrator.route_policy as route_policy
 from ouroboros.orchestrator.route_policy import (
     MAX_ROUTE_CANDIDATES,
     MAX_ROUTE_CAPABILITIES,
-    MAX_ROUTE_COST_UNITS,
     MAX_ROUTE_ORDINAL,
     RouteAdmission,
     RouteCandidate,
@@ -474,16 +473,33 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
             RouteRequirements(pinned_authority_identity=identity)
 
 
-def test_numeric_contract_fields_are_bounded_and_json_serializable() -> None:
-    registry = _registry(_route("json-safe", cost=MAX_ROUTE_COST_UNITS, ordinal=MAX_ROUTE_ORDINAL))
+def test_public_cost_domain_and_bounded_ordinal_are_json_serializable() -> None:
+    huge_public_cost = 10**100
+    registry = _registry(_route("json-safe", cost=huge_public_cost, ordinal=MAX_ROUTE_ORDINAL))
     encoded = registry.to_contract_data()
 
     assert json.loads(json.dumps(encoded, sort_keys=True)) == encoded
+    candidates = encoded["candidates"]
+    assert isinstance(candidates, list)
+    candidate = candidates[0]
+    assert isinstance(candidate, dict)
+    assert candidate["cost_units"] == huge_public_cost
 
-    with pytest.raises(ValueError, match="cost_units exceeds"):
-        _route("huge-cost", cost=10**5000)
     with pytest.raises(ValueError, match="ordinal exceeds"):
         _route("huge-ordinal", cost=1, ordinal=10**5000)
+
+
+def test_model_identifier_preserves_public_config_domain_exactly() -> None:
+    model = "claude-sonnet@20250514 with vendor/suffix"
+    candidate = _route("public-model", cost=1, model=model)
+    registry = _registry(candidate)
+    requirements = RouteRequirements(pinned_model=model)
+
+    restored = RouteRegistry.from_contract_data(registry.to_contract_data())
+    admission = admit_route(restored, requirements)
+
+    assert restored.candidates[0].model == model
+    assert admission.admitted is True
 
 
 def test_admission_rejects_non_route_selected_values() -> None:

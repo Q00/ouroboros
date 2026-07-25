@@ -50,9 +50,6 @@ DEFAULT_ROUTE_TOOL_POLICY = "default"
 DEFAULT_ROUTE_AUTHORITY_PREFIX = "runtime:"
 UNRESOLVED_ROUTE_ID = "compat:unresolved"
 INVALID_CAPABILITY = "compat:invalid-capability"
-# Keep the persisted retry control finite while allowing ordinary user config
-# values well beyond the shipped defaults.
-MAX_ROUTE_ESCALATION_THRESHOLD = 1_000_000_000
 MAX_ROUTE_MODELS_PER_TIER = MAX_ROUTE_CANDIDATES
 _SAFE_COMPAT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}$")
 
@@ -164,10 +161,7 @@ class RouteCompatProjection:
             raise ValueError("child_tier is invalid")
         if self.base_tier not in MODEL_TIER_LADDER:
             raise ValueError("base_tier is invalid")
-        if (
-            type(self.escalation_retry_threshold) is not int
-            or not 1 <= self.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
-        ):
+        if type(self.escalation_retry_threshold) is not int or self.escalation_retry_threshold < 1:
             raise ValueError("escalation_retry_threshold is invalid")
         if not isinstance(self.tier_route_ids, tuple):
             raise ValueError("tier_route_ids must be an ordered tuple")
@@ -345,7 +339,7 @@ def build_route_compat_projection(
         or model_router.child_tier not in MODEL_TIER_LADDER
         or model_router.base_tier not in MODEL_TIER_LADDER
         or type(model_router.escalation_retry_threshold) is not int
-        or not 1 <= model_router.escalation_retry_threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
+        or model_router.escalation_retry_threshold < 1
     ):
         return None
     try:
@@ -649,7 +643,7 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         or child_tier not in MODEL_TIER_LADDER
         or base_tier not in MODEL_TIER_LADDER
         or type(threshold) is not int
-        or not 1 <= threshold <= MAX_ROUTE_ESCALATION_THRESHOLD
+        or threshold < 1
         or (effort is not None and not isinstance(effort, str))
         or not isinstance(raw_tiers, list)
         or len(raw_tiers) > MAX_ROUTE_CANDIDATES
@@ -792,7 +786,6 @@ __all__ = [
     "DEFAULT_ROUTE_PERSONA",
     "DEFAULT_ROUTE_TOOL_POLICY",
     "INVALID_CAPABILITY",
-    "MAX_ROUTE_ESCALATION_THRESHOLD",
     "ROUTE_COMPAT_VERSION",
     "RouteCompatProjection",
     "admit_compat_route",

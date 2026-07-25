@@ -254,12 +254,11 @@ def test_projection_rejects_unordered_capabilities_and_invalid_router_bounds() -
         base_tier="standard",
         escalation_retry_threshold=10**9 + 1,
     )
-    assert (
-        build_route_compat_projection(
-            _economics(), model_router=huge_threshold_router, runtime_backend="claude"
-        )
-        is None
+    huge_threshold_projection = build_route_compat_projection(
+        _economics(), model_router=huge_threshold_router, runtime_backend="claude"
     )
+    assert huge_threshold_projection is not None
+    assert huge_threshold_projection.escalation_retry_threshold == 10**9 + 1
 
     class ExplodingInt(int):
         def __lt__(self, other: object) -> bool:
@@ -307,6 +306,39 @@ def test_projection_keeps_snapshot_after_router_mapping_mutation() -> None:
         effort=None,
     )
     assert blocked.disposition is RouteDecisionDisposition.BLOCKED
+
+
+def test_projection_preserves_existing_model_and_cost_domains() -> None:
+    model = "claude-sonnet@20250514"
+    cost = 10**12
+    economics = EconomicsConfig(
+        default_tier="standard",
+        escalation_threshold=10**12,
+        tiers={
+            "standard": TierConfig(
+                cost_factor=cost,
+                models=[ModelConfig(provider="anthropic", model=model)],
+            )
+        },
+    )
+    router = ModelRouter(
+        tier_models={"standard": model},
+        runtime_backend="claude",
+        child_tier="frugal",
+        base_tier="standard",
+        escalation_retry_threshold=10**12,
+    )
+
+    projection = build_route_compat_projection(
+        economics,
+        model_router=router,
+        runtime_backend="claude",
+    )
+
+    assert projection is not None
+    assert projection.candidate_for_tier("standard").model == model
+    assert projection.candidate_for_tier("standard").cost_units == cost
+    assert projection.escalation_retry_threshold == 10**12
 
 
 def test_admission_pins_model_backend_effort_and_route_dimensions() -> None:

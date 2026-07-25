@@ -251,6 +251,22 @@ def test_resume_restores_persisted_kill_switch() -> None:
     assert resumed._model_router is None
 
 
+def test_dormant_model_routing_still_rejects_reasoning_effort_drift() -> None:
+    original = _runner()
+    original._model_router = None
+    original._reasoning_effort = "low"
+    persisted = original._build_execution_contract()
+    routing = persisted["model_routing"]
+    assert routing["route_compat"] == {"version": 1, "enabled": False}
+    assert routing["reasoning_effort"] == "low"
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+
+    with pytest.raises(OrchestratorError, match="changed reasoning-effort contract"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
     _use_frontier_custom_routing(original)

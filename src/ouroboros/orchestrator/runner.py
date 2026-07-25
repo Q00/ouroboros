@@ -3688,6 +3688,10 @@ class OrchestratorRunner:
 
         guidance_bundle = self._ensure_new_run_guidance()
         routing_contract = serialize_model_router(self._model_router)
+        # Effort routing is independent of model-tier routing. Persist it even
+        # when the optional model router is dormant so resume cannot silently
+        # adopt a different provider-effect policy.
+        routing_contract["reasoning_effort"] = self._reasoning_effort
         route_projection = build_route_compat_projection(
             self._route_economics,
             model_router=self._model_router,
@@ -4038,6 +4042,7 @@ class OrchestratorRunner:
         persisted_runtime_backend = raw_routing.get("runtime_backend")
         persisted_llm_backend = raw_routing.get("llm_backend")
         persisted_permission_mode = raw_routing.get("permission_mode")
+        persisted_reasoning_effort = raw_routing.get("reasoning_effort")
         persisted_resume_workspace = raw_resume.get("workspace")
         valid_seed_fingerprint = (
             isinstance(persisted_seed_fingerprint, str)
@@ -4062,6 +4067,8 @@ class OrchestratorRunner:
             or not isinstance(persisted_llm_backend, str)
             or not persisted_llm_backend.strip()
             or not self._valid_permission_mode_contract(persisted_permission_mode)
+            or "reasoning_effort" not in raw_routing
+            or persisted_reasoning_effort not in {None, "low", "medium", "high", "xhigh"}
             or not isinstance(persisted_resume_workspace, Mapping)
         ):
             raise OrchestratorError(
@@ -4253,6 +4260,15 @@ class OrchestratorRunner:
                         "hint": "Restore the original route catalog or start a new session.",
                     },
                 )
+        if persisted_reasoning_effort != self._reasoning_effort:
+            raise OrchestratorError(
+                message="Cannot resume with a changed reasoning-effort contract",
+                details={
+                    "persisted_reasoning_effort": persisted_reasoning_effort,
+                    "current_reasoning_effort": self._reasoning_effort,
+                    "hint": "Restore the original reasoning effort or start a new session.",
+                },
+            )
         constructor_model_value = persisted_constructor_model.get("model")
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
