@@ -111,8 +111,9 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
-1. Extend the compatibility adapter to direct/resume calls and persist a
-   versioned route projection alongside the resolved model router.
+1. Keep the compatibility projection contract in
+   [`routing-c-route-compat.md`](./routing-c-route-compat.md) and extend it only
+   through the same Admission Kernel boundary.
 2. Add Routing C observations and bounded escalation. Escalation may choose the
    next configured route only after a classified failure and a finite budget.
 3. Emit the route fingerprint into the frugality proof and shared projection.
