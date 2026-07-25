@@ -1916,30 +1916,75 @@ class CodexCliRuntime:
         return "mcp_tool"
 
     @staticmethod
+    def _nested_error(item: dict[str, Any]) -> object:
+        """Return a nested ``result.error`` envelope when present."""
+        result = item.get("result")
+        return result.get("error") if isinstance(result, dict) else None
+
+    @staticmethod
     def _extract_mcp_content_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
-        """Preserve supported MCP result content blocks and structured data."""
+        """Normalize supported MCP result blocks to the shared projection contract.
+
+        The shared projection reads flat ``text``/``data``/``mime_type``/``uri``
+        fields, so Codex-native blocks (camelCase ``mimeType``, nested
+        ``resource``) are flattened here and structured content is serialized
+        into a carrier field that survives projection (round eleven).
+        """
         result = item.get("result")
         if not isinstance(result, dict):
             return []
         blocks: list[dict[str, Any]] = []
         content = result.get("content")
         if isinstance(content, list):
-            blocks.extend(block for block in content if isinstance(block, dict))
+            for raw in content:
+                if not isinstance(raw, dict):
+                    continue
+                block: dict[str, Any] = {"type": raw.get("type")}
+                text = raw.get("text")
+                if isinstance(text, str):
+                    block["text"] = text
+                if raw.get("data") is not None:
+                    block["data"] = raw.get("data")
+                mime = raw.get("mime_type") or raw.get("mimeType")
+                if isinstance(mime, str):
+                    block["mime_type"] = mime
+                resource = raw.get("resource")
+                if isinstance(resource, dict):
+                    uri = resource.get("uri")
+                    if isinstance(uri, str):
+                        block["uri"] = uri
+                    res_text = resource.get("text")
+                    if isinstance(res_text, str) and "text" not in block:
+                        block["text"] = res_text
+                    res_mime = resource.get("mime_type") or resource.get("mimeType")
+                    if isinstance(res_mime, str) and "mime_type" not in block:
+                        block["mime_type"] = res_mime
+                elif isinstance(raw.get("uri"), str):
+                    block["uri"] = raw["uri"]
+                blocks.append(block)
         structured = result.get("structured_content")
         if isinstance(structured, (dict, list)) and structured:
-            blocks.append({"type": "structured", "structured": structured})
+            # No structured payload field survives the flat projection, so ride
+            # the JSON in ``data`` (which the projection preserves) under a
+            # distinct block type.
+            blocks.append(
+                {
+                    "type": "structured",
+                    "data": json.dumps(structured, ensure_ascii=False, sort_keys=True),
+                }
+            )
         return blocks
 
     @staticmethod
     def _extract_mcp_result_text(item: dict[str, Any]) -> str:
         """Normalize MCP result/error envelopes into result text."""
-        error_envelope = item.get("error")
-        if isinstance(error_envelope, dict):
-            message = error_envelope.get("message")
-            if isinstance(message, str) and message.strip():
-                return message.strip()
-        if isinstance(error_envelope, str) and error_envelope.strip():
-            return error_envelope.strip()
+        for error_envelope in (item.get("error"), CodexCliRuntime._nested_error(item)):
+            if isinstance(error_envelope, dict):
+                message = error_envelope.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+            if isinstance(error_envelope, str) and error_envelope.strip():
+                return error_envelope.strip()
         result = item.get("result")
         if isinstance(result, dict):
             content = result.get("content")
@@ -2027,7 +2072,11 @@ class CodexCliRuntime:
                     tool_name="Edit",
                     tool_input={"file_path": file_path},
                     start_content=f"Calling tool: Edit: {file_path}",
-                    tool_call_id=f"{item_id}:{file_path}" if item_id is not None else None,
+                    tool_call_id=(
+                        f"{item_id}:{file_path}"
+                        if item_id is not None
+                        else f"filechange:{file_path}"
+                    ),
                 )
                 for file_path in self._extract_paths(item)
             ]
@@ -2338,8 +2387,9 @@ class CodexCliRuntime:
 
         ``item_scope`` isolates start/result correlation per streamed process;
         the streaming loop passes a fresh scope per invocation. Direct callers
-        fall back to a per-instance scope, which is cleared on every
-        ``thread.started`` so a new thread never inherits stale item ids.
+        fall back to a per-instance scope, which is cleared on a
+        ``thread.started`` event only when the thread identity changes, so an
+        exact same-thread header replay does not orphan in-flight starts.
         """
         event_type = event.get("type")
         if not isinstance(event_type, str):

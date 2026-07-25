@@ -15,6 +15,7 @@ issue #1690 reproduction steps.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1138,6 +1139,92 @@ class TestCodexCompletionReviewRoundOne:
         types = [b.get("type") for b in blocks if isinstance(b, dict)]
         assert "image" in types, "the image content block was dropped"
         assert "resource" in types, "the resource content block was dropped"
+
+    def test_mcp_content_blocks_survive_projection_with_values(self) -> None:
+        """Rich MCP blocks must keep their values through project_runtime_message."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "mcpproj",
+                    "type": "mcp_tool_call",
+                    "name": "screenshot.capture",
+                    "status": "completed",
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": "caption"},
+                            {"type": "image", "data": "AAAA", "mimeType": "image/png"},
+                            {"type": "resource", "resource": {"uri": "file:///x", "text": "R"}},
+                        ],
+                        "structured_content": {"width": 800},
+                    },
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        projected = project_runtime_message(results[0])
+        blocks = (projected.tool_result or {}).get("content") or []
+        by_type = {b.get("type"): b for b in blocks if isinstance(b, dict)}
+        assert by_type.get("image", {}).get("mime_type") == "image/png", (
+            "image mime lost in projection"
+        )
+        assert by_type.get("image", {}).get("data") == "AAAA", "image data lost in projection"
+        assert by_type.get("resource", {}).get("uri") == "file:///x", (
+            "resource uri lost in projection"
+        )
+        structured = by_type.get("structured", {})
+        assert "800" in json.dumps(structured), "structured payload lost in projection"
+
+    def test_idless_multifile_paths_have_stable_correlation_ids(self) -> None:
+        """Each path in an id-less multi-file item must carry a stable synthetic id."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        item = {
+            "type": "file_change",
+            "status": "completed",
+            "changes": [
+                {"path": "src/app.py", "kind": "update"},
+                {"path": "tests/test_app.py", "kind": "add"},
+            ],
+        }
+        messages = runtime._convert_event(
+            {"type": "item.completed", "item": item}, current_handle=None
+        )
+        starts = [m for m in messages if m.data.get("subtype") != "tool_result"]
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        start_ids = [m.data.get("tool_call_id") for m in starts]
+        result_ids = [m.data.get("tool_call_id") for m in results]
+        assert None not in start_ids and None not in result_ids, (
+            "an id-less multi-file item left tool_call_id=None, breaking exact correlation"
+        )
+        assert len(set(result_ids)) == 2, "the two paths must have distinct correlation ids"
+        assert set(start_ids) == set(result_ids), "start and result ids must correlate per path"
+
+    def test_nested_mcp_error_message_becomes_result_text(self) -> None:
+        """A nested result.error.message must surface as the journaled failure reason."""
+        runtime = CodexCliRuntime(cli_path="codex")
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "nerr",
+                    "type": "mcp_tool_call",
+                    "name": "filesystem.write",
+                    "status": "completed",
+                    "result": {"error": {"message": "disk full"}},
+                },
+            },
+            current_handle=None,
+        )
+        results = [m for m in messages if m.data.get("subtype") == "tool_result"]
+        assert len(results) == 1
+        assert results[0].data.get("is_error") is True
+        tool_result = results[0].data.get("tool_result") or {}
+        assert "disk full" in (tool_result.get("text_content") or ""), (
+            "the nested error reason was dropped, leaving the journaled failure blank"
+        )
 
     def test_new_thread_resets_item_correlation_state(self) -> None:
         """A new thread's completed-only item must synthesize its own start."""
