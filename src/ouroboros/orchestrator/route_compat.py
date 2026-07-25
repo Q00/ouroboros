@@ -624,7 +624,8 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
     ):
         return None
     try:
-        if value["version"] != ROUTE_COMPAT_VERSION:
+        version = value["version"]
+        if type(version) is not int or version != ROUTE_COMPAT_VERSION:
             return None
         backend = value["runtime_backend"]
         effort = value["effort"]
@@ -726,7 +727,8 @@ def deserialize_route_compat_contract(
     ):
         return False, None
     try:
-        if value["version"] != ROUTE_COMPAT_VERSION:
+        version = value["version"]
+        if type(version) is not int or version != ROUTE_COMPAT_VERSION:
             return False, None
         enabled = value["enabled"]
     except Exception:

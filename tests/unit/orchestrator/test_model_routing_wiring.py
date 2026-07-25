@@ -430,6 +430,32 @@ class TestModelRoutedEvent:
         assert "live route state changed" in result.error
         assert runtime.received_model == "UNSET"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_recomputes_live_model_policy(self) -> None:
+        """A same-catalog policy replacement invalidates the carried admission."""
+        store = AsyncMock()
+        runtime = _EnforcedModelRuntime()
+        router = _claude_router()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=router,
+            route_economics=_economics(),
+        )
+
+        async def _append(event):
+            if getattr(event, "type", None) == "execution.ac.attempt.dispatched":
+                executor._model_router = replace(router, base_tier="frontier")
+
+        store.append.side_effect = _append
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.outcome.value == "blocked"
+        assert runtime.received_model == "UNSET"
+
 
 class TestRunnerRouterConstruction:
     def _adapter(self, backend: str = "claude") -> MagicMock:
@@ -518,7 +544,32 @@ class TestRunnerRouterConstruction:
 
         store.append.side_effect = _append
 
-        with pytest.raises(OrchestratorError, match="Route admission blocked"):
+        with pytest.raises(OrchestratorError, match="became stale"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_runner_blocks_router_dormancy_during_telemetry(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+
+        async def _append(_event):
+            runner._model_router = None
+
+        store.append.side_effect = _append
+
+        with pytest.raises(OrchestratorError, match="became stale"):
             await runner._route_call_effort(
                 execution_id="exec_direct",
                 session_id="sess_direct",

@@ -1050,9 +1050,10 @@ class OrchestratorRunner:
             is_decomposed_child=False,
             investment_assessment=investment_assessment,
         )
+        initial_model_router = self._model_router
         model_decision, legacy_model_kwargs = resolve_execute_model(
             self._adapter,
-            router=self._model_router,
+            router=initial_model_router,
             is_decomposed_child=False,
             decomposition_trustworthy=False,
         )
@@ -1144,19 +1145,59 @@ class OrchestratorRunner:
 
         # All observability awaits are complete. Rebuild and admit from live
         # routing state now, immediately before the caller enters execute_task.
-        if self._model_router is None:
+        live_model_router = self._model_router
+        if (initial_model_router is None) != (live_model_router is None):
+            raise OrchestratorError(
+                message="Route admission became stale before provider dispatch",
+                details={
+                    "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                    "reason": "model routing activation changed during pre-dispatch awaits",
+                    "call_site": "runner",
+                },
+            )
+        if live_model_router is None:
             model_kwargs = legacy_model_kwargs
         else:
+            live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=live_model_router,
+                is_decomposed_child=False,
+                decomposition_trustworthy=False,
+            )
+            if live_model_decision != model_decision:
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "model routing policy changed during pre-dispatch awaits",
+                        "call_site": "runner",
+                    },
+                )
+            live_effort_decision, live_effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=False,
+                investment_assessment=investment_assessment,
+            )
+            if live_effort_decision != decision:
+                raise OrchestratorError(
+                    message="Route admission became stale before provider dispatch",
+                    details={
+                        "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                        "reason": "effort routing policy changed during pre-dispatch awaits",
+                        "call_site": "runner",
+                    },
+                )
             projection = build_route_compat_projection(
                 self._route_economics,
-                model_router=self._model_router,
+                model_router=live_model_router,
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                effort=decision.level,
+                effort=live_effort_decision.level,
             )
             route_admission = admit_compat_route(
                 projection,
                 model_decision=model_decision,
-                effort=decision.level,
+                effort=live_effort_decision.level,
             )
             if not route_admission.admitted:
                 raise OrchestratorError(
@@ -1171,7 +1212,7 @@ class OrchestratorRunner:
                 route_admission,
                 model_decision=model_decision,
                 projection=projection,
-                effort=decision.level,
+                effort=live_effort_decision.level,
             )
             if (
                 model_decision.is_enforced
@@ -1188,7 +1229,7 @@ class OrchestratorRunner:
                 )
         # Model kwargs are collapsed only after live admission above. Callers
         # invoke execute_task on the next statement without another await.
-        return {**kwargs, **model_kwargs}
+        return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.

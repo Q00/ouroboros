@@ -420,6 +420,14 @@ def test_projection_contract_round_trip_and_tamper_rejection() -> None:
         None,
     )
 
+    boolean_projection_version = projection.to_contract_data()
+    boolean_projection_version["version"] = True
+    assert deserialize_route_compat_projection(boolean_projection_version) is None
+
+    boolean_contract_version = serialize_route_compat_contract(projection)
+    boolean_contract_version["version"] = True
+    assert deserialize_route_compat_contract(boolean_contract_version) == (False, None)
+
     payload = projection.to_contract_data()
     payload["runtime_backend"] = "codex_cli"
     changed_backend = deserialize_route_compat_projection(payload)

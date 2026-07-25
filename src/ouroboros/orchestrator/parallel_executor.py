@@ -4812,6 +4812,14 @@ class ParallelACExecutor:
                 semantic_ac_key=semantic_ac_key,
             )
             if atomic_result.error != _STALL_SENTINEL:
+                if atomic_result.outcome in {
+                    ACExecutionOutcome.BLOCKED,
+                    ACExecutionOutcome.INVALID,
+                }:
+                    # Admission/authority failures are terminal before recovery.
+                    # Bounce classification and alternate-harness redispatch are
+                    # provider effects too; neither may bypass a fail-closed route.
+                    return _finalize_node_result(atomic_result)
                 if not atomic_result.success:
                     (
                         bounce_result,
@@ -6257,24 +6265,43 @@ Respond with either ATOMIC or the structured JSON object only.
 
             if route_admission is None:
                 return dict(execute_effort_kwargs)
+            live_model_decision, _live_model_kwargs = resolve_execute_model(
+                self._adapter,
+                router=self._model_router,
+                is_decomposed_child=is_sub_ac,
+                decomposition_trustworthy=decomposition_trustworthy,
+                retry_attempt=retry_attempt,
+                suggested_tier=suggested_tier,
+            )
+            if live_model_decision != model_decision:
+                return None
+            live_effort_decision, live_effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=is_sub_ac,
+                retry_attempt=retry_attempt,
+                investment_assessment=investment_assessment,
+            )
+            if live_effort_decision != effort_decision:
+                return None
             live_projection = build_route_compat_projection(
                 self._route_economics,
                 model_router=self._model_router,
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                effort=effort_decision.level,
+                effort=live_effort_decision.level,
             )
             if not validate_compat_admission(
                 live_projection,
                 route_admission,
                 model_decision=model_decision,
-                effort=effort_decision.level,
+                effort=live_effort_decision.level,
             ):
                 return None
             live_model_kwargs = admitted_execute_model_kwargs(
                 route_admission,
                 model_decision=model_decision,
                 projection=live_projection,
-                effort=effort_decision.level,
+                effort=live_effort_decision.level,
             )
             if (
                 model_decision.is_enforced
@@ -6282,7 +6309,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 and live_model_kwargs.get("model") != model_decision.model
             ):
                 return None
-            return {**execute_effort_kwargs, **live_model_kwargs}
+            return {**live_effort_kwargs, **live_model_kwargs}
 
         def _route_drift_blocked_result() -> ACExecutionResult:
             duration = (datetime.now(UTC) - start_time).total_seconds()

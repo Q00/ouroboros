@@ -23,7 +23,11 @@ from ouroboros.orchestrator.decomposition_policy import (
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, ExecutionStage, StagedExecutionPlan
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelACExecutor
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelACExecutor,
+)
 from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
@@ -125,6 +129,42 @@ async def test_model_failure_keeps_existing_recovery_without_decomposition() -> 
     assert result.success is False
     executor._try_decompose_ac.assert_not_awaited()
     executor._request_bounce_classification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [ACExecutionOutcome.BLOCKED, ACExecutionOutcome.INVALID],
+)
+async def test_authority_failure_never_enters_provider_backed_recovery(
+    outcome: ACExecutionOutcome,
+) -> None:
+    executor = _executor()
+    authority_failure = ACExecutionResult(
+        ac_index=0,
+        ac_content="Parent work",
+        success=False,
+        error="route admission blocked",
+        outcome=outcome,
+    )
+    executor._execute_atomic_ac = AsyncMock(return_value=authority_failure)
+    executor._request_bounce_classification = AsyncMock()
+    executor._maybe_redispatch_alt_harness = AsyncMock()
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Parent work",
+        session_id="session-authority-failure",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="goal",
+        execution_id="exec-authority-failure",
+    )
+
+    assert result.outcome is outcome
+    executor._request_bounce_classification.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness.assert_not_awaited()
 
 
 @pytest.mark.asyncio
