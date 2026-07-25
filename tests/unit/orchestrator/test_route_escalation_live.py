@@ -124,6 +124,8 @@ def _route_judgment(
     *,
     route_id: str = "compat:claude:frugal",
     attempt_index: int = 0,
+    success: bool = False,
+    outcome: str = "failed",
 ) -> BaseEvent:
     return BaseEvent(
         type="execution.ac.attempt_judged",
@@ -139,8 +141,8 @@ def _route_judgment(
             "route_attempt_index": attempt_index,
             "route_id": route_id,
             "call_site": "parallel",
-            "success": False,
-            "outcome": "failed",
+            "success": success,
+            "outcome": outcome,
         },
     )
 
@@ -223,6 +225,56 @@ def _route_event(
             "final_acceptance_declared": final_acceptance_declared,
         },
     )
+
+
+def _judgment_for_route_event(event: BaseEvent) -> BaseEvent:
+    observation = RouteObservation.from_contract_data(event.data["observation"])
+    success = observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+    outcome = {
+        VerifierOutcome.ATTEMPT_SUCCEEDED: "succeeded",
+        VerifierOutcome.FAILED: "failed",
+        VerifierOutcome.BLOCKED: "blocked",
+    }[observation.verifier_outcome]
+    return BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id=event.aggregate_id,
+        data={
+            "execution_id": event.data["execution_id"],
+            "session_id": event.data["session_id"],
+            "root_ac_index": event.data["root_ac_index"],
+            "ac_index": event.data["root_ac_index"],
+            "route_contract_version": 1,
+            "route_episode_id": observation.episode_id,
+            "route_attempt_index": observation.attempt_index,
+            "route_id": observation.route_id,
+            "call_site": "parallel",
+            "success": success,
+            "outcome": outcome,
+        },
+    )
+
+
+def _set_route_replay_events(
+    store: AsyncMock,
+    route_events: list[BaseEvent],
+    *,
+    judgments: list[BaseEvent] | None = None,
+) -> None:
+    judgment_events = (
+        [_judgment_for_route_event(event) for event in route_events]
+        if judgments is None
+        else judgments
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.route_observed":
+            return route_events
+        if kwargs.get("event_type") == "execution.ac.attempt_judged":
+            return judgment_events
+        return []
+
+    store.query_execution_related_events.side_effect = query
 
 
 def _durable_first_failure(
@@ -545,6 +597,130 @@ async def test_unmatched_route_judgment_seals_replay_before_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_route_observation_without_judgment_seals_replay_before_provider() -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    _set_route_replay_events(store, [route_event], judgments=[])
+
+    with pytest.raises(RuntimeError, match="no matching route-aware attempt judgment"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observation_outcome", "judgment_success", "judgment_outcome"),
+    [
+        (VerifierOutcome.FAILED, True, "succeeded"),
+        (VerifierOutcome.FAILED, False, "blocked"),
+        (VerifierOutcome.ATTEMPT_SUCCEEDED, False, "failed"),
+        (VerifierOutcome.BLOCKED, False, "failed"),
+    ],
+    ids=(
+        "successful-judgment-failed-observation",
+        "blocked-judgment-failed-observation",
+        "failed-judgment-successful-observation",
+        "failed-judgment-blocked-observation",
+    ),
+)
+async def test_route_judgment_must_semantically_match_observation(
+    observation_outcome: VerifierOutcome,
+    judgment_success: bool,
+    judgment_outcome: str,
+) -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    observation = RouteObservation.from_candidate(
+        candidate,
+        RouteRequirements(),
+        episode_id=_episode_id(seed),
+        attempt_index=0,
+        verifier_outcome=observation_outcome,
+        failure_class=(
+            None
+            if observation_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+            else (
+                FailureClass.BLOCKED
+                if observation_outcome is VerifierOutcome.BLOCKED
+                else FailureClass.EVIDENCE_MISSING
+            )
+        ),
+        escalation_reason=(
+            None
+            if observation_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+            else EscalationReason.CLASSIFIED_FAILURE
+        ),
+    )
+    route_event = _route_event(seed, observation=observation, decision=None)
+    judgment = _route_judgment(
+        seed,
+        success=judgment_success,
+        outcome=judgment_outcome,
+    )
+    _set_route_replay_events(store, [route_event], judgments=[judgment])
+
+    with pytest.raises(RuntimeError, match="contradicts"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_route_judgment_rejects_unknown_outcome() -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    _set_route_replay_events(
+        store,
+        [route_event],
+        judgments=[_route_judgment(seed, outcome="mystery")],
+    )
+
+    with pytest.raises(RuntimeError, match="invalid outcome"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_route_judgment_canonicalizes_success_without_explicit_outcome() -> None:
+    executor, _store, events = _executor()
+    seed = _seed()
+    await executor._emit_ac_attempt_judged(
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=True,
+            route_candidate=_candidate(executor, "compat:claude:frugal"),
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        required=True,
+        route_episode_id=_episode_id(seed),
+        route_attempt_index=0,
+    )
+
+    judgment = next(event for event in events if event.type == "execution.ac.attempt_judged")
+    assert judgment.data["success"] is True
+    assert judgment.data["outcome"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_legacy_attempt_judgment_does_not_block_route_observation_replay() -> None:
     executor, store, _events = _executor()
     seed = _seed()
@@ -563,14 +739,11 @@ async def test_legacy_attempt_judgment_does_not_block_route_observation_replay()
         },
     )
 
-    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
-        return (
-            [route_event]
-            if kwargs.get("event_type") == "execution.ac.route_observed"
-            else [legacy_judgment]
-        )
-
-    store.query_execution_related_events.side_effect = query
+    _set_route_replay_events(
+        store,
+        [route_event],
+        judgments=[legacy_judgment, _judgment_for_route_event(route_event)],
+    )
 
     histories, overrides, terminals = await executor._load_bounded_route_resume_state(
         seed=seed,
@@ -615,9 +788,10 @@ async def test_resume_uses_durable_next_route_without_repeating_cheapest() -> No
         attempted_route_ids=(cheap.route_id,),
         failure_class=FailureClass.EVIDENCE_MISSING,
     )
-    store.query_execution_related_events.return_value = [
-        _route_event(seed, observation=observation, decision=decision)
-    ]
+    _set_route_replay_events(
+        store,
+        [_route_event(seed, observation=observation, decision=decision)],
+    )
     calls: list[str] = []
 
     async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
@@ -655,9 +829,10 @@ async def test_resume_rejects_malformed_persisted_decision_before_provider_effec
     observation, decision = _durable_first_failure(executor, seed)
     malformed = decision.to_contract_data()
     malformed["unexpected"] = True
-    store.query_execution_related_events.return_value = [
-        _route_event(seed, observation=observation, decision=malformed)
-    ]
+    _set_route_replay_events(
+        store,
+        [_route_event(seed, observation=observation, decision=malformed)],
+    )
 
     with pytest.raises(RuntimeError, match="invalid decision"):
         await executor._load_bounded_route_resume_state(
@@ -677,9 +852,10 @@ async def test_resume_recomputes_and_rejects_changed_selected_route() -> None:
     assert isinstance(changed["selected_route"], dict)
     changed["selected_route"] = _candidate(executor, "compat:claude:frontier").to_contract_data()
     changed["remaining_route_ids"] = ["compat:claude:standard"]
-    store.query_execution_related_events.return_value = [
-        _route_event(seed, observation=observation, decision=changed)
-    ]
+    _set_route_replay_events(
+        store,
+        [_route_event(seed, observation=observation, decision=changed)],
+    )
 
     with pytest.raises(RuntimeError, match="decision drifted"):
         await executor._load_bounded_route_resume_state(
@@ -703,13 +879,14 @@ async def test_resume_rejects_route_snapshot_drift(drifted_observation: Any) -> 
     executor, store, _events = _executor()
     seed = _seed()
     observation, decision = _durable_first_failure(executor, seed)
-    store.query_execution_related_events.return_value = [
+    route_events = [
         _route_event(
             seed,
             observation=drifted_observation(observation),
             decision=decision,
         )
     ]
+    _set_route_replay_events(store, route_events)
 
     with pytest.raises(RuntimeError, match="configuration drift"):
         await executor._load_bounded_route_resume_state(
@@ -760,7 +937,7 @@ async def test_resume_rejects_successor_snapshot_drift_after_first_attempt(
         attempted_route_ids=("compat:claude:frugal", standard.route_id),
         failure_class=FailureClass.EVIDENCE_MISSING,
     )
-    store.query_execution_related_events.return_value = [
+    route_events = [
         _route_event(seed, observation=first_observation, decision=first_decision),
         _route_event(
             seed,
@@ -768,6 +945,7 @@ async def test_resume_rejects_successor_snapshot_drift_after_first_attempt(
             decision=second_decision,
         ),
     ]
+    _set_route_replay_events(store, route_events)
 
     with pytest.raises(RuntimeError, match="durable successor chain"):
         await executor._load_bounded_route_resume_state(
@@ -812,10 +990,11 @@ async def test_resume_rejects_duplicate_or_gapped_observation_indices(
         attempted_route_ids=("compat:claude:frugal", standard.route_id),
         failure_class=FailureClass.EVIDENCE_MISSING,
     )
-    store.query_execution_related_events.return_value = [
+    route_events = [
         _route_event(seed, observation=first_observation, decision=first_decision),
         _route_event(seed, observation=second_observation, decision=second_decision),
     ]
+    _set_route_replay_events(store, route_events)
 
     with pytest.raises(RuntimeError, match="gap or duplicate"):
         await executor._load_bounded_route_resume_state(
@@ -838,7 +1017,7 @@ async def test_route_observation_cannot_claim_final_gate_acceptance() -> None:
         attempt_index=0,
         verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
     )
-    store.query_execution_related_events.return_value = [
+    route_events = [
         _route_event(
             seed,
             observation=observation,
@@ -846,6 +1025,7 @@ async def test_route_observation_cannot_claim_final_gate_acceptance() -> None:
             final_acceptance_declared=True,
         )
     ]
+    _set_route_replay_events(store, route_events)
 
     with pytest.raises(RuntimeError, match="cannot declare Final Gate acceptance"):
         await executor._load_bounded_route_resume_state(
@@ -868,9 +1048,10 @@ async def test_provisional_success_resume_blocks_replay_without_declaring_accept
         attempt_index=0,
         verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
     )
-    store.query_execution_related_events.return_value = [
-        _route_event(seed, observation=observation, decision=None)
-    ]
+    _set_route_replay_events(
+        store,
+        [_route_event(seed, observation=observation, decision=None)],
+    )
     provider = AsyncMock()
     executor._execute_ac_batch = provider  # type: ignore[method-assign]
 

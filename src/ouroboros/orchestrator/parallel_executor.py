@@ -289,6 +289,7 @@ from ouroboros.orchestrator.level_context import (
 from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
 from ouroboros.orchestrator.model_routing import (
     MODEL_MODE_ENFORCED,
+    MODEL_TIER_LADDER,
     ModelDecision,
     decide_model,
     resolve_execute_model,
@@ -312,6 +313,7 @@ from ouroboros.orchestrator.rate_limit import (
 )
 from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
 from ouroboros.orchestrator.route_compat import (
+    RouteCompatProjection,
     admit_compat_escalation_route,
     admit_compat_route,
     admitted_execute_model_kwargs,
@@ -1761,6 +1763,7 @@ class ParallelACExecutor:
         self._alt_harness_redispatched_acs: set[str] = set()
         self._alt_harness_status_by_root: dict[int, str] = {}
         self._recovery_exhausted_emitted: set[tuple[str, int]] = set()
+
         workspace_builder = object.__getattribute__(
             self,
             "_execution_authority_workspace",
@@ -1843,6 +1846,41 @@ class ParallelACExecutor:
             ),
             internal_entry_invokers,
         )
+
+    def _profile_suggested_tier(self) -> str | None:
+        """Return the profile's explicit model-tier floor, if it has one."""
+
+        if (
+            self._execution_profile is None
+            or self._execution_profile.suggested_model_tier is SuggestedModelTier.MEDIUM
+        ):
+            return None
+        return tier_from_profile_hint(self._execution_profile.suggested_model_tier.value)
+
+    def _build_route_compat_projection(
+        self,
+        *,
+        model_router: ModelRouter | None,
+        effort: str | None,
+    ) -> RouteCompatProjection | None:
+        """Build one projection with every public starting-tier floor applied."""
+
+        projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=effort,
+        )
+        suggested_tier = self._profile_suggested_tier()
+        if projection is None or suggested_tier is None:
+            return projection
+        effective_floor = MODEL_TIER_LADDER[
+            max(
+                MODEL_TIER_LADDER.index(projection.base_tier),
+                MODEL_TIER_LADDER.index(suggested_tier),
+            )
+        ]
+        return replace(projection, base_tier=effective_floor)
 
     @property
     def execution_authority(self) -> ExecutionAuthorityContract:
@@ -5989,10 +6027,8 @@ Respond with either ATOMIC or the structured JSON object only.
         bounded_route_attempt_enabled = self._bounded_route_escalation_enabled and (
             not is_sub_ac or decomposition_trustworthy
         )
-        durable_route_projection = build_route_compat_projection(
-            self._route_economics,
+        durable_route_projection = self._build_route_compat_projection(
             model_router=model_router_snapshot,
-            runtime_backend=getattr(self._adapter, "runtime_backend", None),
             effort=None,
         )
         capsule = compile_ac_execution_capsule(
@@ -6237,14 +6273,7 @@ Respond with either ATOMIC or the structured JSON object only.
         # something other than the shipped default MEDIUM ("no opinion"); MEDIUM
         # leaves precedence with the router's own base/child logic and any explicit
         # model_tier arg. Dormant by default (router None → no model override).
-        suggested_tier: str | None = None
-        if (
-            self._execution_profile is not None
-            and self._execution_profile.suggested_model_tier is not SuggestedModelTier.MEDIUM
-        ):
-            suggested_tier = tier_from_profile_hint(
-                self._execution_profile.suggested_model_tier.value
-            )
+        suggested_tier = self._profile_suggested_tier()
         legacy_model_decision, execute_model_kwargs = resolve_execute_model(
             self._adapter,
             router=model_router_snapshot,
@@ -6437,10 +6466,8 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             if live_effort_decision != effort_decision:
                 return None
-            live_projection = build_route_compat_projection(
-                self._route_economics,
+            live_projection = self._build_route_compat_projection(
                 model_router=self._model_router,
-                runtime_backend=getattr(self._adapter, "runtime_backend", None),
                 effort=live_effort_decision.level,
             )
             if bounded_route_attempt_enabled:
@@ -7850,6 +7877,27 @@ Respond with either ATOMIC or the structured JSON object only.
             or not 0 <= route_attempt_index < MAX_ROUTE_ATTEMPTS
         ):
             raise ValueError("route-aware attempt judgment requires bounded correlation metadata")
+        normalized_outcome = (
+            result.outcome.value
+            if result.outcome is not None
+            else (
+                ACExecutionOutcome.SUCCEEDED.value
+                if result.success
+                else ACExecutionOutcome.FAILED.value
+            )
+        )
+        if required and (
+            (result.success and normalized_outcome != ACExecutionOutcome.SUCCEEDED.value)
+            or (
+                not result.success
+                and normalized_outcome
+                not in {
+                    ACExecutionOutcome.FAILED.value,
+                    ACExecutionOutcome.BLOCKED.value,
+                }
+            )
+        ):
+            raise ValueError("route-aware attempt judgment has contradictory result semantics")
         event_data: dict[str, object] = {
             "execution_id": execution_id,
             "session_id": session_id,
@@ -7858,7 +7906,7 @@ Respond with either ATOMIC or the structured JSON object only.
             "retry_attempt": result.retry_attempt,
             "attempt_number": result.attempt_number,
             "success": result.success,
-            "outcome": result.outcome.value if result.outcome is not None else "failed",
+            "outcome": normalized_outcome,
             "is_decomposed": result.is_decomposed,
             "is_decomposed_child": result.is_decomposed,
         }
@@ -8634,10 +8682,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 if gated.outcome is ACExecutionOutcome.BLOCKED:
                     failure = FailureClass.BLOCKED
 
-                live_projection = build_route_compat_projection(
-                    self._route_economics,
+                live_projection = self._build_route_compat_projection(
                     model_router=self._model_router,
-                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
                     effort=candidate.effort,
                 )
                 escalation_registry = build_compat_escalation_registry(live_projection)
@@ -8811,12 +8857,19 @@ Respond with either ATOMIC or the structured JSON object only.
                 (observation, data.get("decision"), human_handoff_required)
             )
 
-        observed_attempts = {
-            (root_ac_index, observation.episode_id, observation.attempt_index, observation.route_id)
-            for root_ac_index, rows in grouped.items()
-            for observation, _decision, _handoff in rows
-        }
-        judged_attempts: set[tuple[int, str, int, str]] = set()
+        observed_attempts: dict[tuple[int, str, int, str], RouteVerifierOutcome] = {}
+        for root_ac_index, rows in grouped.items():
+            for observation, _decision, _handoff in rows:
+                key = (
+                    root_ac_index,
+                    observation.episode_id,
+                    observation.attempt_index,
+                    observation.route_id,
+                )
+                if key in observed_attempts:
+                    raise RuntimeError("durable route observation is duplicated")
+                observed_attempts[key] = observation.verifier_outcome
+        judged_attempts: dict[tuple[int, str, int, str], tuple[bool, str]] = {}
         judgment_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.attempt_judged",
@@ -8841,6 +8894,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 or type(data.get("route_episode_id")) is not str
                 or type(data.get("route_attempt_index")) is not int
                 or type(data.get("route_id")) is not str
+                or type(data.get("success")) is not bool
+                or type(data.get("outcome")) is not str
             ):
                 raise RuntimeError("route-aware attempt judgment has invalid correlation metadata")
             assert isinstance(root_ac_index, int)
@@ -8854,11 +8909,35 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             if key in judged_attempts:
                 raise RuntimeError("route-aware attempt judgment is duplicated")
-            judged_attempts.add(key)
-        if judged_attempts - observed_attempts:
+            outcome = data["outcome"]
+            if outcome not in {
+                ACExecutionOutcome.SUCCEEDED.value,
+                ACExecutionOutcome.FAILED.value,
+                ACExecutionOutcome.BLOCKED.value,
+            }:
+                raise RuntimeError("route-aware attempt judgment has an invalid outcome")
+            judged_attempts[key] = (data["success"], outcome)
+        if set(judged_attempts) - set(observed_attempts):
             raise RuntimeError(
                 "route-aware attempt judgment has no matching durable route observation"
             )
+        if set(observed_attempts) - set(judged_attempts):
+            raise RuntimeError(
+                "durable route observation has no matching route-aware attempt judgment"
+            )
+        expected_judgments = {
+            RouteVerifierOutcome.ATTEMPT_SUCCEEDED: (
+                True,
+                ACExecutionOutcome.SUCCEEDED.value,
+            ),
+            RouteVerifierOutcome.FAILED: (False, ACExecutionOutcome.FAILED.value),
+            RouteVerifierOutcome.BLOCKED: (False, ACExecutionOutcome.BLOCKED.value),
+        }
+        for key, verifier_outcome in observed_attempts.items():
+            if judged_attempts[key] != expected_judgments[verifier_outcome]:
+                raise RuntimeError(
+                    "route-aware attempt judgment contradicts its durable observation"
+                )
 
         histories: dict[int, tuple[str, ...]] = {}
         overrides: dict[int, RouteCandidate] = {}
@@ -8876,10 +8955,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             parsed_decisions: list[RouteEscalationDecision | None] = []
             for row_index, (observation, raw_decision, handoff_claim) in enumerate(rows):
-                live_projection = build_route_compat_projection(
-                    self._route_economics,
+                live_projection = self._build_route_compat_projection(
                     model_router=self._model_router,
-                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
                     effort=observation.effort,
                 )
                 escalation_registry = build_compat_escalation_registry(live_projection)

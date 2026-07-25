@@ -38,6 +38,12 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.profile_loader import (
+    EvidenceSchema,
+    ExecutionProfile,
+    SuggestedModelTier,
+    VerifierCapability,
+)
 from ouroboros.orchestrator.runner import OrchestratorError, OrchestratorRunner
 
 
@@ -196,6 +202,35 @@ class TestExecutorModelWiring:
             console=MagicMock(),
             enable_decomposition=False,
             model_router=replace(_claude_router(), base_tier="frontier"),
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.success is True
+        assert result.route_candidate is not None
+        assert result.route_candidate.route_id == "compat:claude:frontier"
+        assert runtime.received_model == "opus-x"
+
+    @pytest.mark.asyncio
+    async def test_bounded_parallel_honors_high_profile_starting_tier(self) -> None:
+        runtime = _EnforcedModelRuntime()
+        profile = ExecutionProfile(
+            profile="high",
+            axis="testable_unit",
+            min_unit="one acceptance criterion",
+            verifier_focus="verify the criterion",
+            verifier_capability=VerifierCapability.READ_ONLY_DISCOVERY,
+            evidence_schema=EvidenceSchema(),
+            suggested_model_tier=SuggestedModelTier.HIGH,
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=profile,
+            model_router=_claude_router(),
             route_economics=_economics(),
         )
 

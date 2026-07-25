@@ -179,6 +179,8 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
     from ouroboros.orchestrator.heartbeat import CancellationRequest
     from ouroboros.orchestrator.model_routing import ModelRouter
+    from ouroboros.orchestrator.route_escalation import RouteEscalationDecision
+    from ouroboros.orchestrator.route_policy import RouteCandidate
     from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
 
@@ -236,6 +238,16 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectRouteResumeState:
+    """Exact nonterminal Routing D state owned by the direct runner."""
+
+    episode_id: str
+    attempt_index: int
+    prior_route_ids: tuple[str, ...]
+    candidate: RouteCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,12 +1410,128 @@ class OrchestratorRunner:
                 selected_route_sink.append(selected)
         return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
 
+    async def _persist_direct_route_outcome(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        episode_id: str,
+        prior_route_ids: tuple[str, ...],
+        candidate: RouteCandidate,
+        success: bool,
+    ) -> tuple[RouteEscalationDecision | None, tuple[str, ...]]:
+        """Persist one direct provisional outcome and compute its exact successor."""
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_registry,
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            MAX_ROUTE_ATTEMPTS,
+            EscalationAction,
+            EscalationReason,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        history = (*prior_route_ids, candidate.route_id)
+        if len(history) > MAX_ROUTE_ATTEMPTS or len(set(history)) != len(history):
+            raise OrchestratorError(
+                message="Refusing an unbounded or repeated direct route attempt",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=candidate.effort,
+        )
+        registry = build_compat_escalation_registry(projection)
+        requirements = (
+            build_compat_escalation_requirements(projection, effort=candidate.effort)
+            if projection is not None
+            else None
+        )
+        live_candidate = (
+            next(
+                (
+                    configured
+                    for configured in projection.registry.candidates
+                    if configured.route_id == candidate.route_id
+                ),
+                None,
+            )
+            if projection is not None
+            else None
+        )
+        failure_class = None if success else FailureClass.EVIDENCE_MISSING
+        decision: RouteEscalationDecision | None = None
+        if not success:
+            if (
+                projection is None
+                or registry is None
+                or requirements is None
+                or live_candidate != candidate
+            ):
+                decision = RouteEscalationDecision(
+                    action=EscalationAction.BLOCKED,
+                    failure_class=FailureClass.EVIDENCE_MISSING,
+                    selected=None,
+                    attempted_route_ids=history,
+                    remaining_route_ids=(),
+                    reason=EscalationReason.NO_ELIGIBLE_ROUTE,
+                )
+            else:
+                decision = advance_route(
+                    registry,
+                    requirements,
+                    current_route_id=candidate.route_id,
+                    attempted_route_ids=history,
+                    failure_class=FailureClass.EVIDENCE_MISSING,
+                )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            requirements or RouteRequirements(),
+            episode_id=episode_id,
+            attempt_index=len(history) - 1,
+            verifier_outcome=(
+                VerifierOutcome.ATTEMPT_SUCCEEDED if success else VerifierOutcome.FAILED
+            ),
+            failure_class=failure_class,
+            escalation_reason=decision.reason if decision is not None else None,
+        )
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": decision.to_contract_data() if decision is not None else None,
+                    "human_handoff_required": bool(decision is not None and decision.blocked),
+                    "final_acceptance_declared": False,
+                },
+            )
+        )
+        return decision, history
+
     async def _direct_resume_route_id(
         self,
         *,
         execution_id: str,
         session_id: str,
-    ) -> str | None:
+    ) -> _DirectRouteResumeState | None:
         """Resume only an explicitly paused direct route; seal completed effects."""
         from ouroboros.orchestrator.route_compat import (
             build_compat_escalation_registry,
@@ -1454,11 +1582,6 @@ class OrchestratorRunner:
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
-        if len(direct_pauses) > 1:
-            raise OrchestratorError(
-                message="Refusing to replay duplicate direct route pause state",
-                details={"execution_id": execution_id, "session_id": session_id},
-            )
         if not direct_pauses:
             latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
             data = latest.data
@@ -1479,7 +1602,8 @@ class OrchestratorRunner:
                 details={"execution_id": execution_id, "session_id": session_id},
             )
 
-        pause_data = direct_pauses[0].data
+        latest_pause = max(direct_pauses, key=lambda event: (event.timestamp, event.id))
+        pause_data = latest_pause.data
         expected_pause_keys = {
             "schema_version",
             "execution_id",
@@ -1550,6 +1674,45 @@ class OrchestratorRunner:
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         prior_route_ids = tuple(row[0].route_id for row in parsed_rows)
+        for superseded_pause in direct_pauses:
+            if superseded_pause is latest_pause:
+                continue
+            superseded = superseded_pause.data
+            if (
+                set(superseded) != expected_pause_keys
+                or superseded.get("schema_version") != 1
+                or superseded.get("execution_id") != execution_id
+                or superseded.get("session_id") != session_id
+                or superseded.get("root_ac_index") is not None
+                or superseded.get("call_site") != "runner"
+                or superseded.get("episode_id") != expected_episode
+                or superseded.get("recoverable_pause") is not True
+                or superseded.get("final_acceptance_declared") is not False
+                or type(superseded.get("attempt_index")) is not int
+                or type(superseded.get("prior_route_ids")) is not list
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay invalid superseded direct route pause state",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            superseded_index = superseded["attempt_index"]
+            try:
+                superseded_candidate = RouteCandidate.from_contract_data(superseded.get("route"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay invalid superseded direct route pause state",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if (
+                not 0 <= superseded_index < len(parsed_rows)
+                or tuple(superseded["prior_route_ids"])
+                != tuple(row[0].route_id for row in parsed_rows[:superseded_index])
+                or parsed_rows[superseded_index][0].route_id != superseded_candidate.route_id
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay an unconsumed superseded direct route pause",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
         if (
             pause_data["attempt_index"] != len(parsed_rows)
             or tuple(pause_data["prior_route_ids"]) != prior_route_ids
@@ -1678,7 +1841,12 @@ class OrchestratorRunner:
                     message="Refusing to replay a paused route that was not cheapest eligible",
                     details={"execution_id": execution_id, "session_id": session_id},
                 )
-        return paused_candidate.route_id
+        return _DirectRouteResumeState(
+            episode_id=expected_episode,
+            attempt_index=pause_data["attempt_index"],
+            prior_route_ids=prior_route_ids,
+            candidate=paused_candidate,
+        )
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.
@@ -4283,6 +4451,148 @@ class OrchestratorRunner:
                 },
             )
         )
+
+    @staticmethod
+    def _serialize_parallel_resume_plan(execution_plan: Any) -> dict[str, object]:
+        """Seal the exact dependency plan needed by the parallel resume owner."""
+
+        return {
+            "schema_version": 1,
+            "nodes": [
+                {
+                    "index": node.index,
+                    "depends_on": list(node.depends_on),
+                    "can_run_independently": node.can_run_independently,
+                    "requires_serial_stage": node.requires_serial_stage,
+                    "serialization_reasons": list(node.serialization_reasons),
+                }
+                for node in execution_plan.nodes
+            ],
+            "stages": [
+                {
+                    "index": stage.index,
+                    "ac_indices": list(stage.ac_indices),
+                    "depends_on_stages": list(stage.depends_on_stages),
+                }
+                for stage in execution_plan.stages
+            ],
+        }
+
+    @staticmethod
+    def _deserialize_parallel_resume_plan(seed: Seed, raw: object) -> Any:
+        """Restore a bounded exact plan or fail before any analyzer/provider effect."""
+
+        from ouroboros.orchestrator.dependency_analyzer import (
+            ACNode,
+            ExecutionStage,
+            StagedExecutionPlan,
+        )
+
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "schema_version",
+            "nodes",
+            "stages",
+        }:
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        nodes_raw = raw.get("nodes")
+        stages_raw = raw.get("stages")
+        ac_count = len(seed.acceptance_criteria)
+        if (
+            raw.get("schema_version") != 1
+            or not isinstance(nodes_raw, list)
+            or len(nodes_raw) != ac_count
+            or not isinstance(stages_raw, list)
+            or len(stages_raw) > ac_count
+            or (ac_count > 0 and not stages_raw)
+        ):
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        nodes: list[ACNode] = []
+        for expected_index, value in enumerate(nodes_raw):
+            if not isinstance(value, Mapping) or set(value) != {
+                "index",
+                "depends_on",
+                "can_run_independently",
+                "requires_serial_stage",
+                "serialization_reasons",
+            }:
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            depends_on = value.get("depends_on")
+            reasons = value.get("serialization_reasons")
+            if (
+                type(value.get("index")) is not int
+                or value.get("index") != expected_index
+                or not isinstance(depends_on, list)
+                or len(depends_on) > ac_count
+                or any(type(index) is not int for index in depends_on)
+                or len(set(depends_on)) != len(depends_on)
+                or any(not 0 <= index < ac_count or index == expected_index for index in depends_on)
+                or type(value.get("can_run_independently")) is not bool
+                or type(value.get("requires_serial_stage")) is not bool
+                or not isinstance(reasons, list)
+                or len(reasons) > ac_count
+                or any(type(reason) is not str or not reason for reason in reasons)
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            nodes.append(
+                ACNode(
+                    index=expected_index,
+                    content=ac_text(seed.acceptance_criteria[expected_index]),
+                    depends_on=tuple(depends_on),
+                    can_run_independently=value["can_run_independently"],
+                    requires_serial_stage=value["requires_serial_stage"],
+                    serialization_reasons=tuple(reasons),
+                )
+            )
+        stages: list[ExecutionStage] = []
+        seen_acs: set[int] = set()
+        stage_by_ac: dict[int, int] = {}
+        for expected_stage, value in enumerate(stages_raw):
+            if not isinstance(value, Mapping) or set(value) != {
+                "index",
+                "ac_indices",
+                "depends_on_stages",
+            }:
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            ac_indices = value.get("ac_indices")
+            dependencies = value.get("depends_on_stages")
+            if (
+                type(value.get("index")) is not int
+                or value.get("index") != expected_stage
+                or not isinstance(ac_indices, list)
+                or not ac_indices
+                or len(ac_indices) > ac_count
+                or any(type(index) is not int or not 0 <= index < ac_count for index in ac_indices)
+                or len(set(ac_indices)) != len(ac_indices)
+                or seen_acs.intersection(ac_indices)
+                or not isinstance(dependencies, list)
+                or len(dependencies) > expected_stage
+                or any(
+                    type(index) is not int or not 0 <= index < expected_stage
+                    for index in dependencies
+                )
+                or len(set(dependencies)) != len(dependencies)
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            stage = ExecutionStage(
+                index=expected_stage,
+                ac_indices=tuple(ac_indices),
+                depends_on_stages=tuple(dependencies),
+            )
+            stages.append(stage)
+            seen_acs.update(ac_indices)
+            stage_by_ac.update(dict.fromkeys(ac_indices, expected_stage))
+        if seen_acs != set(range(ac_count)):
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        for node in nodes:
+            node_stage = stage_by_ac[node.index]
+            stage_dependencies = set(stages[node_stage].depends_on_stages)
+            if any(
+                stage_by_ac[dependency] >= node_stage
+                or stage_by_ac[dependency] not in stage_dependencies
+                for dependency in node.depends_on
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        return StagedExecutionPlan(nodes=tuple(nodes), stages=tuple(stages))
 
     def _validate_legacy_resume_identity(
         self,
@@ -7501,126 +7811,14 @@ class OrchestratorRunner:
                     if not direct_bounded_routing or direct_route_candidate is None:
                         break
 
-                    from ouroboros.events.base import BaseEvent
-                    from ouroboros.orchestrator.failure_taxonomy import FailureClass
-                    from ouroboros.orchestrator.route_compat import (
-                        build_compat_escalation_registry,
-                        build_compat_escalation_requirements,
-                        build_route_compat_projection,
-                    )
-                    from ouroboros.orchestrator.route_escalation import (
-                        RouteObservation,
-                        VerifierOutcome,
-                        advance_route,
-                    )
-                    from ouroboros.orchestrator.route_policy import RouteRequirements
-
-                    direct_route_history = (
-                        *direct_route_history,
-                        direct_route_candidate.route_id,
-                    )
-                    live_projection = build_route_compat_projection(
-                        self._route_economics,
-                        model_router=self._model_router,
-                        runtime_backend=getattr(self._adapter, "runtime_backend", None),
-                        effort=direct_route_candidate.effort,
-                    )
-                    escalation_registry = build_compat_escalation_registry(live_projection)
-                    requirements = (
-                        build_compat_escalation_requirements(
-                            live_projection,
-                            effort=direct_route_candidate.effort,
-                        )
-                        if live_projection is not None
-                        else None
-                    )
-                    live_candidate = (
-                        next(
-                            (
-                                configured
-                                for configured in live_projection.registry.candidates
-                                if configured.route_id == direct_route_candidate.route_id
-                            ),
-                            None,
-                        )
-                        if live_projection is not None
-                        else None
-                    )
-                    failure_class = None
-                    decision = None
-                    if not success:
-                        failure_class = (
-                            FailureClass.BLOCKED
-                            if recoverable_failure_pause is not None
-                            else FailureClass.EVIDENCE_MISSING
-                        )
-                        if (
-                            live_projection is None
-                            or escalation_registry is None
-                            or requirements is None
-                            or live_candidate != direct_route_candidate
-                        ):
-                            from ouroboros.orchestrator.route_escalation import (
-                                EscalationAction,
-                                EscalationReason,
-                                RouteEscalationDecision,
-                            )
-
-                            decision = RouteEscalationDecision(
-                                action=EscalationAction.BLOCKED,
-                                failure_class=failure_class,
-                                selected=None,
-                                attempted_route_ids=direct_route_history,
-                                remaining_route_ids=(),
-                                reason=EscalationReason.NO_ELIGIBLE_ROUTE,
-                            )
-                        else:
-                            decision = advance_route(
-                                escalation_registry,
-                                requirements,
-                                current_route_id=direct_route_candidate.route_id,
-                                attempted_route_ids=direct_route_history,
-                                failure_class=failure_class,
-                            )
                     episode_digest = hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
-                    observation = RouteObservation.from_candidate(
-                        direct_route_candidate,
-                        requirements or RouteRequirements(),
+                    decision, direct_route_history = await self._persist_direct_route_outcome(
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
                         episode_id=f"route:{episode_digest}",
-                        attempt_index=len(direct_route_history) - 1,
-                        verifier_outcome=(
-                            VerifierOutcome.ATTEMPT_SUCCEEDED
-                            if success
-                            else (
-                                VerifierOutcome.BLOCKED
-                                if failure_class is FailureClass.BLOCKED
-                                else VerifierOutcome.FAILED
-                            )
-                        ),
-                        failure_class=failure_class,
-                        escalation_reason=(decision.reason if decision is not None else None),
-                    )
-                    await self._event_store.append(
-                        BaseEvent(
-                            type="execution.ac.route_observed",
-                            aggregate_type="execution",
-                            aggregate_id=exec_id,
-                            data={
-                                "schema_version": 1,
-                                "execution_id": exec_id,
-                                "session_id": tracker.session_id,
-                                "root_ac_index": None,
-                                "call_site": "runner",
-                                "observation": observation.to_contract_data(),
-                                "decision": (
-                                    decision.to_contract_data() if decision is not None else None
-                                ),
-                                "human_handoff_required": bool(
-                                    decision is not None and decision.blocked
-                                ),
-                                "final_acceptance_declared": False,
-                            },
-                        )
+                        prior_route_ids=direct_route_history,
+                        candidate=direct_route_candidate,
+                        success=success,
                     )
                     if success or decision is None or decision.blocked:
                         if decision is not None and decision.blocked:
@@ -7991,6 +8189,7 @@ class OrchestratorRunner:
         execution_contract: Mapping[str, Any] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         force_sequential_levels: bool = False,
+        resume_execution_plan: Any | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -8026,8 +8225,12 @@ class OrchestratorRunner:
             ac_count=len(seed.acceptance_criteria),
         )
 
-        # Analyze dependencies
-        if force_sequential_levels:
+        # A paused parallel owner must reuse its already-durable plan.  Running
+        # dependency analysis again would be a provider effect before Routing D
+        # replay has validated its judgment/observation chain.
+        if resume_execution_plan is not None:
+            execution_plan = resume_execution_plan
+        elif force_sequential_levels:
             self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
                 nodes=tuple(
@@ -8060,14 +8263,14 @@ class OrchestratorRunner:
             else:
                 dependency_graph = dep_result.value
 
-        execution_plan = dependency_graph.to_execution_plan()
-
-        await self._emit_execution_plan_created(
-            seed=seed,
-            execution_id=exec_id,
-            session_id=tracker.session_id,
-            execution_plan=execution_plan,
-        )
+        if resume_execution_plan is None:
+            execution_plan = dependency_graph.to_execution_plan()
+            await self._emit_execution_plan_created(
+                seed=seed,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                execution_plan=execution_plan,
+            )
 
         # Log execution plan
         log.info(
@@ -8254,6 +8457,27 @@ class OrchestratorRunner:
                 )
             )
         elif recoverable_failure_pause is not None:
+            resume_owner_progress = {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": force_sequential_levels,
+                "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
+            }
+            owner_result = await self._session_repo.track_progress(
+                tracker.session_id,
+                resume_owner_progress,
+            )
+            if owner_result.is_err:
+                return Result.err(
+                    OrchestratorError(
+                        message="Failed to persist the parallel Routing D resume owner",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": exec_id,
+                            "cause": str(owner_result.error),
+                        },
+                    )
+                )
+            tracker = tracker.with_progress(resume_owner_progress)
             pause_result = await self._session_repo.mark_paused(
                 tracker.session_id,
                 reason=recoverable_failure_pause.reason,
@@ -8582,6 +8806,7 @@ class OrchestratorRunner:
             )
 
         tracker = session_result.value
+        parallel_resume_owner = tracker.progress.get("routing_resume_owner") == "parallel"
 
         # Check if session can be resumed
         if tracker.status in (
@@ -8739,7 +8964,7 @@ class OrchestratorRunner:
                 )
             )
 
-        if self._fat_harness_mode:
+        if self._fat_harness_mode and not parallel_resume_owner:
             self._release_process_local_authority(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -8760,7 +8985,7 @@ class OrchestratorRunner:
                 )
             )
 
-        if _seed_has_investment_metadata(seed):
+        if _seed_has_investment_metadata(seed) and not parallel_resume_owner:
             self._release_process_local_authority(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -8929,6 +9154,36 @@ Note: This is a resumed session. Please continue from where execution was interr
                 activity_map=resume_strategy.get_activity_map(),
             )
             await self._replay_workflow_state(session_id, state_tracker)
+
+            if parallel_resume_owner:
+                force_sequential = tracker.progress.get(
+                    "routing_parallel_force_sequential",
+                    False,
+                )
+                if type(force_sequential) is not bool:
+                    raise OrchestratorError(
+                        message="Invalid persisted parallel Routing D resume owner state",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                resume_execution_plan = self._deserialize_parallel_resume_plan(
+                    seed,
+                    tracker.progress.get("routing_parallel_plan"),
+                )
+                return await self._execute_parallel(
+                    seed=seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=merged_tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    start_time=start_time,
+                    execution_contract=execution_contract,
+                    force_sequential_levels=force_sequential,
+                    resume_execution_plan=resume_execution_plan,
+                )
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -8995,6 +9250,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             last_completed_count = state_tracker.state.completed_count
             live_runtime_handle = runtime_handle
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
+            resume_route_state: _DirectRouteResumeState | None = None
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
@@ -9005,15 +9261,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
-                resume_route_id = await self._direct_resume_route_id(
+                resume_route_state = await self._direct_resume_route_id(
                     execution_id=tracker.execution_id,
                     session_id=session_id,
                 )
                 effort_kwargs = await self._route_call_effort(
-                    execution_id=None,
+                    execution_id=tracker.execution_id,
                     session_id=session_id,
-                    bounded_escalation=resume_route_id is not None,
-                    route_id_override=resume_route_id,
+                    bounded_escalation=resume_route_state is not None,
+                    route_id_override=(
+                        resume_route_state.candidate.route_id
+                        if resume_route_state is not None
+                        else None
+                    ),
+                    expected_route_candidate=(
+                        resume_route_state.candidate if resume_route_state is not None else None
+                    ),
                 )
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
@@ -9132,6 +9395,122 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 message,
                                 now=datetime.now(UTC),
                             )
+
+            if (
+                resume_route_state is not None
+                and cancelled_result is None
+                and recoverable_resume_failure is None
+            ):
+                decision, route_history = await self._persist_direct_route_outcome(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    episode_id=resume_route_state.episode_id,
+                    prior_route_ids=resume_route_state.prior_route_ids,
+                    candidate=resume_route_state.candidate,
+                    success=success,
+                )
+                while not success and decision is not None and not decision.blocked:
+                    assert decision.selected is not None
+                    await self._terminate_runtime_handle(
+                        live_runtime_handle,
+                        session_id=session_id,
+                        context="bounded_route_resume_escalation",
+                    )
+                    live_runtime_handle = None
+                    successor = decision.selected
+                    successor_kwargs = await self._route_call_effort(
+                        execution_id=tracker.execution_id,
+                        session_id=session_id,
+                        bounded_escalation=True,
+                        route_id_override=successor.route_id,
+                        expected_route_candidate=successor,
+                    )
+                    final_message = ""
+                    recoverable_resume_failure = None
+                    async with (
+                        aclosing(
+                            self._adapter.execute_task(  # type: ignore[type-var]
+                                prompt=(
+                                    build_task_prompt(seed)
+                                    + "\n\nThe resumed route failed. Continue in a fresh "
+                                    "session and satisfy the same Seed contracts."
+                                ),
+                                tools=merged_tools,
+                                system_prompt=system_prompt,
+                                resume_handle=None,
+                                **successor_kwargs,
+                            )
+                        ) as successor_stream
+                    ):
+                        async for message in successor_stream:
+                            messages_processed += 1
+                            if (
+                                messages_processed % CANCELLATION_CHECK_INTERVAL == 0
+                                and await self._check_cancellation(session_id)
+                            ):
+                                cancelled_result = await self._handle_cancellation(
+                                    session_id=session_id,
+                                    execution_id=tracker.execution_id,
+                                    messages_processed=messages_processed,
+                                    start_time=start_time,
+                                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                                )
+                                break
+                            tracker = await self._update_and_persist_progress(
+                                tracker,
+                                message,
+                                messages_processed,
+                                session_id,
+                            )
+                            if message.resume_handle is not None:
+                                live_runtime_handle = message.resume_handle
+                            state_tracker.process_runtime_message(message)
+                            if message.is_final:
+                                final_message = message.content
+                                success = not message.is_error
+                                recoverable_resume_failure = self._recoverable_failure_pause(
+                                    message,
+                                    now=datetime.now(UTC),
+                                )
+                    if cancelled_result is not None:
+                        break
+                    if recoverable_resume_failure is not None:
+                        from ouroboros.events.base import BaseEvent
+
+                        await self._event_store.append(
+                            BaseEvent(
+                                type="execution.ac.route_paused",
+                                aggregate_type="execution",
+                                aggregate_id=tracker.execution_id,
+                                data={
+                                    "schema_version": 1,
+                                    "execution_id": tracker.execution_id,
+                                    "session_id": session_id,
+                                    "root_ac_index": None,
+                                    "call_site": "runner",
+                                    "episode_id": resume_route_state.episode_id,
+                                    "attempt_index": len(route_history),
+                                    "prior_route_ids": list(route_history),
+                                    "route": successor.to_contract_data(),
+                                    "recoverable_pause": True,
+                                    "final_acceptance_declared": False,
+                                },
+                            )
+                        )
+                        break
+                    decision, route_history = await self._persist_direct_route_outcome(
+                        execution_id=tracker.execution_id,
+                        session_id=session_id,
+                        episode_id=resume_route_state.episode_id,
+                        prior_route_ids=route_history,
+                        candidate=successor,
+                        success=success,
+                    )
+                if not success and decision is not None and decision.blocked:
+                    final_message = (
+                        f"{final_message}\nRoute escalation stopped: "
+                        f"{decision.reason.value}; human handoff required."
+                    )
 
             if cancelled_result is not None:
                 return cancelled_result
