@@ -206,7 +206,7 @@ def is_credential_shaped(value: str) -> bool:
     allowing ordinary route and authority identifiers through.
     """
 
-    if not isinstance(value, str):
+    if type(value) is not str:
         return False
     normalized = value.strip()
     if not normalized:
@@ -247,7 +247,7 @@ def is_stable_authority_identity(value: str) -> bool:
     then pass the shared credential-shape guard.
     """
 
-    if not isinstance(value, str):
+    if type(value) is not str:
         return False
     normalized = value.strip()
     return bool(_STABLE_AUTHORITY_IDENTITY.fullmatch(normalized)) and not is_credential_shaped(

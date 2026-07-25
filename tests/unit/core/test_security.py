@@ -152,6 +152,13 @@ class TestSensitiveDetection:
         assert is_credential_shaped("tokenizer") is False
         assert is_credential_shaped("privateer") is False
 
+        class HostileString(str):
+            def strip(self) -> str:
+                raise RuntimeError("hostile normalization")
+
+        assert is_credential_shaped(HostileString("runtime:apikey123")) is False
+        assert is_stable_authority_identity(HostileString("runtime:claude")) is False
+
     def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
         for value in (
             "authority-default",
