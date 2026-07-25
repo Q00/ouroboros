@@ -224,6 +224,23 @@ def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
                 separators=(",", ":"),
             ),
         },
+        {"tool_name": "Bash", "command": "bash -o noexec -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "-o", "noexec", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash -onoexec -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "command": "bash -c 'pytest tests/test_app.py' || true",
+        },
+        {
+            "tool_name": "Bash",
+            "command": "bash -c 'pytest tests/test_app.py' | cat",
+        },
     ),
 )
 def test_deliver_matching_does_not_extract_shell_body_after_script_operand(
@@ -259,6 +276,36 @@ def test_deliver_matching_preserves_legacy_json_scalar_preview() -> None:
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_true",)
+
+
+def test_deliver_matching_rejects_conflicting_command_aliases() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_conflicting",
+                payload={
+                    "tool_name": "Bash",
+                    "command": "echo ready",
+                    "args_preview": json.dumps(
+                        {"cmd": "pytest tests/not-run.py"},
+                        separators=(",", ":"),
+                    ),
+                },
+            ),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="echo ready",
+    )
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="pytest tests/not-run.py",
+    )
 
 
 def test_tests_passed_requires_a_successful_test_command() -> None:
@@ -322,6 +369,40 @@ def test_tests_passed_rejects_status_masking_shell_chain(command: str) -> None:
 
     assert tuple(entry.handle for entry in command_matches) == ("ev_masked",)
     assert test_matches == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "pytest --version",
+        "pytest --collect-only",
+        "pytest --setup-plan",
+        "python -m unittest --help",
+        "tox --showconfig",
+        "nox --list",
+        "gradle test --dry-run",
+        "npm test --if-present",
+    ),
+)
+def test_tests_passed_rejects_non_executing_runner_modes(command: str) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_no_tests", command=command),),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="commands_run",
+            value=command,
+        )
+    ) == ("ev_no_tests",)
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
 
 
 def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:

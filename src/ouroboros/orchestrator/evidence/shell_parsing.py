@@ -73,6 +73,8 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
 
 def _shell_command_body(command: str) -> str | None:
     """Return the ``-c`` body when the command starts with a shell wrapper."""
+    if _has_unquoted_status_masking_control(command):
+        return None
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -120,8 +122,17 @@ def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
                 return None
             return argv[index + 1].strip()
         if option in _SHELL_OPTIONS_WITH_ARGUMENT:
+            if index + 1 >= len(argv):
+                return None
+            option_value = argv[index + 1].strip().lower().replace("_", "").replace("-", "")
+            if option == "-o" and option_value == "noexec":
+                return None
             index += 2
             continue
+        if option.startswith("-o"):
+            option_value = option[2:].strip().lower().replace("_", "").replace("-", "")
+            if option_value == "noexec":
+                return None
         if option == "--" or option == "-" or not option.startswith(("-", "+")):
             return None
         index += 1
@@ -280,7 +291,7 @@ def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
     return False
 
 
-def _has_unquoted_test_status_mask(command: str) -> bool:
+def _has_unquoted_status_masking_control(command: str) -> bool:
     """Return whether shell control syntax can hide a test command's status."""
     quote: str | None = None
     escaped = False
@@ -325,7 +336,7 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     silently back a clean ``tests_passed`` / ``commands_run`` claim via the
     ``startswith`` widening in ``_runtime_message_supports_command_claim``.
     """
-    if _has_unquoted_test_status_mask(command):
+    if _has_unquoted_status_masking_control(command):
         return None
     try:
         parts = shlex.split(command)
@@ -335,6 +346,8 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     if not parts:
         return None
     if any(part in {"|", "||", ";", "&"} for part in parts):
+        return None
+    if _has_non_executing_test_mode(parts):
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:
@@ -358,6 +371,53 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     ):
         return _normalized_evidence_text(" ".join(parts))
     return None
+
+
+_GENERIC_NON_EXECUTING_TEST_OPTIONS = frozenset({"-h", "--help", "-V", "--version", "--dry-run"})
+_PYTEST_NON_EXECUTING_OPTIONS = frozenset(
+    {
+        "--collect-only",
+        "--co",
+        "--fixtures",
+        "--fixtures-per-test",
+        "--markers",
+        "--setup-only",
+        "--setup-plan",
+    }
+)
+
+
+def _has_non_executing_test_mode(parts: list[str]) -> bool:
+    """Return whether a recognized test runner is configured not to run tests."""
+    if any(part in _GENERIC_NON_EXECUTING_TEST_OPTIONS for part in parts[1:]):
+        return True
+
+    runner_parts = parts
+    if len(parts) >= 3 and (
+        parts[:3] == ["uv", "run", "pytest"]
+        or (
+            _is_python_executable(parts[0])
+            and parts[1] == "-m"
+            and parts[2] in {"pytest", "unittest"}
+        )
+    ):
+        runner_parts = parts[2:]
+
+    runner = Path(runner_parts[0]).name if runner_parts else ""
+    options = runner_parts[1:]
+    if runner in {"pytest", "py.test"} and any(
+        option in _PYTEST_NON_EXECUTING_OPTIONS for option in options
+    ):
+        return True
+    if runner == "tox" and any(
+        option in {"-l", "--listenvs", "--showconfig"} for option in options
+    ):
+        return True
+    if runner == "nox" and any(option in {"-l", "--list"} for option in options):
+        return True
+    if runner in {"gradle", "gradlew"} and "-m" in options:
+        return True
+    return runner in {"npm", "pnpm", "yarn"} and "--if-present" in options
 
 
 def _unittest_command_invocation(command: str) -> str | None:

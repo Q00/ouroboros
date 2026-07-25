@@ -1314,6 +1314,12 @@ def _journal_command_values(payload: Mapping[str, object]) -> tuple[object, ...]
                 # command spellings (for example ``true``). Preserve the
                 # preview rather than silently dropping exact evidence.
                 values.append(preview.strip())
+    if len(values) > 1:
+        anchor = values[0]
+        if any(
+            not _commands_are_strictly_equivalent(anchor, candidate) for candidate in values[1:]
+        ):
+            return ()
     return tuple(values)
 
 
