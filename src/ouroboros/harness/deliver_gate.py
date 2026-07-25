@@ -314,6 +314,7 @@ def _accepted_tool_start_entries(
         normalized_tool_name = tool_name.strip()
         completion: BaseEvent | None = None
         if normalized_tool_name in {"Bash", "Edit", "Write", "NotebookEdit"}:
+            require_command_verdict = normalized_tool_name == "Bash"
             call_id = _event_tool_call_id(event)
             if call_id is not None:
                 matching_starts = tuple(
@@ -330,13 +331,17 @@ def _accepted_tool_start_entries(
                 )
                 if len(matching_starts) != 1:
                     continue
-            if not _event_has_explicit_tool_success(event):
+            if not _event_has_explicit_tool_success(
+                event,
+                require_command_verdict=require_command_verdict,
+            ):
                 completion = _correlated_successful_tool_completion(
                     chronological,
                     start_index=index,
                     scope_id=scope_id,
                     retry_attempt=retry_attempt,
                     session_attempt_id=session_attempt_id,
+                    require_command_verdict=require_command_verdict,
                 )
                 if completion is None:
                     continue
@@ -407,8 +412,17 @@ def _event_tool_call_id(event: BaseEvent) -> str | None:
     return None
 
 
-def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
-    """Return True only for machine-readable non-error completion evidence."""
+def _event_has_explicit_tool_success(
+    event: BaseEvent,
+    *,
+    require_command_verdict: bool = False,
+) -> bool:
+    """Return True only for machine-readable non-error completion evidence.
+
+    Command execution additionally requires a command-specific result bit or
+    zero exit status. Generic lifecycle completion is sufficient for mutation
+    tools, but cannot prove that a Bash body ran successfully.
+    """
     data = event.data
     if not isinstance(data, Mapping):
         return False
@@ -429,16 +443,18 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
         if tool_result.get("is_error") is True:
             return False
     is_completion_event = event.type == "execution.tool.completed"
-    success_signal = is_completion_event and (
+    command_success_signal = is_completion_event and (
         data.get("is_error") is False
         or (isinstance(tool_result, Mapping) and tool_result.get("is_error") is False)
     )
+    success_signal = command_success_signal
     if "exit_code" in data:
         exit_code = data["exit_code"]
         if isinstance(exit_code, bool) or not isinstance(exit_code, int):
             return False
         if exit_code != 0:
             return False
+        command_success_signal = True
         success_signal = True
     if isinstance(tool_result, Mapping):
         meta = tool_result.get("meta")
@@ -449,6 +465,7 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
                     return False
                 if exit_status != 0:
                     return False
+                command_success_signal = True
                 success_signal = True
     subtype = data.get("subtype")
     if isinstance(subtype, str) and subtype.strip().lower() == "success":
@@ -467,7 +484,7 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
             return False
         if normalized.endswith((".completed", ".succeeded")):
             success_signal = True
-    return success_signal
+    return command_success_signal if require_command_verdict else success_signal
 
 
 def _event_matches_accepted_attempt(
@@ -496,8 +513,9 @@ def _correlated_successful_tool_completion(
     scope_id: str,
     retry_attempt: int | None,
     session_attempt_id: str | None,
+    require_command_verdict: bool,
 ) -> BaseEvent | None:
-    """Return one exact successful completion for a mutation start, else None."""
+    """Return one exact successful completion for a guarded tool start, else None."""
     start = events[start_index]
     start_data = start.data
     if not isinstance(start_data, Mapping):
@@ -536,7 +554,10 @@ def _correlated_successful_tool_completion(
             and isinstance(candidate.data, Mapping)
             and candidate.data.get("tool_name") == start_tool
         )
-        if len(matches) != 1 or not _event_has_explicit_tool_success(matches[0]):
+        if len(matches) != 1 or not _event_has_explicit_tool_success(
+            matches[0],
+            require_command_verdict=require_command_verdict,
+        ):
             return None
         return matches[0]
 
@@ -561,7 +582,14 @@ def _correlated_successful_tool_completion(
         )
         if candidate_tool != start_tool:
             return None
-        return candidate if _event_has_explicit_tool_success(candidate) else None
+        return (
+            candidate
+            if _event_has_explicit_tool_success(
+                candidate,
+                require_command_verdict=require_command_verdict,
+            )
+            else None
+        )
     return None
 
 

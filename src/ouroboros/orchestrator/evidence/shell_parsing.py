@@ -81,6 +81,18 @@ def _shell_command_body(command: str) -> str | None:
 
 
 _SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"})
+_SHELL_NON_EXECUTING_OPTIONS = frozenset(
+    {
+        "-n",
+        "--noexec",
+        "--version",
+        "--help",
+        "-D",
+        "--dump-strings",
+        "--dump-po-strings",
+        "--pretty-print",
+    }
+)
 
 
 def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
@@ -99,6 +111,10 @@ def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
     index = 1
     while index < len(argv):
         option = argv[index]
+        if option in _SHELL_NON_EXECUTING_OPTIONS or (
+            option.startswith("-") and not option.startswith("--") and "n" in option[1:]
+        ):
+            return None
         if option in {"-c", "-lc", "-cl"}:
             if index + 1 >= len(argv):
                 return None
@@ -264,6 +280,40 @@ def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
     return False
 
 
+def _has_unquoted_test_status_mask(command: str) -> bool:
+    """Return whether shell control syntax can hide a test command's status."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in {"|", ";", "\n", "\r"}:
+            return True
+        if char == "&":
+            previous = command[index - 1] if index > 0 else ""
+            following = command[index + 1] if index + 1 < len(command) else ""
+            if previous == "&" or following == "&":
+                continue
+            if previous not in {">", "<"} and following != ">":
+                return True
+    return False
+
+
 def _test_invocation_from_prefix(command: str) -> str | None:
     """Return a normalized test invocation only when it starts the command text.
 
@@ -275,6 +325,8 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     silently back a clean ``tests_passed`` / ``commands_run`` claim via the
     ``startswith`` widening in ``_runtime_message_supports_command_claim``.
     """
+    if _has_unquoted_test_status_mask(command):
+        return None
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -282,7 +334,7 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     parts = _strip_env_prefix(parts)
     if not parts:
         return None
-    if "|" in parts:
+    if any(part in {"|", "||", ";", "&"} for part in parts):
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:

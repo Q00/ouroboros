@@ -208,6 +208,22 @@ def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
                 separators=(",", ":"),
             ),
         },
+        {"tool_name": "Bash", "command": "bash -n -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "-n", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash --version -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "--version", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
     ),
 )
 def test_deliver_matching_does_not_extract_shell_body_after_script_operand(
@@ -277,6 +293,35 @@ def test_tests_passed_requires_a_successful_test_command() -> None:
         "ev_echo",
         "missing:tests_passed:0",
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "pytest tests/does_not_exist.py >/dev/null 2>&1 || true",
+        "pytest tests/does_not_exist.py||true",
+        "pytest tests/does_not_exist.py; true",
+    ),
+)
+def test_tests_passed_rejects_status_masking_shell_chain(command: str) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_masked", command=command),),
+    )
+
+    command_matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=command,
+    )
+    test_matches = _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
+
+    assert tuple(entry.handle for entry in command_matches) == ("ev_masked",)
+    assert test_matches == ()
 
 
 def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:
