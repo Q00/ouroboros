@@ -441,6 +441,12 @@ def test_credential_shaped_authority_identity_is_rejected_before_serialization()
         "runtime:access_token-abc123",
         "runtime:api_key-abc123",
         "runtime:client_secret-abc123",
+        "runtime:secretopaquevalue",
+        "runtime:tokenopaquevalue",
+        "runtime:credentialopaquevalue",
+        "runtime:prod-ghp_abcdefghijklmnopqrstuvwxyz",
+        "runtime:prod-sk_live_abcdefghijklmnopqrstuvwxyz",
+        "runtime:prod-hvs.abcdefghijklmnopqrstuvwxyz",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
         "SG." + "A" * 22 + "." + "B" * 43,
         "hvs." + "A" * 24,
@@ -668,6 +674,8 @@ def test_advisor_hash_failure_falls_back_to_kernel_order() -> None:
 
 
 def test_exported_admission_reflection_has_one_coherent_runtime_contract() -> None:
+    assert admit_route.__name__ == "admit_route"
+    assert admit_route.__qualname__ == "admit_route"
     assert typing.get_type_hints(admit_route)["return"] is RouteAdmission
     for method_name in ("__new__", "__copy__", "__deepcopy__", "_trusted_state"):
         typing.get_type_hints(getattr(RouteAdmission, method_name))

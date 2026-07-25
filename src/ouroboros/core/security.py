@@ -132,6 +132,7 @@ _COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
 _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS = frozenset(
     {"secret", "token", "credential", "credentials", "authorization", "key", "private", "bearer"}
 )
+_SAFE_COMPACT_AUTHORITY_IDENTIFIERS = frozenset({"keycloak", "tokenizer", "privateer"})
 _SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
 
 _CREDENTIAL_COMPOUND_PREFIX = re.compile(
@@ -196,6 +197,31 @@ def _is_credential_namespace_label(value: str) -> bool:
     return False
 
 
+def _has_strict_compact_authority_label(value: str) -> bool:
+    """Reject alphabetic compact credential labels at the authority boundary.
+
+    Logging detection intentionally keeps a narrower heuristic to avoid
+    redacting ordinary words. Authority identities are a fail-closed contract,
+    so generic compact labels are rejected there unless they are explicitly
+    recognized ordinary identifiers or safe metadata suffixes.
+    """
+
+    safe_suffixes = {
+        safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+    }
+    for part in re.split(r"[:/.]", value):
+        label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", part.strip()).lower()
+        compact_label = label.replace("-", "").replace("_", "")
+        if compact_label in _SAFE_COMPACT_AUTHORITY_IDENTIFIERS:
+            continue
+        for credential_label in _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS:
+            if compact_label.startswith(credential_label):
+                suffix = compact_label[len(credential_label) :]
+                if suffix and suffix not in safe_suffixes:
+                    return True
+    return False
+
+
 def is_credential_shaped(value: str) -> bool:
     """Return whether a string matches a high-confidence credential shape.
 
@@ -248,8 +274,10 @@ def is_stable_authority_identity(value: str) -> bool:
     if type(value) is not str:
         return False
     normalized = value.strip()
-    return bool(_STABLE_AUTHORITY_IDENTITY.fullmatch(normalized)) and not is_credential_shaped(
-        normalized
+    return (
+        bool(_STABLE_AUTHORITY_IDENTITY.fullmatch(normalized))
+        and not is_credential_shaped(normalized)
+        and not _has_strict_compact_authority_label(normalized)
     )
 
 

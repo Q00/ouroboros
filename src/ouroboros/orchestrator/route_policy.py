@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence, Set, Sized
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 import weakref
 
 from ouroboros.core.security import is_stable_authority_identity
@@ -706,7 +706,7 @@ if TYPE_CHECKING:
         boundary.
         """
 
-        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        def __init__(self) -> NoReturn: ...
 
         @property
         def disposition(self) -> RouteDecisionDisposition: ...
@@ -744,6 +744,9 @@ else:
     _kernel_route_admission.__name__ = "RouteAdmission"
     _kernel_route_admission.__qualname__ = "RouteAdmission"
     _kernel_route_admission.__module__ = __name__
+    _kernel_admit_route.__name__ = "admit_route"
+    _kernel_admit_route.__qualname__ = "admit_route"
+    _kernel_admit_route.__module__ = __name__
     _kernel_admit_route.__annotations__["return"] = RouteAdmission
     # The implementation class is built in a factory so its publication state
     # is not a module-level minting surface. Normalize all reflective method
