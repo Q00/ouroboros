@@ -807,23 +807,39 @@ def _resolve_tool_completion_success(data: dict[str, Any]) -> bool:
     treated as failure rather than silently ignored, matching the fail-closed
     contract the runtime adapters use.
 
-    A completion carrying no verdict at all stays optimistic: the serialized
-    metadata forwards neither ``tool_result`` nor ``reported_status``, so there
+    Both the top-level and the nested envelopes are supported. ``is_error`` is
+    lifted to the top level only when the message itself carries that key, while
+    ``project_runtime_message`` separately persists the normalized ``tool_result``
+    payload — so an adapter that reports failure only inside ``tool_result``
+    (OpenCode does) has no top-level verdict and would otherwise render green.
+
+    A completion carrying no verdict in either envelope stays optimistic: there
     is no signal to fail closed on, and flipping every signal-less runtime to a
     failed display would be a louder wrong answer than the one being fixed.
-    Widening the payload is a shared-projection change and is deliberately out
-    of scope here.
     """
     raw_success = data.get("success")
     if isinstance(raw_success, bool):
         return raw_success
 
-    if data.get("is_error_invalid") is True:
-        return False
+    tool_result = data.get("tool_result")
+    envelopes: list[dict[str, Any]] = [data]
+    if isinstance(tool_result, dict):
+        envelopes.append(tool_result)
 
-    is_error = data.get("is_error")
-    if isinstance(is_error, bool):
-        return not is_error
+    for envelope in envelopes:
+        if envelope.get("is_error_invalid") is True:
+            return False
+
+        if "is_error" not in envelope:
+            continue
+
+        is_error = envelope.get("is_error")
+        if isinstance(is_error, bool):
+            return not is_error
+
+        # A malformed verdict is a claim that could not be validated, so it is
+        # failure rather than an absent signal.
+        return False
 
     return True
 

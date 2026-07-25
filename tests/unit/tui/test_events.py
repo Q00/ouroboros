@@ -1000,6 +1000,55 @@ class TestToolCompletionSuccessFailClosed:
         assert message is not None
         assert message.success is False
 
+    def test_nested_tool_result_error_renders_as_failure(self) -> None:
+        """OpenCode reports failure only inside `tool_result`, with no top-level key."""
+        message = create_message_from_event(
+            self._completed_event(tool_result={"is_error": True, "text_content": "failed"})
+        )
+        assert message is not None
+        assert message.success is False
+
+    def test_nested_tool_result_success_renders_as_success(self) -> None:
+        message = create_message_from_event(
+            self._completed_event(tool_result={"is_error": False, "text_content": "ok"})
+        )
+        assert message is not None
+        assert message.success is True
+
+    def test_nested_malformed_error_claim_fails_closed(self) -> None:
+        message = create_message_from_event(self._completed_event(tool_result={"is_error": "boom"}))
+        assert message is not None
+        assert message.success is False
+
+    def test_top_level_verdict_wins_over_nested(self) -> None:
+        message = create_message_from_event(
+            self._completed_event(is_error=True, tool_result={"is_error": False})
+        )
+        assert message is not None
+        assert message.success is False
+
+    def test_nested_error_reaches_display_through_production_metadata(self) -> None:
+        """Drive the real projection path, not a hand-built event payload."""
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+
+        agent_message = AgentMessage(
+            type="tool_result",
+            content="failed to patch",
+            data={
+                "subtype": "tool_result",
+                "tool_name": "Edit",
+                "tool_result": {"is_error": True, "text_content": "failed to patch"},
+            },
+        )
+        metadata = ExecutionEventEmitter.runtime_event_metadata(agent_message)
+        assert "is_error" not in metadata, "this envelope must carry no top-level verdict"
+        assert metadata["tool_result"]["is_error"] is True
+
+        message = create_message_from_event(self._completed_event(**metadata))
+        assert message is not None
+        assert message.success is False
+
     def test_absent_verdict_stays_optimistic(self) -> None:
         """No verdict channel is forwarded, so there is nothing to fail closed on."""
         message = create_message_from_event(self._completed_event())
