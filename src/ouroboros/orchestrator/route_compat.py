@@ -95,6 +95,31 @@ def _bounded_tuple(values: Iterable[object], *, max_count: int) -> tuple[object,
     raise ValueError("compatibility values exceed their bound")
 
 
+def _has_bounded_mapping_keys(
+    value: Mapping[object, object],
+    *,
+    expected: frozenset[str],
+) -> bool:
+    """Check an untrusted mapping's exact keys without materializing a tail."""
+
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    keys: list[str] = []
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(keys) == len(expected) and frozenset(keys) == expected
+        except Exception:
+            return False
+        if index >= len(expected) or not isinstance(key, str):
+            return False
+        keys.append(key)
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class RouteCompatProjection:
     """Immutable compatibility snapshot for one runtime/backend.
@@ -576,22 +601,26 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         "tier_route_ids",
         "registry",
     }
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != expected_fields
-        or value.get("version") != ROUTE_COMPAT_VERSION
+    if not isinstance(value, Mapping) or not _has_bounded_mapping_keys(
+        value,
+        expected=frozenset(expected_fields),
     ):
         return None
-    backend = value.get("runtime_backend")
-    effort = value.get("effort")
-    persona = value.get("persona")
-    tool_policy = value.get("tool_policy")
-    authority = value.get("authority_identity")
-    child_tier = value.get("child_tier")
-    base_tier = value.get("base_tier")
-    threshold = value.get("escalation_retry_threshold")
-    raw_registry = value.get("registry")
-    raw_tiers = value.get("tier_route_ids")
+    try:
+        if value["version"] != ROUTE_COMPAT_VERSION:
+            return None
+        backend = value["runtime_backend"]
+        effort = value["effort"]
+        persona = value["persona"]
+        tool_policy = value["tool_policy"]
+        authority = value["authority_identity"]
+        child_tier = value["child_tier"]
+        base_tier = value["base_tier"]
+        threshold = value["escalation_retry_threshold"]
+        raw_registry = value["registry"]
+        raw_tiers = value["tier_route_ids"]
+    except Exception:
+        return None
     if (
         not isinstance(backend, str)
         or not isinstance(persona, str)
@@ -614,10 +643,16 @@ def deserialize_route_compat_projection(value: object) -> RouteCompatProjection 
         for index, item in enumerate(raw_tiers):
             if index >= MAX_ROUTE_CANDIDATES:
                 return None
-            if not isinstance(item, Mapping) or set(item) != {"tier", "route_id"}:
+            if not isinstance(item, Mapping) or not _has_bounded_mapping_keys(
+                item,
+                expected=frozenset({"tier", "route_id"}),
+            ):
                 return None
-            tier = item["tier"]
-            route_id = item["route_id"]
+            try:
+                tier = item["tier"]
+                route_id = item["route_id"]
+            except Exception:
+                return None
             if not isinstance(tier, str) or not isinstance(route_id, str):
                 return None
             if tier not in MODEL_TIER_LADDER or tier_route_ids and tier in dict(tier_route_ids):
@@ -662,18 +697,40 @@ def deserialize_route_compat_contract(
 ) -> tuple[bool, RouteCompatProjection | None]:
     """Parse a compatibility contract while preserving dormant-vs-invalid."""
 
-    if not isinstance(value, Mapping) or value.get("version") != ROUTE_COMPAT_VERSION:
+    if not isinstance(value, Mapping) or not (
+        _has_bounded_mapping_keys(
+            value,
+            expected=frozenset({"version", "enabled", "projection"}),
+        )
+        or _has_bounded_mapping_keys(
+            value,
+            expected=frozenset({"version", "enabled"}),
+        )
+    ):
         return False, None
-    enabled = value.get("enabled")
+    try:
+        if value["version"] != ROUTE_COMPAT_VERSION:
+            return False, None
+        enabled = value["enabled"]
+    except Exception:
+        return False, None
     if not isinstance(enabled, bool):
         return False, None
     if not enabled:
-        if set(value) != {"version", "enabled"}:
+        # Dormant contracts intentionally omit ``projection``.  The bounded
+        # key check above allows the three-key enabled shape, so validate the
+        # two-key dormant shape with the same finite parser before accepting it.
+        if not _has_bounded_mapping_keys(
+            value,
+            expected=frozenset({"version", "enabled"}),
+        ):
             return False, None
         return True, None
-    if set(value) != {"version", "enabled", "projection"}:
+    try:
+        projection_value = value["projection"]
+    except Exception:
         return False, None
-    projection = deserialize_route_compat_projection(value.get("projection"))
+    projection = deserialize_route_compat_projection(projection_value)
     return (projection is not None), projection
 
 

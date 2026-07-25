@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -138,6 +139,42 @@ def test_projection_bounds_hostile_capability_iterables() -> None:
         required_capabilities=infinite(),
     )
     assert blocked.disposition is RouteDecisionDisposition.BLOCKED
+
+
+def test_persisted_mapping_keys_are_checked_with_a_finite_budget() -> None:
+    projection_payload = _projection().to_contract_data()
+
+    class InfiniteMapping(Mapping[str, object]):
+        def __iter__(self):
+            yield from projection_payload
+            index = 0
+            while True:
+                yield f"unexpected-{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            return projection_payload[key]
+
+    assert deserialize_route_compat_projection(InfiniteMapping()) is None
+
+    contract_payload = serialize_route_compat_contract(_projection())
+    assert deserialize_route_compat_contract(InfiniteMapping()) == (False, None)
+
+    class InfiniteContractMapping(InfiniteMapping):
+        def __getitem__(self, key: str) -> object:
+            return contract_payload[key]
+
+        def __iter__(self):
+            yield from contract_payload
+            index = 0
+            while True:
+                yield f"unexpected-contract-{index}"
+                index += 1
+
+    assert deserialize_route_compat_contract(InfiniteContractMapping()) == (False, None)
 
 
 def test_projection_rejects_unordered_capabilities_and_invalid_router_bounds() -> None:
