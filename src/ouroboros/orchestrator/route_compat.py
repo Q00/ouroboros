@@ -160,6 +160,7 @@ class RouteCompatProjection:
                 or tier not in MODEL_TIER_LADDER
                 or tier in seen_tiers
                 or not isinstance(route_id, str)
+                or route_id != f"compat:{runtime_backend}:{tier}"
             ):
                 raise ValueError("tier_route_ids entries are invalid")
             seen_tiers.add(tier)
@@ -315,7 +316,9 @@ def build_route_compat_projection(
         else authority_identity
     )
     if (
-        model_router.child_tier not in MODEL_TIER_LADDER
+        not isinstance(model_router.child_tier, str)
+        or not isinstance(model_router.base_tier, str)
+        or model_router.child_tier not in MODEL_TIER_LADDER
         or model_router.base_tier not in MODEL_TIER_LADDER
         or isinstance(model_router.escalation_retry_threshold, bool)
         or not isinstance(model_router.escalation_retry_threshold, int)
@@ -400,8 +403,11 @@ def admit_compat_route(
             # registry so callers still receive a genuine Kernel-produced
             # blocked decision rather than an exception or an implicit bypass.
             return _blocked_compat_admission(None)
-        requirements = RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID)
-        return admit_route(projection.registry, requirements)
+        try:
+            requirements = RouteRequirements(pinned_route_id=UNRESOLVED_ROUTE_ID)
+            return admit_route(projection.registry, requirements)
+        except Exception:
+            return _blocked_compat_admission(projection)
 
     try:
         requirements = _compat_requirements(

@@ -353,6 +353,12 @@ def test_projection_parser_rejects_metadata_drift_before_dispatch() -> None:
     payload["authority_identity"] = "runtime:claude:opaque"
     assert deserialize_route_compat_projection(payload) is None
 
+    payload = projection.to_contract_data()
+    tier_route_ids = payload["tier_route_ids"]
+    assert isinstance(tier_route_ids, list)
+    tier_route_ids[0] = {"tier": "frugal", "route_id": "compat:claude:unresolved"}
+    assert deserialize_route_compat_projection(payload) is None
+
 
 class _CountingRuntime:
     runtime_backend = "claude"
