@@ -99,13 +99,19 @@ value. Every effect boundary must call `validate_admission(registry,
 requirements, admission)` against the live registry and exact requirements;
 only that revalidated `selected` route may enter dispatch. A serialized route
 contract is configuration evidence only and must likewise be rebuilt and
-compared before side effects. The module deliberately has no provider calls,
-retry/escalation policy, or Final Gate behavior.
+compared before side effects. Revalidation compares the complete selected
+candidate semantics, not only `route_id`, so a registry replacement that keeps
+an ID but changes model, harness, effort, cost, persona, tools, authority, or
+capabilities cannot reuse a stale admission. The module deliberately has no
+provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
 1. Wire this contract into the existing live model/harness routing path while
-   preserving current behavior behind an explicit compatibility adapter.
-2. Add Routing C observations and bounded escalation. Escalation may choose the
-   next configured route only after a classified failure and a finite budget.
+   preserving current behavior behind the explicit compatibility adapter in
+   [`routing-c-route-compat.md`](./routing-c-route-compat.md).
+2. Add bounded observations and escalation in
+   [`routing-d-bounded-escalation.md`](./routing-d-bounded-escalation.md).
+   Escalation may choose the next configured route only after a classified
+   failure and a finite budget.
 3. Emit the route fingerprint into the frugality proof and shared projection.
