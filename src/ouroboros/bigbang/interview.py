@@ -703,7 +703,7 @@ class InterviewEngine:
         or passed directly to the constructor.
     """
 
-    llm_adapter: LLMAdapter
+    llm_adapter: LLMAdapter | None = None
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
     model: str | None = None
     model_is_explicit: bool = field(default=False, init=False)
