@@ -379,7 +379,6 @@ from ouroboros.orchestrator.verifier import (
 )
 
 _MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
-_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS = 4096
 _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS = 4096
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
@@ -396,6 +395,20 @@ _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
         "final_acceptance_declared",
     }
 )
+
+
+def _composite_completion_event_sentinel(root_ac_count: int) -> int:
+    """Return the max-plus-one population admitted by the root Seed."""
+
+    if type(root_ac_count) is not int or root_ac_count < 0:
+        raise ValueError("composite completion root population is invalid")
+    # A completed composite is terminal and can be produced at most once for
+    # each admitted root AC.  Replay and pre-dispatch detection must derive
+    # their query sentinel from that producer population instead of imposing a
+    # smaller execution-wide constant on otherwise valid Seeds.
+    return root_ac_count + 1
+
+
 _PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
     {
         "schema_version",
@@ -10471,7 +10484,7 @@ Respond with either ATOMIC or the structured JSON object only.
             "execution.ac.route_observed": root_ac_count * MAX_ROUTE_ATTEMPTS + 1,
             "execution.ac.route_paused": root_ac_count * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1,
             "execution.ac.uncertain_handoff_required": root_ac_count + 1,
-            "execution.ac.composite_completed": (_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1),
+            "execution.ac.composite_completed": _composite_completion_event_sentinel(root_ac_count),
             "execution.ac.composite_paused": _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1,
         }
         for event_type, event_limit in bounded_streams.items():
@@ -11178,14 +11191,14 @@ Respond with either ATOMIC or the structured JSON object only.
         for root_ac_index in relevant:
             self._parallel_route_resumes.pop(root_ac_index, None)
         composite_results: dict[int, ACExecutionResult] = {}
-        composite_event_limit = _MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1
+        composite_event_limit = _composite_completion_event_sentinel(len(seed.acceptance_criteria))
         composite_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.composite_completed",
             limit=composite_event_limit,
         )
         if len(composite_events) >= composite_event_limit:
-            raise RuntimeError("composite completion replay exceeds the execution-wide bound")
+            raise RuntimeError("composite completion replay exceeds the admitted root population")
         for event in composite_events:
             if event.type != "execution.ac.composite_completed":
                 continue

@@ -356,6 +356,121 @@ class TestCoordinatorReview:
                 expected_conflicts=(conflict,),
             )
 
+    def test_4097_production_conflicts_round_trip_with_population_derived_bounds(self) -> None:
+        """Accepted result paths define the exact durable parser population."""
+
+        paths = (
+            "src/" + "p" * 4_097,
+            *(f"src/generated_{index}.py" for index in range(4_096)),
+        )
+        results = [
+            ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=f"AC {ac_index}",
+                success=True,
+                conflict_files=paths,
+            )
+            for ac_index in (0, 1)
+        ]
+        conflicts = LevelCoordinator.detect_file_conflicts(results)
+        assert len(conflicts) == len(paths)
+
+        started = build_coordinator_started_payload(
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            conflicts=conflicts,
+        )
+        validate_coordinator_started_payload(
+            started,
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            expected_conflicts=tuple(conflicts),
+        )
+
+        completed = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=tuple(conflicts),
+            review_summary="Population reviewed",
+            duration_seconds=1.0,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            final_output="coordinator final output",
+        ).to_completed_event_payload(execution_id="exec", session_id="session")
+        restored = CoordinatorReview.from_artifact_payload(
+            completed,
+            level_number=1,
+            expected_conflicts=tuple(conflicts),
+            execution_id="exec",
+            session_id="session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+        )
+
+        assert len(started["conflicts"]) == len(paths)
+        assert restored.conflicts_detected == tuple(conflicts)
+
+    def test_4097_writer_population_round_trips_one_shared_conflict(self) -> None:
+        """Per-conflict writer indices use the admitted result population as their bound."""
+
+        results = [
+            ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=f"AC {ac_index}",
+                success=True,
+                conflict_files=("src/shared.py",),
+            )
+            for ac_index in range(4_097)
+        ]
+        conflicts = LevelCoordinator.detect_file_conflicts(results)
+        assert conflicts == [
+            FileConflict(file_path="src/shared.py", ac_indices=tuple(range(4_097)))
+        ]
+
+        started = build_coordinator_started_payload(
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            conflicts=conflicts,
+        )
+        validate_coordinator_started_payload(
+            started,
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            expected_conflicts=tuple(conflicts),
+        )
+
+        completed = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=tuple(conflicts),
+            review_summary="Writer population reviewed",
+            duration_seconds=1.0,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            final_output="coordinator final output",
+        ).to_completed_event_payload(execution_id="exec", session_id="session")
+        restored = CoordinatorReview.from_artifact_payload(
+            completed,
+            level_number=1,
+            expected_conflicts=tuple(conflicts),
+            execution_id="exec",
+            session_id="session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+        )
+
+        assert restored.conflicts_detected == tuple(conflicts)
+
     def test_frozen(self):
         review = CoordinatorReview(level_number=1)
         with pytest.raises(AttributeError):

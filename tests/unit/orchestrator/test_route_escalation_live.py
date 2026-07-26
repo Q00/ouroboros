@@ -3428,7 +3428,7 @@ async def test_legacy_judgment_population_does_not_consume_route_replay_bound() 
 
 
 @pytest.mark.asyncio
-async def test_fresh_valid_257_ac_seed_is_not_rejected_by_composite_replay_bound() -> None:
+async def test_composite_completion_query_bound_tracks_admitted_root_population() -> None:
     executor, store, _events = _executor()
     seed = _seed().model_copy(
         update={
@@ -3458,7 +3458,77 @@ async def test_fresh_valid_257_ac_seed_is_not_rejected_by_composite_replay_bound
     assert overrides == {}
     assert terminals == {}
     assert provisional == {}
-    assert composite_limits == [4097]
+    assert composite_limits == [258]
+
+
+@pytest.mark.asyncio
+async def test_valid_4097_composite_completion_population_replays_all_roots(
+    tmp_path: Any,
+) -> None:
+    """Every admitted root can own one terminal composite without a fixed cap."""
+
+    root_count = 4_097
+    producer, _mock_store, events = _executor()
+    seed = _seed().model_copy(
+        update={
+            "acceptance_criteria": tuple(
+                AcceptanceCriterionSpec(description=f"ship criterion {index}")
+                for index in range(root_count)
+            )
+        }
+    )
+    for root_ac_index, criterion in enumerate(seed.acceptance_criteria):
+        completed = ACExecutionResult(
+            ac_index=root_ac_index,
+            ac_content=str(criterion),
+            success=True,
+            final_message=f"composite {root_ac_index} complete",
+            is_decomposed=True,
+            sub_results=(
+                ACExecutionResult(ac_index=100, ac_content="first child", success=True, depth=1),
+                ACExecutionResult(ac_index=101, ac_content="second child", success=True, depth=1),
+            ),
+            outcome=ACExecutionOutcome.SUCCEEDED,
+            decomposition_decision=_split_decision(root_ac_index=root_ac_index),
+        )
+        await producer._persist_composite_completion(
+            seed=seed,
+            result=completed,
+            root_ac_index=root_ac_index,
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+
+    completion_events = [
+        event for event in events if event.type == "execution.ac.composite_completed"
+    ]
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'composite-population.db'}")
+    await store.initialize()
+    await store.append_batch(completion_events)
+    replay = _live_executor(
+        adapter=_Adapter(),
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="a" * 32,
+    )
+    try:
+        (
+            _histories,
+            _overrides,
+            _terminals,
+            restored,
+        ) = await replay._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=tuple(range(root_count)),
+        )
+
+        assert len(restored) == root_count
+        assert restored[0].final_message == "composite 0 complete"
+        assert restored[root_count - 1].final_message == f"composite {root_count - 1} complete"
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,10 @@ from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
-from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_level_coordinator_runtime_scope,
+)
 from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -11739,6 +11742,82 @@ class TestParallelACExecutor:
             coordinator_events[-1].data["artifact"]
             == '{"review_summary":"Resolved shared.py conflict","fixes_applied":["Merged overlapping import edits"],"warnings_for_next_level":["Verify shared.py integration paths"],"conflicts_resolved":["src/shared.py"]}'
         )
+
+    @pytest.mark.asyncio
+    async def test_coordinator_persists_all_post_effect_conflicts_without_fixed_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid stage result population stays serializable after provider effects."""
+
+        conflict_paths = tuple(f"src/generated_{index}.py" for index in range(4_097))
+
+        async def run_review(
+            _coordinator: LevelCoordinator,
+            execution_id: str,
+            conflicts: list[FileConflict],
+            level_context: LevelContext,
+            level_number: int,
+            **_kwargs: Any,
+        ) -> CoordinatorReview:
+            del level_context
+            runtime_scope = build_level_coordinator_runtime_scope(execution_id, level_number)
+            return CoordinatorReview(
+                level_number=level_number,
+                conflicts_detected=tuple(conflicts),
+                review_summary="Reviewed complete conflict population",
+                duration_seconds=1.0,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+                final_output="coordinator final output",
+            )
+
+        monkeypatch.setattr(LevelCoordinator, "run_review", run_review)
+        seed = _make_seed("Produce shared files", "Integrate shared files")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = LevelCoordinator.detect_file_conflicts
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"AC {ac_index} complete",
+                conflict_files=conflict_paths,
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-conflict-population",
+            execution_id="execution-conflict-population",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        coordinator_events = [
+            call.args[0]
+            for call in executor._event_store.append.await_args_list
+            if call.args[0].type
+            in {
+                "execution.coordinator.started",
+                "execution.coordinator.completed",
+            }
+        ]
+        assert result.success_count == 2
+        assert len(coordinator_events) == 2
+        assert coordinator_events[0].data["conflict_count"] == len(conflict_paths)
+        assert len(coordinator_events[0].data["conflicts"]) == len(conflict_paths)
+        assert len(coordinator_events[1].data["conflicts_detected"]) == len(conflict_paths)
 
     @pytest.mark.asyncio
     async def test_completed_coordinator_event_restores_without_repeating_provider_effect(

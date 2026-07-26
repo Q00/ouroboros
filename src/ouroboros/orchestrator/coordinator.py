@@ -61,8 +61,6 @@ _LEVEL_COORDINATOR_SESSION_KIND = "level_coordinator"
 _COORDINATOR_SCOPE = "level"
 _COORDINATOR_SESSION_ROLE = "coordinator"
 _COORDINATOR_ARTIFACT_TYPE = "coordinator_review"
-_MAX_COORDINATOR_CONFLICTS = 4_096
-_MAX_COORDINATOR_CONFLICT_AC_INDICES = 4_096
 _MAX_COORDINATOR_STRING_ITEMS = 1_024
 _MAX_COORDINATOR_ID_CHARS = 1_024
 _MAX_COORDINATOR_PATH_CHARS = 4_096
@@ -161,9 +159,7 @@ def _validate_file_conflict(conflict: object) -> FileConflict:
     if (
         type(conflict.file_path) is not str
         or not conflict.file_path
-        or len(conflict.file_path) > _MAX_COORDINATOR_PATH_CHARS
         or type(conflict.ac_indices) is not tuple
-        or len(conflict.ac_indices) > _MAX_COORDINATOR_CONFLICT_AC_INDICES
         or any(type(index) is not int or index < 0 for index in conflict.ac_indices)
         or tuple(sorted(set(conflict.ac_indices))) != conflict.ac_indices
         or type(conflict.resolved) is not bool
@@ -207,8 +203,8 @@ def build_coordinator_started_payload(
     )
     if type(level_number) is not int or level_number < 1:
         raise ValueError("coordinator level_number is invalid")
-    if type(conflicts) is not list or not 0 < len(conflicts) <= _MAX_COORDINATOR_CONFLICTS:
-        raise ValueError("coordinator conflict population exceeds its durable bound")
+    if type(conflicts) is not list or not conflicts:
+        raise ValueError("coordinator conflict population is invalid")
     validated_conflicts = [_validate_file_conflict(conflict) for conflict in conflicts]
     return {
         "schema_version": 1,
@@ -263,13 +259,8 @@ def validate_coordinator_started_payload(
         field_name="session_state_path",
         max_chars=_MAX_COORDINATOR_PATH_CHARS,
     )
-    if (
-        type(level_number) is not int
-        or level_number < 1
-        or type(expected_conflicts) is not tuple
-        or len(expected_conflicts) > _MAX_COORDINATOR_CONFLICTS
-    ):
-        raise ValueError("current coordinator owner exceeds its durable bounds")
+    if type(level_number) is not int or level_number < 1 or type(expected_conflicts) is not tuple:
+        raise ValueError("current coordinator owner is invalid")
 
     expected_keys = frozenset(
         {
@@ -319,9 +310,8 @@ def validate_coordinator_started_payload(
         if (
             raw_conflict.get("file_path") != expected.file_path
             or type(raw_conflict.get("file_path")) is not str
-            or len(raw_conflict["file_path"]) > _MAX_COORDINATOR_PATH_CHARS
             or type(raw_indices) is not list
-            or len(raw_indices) > _MAX_COORDINATOR_CONFLICT_AC_INDICES
+            or len(raw_indices) != len(expected.ac_indices)
             or any(type(index) is not int or index < 0 for index in raw_indices)
             or tuple(raw_indices) != expected.ac_indices
         ):
@@ -503,9 +493,8 @@ class CoordinatorReview:
             type(level_number) is not int
             or level_number < 1
             or type(expected_conflicts) is not tuple
-            or len(expected_conflicts) > _MAX_COORDINATOR_CONFLICTS
         ):
-            raise ValueError("current coordinator owner exceeds its durable bounds")
+            raise ValueError("current coordinator owner is invalid")
         for conflict in expected_conflicts:
             _validate_file_conflict(conflict)
 
@@ -556,10 +545,14 @@ class CoordinatorReview:
         require_exact("artifact_type", "coordinator_review")
 
         raw_conflicts = payload.get("conflicts_detected")
-        if type(raw_conflicts) is not list or len(raw_conflicts) > _MAX_COORDINATOR_CONFLICTS:
-            raise ValueError("coordinator artifact conflicts_detected must be a list")
+        if type(raw_conflicts) is not list or len(raw_conflicts) != len(expected_conflicts):
+            raise ValueError("coordinator artifact conflict population drifted")
         restored_conflicts: list[FileConflict] = []
-        for raw_conflict in raw_conflicts:
+        for raw_conflict, expected_conflict in zip(
+            raw_conflicts,
+            expected_conflicts,
+            strict=True,
+        ):
             if not _mapping_has_exact_keys(
                 raw_conflict,
                 frozenset(
@@ -580,14 +573,14 @@ class CoordinatorReview:
             if (
                 type(file_path) is not str
                 or not file_path
-                or len(file_path) > _MAX_COORDINATOR_PATH_CHARS
+                or file_path != expected_conflict.file_path
             ):
                 raise ValueError("coordinator artifact conflict path is invalid")
             if (
                 type(raw_indices) is not list
-                or len(raw_indices) > _MAX_COORDINATOR_CONFLICT_AC_INDICES
+                or len(raw_indices) != len(expected_conflict.ac_indices)
                 or any(type(index) is not int or index < 0 for index in raw_indices)
-                or raw_indices != sorted(set(raw_indices))
+                or tuple(raw_indices) != expected_conflict.ac_indices
             ):
                 raise ValueError("coordinator artifact conflict indices are invalid")
             if (
@@ -604,15 +597,6 @@ class CoordinatorReview:
                     resolution_description=resolution,
                 )
             )
-
-        expected_identity = tuple(
-            (conflict.file_path, conflict.ac_indices) for conflict in expected_conflicts
-        )
-        restored_identity = tuple(
-            (conflict.file_path, conflict.ac_indices) for conflict in restored_conflicts
-        )
-        if restored_identity != expected_identity:
-            raise ValueError("coordinator artifact conflict population drifted")
 
         duration = payload.get("duration_seconds")
         if (
@@ -667,7 +651,6 @@ def _validate_coordinator_review(review: object) -> CoordinatorReview:
         type(review.level_number) is not int
         or review.level_number < 1
         or type(review.conflicts_detected) is not tuple
-        or len(review.conflicts_detected) > _MAX_COORDINATOR_CONFLICTS
         or type(review.fixes_applied) is not tuple
         or len(review.fixes_applied) > _MAX_COORDINATOR_STRING_ITEMS
         or type(review.warnings_for_next_level) is not tuple
@@ -1163,11 +1146,7 @@ def _parse_review_response(
                     if type(item) is str
                 ]
             if type(raw_resolved) is list:
-                resolved_files = {
-                    item
-                    for item in raw_resolved[:_MAX_COORDINATOR_CONFLICTS]
-                    if type(item) is str and 0 < len(item) <= _MAX_COORDINATOR_PATH_CHARS
-                }
+                resolved_files = {item for item in raw_resolved if type(item) is str and item}
         except (AttributeError, json.JSONDecodeError, IndexError):
             log.warning(
                 "coordinator.parse_failed",

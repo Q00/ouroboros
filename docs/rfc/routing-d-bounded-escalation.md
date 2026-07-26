@@ -152,6 +152,13 @@ excludes it from dispatch. Duplicate, conflicting, drifted, oversized, or
 non-canonical composite evidence fails closed instead of repeating decomposition,
 child provider calls, or tool effects.
 
+The completion stream has one producer slot per admitted root AC. Both the
+pre-dispatch detector and replay loader derive their max-plus-one query
+sentinel from `len(seed.acceptance_criteria)`, so every valid root can own one
+terminal composite even when the Seed contains more than 4,096 criteria. A
+population above that Seed-derived limit is necessarily duplicate or foreign
+completion authority and fails closed.
+
 A quota pause inside a legacy composite is sealed separately as an exact-schema
 `execution.ac.composite_paused` event. Its versioned frame list records every
 composite on the root-to-leaf path, each completed sibling prefix, and each
@@ -259,11 +266,15 @@ or parallel resume-owner claim. This preserves existing execution behavior while
 making the stronger crash-replay guarantee explicit and version-local.
 
 The durable conflict representation is also population-safe at depth four.
-Each result node seals only its own bounded file projection; the coordinator
-walks the full result tree for both live and replayed execution. A complete
-five-way tree therefore does not flatten 625 leaf paths into a 512-entry parent
-field, and nested writes have identical conflict semantics before and after
-resume.
+Each result node seals its exact finite local file projection; the coordinator
+walks the full result tree for both live and replayed execution. Coordinator
+started/completed producers serialize the complete conflict population admitted
+from those results, and replay uses the exact current stage population as its
+row, path, and per-row AC-index bound. It does not impose a smaller fixed
+post-effect cap on any of those provider-derived fields. A complete five-way
+tree therefore does not flatten 625 leaf paths into a 512-entry parent field,
+conflict sets or writer populations above 4,096 remain serializable, and nested
+writes have identical conflict semantics before and after resume.
 
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is
@@ -311,8 +322,10 @@ Both owners compare a paused candidate with the complete predecessor
 `selected_route` snapshot, or with the exact live initial admission when no
 observation exists. A same-ID change to effort or any other candidate semantic
 is configuration drift, not a resumable pause. Pre-dispatch detection and the
-full replay loaders use finite max-plus-one stream sentinels; no Routing D
-history scan uses an unbounded query.
+full replay loaders use finite max-plus-one stream sentinels. Composite
+completion sentinels are derived from the admitted root population; no Routing
+D history scan uses an unbounded query or a fixed completion cap smaller than
+its producer domain.
 
 ## Parallel and direct scope
 
