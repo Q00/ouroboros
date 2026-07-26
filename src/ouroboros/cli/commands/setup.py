@@ -175,6 +175,14 @@ _CLAUDE_MCP_RECOVERY_PHASES = {
 }
 
 
+class _ClaudeSetupConflictError(OSError):
+    """The live target no longer matches the transaction generation."""
+
+
+class _ParentDirectoryFsyncError(OSError):
+    """A promoted directory entry could not be made durable."""
+
+
 def _claude_mcp_file_identity(stat_result: os.stat_result) -> dict[str, int]:
     return {
         "dev": int(stat_result.st_dev),
@@ -249,10 +257,13 @@ def _fsync_parent_dir(path: Path) -> None:
         return
     fd = -1
     try:
-        fd = os.open(path.parent, os.O_RDONLY)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(path.parent, flags)
         os.fsync(fd)
-    except OSError:
-        return
+    except OSError as exc:
+        raise _ParentDirectoryFsyncError(
+            f"Could not fsync parent directory for {path}: {exc}"
+        ) from exc
     finally:
         if fd >= 0:
             try:
@@ -380,24 +391,32 @@ def _promote_text_cas(
     """Promote bytes only if the live path still matches ``expected``."""
     if os.name != "posix":
         if not _claude_setup_file_matches(path, expected):
-            raise OSError(f"{path} changed during setup")
+            raise _ClaudeSetupConflictError(f"{path} changed during setup")
         _atomic_write_text(path, content.decode("utf-8"), mode=mode)
         promoted = _read_claude_setup_file_snapshot(path)
         if promoted is None or not promoted.existed:
             raise OSError(f"Could not verify promoted file: {path}")
         return promoted
 
+    import tempfile
+
     tmp_path = _write_temp_bytes(path, content, mode=mode)
-    backup_path = path.with_name(f".{path.name}.ouroboros-pre")
+    backup_path: Path | None = None
+    claimed_existing = False
+    published = False
     try:
         if expected.existed:
-            try:
-                backup_path.unlink()
-            except FileNotFoundError:
-                pass
             if not _claude_setup_file_matches(path, expected):
-                raise OSError(f"{path} changed during setup")
+                raise _ClaudeSetupConflictError(f"{path} changed during setup")
+            backup_fd, backup_name = tempfile.mkstemp(
+                prefix=f".{path.name}.ouroboros-pre.",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+            backup_path = Path(backup_name)
+            os.close(backup_fd)
             os.rename(path, backup_path)
+            claimed_existing = True
             backup_bytes = backup_path.read_bytes()
             if (
                 not _path_matches_snapshot_while_linked(backup_path, expected)
@@ -405,26 +424,46 @@ def _promote_text_cas(
             ):
                 if not path.exists():
                     os.rename(backup_path, path)
-                raise OSError(f"{path} changed during setup")
+                    claimed_existing = False
+                raise _ClaudeSetupConflictError(f"{path} changed during setup")
             try:
                 os.link(tmp_path, path)
+                published = True
                 tmp_path.unlink()
+            except FileExistsError as exc:
+                raise _ClaudeSetupConflictError(f"{path} changed during setup") from exc
             except OSError:
                 if not path.exists():
                     os.rename(backup_path, path)
+                    claimed_existing = False
                 raise
         else:
             if not _claude_setup_file_matches(path, expected):
-                raise OSError(f"{path} changed during setup")
-            os.link(tmp_path, path)
+                raise _ClaudeSetupConflictError(f"{path} changed during setup")
+            try:
+                os.link(tmp_path, path)
+            except FileExistsError as exc:
+                raise _ClaudeSetupConflictError(f"{path} changed during setup") from exc
+            published = True
             tmp_path.unlink()
         _fsync_parent_dir(path)
         promoted = _read_claude_setup_file_snapshot(path)
         if promoted is None or not promoted.existed:
             raise OSError(f"Could not verify promoted file: {path}")
         return promoted
+    except OSError:
+        if claimed_existing and not published and backup_path is not None and not path.exists():
+            try:
+                os.rename(backup_path, path)
+                claimed_existing = False
+            except OSError:
+                pass
+        raise
     finally:
-        for cleanup_path in (tmp_path, backup_path):
+        cleanup_paths = [tmp_path]
+        if backup_path is not None:
+            cleanup_paths.append(backup_path)
+        for cleanup_path in cleanup_paths:
             try:
                 cleanup_path.unlink()
             except FileNotFoundError:
@@ -465,7 +504,6 @@ def _write_claude_mcp_recovery_manifest(
             json.dumps(manifest, indent=2, allow_nan=False) + "\n",
             mode=0o600,
         )
-        _fsync_parent_dir(_claude_mcp_recovery_path(mcp_config_path))
     except (OSError, TypeError, ValueError) as exc:
         print_warning(f"Could not write Claude MCP recovery journal — setup aborted: {exc}")
         return False
@@ -493,13 +531,38 @@ def _update_claude_mcp_recovery_phase(
 def _clear_claude_mcp_recovery(mcp_config_path: Path, *, non_blocking: bool = False) -> bool:
     recovery_path = _claude_mcp_recovery_path(mcp_config_path)
     try:
+        content = recovery_path.read_bytes()
+        mode = stat.S_IMODE(recovery_path.stat().st_mode)
         recovery_path.unlink()
-        _fsync_parent_dir(recovery_path)
     except FileNotFoundError:
         return True
     except OSError as exc:
         print_warning(f"Could not remove Claude MCP recovery journal: {exc}")
         return non_blocking
+    try:
+        _fsync_parent_dir(recovery_path)
+    except _ParentDirectoryFsyncError as exc:
+        fd = -1
+        try:
+            fd = os.open(recovery_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            with os.fdopen(fd, "wb") as handle:
+                fd = -1
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as restore_exc:
+            print_warning(
+                "Could not restore Claude MCP recovery journal after directory fsync "
+                f"failure: {restore_exc}"
+            )
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        print_warning(f"Claude MCP recovery journal cleanup remains pending: {exc}")
+        return False
     return True
 
 
@@ -538,6 +601,165 @@ def _manifest_target(
     return Path(raw_path), pre, content, raw_mode
 
 
+def _manifest_claude_cli_path(manifest: dict[str, object]) -> str | None:
+    updates = manifest.get("config_updates")
+    if isinstance(updates, dict):
+        cli_path = updates.get("orchestrator.cli_path")
+        if isinstance(cli_path, str) and cli_path:
+            return cli_path
+
+    target = _manifest_target(manifest, "config")
+    if target is None or target[2] is None:
+        return None
+    try:
+        data = yaml.safe_load(target[2].decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    orchestrator = data.get("orchestrator")
+    if not isinstance(orchestrator, dict):
+        return None
+    cli_path = orchestrator.get("cli_path")
+    return cli_path if isinstance(cli_path, str) and cli_path else None
+
+
+def _set_manifest_target_stage(
+    manifest: dict[str, object],
+    name: str,
+    *,
+    snapshot: _ClaudeSetupFileSnapshot,
+    content: bytes | None,
+    mode: int,
+) -> bool:
+    targets = manifest.get("targets")
+    if not isinstance(targets, dict):
+        return False
+    raw_target = targets.get(name)
+    if not isinstance(raw_target, dict):
+        return False
+    raw_target["pre"] = _snapshot_to_manifest(snapshot)
+    raw_target["mode"] = mode
+    raw_target["content_b64"] = (
+        base64.b64encode(content).decode("ascii") if content is not None else None
+    )
+    raw_target["sha256"] = hashlib.sha256(content).hexdigest() if content is not None else None
+    raw_target.pop("post", None)
+    return True
+
+
+def _claude_config_snapshot_has_owned_values(
+    snapshot: _ClaudeSetupFileSnapshot,
+    claude_path: str,
+) -> bool:
+    if not snapshot.existed:
+        return False
+    try:
+        data = yaml.safe_load((snapshot.content or b"").decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    orchestrator = data.get("orchestrator")
+    llm = data.get("llm")
+    return (
+        isinstance(orchestrator, dict)
+        and orchestrator.get("runtime_backend") == "claude"
+        and orchestrator.get("cli_path") == claude_path
+        and isinstance(llm, dict)
+        and llm.get("backend") == "claude"
+    )
+
+
+def _promote_live_claude_config_target(
+    mcp_config_path: Path,
+    manifest: dict[str, object],
+    next_phase: str,
+) -> bool:
+    target = _manifest_target(manifest, "config")
+    claude_path = _manifest_claude_cli_path(manifest)
+    if target is None or claude_path is None:
+        print_warning("Claude MCP recovery journal is incomplete — setup aborted.")
+        return False
+    config_path = target[0]
+
+    for _ in range(4):
+        current = _read_claude_setup_file_snapshot(config_path)
+        if current is None:
+            print_warning(f"Could not snapshot {config_path} safely — Claude setup aborted.")
+            return False
+        content = _merge_claude_config_snapshot(config_path, current, claude_path)
+        if content is None:
+            return False
+        mode = current.mode if current.existed else 0o600
+
+        if current.existed and current.content == content:
+            return _update_claude_mcp_recovery_phase(
+                mcp_config_path,
+                manifest,
+                next_phase,
+                target="config",
+                snapshot=current,
+            )
+
+        if not _set_manifest_target_stage(
+            manifest,
+            "config",
+            snapshot=current,
+            content=content,
+            mode=mode,
+        ):
+            print_warning("Claude MCP recovery journal is incomplete — setup aborted.")
+            return False
+        if not _write_claude_mcp_recovery_manifest(mcp_config_path, manifest):
+            return False
+
+        try:
+            promoted = _promote_text_cas(
+                config_path,
+                content,
+                expected=current,
+                mode=mode,
+            )
+        except _ClaudeSetupConflictError:
+            continue
+        except _ParentDirectoryFsyncError:
+            raise
+        except OSError as exc:
+            print_warning(f"Could not write {config_path} — Claude setup aborted: {exc}")
+            return False
+        return _update_claude_mcp_recovery_phase(
+            mcp_config_path,
+            manifest,
+            next_phase,
+            target="config",
+            snapshot=promoted,
+        )
+
+    print_warning(f"{config_path} kept changing during setup — Claude setup aborted.")
+    return False
+
+
+def _refresh_manifest_config_post(
+    mcp_config_path: Path,
+    manifest: dict[str, object],
+) -> bool:
+    target = _manifest_target(manifest, "config")
+    claude_path = _manifest_claude_cli_path(manifest)
+    if target is None or claude_path is None:
+        return False
+    current = _read_claude_setup_file_snapshot(target[0])
+    if current is None or not _claude_config_snapshot_has_owned_values(current, claude_path):
+        return False
+    return _update_claude_mcp_recovery_phase(
+        mcp_config_path,
+        manifest,
+        "config_written",
+        target="config",
+        snapshot=current,
+    )
+
+
 def _manifest_target_post_matches(manifest: dict[str, object], name: str) -> bool:
     targets = manifest.get("targets")
     if not isinstance(targets, dict):
@@ -568,7 +790,13 @@ def _recover_manifest_target(
         if not _claude_setup_file_matches(path, pre):
             print_warning(f"Claude MCP recovery found external changes in {path} — setup aborted.")
             return False
-        return _update_claude_mcp_recovery_phase(mcp_config_path, manifest, next_phase)
+        return _update_claude_mcp_recovery_phase(
+            mcp_config_path,
+            manifest,
+            next_phase,
+            target=name,
+            snapshot=pre,
+        )
     current = _read_claude_setup_file_snapshot(path)
     if (
         current is not None
@@ -580,6 +808,8 @@ def _recover_manifest_target(
         )
     try:
         promoted = _promote_text_cas(path, content, expected=pre, mode=mode)
+    except _ParentDirectoryFsyncError:
+        raise
     except (OSError, UnicodeDecodeError) as exc:
         print_warning(f"Could not complete Claude setup recovery for {path}: {exc}")
         return False
@@ -646,18 +876,33 @@ def _recover_claude_mcp_activation() -> bool:
                     "setup aborted."
                 )
                 return False
-            if not _recover_manifest_target(mcp_config_path, data, "config", "config_written"):
+            try:
+                config_recovered = _promote_live_claude_config_target(
+                    mcp_config_path, data, "config_written"
+                )
+            except _ParentDirectoryFsyncError as exc:
+                print_warning(f"Claude config recovery remains pending: {exc}")
+                return False
+            if not config_recovered:
                 return False
             continue
         if phase == "config_written":
-            if not _manifest_target_post_matches(data, "mcp") or not _manifest_target_post_matches(
-                data, "config"
-            ):
+            if not _manifest_target_post_matches(data, "mcp"):
                 print_warning("Claude MCP recovery found external changes — setup aborted.")
                 return False
-            if not _recover_manifest_target(
-                mcp_config_path, data, "credentials", "credentials_written"
-            ):
+            if not _manifest_target_post_matches(
+                data, "config"
+            ) and not _refresh_manifest_config_post(mcp_config_path, data):
+                print_warning("Claude MCP recovery found external config changes — setup aborted.")
+                return False
+            try:
+                credentials_recovered = _recover_manifest_target(
+                    mcp_config_path, data, "credentials", "credentials_written"
+                )
+            except _ParentDirectoryFsyncError as exc:
+                print_warning(f"Claude credentials recovery remains pending: {exc}")
+                return False
+            if not credentials_recovered:
                 return False
             continue
         if phase == "credentials_written":
@@ -3031,15 +3276,19 @@ def _validate_existing_credentials_file(credentials_path: Path) -> bool:
     return True
 
 
-def _stage_claude_config(config_path: Path, claude_path: str) -> bytes | None:
+def _merge_claude_config_snapshot(
+    config_path: Path,
+    snapshot: _ClaudeSetupFileSnapshot,
+    claude_path: str,
+) -> bytes | None:
     from ouroboros.config.models import get_default_config
 
     try:
-        if config_path.exists():
-            raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if snapshot.existed:
+            raw_config = yaml.safe_load((snapshot.content or b"").decode("utf-8")) or {}
         else:
             raw_config = get_default_config().model_dump(mode="json")
-    except (OSError, yaml.YAMLError, RecursionError) as exc:
+    except (UnicodeDecodeError, yaml.YAMLError, RecursionError) as exc:
         print_warning(f"Could not read {config_path} — Claude setup aborted: {exc}")
         return None
     if not isinstance(raw_config, dict):
@@ -3070,6 +3319,14 @@ def _stage_claude_config(config_path: Path, claude_path: str) -> bytes | None:
         print_warning("Could not stage Claude config safely — setup aborted.")
         return None
     return staged_config.encode("utf-8")
+
+
+def _stage_claude_config(config_path: Path, claude_path: str) -> bytes | None:
+    snapshot = _read_claude_setup_file_snapshot(config_path)
+    if snapshot is None:
+        print_warning(f"Could not snapshot {config_path} safely — Claude setup aborted.")
+        return None
+    return _merge_claude_config_snapshot(config_path, snapshot, claude_path)
 
 
 def _stage_claude_credentials(credentials_path: Path) -> bytes | None:
@@ -3107,6 +3364,7 @@ def _build_claude_setup_manifest(
     mcp: _ClaudeSetupStagedFile,
     config: _ClaudeSetupStagedFile,
     credentials: _ClaudeSetupStagedFile,
+    claude_path: str,
 ) -> dict[str, object]:
     targets: dict[str, object] = {}
     for name, staged in (
@@ -3128,6 +3386,11 @@ def _build_claude_setup_manifest(
     return {
         "version": _CLAUDE_MCP_RECOVERY_VERSION,
         "phase": "prepared",
+        "config_updates": {
+            "orchestrator.runtime_backend": "claude",
+            "orchestrator.cli_path": claude_path,
+            "llm.backend": "claude",
+        },
         "targets": targets,
     }
 
@@ -3235,9 +3498,17 @@ def _promote_claude_setup_target(
         if not _claude_setup_file_matches(path, pre):
             print_warning(f"{path} changed during setup — Claude setup aborted.")
             return False
-        return _update_claude_mcp_recovery_phase(mcp_config_path, manifest, phase)
+        return _update_claude_mcp_recovery_phase(
+            mcp_config_path,
+            manifest,
+            phase,
+            target=name,
+            snapshot=pre,
+        )
     try:
         promoted = _promote_text_cas(path, content, expected=pre, mode=mode)
+    except _ParentDirectoryFsyncError:
+        raise
     except (OSError, UnicodeDecodeError) as exc:
         print_warning(f"Could not write {path} — Claude setup aborted: {exc}")
         return False
@@ -3275,7 +3546,7 @@ def _setup_claude(claude_path: str) -> bool:
     )
     if not credentials_snapshot.existed and staged_credentials is None:
         return False
-    staged_config = _stage_claude_config(config_path, claude_path)
+    staged_config = _merge_claude_config_snapshot(config_path, config_snapshot, claude_path)
     staged_mcp = _stage_claude_mcp_content(mcp_config_path)
     if staged_config is None or staged_mcp is None:
         return False
@@ -3300,26 +3571,35 @@ def _setup_claude(claude_path: str) -> bool:
             staged_credentials,
             credentials_snapshot.mode if credentials_snapshot.existed else 0o600,
         ),
+        claude_path=claude_path,
     )
     if not _write_claude_mcp_recovery_manifest(mcp_config_path, manifest):
         return False
 
-    if not _promote_claude_setup_target(mcp_config_path, manifest, "mcp", "mcp_written"):
-        _recover_claude_mcp_activation()
-        return False
-    if not _promote_claude_setup_target(mcp_config_path, manifest, "config", "config_written"):
-        _recover_claude_mcp_activation()
-        return False
-    if not _promote_claude_setup_target(
-        mcp_config_path, manifest, "credentials", "credentials_written"
-    ):
-        _recover_claude_mcp_activation()
+    try:
+        if not _promote_claude_setup_target(mcp_config_path, manifest, "mcp", "mcp_written"):
+            _recover_claude_mcp_activation()
+            return False
+        if not _promote_live_claude_config_target(mcp_config_path, manifest, "config_written"):
+            _recover_claude_mcp_activation()
+            return False
+        if not _promote_claude_setup_target(
+            mcp_config_path, manifest, "credentials", "credentials_written"
+        ):
+            _recover_claude_mcp_activation()
+            return False
+    except _ParentDirectoryFsyncError as exc:
+        print_warning(f"Claude setup durability is pending: {exc}")
         return False
 
     if not _update_claude_mcp_recovery_phase(mcp_config_path, manifest, "committed"):
         print_warning("Claude MCP recovery journal cleanup is pending.")
-    elif _update_claude_mcp_recovery_phase(mcp_config_path, manifest, "cleanup_pending"):
-        _clear_claude_mcp_recovery(mcp_config_path, non_blocking=True)
+        return False
+    if not _update_claude_mcp_recovery_phase(mcp_config_path, manifest, "cleanup_pending"):
+        print_warning("Claude MCP recovery journal cleanup is pending.")
+        return False
+    if not _clear_claude_mcp_recovery(mcp_config_path, non_blocking=True):
+        return False
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     if registered:
