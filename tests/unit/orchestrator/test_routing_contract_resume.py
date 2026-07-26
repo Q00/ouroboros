@@ -29,10 +29,10 @@ from ouroboros.orchestrator.model_routing import (
 )
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
-    EXECUTION_CONTRACT_VERSION,
     FRUGALITY_PROOF_PROTOCOL_VERSION,
     OrchestratorError,
     OrchestratorRunner,
+    build_system_prompt,
 )
 from ouroboros.orchestrator.session import (
     SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
@@ -253,7 +253,7 @@ def test_resume_rejects_router_policy_that_validates_its_own_projection() -> Non
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
-def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
+def test_pre_admission_v2_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
     persisted["version"] = 2
@@ -269,20 +269,14 @@ def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
         routing
     )
 
-    resumed = _runner()
-    changed = resumed._restore_execution_contract(
-        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
-        seed=_seed(),
-    )
-
-    assert changed is True
-    assert resumed._execution_contract is not None
-    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
-    assert "reasoning_effort" in resumed._execution_contract["model_routing"]
-    assert "route_compat" in resumed._execution_contract["model_routing"]
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
 
 
-def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> None:
+def test_pre_requested_tier_v3_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner(base_model_tier="frontier")
     persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
     persisted["version"] = 3
@@ -296,19 +290,14 @@ def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> No
         routing
     )
 
-    resumed = _runner()
-    changed = resumed._restore_execution_contract(
-        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
-        seed=_seed(),
-    )
-
-    assert changed is True
-    assert resumed._execution_contract is not None
-    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
-    assert resumed._execution_contract["model_routing"]["requested_model_tier"] == "frontier"
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
 
 
-def test_pre_execution_semantics_v4_contract_migrates_once_to_current_version() -> None:
+def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
     persisted["version"] = 4
@@ -317,18 +306,28 @@ def test_pre_execution_semantics_v4_contract_migrates_once_to_current_version() 
     del persisted["execution_inputs"]
     del persisted["frugality_proof"]["execution_inputs_fingerprint"]
 
-    resumed = _runner()
-    changed = resumed._restore_execution_contract(
-        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
-        seed=_seed(),
-    )
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
 
-    assert changed is True
-    assert resumed._execution_contract is not None
-    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
-    assert resumed._execution_contract["execution_semantics"] == (
-        resumed._execution_semantics_contract()
-    )
+
+@pytest.mark.parametrize("legacy_version", [5, 6])
+def test_recent_contracts_without_complete_effect_inputs_fail_closed(
+    legacy_version: int,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted["version"] = legacy_version
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["contract_version"] == legacy_version
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
 
 
 def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() -> None:
@@ -343,6 +342,97 @@ def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() ->
     assert inputs["allowed_tools"] == strategy.get_tools()
     assert '"name":"Read"' in inputs["tool_catalog_json"]
     assert len(inputs["tool_catalog_fingerprint"]) == 64
+
+
+def test_v7_inputs_freeze_context_profile_and_parent_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+    manifest = tmp_path / "pyproject.toml"
+    manifest.write_text(
+        '[project]\nname = "frozen-app"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    inherited = RuntimeHandle(
+        backend="claude",
+        native_session_id="original-parent",
+        metadata={"fork_session": True},
+    )
+    runner = _runner(cwd=str(tmp_path), inherited_runtime_handle=inherited)
+    seed = _seed()
+    contract = runner._build_execution_contract(seed=seed)
+
+    inputs = contract["execution_inputs"]
+    assert inputs["schema_version"] == 2
+    assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
+    persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
+    persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
+        contract,
+        require_bound=True,
+    )
+    assert persisted_profile is not None
+    assert persisted_profile.profile == "code"
+    assert persisted_handle is not None
+    assert persisted_handle.native_session_id == "original-parent"
+
+    manifest.write_text(
+        '[project]\nname = "frozen-app"\nversion = "9.9.9"\n',
+        encoding="utf-8",
+    )
+    frozen_prompt = build_system_prompt(
+        seed,
+        strategy=runner._execution_strategy_snapshot(contract, require_bound=True),
+        repo_root=tmp_path,
+        context_pack_enabled=True,
+        resolved_context_pack_fragment=runner._execution_context_pack_fragment_snapshot(
+            contract,
+            require_bound=True,
+        ),
+    )
+    current_prompt = build_system_prompt(
+        seed,
+        repo_root=tmp_path,
+        context_pack_enabled=True,
+    )
+
+    assert "frozen-app 1.0.0" in frozen_prompt
+    assert "frozen-app 9.9.9" not in frozen_prompt
+    assert "frozen-app 9.9.9" in current_prompt
+
+
+def test_execution_inputs_reject_noncanonical_parent_handle_before_publication() -> None:
+    runner = _runner(
+        inherited_runtime_handle=RuntimeHandle(
+            backend="claude",
+            metadata={"non_finite": float("nan")},
+        )
+    )
+
+    with pytest.raises(OrchestratorError, match="non-canonical execution effect inputs"):
+        runner._build_execution_contract(seed=_seed())
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "context_pack_fragment",
+        "execution_profile_json",
+        "inherited_runtime_handle_json",
+    ],
+)
+def test_current_execution_inputs_require_complete_effect_population(field: str) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    del persisted["execution_inputs"][field]
+    persisted["frugality_proof"]["execution_inputs_fingerprint"] = (
+        OrchestratorRunner._execution_inputs_fingerprint(persisted["execution_inputs"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
 
 
 def test_persisted_research_strategy_does_not_gain_edit_on_resume() -> None:
@@ -374,7 +464,7 @@ def test_complete_tool_catalog_drift_is_rejected_before_resume_dispatch() -> Non
         )
 
 
-def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None:
+def test_malformed_v3_contract_does_not_bypass_effect_input_version_gate() -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract())
     persisted["version"] = 3
@@ -387,7 +477,7 @@ def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None
         routing
     )
 
-    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
@@ -1408,14 +1498,14 @@ def test_seed_fingerprint_ignores_identity_but_tracks_semantics() -> None:
     )
 
 
-def test_first_legacy_resume_migrates_resolved_contract() -> None:
+def test_contractless_legacy_resume_fails_closed_without_effect_inputs() -> None:
     runner = _runner()
 
-    changed = runner._restore_execution_contract({}, seed=_seed())
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        runner._restore_execution_contract({}, seed=_seed())
 
-    assert changed is True
-    assert runner._execution_contract is not None
-    assert "seed_fingerprint" in runner._execution_contract["frugality_proof"]
+    assert exc_info.value.details["contract_version"] is None
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1519,7 +1609,7 @@ def test_legacy_resume_rejects_persisted_workspace_mismatch(tmp_path: Path) -> N
     )
     runner = _runner(task_workspace=current_workspace)
 
-    with pytest.raises(OrchestratorError, match="different project workspace"):
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
         runner._restore_execution_contract(
             {
                 SESSION_START_IDENTITY_PROGRESS_KEY: {
@@ -1533,31 +1623,25 @@ def test_legacy_resume_rejects_persisted_workspace_mismatch(tmp_path: Path) -> N
         )
 
 
-def test_legacy_resume_migrates_to_forced_bypass_permission() -> None:
+def test_legacy_resume_cannot_reconstruct_forced_permission_or_effect_inputs() -> None:
     runner = _runner()
 
-    changed = runner._restore_execution_contract(
-        {
-            SESSION_START_IDENTITY_PROGRESS_KEY: {
-                "seed_id": "seed-routing-contract",
-                "seed_goal": "Prove durable routing",
-                "runtime_backend": "claude",
-                "llm_backend": "anthropic",
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        runner._restore_execution_contract(
+            {
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "seed_id": "seed-routing-contract",
+                    "seed_goal": "Prove durable routing",
+                    "runtime_backend": "claude",
+                    "llm_backend": "anthropic",
+                },
+                "runtime": {
+                    "backend": "claude",
+                    "approval_mode": "acceptEdits",
+                },
             },
-            "runtime": {
-                "backend": "claude",
-                "approval_mode": "acceptEdits",
-            },
-        },
-        seed=_seed(),
-    )
-
-    assert changed is True
-    assert runner._execution_contract is not None
-    assert runner._execution_contract["model_routing"]["permission_mode"] == {
-        "observed": True,
-        "mode": "bypassPermissions",
-    }
+            seed=_seed(),
+        )
 
 
 def test_mcp_model_tier_omission_remains_distinguishable_from_explicit_medium() -> None:

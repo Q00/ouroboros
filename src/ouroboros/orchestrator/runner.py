@@ -146,6 +146,7 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.recoverable_failure import (
     is_usage_limit_pause_message,
+    project_failure_metadata,
     retry_duration_seconds_from_message,
     retry_duration_seconds_from_metadata,
 )
@@ -199,6 +200,9 @@ _MAX_EXECUTION_STRATEGY_TOOLS = 256
 _MAX_EXECUTION_STRATEGY_TEXT_CHARS = 100_000
 _MAX_EXECUTION_TOOL_CATALOG_CHARS = 1_000_000
 _MAX_EXECUTION_ALLOWED_TOOLS = 1024
+_MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS = 100_000
+_MAX_EXECUTION_PROFILE_CHARS = 100_000
+_MAX_EXECUTION_RUNTIME_HANDLE_CHARS = 1_000_000
 _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -483,6 +487,7 @@ def build_system_prompt(
     repo_root: str | Path | None = None,
     guidance_fragment: str = "",
     context_pack_enabled: bool | None = None,
+    resolved_context_pack_fragment: str | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -501,6 +506,9 @@ def build_system_prompt(
         context_pack_enabled: Resolved context-pack mode. ``None`` preserves
             lazy config resolution for direct helper callers; runner-owned
             execution passes the durable contract value explicitly.
+        resolved_context_pack_fragment: Exact context-pack text frozen before
+            session publication. When provided (including the empty string),
+            prompt construction never scans the mutable workspace again.
 
     Returns:
         System prompt string.
@@ -538,10 +546,14 @@ def build_system_prompt(
     if conductor_directive:
         prompt = f"{prompt}\n\n{conductor_directive}"
 
-    context_pack_fragment = _context_pack_fragment(
-        seed,
-        repo_root,
-        context_pack_enabled=context_pack_enabled,
+    context_pack_fragment = (
+        resolved_context_pack_fragment
+        if resolved_context_pack_fragment is not None
+        else _context_pack_fragment(
+            seed,
+            repo_root,
+            context_pack_enabled=context_pack_enabled,
+        )
     )
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
@@ -708,11 +720,12 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 6
+EXECUTION_CONTRACT_VERSION = 7
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
+PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -3133,19 +3146,57 @@ class OrchestratorRunner:
         return hashlib.sha256(encoded).hexdigest()
 
     def _build_execution_inputs_contract(self, seed: Seed | None) -> dict[str, object]:
-        """Freeze strategy outputs before a durable session becomes observable."""
+        """Freeze every prompt/profile/session input before publication."""
+        execution_profile = _execution_profile_for_seed(seed) if seed is not None else None
         strategy = (
-            _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
-            if seed is not None
-            else get_strategy("code")
+            ProfileBackedStrategy(execution_profile)
+            if self._fat_harness_mode and execution_profile is not None
+            else get_strategy(seed.task_type if seed is not None else "code")
         )
         tools = strategy.get_tools()
         system_fragment = strategy.get_system_prompt_fragment()
         task_suffix = strategy.get_task_prompt_suffix()
         activity_map = strategy.get_activity_map()
         resolver = "profile_backed" if isinstance(strategy, ProfileBackedStrategy) else "registry"
+        context_pack_fragment = (
+            _context_pack_fragment(
+                seed,
+                self._effective_cwd(),
+                context_pack_enabled=self._context_pack_enabled,
+            )
+            if seed is not None
+            else ""
+        )
+        try:
+            execution_profile_json = (
+                json.dumps(
+                    execution_profile.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if execution_profile is not None
+                else None
+            )
+            inherited_runtime_handle_json = (
+                json.dumps(
+                    self._inherited_runtime_handle.to_persisted_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if self._inherited_runtime_handle is not None
+                else None
+            )
+        except (OverflowError, RecursionError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot persist non-canonical execution effect inputs",
+                details={"cause": type(exc).__name__},
+            ) from exc
         raw_contract: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "strategy": {
                 "schema_version": 1,
                 "resolver": resolver,
@@ -3156,6 +3207,9 @@ class OrchestratorRunner:
                     [tool, activity.value] for tool, activity in sorted(activity_map.items())
                 ],
             },
+            "context_pack_fragment": context_pack_fragment,
+            "execution_profile_json": execution_profile_json,
+            "inherited_runtime_handle_json": inherited_runtime_handle_json,
             # MCP discovery is asynchronous and session-scoped, so the complete
             # catalog is sealed immediately after discovery and before the first
             # provider effect. A paused current-format session must always have
@@ -3200,6 +3254,9 @@ class OrchestratorRunner:
                 "allowed_tools",
                 "tool_catalog_json",
                 "tool_catalog_fingerprint",
+                "context_pack_fragment",
+                "execution_profile_json",
+                "inherited_runtime_handle_json",
             }
         )
         strategy_keys = frozenset(
@@ -3216,7 +3273,7 @@ class OrchestratorRunner:
             if not _mapping_has_exact_keys(value, input_keys):
                 return None
             assert isinstance(value, Mapping)
-            if value.get("schema_version") != 1:
+            if value.get("schema_version") != 2:
                 return None
             raw_strategy = value.get("strategy")
             if not _mapping_has_exact_keys(raw_strategy, strategy_keys):
@@ -3229,6 +3286,9 @@ class OrchestratorRunner:
             system_fragment = raw_strategy.get("system_prompt_fragment")
             task_suffix = raw_strategy.get("task_prompt_suffix")
             raw_activity_map = raw_strategy.get("activity_map")
+            context_pack_fragment = value.get("context_pack_fragment")
+            execution_profile_json = value.get("execution_profile_json")
+            inherited_runtime_handle_json = value.get("inherited_runtime_handle_json")
             if (
                 resolver not in {"registry", "profile_backed"}
                 or type(tools) is not list
@@ -3244,6 +3304,8 @@ class OrchestratorRunner:
                 or len(task_suffix) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
                 or type(raw_activity_map) is not list
                 or len(raw_activity_map) > _MAX_EXECUTION_STRATEGY_TOOLS
+                or type(context_pack_fragment) is not str
+                or len(context_pack_fragment) > _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS
             ):
                 return None
             normalized_activity: list[list[str]] = []
@@ -3299,13 +3361,62 @@ class OrchestratorRunner:
                     sort_keys=True,
                     separators=(",", ":"),
                     ensure_ascii=True,
+                    allow_nan=False,
                 )
                 if canonical_catalog != catalog_json:
                     return None
                 normalized_allowed_tools = list(allowed_tools)
 
+            if execution_profile_json is None:
+                normalized_profile_json: str | None = None
+            else:
+                if (
+                    type(execution_profile_json) is not str
+                    or len(execution_profile_json) > _MAX_EXECUTION_PROFILE_CHARS
+                ):
+                    return None
+                decoded_profile = json.loads(execution_profile_json)
+                if not isinstance(decoded_profile, dict):
+                    return None
+                normalized_profile = ExecutionProfile.model_validate(decoded_profile)
+                canonical_profile = json.dumps(
+                    normalized_profile.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_profile != execution_profile_json:
+                    return None
+                normalized_profile_json = execution_profile_json
+
+            if inherited_runtime_handle_json is None:
+                normalized_runtime_handle_json: str | None = None
+            else:
+                if (
+                    type(inherited_runtime_handle_json) is not str
+                    or len(inherited_runtime_handle_json) > _MAX_EXECUTION_RUNTIME_HANDLE_CHARS
+                ):
+                    return None
+                decoded_runtime_handle = json.loads(inherited_runtime_handle_json)
+                if not isinstance(decoded_runtime_handle, dict):
+                    return None
+                normalized_runtime_handle = RuntimeHandle.from_dict(decoded_runtime_handle)
+                if normalized_runtime_handle is None:
+                    return None
+                canonical_runtime_handle = json.dumps(
+                    normalized_runtime_handle.to_persisted_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_runtime_handle != inherited_runtime_handle_json:
+                    return None
+                normalized_runtime_handle_json = inherited_runtime_handle_json
+
             return {
-                "schema_version": 1,
+                "schema_version": 2,
                 "strategy": {
                     "schema_version": 1,
                     "resolver": resolver,
@@ -3314,6 +3425,9 @@ class OrchestratorRunner:
                     "task_prompt_suffix": task_suffix,
                     "activity_map": normalized_activity,
                 },
+                "context_pack_fragment": context_pack_fragment,
+                "execution_profile_json": normalized_profile_json,
+                "inherited_runtime_handle_json": normalized_runtime_handle_json,
                 "allowed_tools": normalized_allowed_tools,
                 "tool_catalog_json": catalog_json,
                 "tool_catalog_fingerprint": catalog_fingerprint,
@@ -3321,12 +3435,13 @@ class OrchestratorRunner:
         except Exception:
             return None
 
-    def _execution_strategy_snapshot(
+    def _execution_inputs_snapshot(
         self,
         execution_contract: Mapping[str, Any] | None,
         *,
         require_bound: bool,
-    ) -> _PersistedExecutionStrategy:
+    ) -> dict[str, object]:
+        """Return the validated immutable provider-input population."""
         raw_inputs = (
             execution_contract.get("execution_inputs")
             if isinstance(execution_contract, Mapping)
@@ -3341,6 +3456,18 @@ class OrchestratorRunner:
                 message="Cannot execute with an invalid prompt/tool input snapshot",
                 details={"invalid": "execution_inputs"},
             )
+        return normalized
+
+    def _execution_strategy_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> _PersistedExecutionStrategy:
+        normalized = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
         strategy = normalized["strategy"]
         assert isinstance(strategy, dict)
         raw_activity = strategy["activity_map"]
@@ -3351,6 +3478,58 @@ class OrchestratorRunner:
             task_prompt_suffix=strategy["task_prompt_suffix"],
             activity_map=tuple((row[0], ActivityType(row[1])) for row in raw_activity),
         )
+
+    def _execution_context_pack_fragment_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> str:
+        """Return context text resolved before the durable session existed."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        fragment = inputs["context_pack_fragment"]
+        assert isinstance(fragment, str)
+        return fragment
+
+    def _execution_profile_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> ExecutionProfile | None:
+        """Restore the complete profile without rereading mutable YAML."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        raw_profile = inputs["execution_profile_json"]
+        if raw_profile is None:
+            return None
+        assert isinstance(raw_profile, str)
+        return ExecutionProfile.model_validate(json.loads(raw_profile))
+
+    def _execution_inherited_runtime_handle_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> RuntimeHandle | None:
+        """Restore parent conversation lineage from the durable snapshot."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        raw_handle = inputs["inherited_runtime_handle_json"]
+        if raw_handle is None:
+            return None
+        assert isinstance(raw_handle, str)
+        restored = RuntimeHandle.from_dict(json.loads(raw_handle))
+        if restored is None:  # pragma: no cover - exact-schema validation owns this path
+            raise OrchestratorError(message="Cannot restore inherited runtime authority")
+        return restored
 
     def _bind_execution_tool_authority(
         self,
@@ -5497,16 +5676,14 @@ class OrchestratorRunner:
         session or allowed to change models silently.
         """
         if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
-            self._validate_legacy_resume_identity(progress, seed=seed)
-            self._execution_guidance = self._resolve_guidance_bundle(())
-            self._execution_contract = self._build_execution_contract(
-                seed=seed,
-                authority_generation=authority_generation,
+            raise OrchestratorError(
+                message="Cannot resume a session without durable effect inputs",
+                details={
+                    "contract_version": None,
+                    "resume_blocked": "execution_inputs_unavailable",
+                    "hint": "Start a new session under the current execution contract.",
+                },
             )
-            # One unavoidable recomputation migrates a legacy session. Persist the
-            # resolved contract now so every later resume restores this exact policy
-            # instead of drifting again with each environment/config change.
-            return True
         raw_contract = progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
 
         raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
@@ -5520,6 +5697,7 @@ class OrchestratorRunner:
                 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
                 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
                 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
+                PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -5528,13 +5706,13 @@ class OrchestratorRunner:
                 details={"contract_version": raw_version},
             )
 
-        if raw_version == PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION:
-            # Version 5 could already have dispatched provider effects, but did
-            # not persist the resolved prompt strategy or complete tool
-            # authority. Reconstructing either from current files/config would
-            # silently change the resumed effect boundary.
+        if raw_version != EXECUTION_CONTRACT_VERSION:
+            # Every older version may already have dispatched provider effects,
+            # but none sealed the complete context/profile/parent-session input
+            # population. Reconstructing any missing field from the current
+            # workspace or configuration would change replay authorization.
             raise OrchestratorError(
-                message="Cannot resume a session without durable prompt/tool authority",
+                message="Cannot resume a session without durable effect inputs",
                 details={
                     "contract_version": raw_version,
                     "resume_blocked": "execution_inputs_unavailable",
@@ -6283,25 +6461,9 @@ class OrchestratorRunner:
 
     @staticmethod
     def _metadata_candidates(message: AgentMessage) -> tuple[Mapping[str, Any], ...]:
-        """Return structured metadata maps attached to a runtime message."""
-        candidates: list[Mapping[str, Any]] = []
-        seen: set[int] = set()
-
-        def add(value: object) -> None:
-            if not isinstance(value, Mapping):
-                return
-            identity = id(value)
-            if identity in seen:
-                return
-            seen.add(identity)
-            candidates.append(value)
-            for key in ("meta", "mcp_meta", "metadata", "error", "details", "response"):
-                nested = value.get(key)
-                if isinstance(nested, Mapping):
-                    add(nested)
-
-        add(message.data)
-        return tuple(candidates)
+        """Return the shared bounded closed-vocabulary metadata projection."""
+        candidates, _overflowed = project_failure_metadata(message)
+        return candidates
 
     @staticmethod
     def _parse_datetime(value: object) -> datetime | None:
@@ -6471,11 +6633,9 @@ class OrchestratorRunner:
     ) -> bool:
         """Return True when structured metadata identifies a quota-window failure."""
         for metadata in cls._metadata_candidates(message):
-            recovery = metadata.get("recovery")
-            if isinstance(recovery, Mapping):
-                kind = str(recovery.get("kind", "")).strip().lower()
-                if kind in _USAGE_LIMIT_RECOVERY_KINDS:
-                    return True
+            kind = metadata.get("kind")
+            if isinstance(kind, str) and kind.strip().lower() in _USAGE_LIMIT_RECOVERY_KINDS:
+                return True
 
             if metadata.get("usage_limit") is True or metadata.get("quota_exhausted") is True:
                 return True
@@ -6565,11 +6725,8 @@ class OrchestratorRunner:
     def _resume_retry_pause(cls, message: AgentMessage) -> RecoverableFailurePause | None:
         """Return a pause decision for recoverable resume-bootstrap failures."""
         for metadata in cls._metadata_candidates(message):
-            recovery = metadata.get("recovery")
-            if not isinstance(recovery, Mapping):
-                continue
-            kind = str(recovery.get("kind", "")).strip().lower()
-            if kind == _RESUME_RETRY_RECOVERY_KIND:
+            kind = metadata.get("kind")
+            if isinstance(kind, str) and kind.strip().lower() == _RESUME_RETRY_RECOVERY_KIND:
                 return RecoverableFailurePause(
                     pause_kind=_RESUME_RETRY_RECOVERY_KIND,
                     reason=message.content,
@@ -8222,6 +8379,12 @@ class OrchestratorRunner:
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
                 context_pack_enabled=execution_semantics["context_pack_enabled"],
+                resolved_context_pack_fragment=(
+                    self._execution_context_pack_fragment_snapshot(
+                        execution_contract,
+                        require_bound=False,
+                    )
+                ),
             )
             await self._record_execution_guidance_injection(
                 session_id=tracker.session_id,
@@ -8645,7 +8808,11 @@ class OrchestratorRunner:
                 spinner="dots",
             ) as status:
                 runtime_handle = self._seed_runtime_handle(
-                    self._inherited_runtime_handle, tool_catalog=tool_catalog
+                    self._execution_inherited_runtime_handle_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    ),
+                    tool_catalog=tool_catalog,
                 )
                 direct_route_history: tuple[str, ...] = ()
                 direct_route_override: Any | None = None
@@ -9261,7 +9428,18 @@ class OrchestratorRunner:
                 f"  Stage {stage.stage_number}: ACs {[idx + 1 for idx in stage.ac_indices]}"
             )
 
-        execution_profile = _execution_profile_for_seed(seed)
+        if contract_source is None:
+            execution_profile = _execution_profile_for_seed(seed)
+            inherited_runtime_handle = self._inherited_runtime_handle
+        else:
+            execution_profile = self._execution_profile_snapshot(
+                contract_source,
+                require_bound=True,
+            )
+            inherited_runtime_handle = self._execution_inherited_runtime_handle_snapshot(
+                contract_source,
+                require_bound=True,
+            )
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
@@ -9291,7 +9469,7 @@ class OrchestratorRunner:
             decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
             max_decomposition_depth=max_decomposition_depth,
-            inherited_runtime_handle=self._inherited_runtime_handle,
+            inherited_runtime_handle=inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
@@ -10111,7 +10289,7 @@ class OrchestratorRunner:
             # current configuration and therefore are not resume authority.
             strategy = self._execution_strategy_snapshot(
                 execution_contract,
-                require_bound=not execution_contract_changed,
+                require_bound=True,
             )
             system_prompt = build_system_prompt(
                 seed,
@@ -10119,6 +10297,12 @@ class OrchestratorRunner:
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
                 context_pack_enabled=execution_semantics["context_pack_enabled"],
+                resolved_context_pack_fragment=(
+                    self._execution_context_pack_fragment_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    )
+                ),
             )
             await self._record_execution_guidance_injection(
                 session_id=session_id,

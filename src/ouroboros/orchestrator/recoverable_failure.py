@@ -107,7 +107,7 @@ _LIMIT_PATTERN = re.compile(
 )
 
 
-def _metadata_candidates(
+def project_failure_metadata(
     message: AgentMessage,
 ) -> tuple[tuple[dict[str, object], ...], bool]:
     """Return bounded closed-vocabulary rows plus an ambiguity sentinel.
@@ -249,7 +249,7 @@ def retry_duration_seconds_from_metadata(
 def retry_duration_seconds_from_message(message: AgentMessage, *, now: datetime) -> int | None:
     """Resolve structured retry metadata, then bounded human-readable text."""
 
-    metadata_rows, _overflowed = _metadata_candidates(message)
+    metadata_rows, _overflowed = project_failure_metadata(message)
     for metadata in metadata_rows:
         duration = retry_duration_seconds_from_metadata(metadata, now=now)
         if duration is not None:
@@ -337,7 +337,7 @@ def is_usage_limit_pause_message(
     if not isinstance(message, AgentMessage) or not (message.is_final and message.is_error):
         return False
     resolved_now = now or datetime.now(UTC)
-    metadata_rows, metadata_overflowed = _metadata_candidates(message)
+    metadata_rows, metadata_overflowed = project_failure_metadata(message)
     if metadata_overflowed:
         # A final provider error with metadata beyond the inspected envelope is
         # ambiguous. It must pause rather than authorize a costlier successor.
@@ -384,6 +384,7 @@ def is_usage_limit_pause_message(
 
 __all__ = [
     "is_usage_limit_pause_message",
+    "project_failure_metadata",
     "retry_duration_seconds_from_message",
     "retry_duration_seconds_from_metadata",
 ]

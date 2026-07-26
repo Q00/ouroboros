@@ -43,6 +43,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
     ParallelExecutionResult,
 )
+from ouroboros.orchestrator.profile_loader import SuggestedModelTier
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -3970,6 +3971,31 @@ class TestOrchestratorRunner:
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
 
+    def test_recoverable_failure_bounds_deep_plain_metadata_before_resume_retry(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """The runner must not recurse through a provider-controlled envelope."""
+        data: dict[str, object] = {"subtype": "error"}
+        cursor = data
+        for _ in range(1_200):
+            nested: dict[str, object] = {}
+            cursor["error"] = nested
+            cursor = nested
+        message = AgentMessage(
+            type="result",
+            content="Provider returned malformed nested metadata",
+            data=data,
+        )
+
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
+
     def test_recoverable_failure_detects_hermes_usage_limit_exit(
         self,
         runner: OrchestratorRunner,
@@ -5112,6 +5138,74 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert "Edit" not in captured["tools"]
         assert "research" in captured["system_prompt"].lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_uses_frozen_context_after_manifest_changes(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A sibling workspace edit cannot change a paused provider prompt."""
+        monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+        manifest = tmp_path / "pyproject.toml"
+        manifest.write_text(
+            '[project]\nname = "resume-app"\nversion = "1.0.0"\n',
+            encoding="utf-8",
+        )
+        mock_adapter.working_directory = str(tmp_path)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(tmp_path),
+        )
+        paused_tracker = SessionTracker.create(
+            "exec_resume_context",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_context",
+        )
+        manifest.write_text(
+            '[project]\nname = "resume-app"\nversion = "9.9.9"\n',
+            encoding="utf-8",
+        )
+        captured: dict[str, Any] = {}
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args
+            captured.update(kwargs)
+            yield AgentMessage(
+                type="result",
+                content="Resume preserved the original prompt",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("sess_resume_context", sample_seed)
+
+        assert result.is_ok
+        assert "resume-app 1.0.0" in captured["system_prompt"]
+        assert "resume-app 9.9.9" not in captured["system_prompt"]
 
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
@@ -6578,13 +6672,13 @@ class TestOrchestratorRunner:
         assert "mcp__chrome-devtools__click" not in captured_kwargs["tools"]
 
     @pytest.mark.asyncio
-    async def test_execute_parallel_passes_inherited_runtime_handle_to_executor(
+    async def test_execute_parallel_restores_profile_and_inherited_handle_from_contract(
         self,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
-        """Parallel delegated runs should propagate inherited runtime/tool context."""
+        """Parallel replay must not adopt current profile or parent lineage drift."""
         from ouroboros.core.types import Result
         from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
         from ouroboros.orchestrator.parallel_executor import (
@@ -6603,6 +6697,20 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             inherited_runtime_handle=inherited_handle,
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        persisted_profile = runner._execution_profile_snapshot(
+            execution_contract,
+            require_bound=True,
+        )
+        assert persisted_profile is not None
+        drifted_profile = persisted_profile.model_copy(
+            update={"suggested_model_tier": SuggestedModelTier.HIGH}
+        )
+        runner._inherited_runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_drifted_parent",
+            metadata={"fork_session": True},
         )
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         captured_init: dict[str, Any] = {}
@@ -6647,6 +6755,10 @@ class TestOrchestratorRunner:
                 "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
                 FakeParallelExecutor,
             ),
+            patch(
+                "ouroboros.orchestrator.runner._execution_profile_for_seed",
+                return_value=drifted_profile,
+            ) as load_current_profile,
             patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
             patch.object(
                 runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
@@ -6665,6 +6777,7 @@ class TestOrchestratorRunner:
                 tool_catalog=tool_catalog,
                 system_prompt="system",
                 start_time=datetime.now(UTC),
+                execution_contract=execution_contract,
             )
 
         assert result.is_ok
@@ -6672,6 +6785,9 @@ class TestOrchestratorRunner:
         assert inherited_runtime_handle.native_session_id == inherited_handle.native_session_id
         assert inherited_runtime_handle.metadata == inherited_handle.metadata
         assert inherited_runtime_handle.approval_mode == "bypassPermissions"
+        assert captured_init["execution_profile"] == persisted_profile
+        assert captured_init["execution_profile"].suggested_model_tier is SuggestedModelTier.MEDIUM
+        load_current_profile.assert_not_called()
         assert captured_execute["tools"] == ["Read", "mcp__chrome-devtools__click"]
 
     @pytest.mark.asyncio

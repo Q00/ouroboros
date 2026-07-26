@@ -209,15 +209,14 @@ async def test_each_new_run_reloads_declared_guidance(tmp_path: Path) -> None:
         )
 
 
-def test_legacy_contract_resumes_without_newly_configured_guidance(tmp_path: Path) -> None:
+def test_legacy_contract_cannot_reconstruct_guidance_or_effect_inputs(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, _store = _runner(tmp_path, ("team",))
 
-    changed = runner._restore_execution_contract({}, seed=_seed())
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        runner._restore_execution_contract({}, seed=_seed())
 
-    assert changed is True
-    assert runner._execution_guidance is not None
-    assert runner._execution_guidance.refs == ()
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
 
 
 @pytest.mark.asyncio

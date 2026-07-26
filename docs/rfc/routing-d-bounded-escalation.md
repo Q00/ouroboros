@@ -188,7 +188,7 @@ before the first route event. Resume therefore fails before dependency analysis 
 provider entry if native model enforcement, routing configuration, or durable-depth
 eligibility is no longer available.
 
-Execution contract version 6 also seals the complete scalar executor semantics
+Execution contract version 7 also seals the complete scalar executor semantics
 used by that owner: verification enablement and timeout, retry and cross-harness
 budgets, decomposition enablement/mode/depth, requested and backend-capped effective
 worker counts, backend concurrency/rate limits, adapter pacing ownership,
@@ -199,17 +199,21 @@ current-setting drift before constructing prompts or `ParallelACExecutor`. Promp
 construction, fan-out, and rate pacing consume the immutable persisted snapshot
 instead of rereading mutable environment or config.
 
-Version 6 additionally freezes the resolved execution strategy: its system-prompt
+Version 7 additionally freezes the resolved execution strategy: its system-prompt
 fragment, task suffix, base tools, and activity map. After session-scoped MCP
 discovery, the complete canonical tool catalog and the policy-allowed tool list
 are fingerprinted and persisted before the first provider effect. Resume rebuilds
 prompts from that frozen strategy and requires the current handler catalog to be
 byte-equivalent before re-entering either the direct or parallel owner; it never
 falls back to the task-type registry or overwrites a persisted runtime catalog
-with broader current authority. Version 5 cannot safely reconstruct these
-effect-bearing inputs and therefore fails closed on resume. Version 4 and older
-contracts predate Routing D ownership and migrate once using their legacy current
-settings; every new Routing D owner is born with version 6.
+with broader current authority. The exact rendered context-pack fragment, complete
+canonical `ExecutionProfile`, and persisted inherited `RuntimeHandle` are frozen in
+the same input fingerprint before the session is published. New and resumed direct
+or parallel execution consume those snapshots without rescanning a changed
+workspace, reloading profile YAML, or adopting a different parent conversation.
+Contractless sessions and versions 2 through 6 cannot reconstruct this complete
+effect population and therefore fail closed on resume; every new Routing D owner
+is born with version 7.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
