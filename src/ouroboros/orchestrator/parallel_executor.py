@@ -1636,6 +1636,8 @@ def _structured_literal(value: str) -> str | None:
 
 # Decomposition constants
 # Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
+# The maximum is also the largest five-way tree whose complete child projection
+# fits the durable 64-node replay envelope (5 + 25 = 30 child nodes).
 DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
 MAX_DECOMPOSITION_DEPTH = DEFAULT_MAX_DECOMPOSITION_DEPTH
 MIN_SUB_ACS = 2
@@ -2819,7 +2821,15 @@ class ParallelACExecutor:
             "off" if not enable_decomposition else decomposition_mode
         )
         self._enable_decomposition = self._decomposition_mode != "off"
-        self._max_decomposition_depth = max(0, max_decomposition_depth)
+        if (
+            type(max_decomposition_depth) is not int
+            or not 0 <= max_decomposition_depth <= MAX_DECOMPOSITION_DEPTH
+        ):
+            raise ValueError(
+                "max_decomposition_depth must be between 0 and "
+                f"{MAX_DECOMPOSITION_DEPTH} so completed trees remain replayable"
+            )
+        self._max_decomposition_depth = max_decomposition_depth
         self._max_concurrent = max_concurrent
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
@@ -6054,6 +6064,8 @@ class ParallelACExecutor:
             and len(node_decision.children) >= MIN_SUB_ACS
             and (self._decomposition_mode == "preflight" or node_decision.trustworthy is True)
         ):
+            if depth >= self._max_decomposition_depth:
+                raise RuntimeError("durable decomposition exceeds the replayable depth boundary")
             return await self._execute_decomposition_children(
                 decision=node_decision,
                 ac_index=ac_index,
@@ -8046,6 +8058,36 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=ac_session_id,
                     retry_attempt=retry_attempt,
                     depth=depth,
+                    route_candidate=observed_route_candidate,
+                )
+
+            # Quota is a hard pause boundary, so it must be recognized before
+            # queued SessionSignals are allowed to open another provider turn.
+            # Preserve the exact primary handle and let the outer ``finally``
+            # reject any still-pending signals as target-ended; PAUSED must
+            # imply that no effect happened after the quota-ending message.
+            if any(is_usage_limit_pause_message(message) for message in reversed(messages)):
+                self._remember_ac_runtime_handle(
+                    ac_index,
+                    runtime_handle,
+                    execution_context_id=execution_context_id,
+                    is_sub_ac=is_sub_ac,
+                    parent_ac_index=parent_ac_index,
+                    sub_ac_index=sub_ac_index,
+                    node_identity=node_identity,
+                    retry_attempt=retry_attempt,
+                )
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    messages=tuple(messages),
+                    final_message=final_message,
+                    duration_seconds=(datetime.now(UTC) - start_time).total_seconds(),
+                    session_id=ac_session_id,
+                    retry_attempt=retry_attempt,
+                    depth=depth,
+                    runtime_handle=runtime_handle,
                     route_candidate=observed_route_candidate,
                 )
 
@@ -10693,6 +10735,7 @@ Respond with either ATOMIC or the structured JSON object only.
             raise RuntimeError("partial composite replay exceeds the execution-wide bound")
         partial_states: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
         prior_frame_states: dict[tuple[int, str], _PartialCompositeResumeState] = {}
+        prior_paths: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
         # The production query is newest-first.  Replay the state machine in
         # chronological order so advancing prefixes cannot be mistaken for
         # regressions and repeated pauses retain the newest provider boundary.
@@ -10833,7 +10876,40 @@ Respond with either ATOMIC or the structured JSON object only.
                 frame_states.append(state)
                 expected_node = expected_child
                 parent_ac_index = paused_child_ac_index
-            partial_states[root_ac_index] = tuple(frame_states)
+            current_path = tuple(frame_states)
+            previous_path = prior_paths.get(root_ac_index)
+            if previous_path is not None and len(current_path) < len(previous_path):
+                first_progress_index: int | None = None
+                for path_index, (previous_state, current_state) in enumerate(
+                    zip(previous_path, current_path, strict=False)
+                ):
+                    if (
+                        current_state.decision != previous_state.decision
+                        or current_state.completed_children != previous_state.completed_children
+                        or current_state.paused_child_index != previous_state.paused_child_index
+                        or current_state.paused_child_ac_index
+                        != previous_state.paused_child_ac_index
+                        or current_state.paused_child_content != previous_state.paused_child_content
+                        or current_state.paused_child_retry_attempt
+                        != previous_state.paused_child_retry_attempt
+                    ):
+                        first_progress_index = path_index
+                        break
+                if first_progress_index is None:
+                    raise RuntimeError(
+                        "partial composite replay dropped an established descendant frame"
+                    )
+                previous_state = previous_path[first_progress_index]
+                current_state = current_path[first_progress_index]
+                if (
+                    current_state.decision != previous_state.decision
+                    or current_state.paused_child_index <= previous_state.paused_child_index
+                ):
+                    raise RuntimeError(
+                        "partial composite replay shortened without consuming its subtree"
+                    )
+            prior_paths[root_ac_index] = current_path
+            partial_states[root_ac_index] = current_path
         active_partial_roots = set(partial_states) - set(composite_results)
         for root_ac_index, states in partial_states.items():
             if root_ac_index in composite_results:

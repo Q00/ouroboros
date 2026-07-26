@@ -1575,6 +1575,116 @@ async def test_partial_composite_replay_folds_newest_first_advancing_history() -
 
 
 @pytest.mark.asyncio
+async def test_partial_composite_replay_rejects_newer_descendant_path_shortening() -> None:
+    executor, store, events = _executor(enable_decomposition=True)
+    seed = _seed()
+    root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    root_decision = _split_decision(
+        node_identity=root,
+        child_descriptions=("outer completed", "nested composite"),
+    )
+    nested_decision = _split_decision(
+        node_identity=root.child(1),
+        child_descriptions=("nested completed", "nested paused"),
+    )
+    paused_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+    paused_leaf = ACExecutionResult(
+        ac_index=101,
+        ac_content="nested paused",
+        success=False,
+        messages=(paused_message,),
+        final_message=paused_message.content,
+        runtime_handle=RuntimeHandle(
+            backend="claude",
+            native_session_id="nested-paused",
+            cwd="/tmp/project",
+            metadata={
+                "node_id": root.child(1).child(1).node_id,
+                "session_scope_id": "execution-1-nested-paused",
+                "ac_dispatch_id": "a" * 32,
+                "ac_capsule_fingerprint": "sha256:" + "b" * 64,
+            },
+        ),
+        depth=2,
+    )
+    nested = ACExecutionResult(
+        ac_index=1,
+        ac_content="nested composite",
+        success=False,
+        is_decomposed=True,
+        sub_results=(
+            ACExecutionResult(
+                ac_index=100,
+                ac_content="nested completed",
+                success=True,
+                final_message="nested completed once",
+                depth=2,
+            ),
+            paused_leaf,
+        ),
+        decomposition_decision=nested_decision,
+        depth=1,
+    )
+    await executor._persist_partial_composite_pause(
+        seed=seed,
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            is_decomposed=True,
+            sub_results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="outer completed",
+                    success=True,
+                    final_message="outer completed once",
+                    depth=1,
+                ),
+                nested,
+            ),
+            decomposition_decision=root_decision,
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+    )
+    original = next(event for event in events if event.type == "execution.ac.composite_paused")
+    shortened_data = deepcopy(original.data)
+    shortened_data["frames"] = shortened_data["frames"][:1]
+    shortened_data["paused_leaf"].update(
+        {
+            "node_id": root.child(1).node_id,
+            "ac_index": 1,
+            "ac_content": "nested composite",
+        }
+    )
+    shortened = BaseEvent(
+        type=original.type,
+        aggregate_type=original.aggregate_type,
+        aggregate_id=original.aggregate_id,
+        data=shortened_data,
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.composite_paused":
+            return [shortened, original]
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="dropped an established descendant frame"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
 async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> None:
     native, _native_store, events = _executor()
     cheap = _candidate(native, "compat:claude:frugal")

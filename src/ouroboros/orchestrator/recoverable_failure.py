@@ -66,6 +66,8 @@ def _duration_text_to_seconds(text: str) -> int | None:
     total = 0.0
     for match in _DURATION_PATTERN.finditer(text):
         value = float(match.group("value"))
+        if not math.isfinite(value):
+            return None
         unit = match.group("unit").lower()
         if unit.startswith("d"):
             total += value * 24 * 60 * 60
@@ -75,6 +77,8 @@ def _duration_text_to_seconds(text: str) -> int | None:
             total += value * 60
         else:
             total += value
+        if not math.isfinite(total):
+            return None
     return max(1, math.ceil(total)) if total > 0 else None
 
 
@@ -113,7 +117,9 @@ def _duration_from_metadata(metadata: Mapping[str, object], *, now: datetime) ->
         value = metadata.get(key)
         if isinstance(value, bool) or value is None:
             continue
-        if isinstance(value, int | float) and value > 0:
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, float) and math.isfinite(value) and value > 0:
             return max(1, math.ceil(value))
         if isinstance(value, str) and value.strip():
             try:
@@ -132,7 +138,7 @@ def _duration_from_metadata(metadata: Mapping[str, object], *, now: datetime) ->
                 if duration is not None:
                     return duration
             else:
-                if numeric > 0:
+                if math.isfinite(numeric) and numeric > 0:
                     return max(1, math.ceil(numeric))
     return None
 

@@ -1,143 +1,43 @@
-"""Focused recursion-depth regressions for ``ParallelACExecutor``."""
+"""Admission regressions for the durable decomposition-depth boundary."""
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.core.seed import AcceptanceCriterionSpec, InvestmentSpec
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult
+from ouroboros.orchestrator.parallel_executor import (
+    MAX_DECOMPOSITION_DEPTH,
+    ParallelACExecutor,
+)
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
-@pytest.mark.asyncio
-async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic() -> None:
-    """Composite ACs should keep recursing until the soft depth safety net is reached."""
-    executor = ProcessLocalTestExecutor(
+@pytest.mark.parametrize("invalid_depth", [-1, 3, 100, True])
+def test_executor_rejects_unpersistable_decomposition_depth_before_effects(
+    invalid_depth: object,
+) -> None:
+    """No live tree may outgrow the complete 64-node replay projection."""
+    adapter = MagicMock()
+
+    with pytest.raises(ValueError, match="completed trees remain replayable"):
+        ProcessLocalTestExecutor(
+            adapter=adapter,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_decomposition_depth=invalid_depth,  # type: ignore[arg-type]
+        )
+
+    adapter.execute_task.assert_not_called()
+
+
+def test_executor_accepts_the_persistable_maximum_depth() -> None:
+    executor = ParallelACExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
-        enable_decomposition=True,
-        max_decomposition_depth=3,
-    )
-    executor._emit_subtask_event = AsyncMock()
-    executor._try_decompose_ac = AsyncMock(
-        side_effect=[
-            ["Composite depth 1", "Atomic depth 1"],
-            ["Composite depth 2", "Atomic depth 2"],
-            ["Forced atomic depth 3 A", "Forced atomic depth 3 B"],
-            None,
-            None,
-        ]
+        max_decomposition_depth=MAX_DECOMPOSITION_DEPTH,
     )
 
-    async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
-        return ACExecutionResult(
-            ac_index=int(kwargs["ac_index"]),
-            ac_content=str(kwargs["ac_content"]),
-            success=True,
-            final_message=f"{kwargs['ac_content']} complete",
-            depth=int(kwargs["depth"]),
-        )
-
-    execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
-    executor._execute_atomic_ac = execute_atomic_ac
-    executor._test_single_ac_calls = []
-    investment = InvestmentSpec(
-        difficulty="high",
-        stakes="high",
-        provenance="declared",
-        confidence="high",
-    )
-    parent_spec = AcceptanceCriterionSpec(
-        description="Root composite AC",
-        verify_command="pytest -q tests/root_contract.py",
-        investment=investment,
-    )
-
-    result = await executor._execute_single_ac(
-        ac_index=1,
-        ac_content="Root composite AC",
-        session_id="sess_recursive_depth",
-        tools=["Read", "Edit"],
-        tool_catalog=None,
-        system_prompt="system",
-        seed_goal="Support recursive decomposition",
-        depth=0,
-        execution_id="exec_recursive_depth",
-        ac_spec=parent_spec,
-        investment_spec=investment,
-    )
-
-    assert result.success is True
-    assert result.is_decomposed is True
-
-    level_one_composite, level_one_atomic = result.sub_results
-    assert level_one_composite.is_decomposed is True
-    assert level_one_atomic.depth == 1
-    assert level_one_atomic.decomposition_depth_warning is False
-
-    level_two_composite, level_two_atomic = level_one_composite.sub_results
-    assert level_two_composite.is_decomposed is True
-    assert level_two_atomic.depth == 2
-    assert level_two_atomic.decomposition_depth_warning is False
-
-    forced_atomic_a, forced_atomic_b = level_two_composite.sub_results
-    assert [forced_atomic_a.depth, forced_atomic_b.depth] == [3, 3]
-    assert [
-        forced_atomic_a.decomposition_depth_warning,
-        forced_atomic_b.decomposition_depth_warning,
-    ] == [True, True]
-
-    assert [
-        (
-            int(call["ac_index"]),
-            str(call["ac_content"]),
-            int(call["depth"]),
-        )
-        for call in executor._test_single_ac_calls
-    ] == [
-        (1, "Root composite AC", 0),
-        (100, "Composite depth 1", 1),
-        (10000, "Composite depth 2", 2),
-        (1000000, "Forced atomic depth 3 A", 3),
-        (1000001, "Forced atomic depth 3 B", 3),
-        (10001, "Atomic depth 2", 2),
-        (101, "Atomic depth 1", 1),
-    ]
-    assert executor._try_decompose_ac.await_count == 5
-    assert [
-        (int(call.kwargs["ac_index"]), int(call.kwargs["depth"]))
-        for call in execute_atomic_ac.await_args_list
-    ] == [
-        (1000000, 3),
-        (1000001, 3),
-        (10001, 2),
-        (101, 1),
-    ]
-    assert [
-        call.kwargs["node_identity"].display_path for call in execute_atomic_ac.await_args_list
-    ] == [
-        "2.1.1.1",
-        "2.1.1.2",
-        "2.1.2",
-        "2.2",
-    ]
-    assert [
-        (
-            call.kwargs["parent_ac_index"],
-            call.kwargs["sub_ac_index"],
-        )
-        for call in execute_atomic_ac.await_args_list
-    ] == [
-        (None, None),
-        (None, None),
-        (None, None),
-        (1, 1),
-    ]
-    assert all(
-        call.kwargs["investment_spec"] is investment for call in execute_atomic_ac.await_args_list
-    )
-    assert all(call.kwargs["ac_spec"] is None for call in execute_atomic_ac.await_args_list)
+    assert executor._max_decomposition_depth == 2

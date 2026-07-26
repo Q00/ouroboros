@@ -9255,64 +9255,20 @@ class TestParallelACExecutor:
             (101, True, 1, 1),
         ]
 
-    @pytest.mark.asyncio
-    async def test_depth_three_forces_atomic_without_further_decomposition(self) -> None:
-        """Depth 2 may still recurse, but depth 3 must execute atomically."""
-        executor = ProcessLocalTestExecutor(
-            adapter=MagicMock(),
-            event_store=AsyncMock(),
-            console=MagicMock(),
-            enable_decomposition=True,
-            max_decomposition_depth=3,
-        )
-        executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[
-                ["Depth 3 child A", "Depth 3 child B"],
-            ]
-        )
+    def test_depth_three_is_rejected_before_executor_construction(self) -> None:
+        """A five-way depth-3 tree cannot outrun its durable 64-node envelope."""
+        adapter = MagicMock()
 
-        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
-            return ACExecutionResult(
-                ac_index=int(kwargs["ac_index"]),
-                ac_content=str(kwargs["ac_content"]),
-                success=True,
-                final_message=f"{kwargs['ac_content']} complete",
-                depth=int(kwargs["depth"]),
+        with pytest.raises(ValueError, match="completed trees remain replayable"):
+            ProcessLocalTestExecutor(
+                adapter=adapter,
+                event_store=AsyncMock(),
+                console=MagicMock(),
+                enable_decomposition=True,
+                max_decomposition_depth=3,
             )
 
-        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
-        executor._execute_atomic_ac = execute_atomic_ac
-
-        result = await executor._execute_single_ac(
-            ac_index=0,
-            ac_content="Root AC",
-            session_id="sess_depth_limit",
-            tools=["Read"],
-            tool_catalog=None,
-            system_prompt="system",
-            seed_goal="Ship recursive decomposition",
-            depth=2,
-            execution_id="exec_depth_limit",
-        )
-
-        assert result.is_decomposed is True
-        assert result.decomposition_depth_warning is False
-        assert [sub_result.ac_content for sub_result in result.sub_results] == [
-            "Depth 3 child A",
-            "Depth 3 child B",
-        ]
-        assert [sub_result.depth for sub_result in result.sub_results] == [3, 3]
-        assert [sub_result.decomposition_depth_warning for sub_result in result.sub_results] == [
-            True,
-            True,
-        ]
-        executor._try_decompose_ac.assert_awaited_once()
-        assert execute_atomic_ac.await_count == 2
-        assert [call.kwargs["depth"] for call in execute_atomic_ac.await_args_list] == [
-            3,
-            3,
-        ]
+        adapter.execute_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_parallel_skips_externally_satisfied_acs(self) -> None:

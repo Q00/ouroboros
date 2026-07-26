@@ -129,7 +129,10 @@ from ouroboros.orchestrator.mcp_tools import (
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
-from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
+from ouroboros.orchestrator.parallel_executor import (
+    DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    MAX_DECOMPOSITION_DEPTH,
+)
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyDecision,
@@ -816,7 +819,15 @@ class OrchestratorRunner:
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
-        self._max_decomposition_depth = max(0, max_decomposition_depth)
+        if (
+            type(max_decomposition_depth) is not int
+            or not 0 <= max_decomposition_depth <= MAX_DECOMPOSITION_DEPTH
+        ):
+            raise ValueError(
+                "max_decomposition_depth must be between 0 and "
+                f"{MAX_DECOMPOSITION_DEPTH} so completed trees remain replayable"
+            )
+        self._max_decomposition_depth = max_decomposition_depth
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
         self._session_signal_hub = session_signal_hub
@@ -5735,6 +5746,8 @@ class OrchestratorRunner:
         total_seconds = 0.0
         for match in _DURATION_PATTERN.finditer(text):
             value = float(match.group("value"))
+            if not math.isfinite(value):
+                return None
             unit = match.group("unit").lower()
             if unit.startswith("d"):
                 seconds = value * 24 * 60 * 60
@@ -5745,6 +5758,8 @@ class OrchestratorRunner:
             else:
                 seconds = value
             total_seconds += seconds
+            if not math.isfinite(total_seconds):
+                return None
         if total_seconds <= 0:
             return None
         return max(1, math.ceil(total_seconds))
@@ -5754,8 +5769,12 @@ class OrchestratorRunner:
         """Parse a numeric or textual retry duration into seconds."""
         if isinstance(value, bool) or value is None:
             return None
-        if isinstance(value, int | float):
+        if isinstance(value, int):
             if value <= 0:
+                return None
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value) or value <= 0:
                 return None
             return max(1, math.ceil(value))
         if isinstance(value, str):
@@ -5766,7 +5785,7 @@ class OrchestratorRunner:
                 numeric = float(stripped)
             except ValueError:
                 return cls._duration_text_to_seconds(stripped)
-            if numeric <= 0:
+            if not math.isfinite(numeric) or numeric <= 0:
                 return None
             return max(1, math.ceil(numeric))
         return None
@@ -5793,7 +5812,7 @@ class OrchestratorRunner:
         for key in ("retry_after_ms", "retryAfterMs", "reset_after_ms", "resetAfterMs"):
             parsed = cls._duration_value_to_seconds(metadata.get(key))
             if parsed is not None:
-                return max(1, math.ceil(parsed / 1000))
+                return max(1, (parsed + 999) // 1000)
 
         for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
             value = metadata.get(key)

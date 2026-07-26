@@ -70,7 +70,7 @@ def _trusted_split(node_id: str) -> DecompositionDecisionRecord:
     )
 
 
-def _executor(*, max_depth: int = 3) -> ProcessLocalTestExecutor:
+def _executor(*, max_depth: int = 2) -> ProcessLocalTestExecutor:
     return ProcessLocalTestExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
         event_store=AsyncMock(),

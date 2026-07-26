@@ -161,6 +161,21 @@ folds these events chronologically even though the store returns newest-first,
 restores every frame, and resumes only the newest exact leaf boundary. Advancing
 or repeated pauses therefore preserve already completed effects, while regressed,
 conflicting, oversized, or malformed frame histories fail before provider entry.
+A newer pause may shorten an established descendant path only when an ancestor
+has advanced to a later child and thereby consumed that subtree; simply dropping
+the nested frame is rejected as replay regression.
+
+Quota classification runs immediately after each provider turn and before any
+queued SessionSignal follow-up. A quota-ending turn therefore performs no later
+provider effect, retains its exact resumable handle, and leaves queued signals to
+be rejected at target teardown. Non-finite retry hints are ignored by both direct
+and shared pause classifiers rather than being passed into integer rounding.
+
+Live decomposition depth is admitted only in the inclusive range 0-2. At the
+maximum five-way branching factor this yields at most 30 persisted child nodes
+(`5 + 25`), within the fixed 64-node completion/pause replay envelope. Larger or
+non-integer depths are rejected during runner/executor construction, before any
+provider effect; restored split decisions cannot cross the same depth boundary.
 
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is

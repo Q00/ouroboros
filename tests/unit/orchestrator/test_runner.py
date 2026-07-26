@@ -609,6 +609,22 @@ class TestOrchestratorRunner:
         assert runner._decomposition_mode == "bounce_only"
         assert disabled_runner._decomposition_mode == "off"
 
+    def test_runner_rejects_unpersistable_decomposition_depth_before_effects(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        with pytest.raises(ValueError, match="completed trees remain replayable"):
+            OrchestratorRunner(
+                mock_adapter,
+                mock_event_store,
+                mock_console,
+                max_decomposition_depth=3,
+            )
+
+        mock_adapter.execute_task.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_route_call_effort_emits_observability_only_event(
         self,
@@ -3732,6 +3748,52 @@ class TestOrchestratorRunner:
         now = datetime(2026, 1, 1, tzinfo=UTC)
 
         assert OrchestratorRunner._duration_from_metadata(metadata, now=now) == expected_seconds
+
+    @pytest.mark.parametrize(
+        "retry_after",
+        [
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            "inf",
+            "-inf",
+            "nan",
+            f"{'9' * 400} hours",
+        ],
+    )
+    def test_recoverable_failure_ignores_non_finite_retry_metadata(
+        self,
+        retry_after: object,
+    ) -> None:
+        """Untrusted retry metadata must keep quota classification non-throwing."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_seconds": retry_after},
+                now=now,
+            )
+            is None
+        )
+
+    def test_recoverable_failure_handles_huge_integer_retry_metadata(self) -> None:
+        huge_retry = 10**1000
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_seconds": huge_retry},
+                now=now,
+            )
+            == huge_retry
+        )
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_ms": huge_retry},
+                now=now,
+            )
+            == (huge_retry + 999) // 1000
+        )
 
     def test_recoverable_failure_propagates_invalid_usage_limit_config(
         self,
