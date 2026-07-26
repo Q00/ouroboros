@@ -184,6 +184,10 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             field_name = malformed.group(1).lower()
             raise ValueError(f"Malformed {field_name} field in acceptance criterion")
         index += 1
+    if (quote is not None or escaped) and (
+        _AC_CONTRACT_FIELD_RE.search(body) or _AC_RESERVED_FIELD_FRAGMENT_RE.search(body)
+    ):
+        raise ValueError("Unterminated quoted or escaped acceptance criterion contract")
     return tuple(markers)
 
 

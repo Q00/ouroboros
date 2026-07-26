@@ -483,6 +483,25 @@ class TestSeedGeneratorExtraction:
                 "Files exist | verify: test -f output.txt | artifacts output.txt"
             )
 
+    @pytest.mark.parametrize(
+        "line",
+        (
+            (
+                'AC: Output file exists " | verify: true | '
+                "artifacts: schema v2 outputs.json | expect: NONE"
+            ),
+            'AC: Output file exists " | artifacts: schema v2 outputs.json | expect: NONE',
+            'AC: Output file exists " | artifacts schema v2 outputs.json',
+            'AC: Output file exists " | verify: true | artifacts: outputs.json | expect: NONE \\',
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_unterminated_quote_hiding_reserved_fields(
+        self,
+        line: str,
+    ) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(line)
+
     @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
     def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
         self,
@@ -1067,6 +1086,75 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "Users' files exist"
         assert criterion.verify_command == "test -f users.txt"
         assert criterion.expected_artifacts == ("users.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bypass_attempt,repaired_contract,expected_verify,expected_artifacts",
+        (
+            (
+                (
+                    'AC: Output file exists " | verify: true | '
+                    "artifacts: schema v2 outputs.json | expect: NONE"
+                ),
+                "AC: Output file exists | verify: true | artifacts: outputs.json | expect: NONE",
+                "true",
+                ("outputs.json",),
+            ),
+            (
+                'AC: Output file exists " | artifacts schema v2 outputs.json',
+                "AC: Output file exists | verify: test -f outputs.json | "
+                "artifacts: outputs.json | expect: NONE",
+                "test -f outputs.json",
+                ("outputs.json",),
+            ),
+            (
+                'AC: Output file exists " | artifacts: schema v2 outputs.json | expect: NONE',
+                "AC: Output file exists | verify: NONE | artifacts: outputs.json | expect: NONE",
+                None,
+                ("outputs.json",),
+            ),
+        ),
+    )
+    async def test_generate_retries_unterminated_quote_hiding_success_contracts_before_grading(
+        self,
+        bypass_attempt: str,
+        repaired_contract: str,
+        expected_verify: str | None,
+        expected_artifacts: tuple[str, ...],
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bypass_attempt}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "Output file exists"
+        assert criterion.verify_command == expected_verify
+        assert criterion.expected_artifacts == expected_artifacts
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True
