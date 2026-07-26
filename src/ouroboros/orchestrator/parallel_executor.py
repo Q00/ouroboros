@@ -1828,6 +1828,10 @@ def _has_usage_limit_pause(result: ACExecutionResult) -> bool:
     return any(_has_usage_limit_pause(child) for child in result.sub_results)
 
 
+class _BatchInterruptedForRecoverablePause(RuntimeError):
+    """Internal marker for an AC stopped before a shared-quota provider effect."""
+
+
 def _canonical_result_context(
     result: ACExecutionResult,
     *,
@@ -3631,7 +3635,12 @@ class ParallelACExecutor:
         same-runtime retry budget, gating cross-harness redispatch (PR-X X1) so
         it never pre-empts those retries.
         """
-        batch_results: list[ACExecutionResult | BaseException] = [None] * len(batch_indices)
+        batch_results: list[ACExecutionResult | BaseException | None] = [None] * len(batch_indices)
+        cancel_on_recoverable_pause = bool(
+            self._bounded_route_escalation_enabled and not force_legacy_routing
+        )
+        recoverable_pause_detected = anyio.Event()
+        sibling_cancel_scopes: dict[int, anyio.CancelScope] = {}
         sibling_acs: list[_SiblingACRef] = (
             [(i, ac_text(seed.acceptance_criteria[i])) for i in batch_indices]
             if len(batch_indices) > 1
@@ -3639,51 +3648,86 @@ class ParallelACExecutor:
         )
 
         async def _run_ac(idx: int, ac_idx: int) -> None:
-            async with self._semaphore:
+            with anyio.CancelScope() as sibling_scope:
+                sibling_cancel_scopes[idx] = sibling_scope
                 try:
-                    ac_criterion = seed.acceptance_criteria[ac_idx]
-                    expected_route = (route_overrides or {}).get(ac_idx)
-                    batch_results[idx] = await _invoke_execution_authority_entry(
-                        self,
-                        _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
-                        ac_index=ac_idx,
-                        ac_content=ac_text(ac_criterion),
-                        session_id=session_id,
-                        tools=tools,
-                        tool_catalog=tool_catalog,
-                        system_prompt=system_prompt,
-                        seed_goal=seed.goal,
-                        depth=0,
-                        execution_id=execution_id,
-                        level_contexts=level_contexts,
-                        sibling_acs=sibling_acs,
-                        retry_attempt=ac_retry_attempts[ac_idx],
-                        execution_counters=execution_counters,
-                        retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
-                        route_id_override=(
-                            expected_route.route_id if expected_route is not None else None
-                        ),
-                        expected_route_candidate=expected_route,
-                        force_legacy_routing=force_legacy_routing,
-                        same_runtime_budget_exhausted=same_runtime_budget_exhausted,
-                        ac_spec=(
-                            ac_criterion
-                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                            else None
-                        ),
-                        investment_spec=(
-                            ac_criterion.investment
-                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                            else None
-                        ),
-                    )
+                    if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
+                        batch_results[idx] = _BatchInterruptedForRecoverablePause(
+                            "batch stopped at a recoverable provider quota boundary"
+                        )
+                        return
+                    async with self._semaphore:
+                        # Tasks are created together but may wait behind the
+                        # provider semaphore. Re-check under the permit so a
+                        # sibling that already found a shared quota window can
+                        # close this provider entrance before its first effect.
+                        if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
+                            batch_results[idx] = _BatchInterruptedForRecoverablePause(
+                                "batch stopped at a recoverable provider quota boundary"
+                            )
+                            return
+                        ac_criterion = seed.acceptance_criteria[ac_idx]
+                        expected_route = (route_overrides or {}).get(ac_idx)
+                        result = await _invoke_execution_authority_entry(
+                            self,
+                            _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
+                            ac_index=ac_idx,
+                            ac_content=ac_text(ac_criterion),
+                            session_id=session_id,
+                            tools=tools,
+                            tool_catalog=tool_catalog,
+                            system_prompt=system_prompt,
+                            seed_goal=seed.goal,
+                            depth=0,
+                            execution_id=execution_id,
+                            level_contexts=level_contexts,
+                            sibling_acs=sibling_acs,
+                            retry_attempt=ac_retry_attempts[ac_idx],
+                            execution_counters=execution_counters,
+                            retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
+                            route_id_override=(
+                                expected_route.route_id if expected_route is not None else None
+                            ),
+                            expected_route_candidate=expected_route,
+                            force_legacy_routing=force_legacy_routing,
+                            same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                            ac_spec=(
+                                ac_criterion
+                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                                else None
+                            ),
+                            investment_spec=(
+                                ac_criterion.investment
+                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                                else None
+                            ),
+                        )
+                        batch_results[idx] = result
+                        if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
+                            # A provider quota belongs to the batch, not merely
+                            # the AC that observed it. Signal first, then cancel
+                            # every already-running or semaphore-waiting sibling.
+                            recoverable_pause_detected.set()
+                            for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
+                                if sibling_idx != idx:
+                                    scope.cancel()
                 except BaseException as e:
-                    # Never suppress anyio Cancelled — doing so breaks
-                    # the task group's cancel-scope propagation and can
-                    # cause the entire group to hang indefinitely.
                     if isinstance(e, anyio.get_cancelled_exc_class()):
+                        if (
+                            cancel_on_recoverable_pause
+                            and sibling_scope.cancel_called
+                            and recoverable_pause_detected.is_set()
+                        ):
+                            batch_results[idx] = _BatchInterruptedForRecoverablePause(
+                                "batch stopped at a recoverable provider quota boundary"
+                            )
+                            return
+                        # External cancellation still owns the task group and
+                        # must never be converted into a recoverable pause.
                         raise
                     batch_results[idx] = e
+                finally:
+                    sibling_cancel_scopes.pop(idx, None)
 
         # Cross-AC concurrency is governed by the LevelCoordinator's
         # file-conflict guard, not by session-level tool catalog presence.
@@ -3695,7 +3739,9 @@ class ParallelACExecutor:
             for idx, ac_idx in enumerate(batch_indices):
                 tg.start_soon(_run_ac, idx, ac_idx)
 
-        return batch_results
+        if any(result is None for result in batch_results):
+            raise RuntimeError("parallel AC batch exited without materializing every result")
+        return [result for result in batch_results if result is not None]
 
     async def execute_parallel(
         self,
@@ -4274,6 +4320,17 @@ class ParallelACExecutor:
                     )
 
                     for ac_idx, result in zip(batch_executable, batch_results, strict=False):
+                        if isinstance(result, _BatchInterruptedForRecoverablePause):
+                            if not batch_route_pause:
+                                raise RuntimeError(
+                                    "parallel AC batch interrupted without a recoverable pause"
+                                )
+                            # This sibling crossed no completed provider boundary
+                            # after the shared quota signal. Keep it pending for
+                            # the exact-route resume owner; interruption is not a
+                            # judgment, failure, or completed stage result.
+                            ac_statuses[ac_idx] = "pending"
+                            continue
                         if isinstance(result, BaseException):
                             # Exception during execution
                             error_msg = str(result)
@@ -10397,7 +10454,16 @@ Respond with either ATOMIC or the structured JSON object only.
             next_pending: set[int] = set()
             next_overrides: dict[int, RouteCandidate] = {}
             next_prompts: dict[int, str] = {}
-            recoverable_pause_seen = False
+            recoverable_pause_seen = any(
+                isinstance(value, ACExecutionResult) and _has_usage_limit_pause(value)
+                for value in round_results
+            )
+            if not recoverable_pause_seen and any(
+                isinstance(value, _BatchInterruptedForRecoverablePause) for value in round_results
+            ):
+                raise RuntimeError(
+                    "parallel route batch interruption has no recoverable pause owner"
+                )
             for round_position, ac_idx in enumerate(round_indices):
                 await self._raise_if_parallel_cancellation_requested(
                     session_id=session_id,
@@ -10405,9 +10471,26 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
                 value = round_results[round_position]
                 results[positions[ac_idx]] = value
+                if isinstance(value, _BatchInterruptedForRecoverablePause):
+                    continue
                 if not isinstance(value, ACExecutionResult):
                     continue
                 if value.is_decomposed:
+                    if (
+                        recoverable_pause_seen
+                        and not _has_usage_limit_pause(value)
+                        and not value.success
+                    ):
+                        # Decomposed legacy recovery can dispatch more provider
+                        # attempts. A quota observed anywhere in this round owns
+                        # the boundary first, so defer a retryable sibling to the
+                        # parallel resume owner. Completed composites and the
+                        # composite that owns the pause still take their
+                        # no-provider persistence paths below.
+                        results[positions[ac_idx]] = _BatchInterruptedForRecoverablePause(
+                            "composite recovery deferred at a sibling quota boundary"
+                        )
+                        continue
                     # Routing D has no child/aggregate replay owner in this
                     # slice.  Once preflight or bounce execution proves this
                     # root is composite, finish its established legacy
@@ -10437,7 +10520,6 @@ Respond with either ATOMIC or the structured JSON object only.
                                 session_id=session_id,
                                 execution_id=execution_id,
                             )
-                            recoverable_pause_seen = True
                         else:
                             await self._persist_composite_completion(
                                 seed=seed,
@@ -10460,7 +10542,6 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_id,
                         prior_route_ids=histories[ac_idx],
                     )
-                    recoverable_pause_seen = True
                     continue
                 gated = await self._apply_verify_gate(
                     seed=seed,

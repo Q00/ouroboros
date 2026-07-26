@@ -41,7 +41,11 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ouroboros.backends import backend_supports_tool_envelope, get_backend_capability
-from ouroboros.config import get_llm_model_for_role
+from ouroboros.config import (
+    MAX_USAGE_LIMIT_PAUSE_SECONDS,
+    get_llm_model_for_role,
+    get_usage_limit_pause_seconds,
+)
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
@@ -720,12 +724,13 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 7
+EXECUTION_CONTRACT_VERSION = 8
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
 PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
+PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -3601,7 +3606,7 @@ class OrchestratorRunner:
         """Return every scalar setting that can change resumed AC effects."""
         backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
         return {
-            "version": 1,
+            "version": 2,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
@@ -3626,11 +3631,12 @@ class OrchestratorRunner:
             "backend_self_governs_rate_limit": bool(
                 getattr(self._adapter, "self_governs_rate_limit", False)
             ),
+            "usage_limit_pause_seconds": get_usage_limit_pause_seconds(),
         }
 
     @staticmethod
     def _valid_execution_semantics_contract(value: object) -> bool:
-        """Validate the exact version-one scalar executor schema."""
+        """Validate the exact current scalar executor schema."""
         expected_keys = frozenset(
             {
                 "version",
@@ -3653,6 +3659,7 @@ class OrchestratorRunner:
                 "backend_requests_per_minute",
                 "backend_tokens_per_minute",
                 "backend_self_governs_rate_limit",
+                "usage_limit_pause_seconds",
             }
         )
         if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
@@ -3670,7 +3677,7 @@ class OrchestratorRunner:
         )
         if (
             type(value.get("version")) is not int
-            or value.get("version") != 1
+            or value.get("version") != 2
             or any(type(value.get(key)) is not bool for key in boolean_keys)
         ):
             return False
@@ -3687,6 +3694,7 @@ class OrchestratorRunner:
             value.get("backend_requests_per_minute"),
             value.get("backend_tokens_per_minute"),
         )
+        usage_limit_pause_seconds = value.get("usage_limit_pause_seconds")
         expected_effective_workers = (
             min(max_workers, backend_max_concurrency)
             if type(max_workers) is int and type(backend_max_concurrency) is int
@@ -3710,6 +3718,8 @@ class OrchestratorRunner:
             and isinstance(backend, str)
             and bool(backend)
             and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
+            and type(usage_limit_pause_seconds) is int
+            and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
         )
 
     def _execution_semantics_snapshot(
@@ -5698,6 +5708,7 @@ class OrchestratorRunner:
                 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
                 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
                 PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
+                PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -5708,9 +5719,10 @@ class OrchestratorRunner:
 
         if raw_version != EXECUTION_CONTRACT_VERSION:
             # Every older version may already have dispatched provider effects,
-            # but none sealed the complete context/profile/parent-session input
-            # population. Reconstructing any missing field from the current
-            # workspace or configuration would change replay authorization.
+            # but none sealed the complete v8 effect population, including the
+            # resolved operator pause-window policy. Reconstructing any missing
+            # field from the current workspace or configuration would change
+            # replay authorization.
             raise OrchestratorError(
                 message="Cannot resume a session without durable effect inputs",
                 details={
@@ -6673,14 +6685,26 @@ class OrchestratorRunner:
         message: AgentMessage,
         *,
         now: datetime,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
         """Return a pause decision for provider usage/quota window failures."""
         if not is_usage_limit_pause_message(message, now=now):
             return None
 
-        from ouroboros.config import get_usage_limit_pause_seconds
-
-        default_pause_seconds = get_usage_limit_pause_seconds()
+        if default_pause_seconds is None:
+            default_pause_seconds = get_usage_limit_pause_seconds()
+        if (
+            type(default_pause_seconds) is not int
+            or not 1 <= default_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+        ):
+            raise ConfigError(
+                "Resolved usage-limit pause policy is outside the durable range",
+                config_key="orchestrator.usage_limit_pause_hours",
+                details={
+                    "pause_seconds": default_pause_seconds,
+                    "max_seconds": MAX_USAGE_LIMIT_PAUSE_SECONDS,
+                },
+            )
 
         pause_seconds = self._duration_from_message(message, now=now) or default_pause_seconds
         pause_seconds = max(1, pause_seconds)
@@ -6741,6 +6765,7 @@ class OrchestratorRunner:
         message: AgentMessage,
         *,
         now: datetime | None = None,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
         """Return pause metadata when a final runtime error should stay resumable."""
         if not (message.is_final and message.is_error):
@@ -6750,7 +6775,11 @@ class OrchestratorRunner:
         if resume_retry is not None:
             return resume_retry
 
-        return self._usage_limit_pause(message, now=now or datetime.now(UTC))
+        return self._usage_limit_pause(
+            message,
+            now=now or datetime.now(UTC),
+            default_pause_seconds=default_pause_seconds,
+        )
 
     def _is_recoverable_resume_failure(self, message: AgentMessage) -> bool:
         """Return True when a final error should leave the session resumable."""
@@ -6762,6 +6791,7 @@ class OrchestratorRunner:
         *,
         now: datetime | None = None,
         require_all_failures_recoverable: bool = True,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
         """Resolve a parallel pause under the caller's explicit ownership rule."""
 
@@ -6813,7 +6843,11 @@ class OrchestratorRunner:
 
             failure_pause = None
             for message in reversed(messages):
-                pause = self._recoverable_failure_pause(message, now=resolved_now)
+                pause = self._recoverable_failure_pause(
+                    message,
+                    now=resolved_now,
+                    default_pause_seconds=default_pause_seconds,
+                )
                 if pause is not None:
                     failure_pause = pause
                     break
@@ -8761,6 +8795,9 @@ class OrchestratorRunner:
                             recoverable_failure_pause = self._recoverable_failure_pause(
                                 message,
                                 now=datetime.now(UTC),
+                                default_pause_seconds=execution_semantics[
+                                    "usage_limit_pause_seconds"
+                                ],
                             )
 
                 if direct_bounded_routing and cancelled_result is None:
@@ -9590,6 +9627,7 @@ class OrchestratorRunner:
                 require_all_failures_recoverable=not bool(
                     getattr(parallel_result, "recoverable_route_pause", False)
                 ),
+                default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
 
         final_message = render_parallel_completion_message(
@@ -10635,6 +10673,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                             recoverable_resume_failure = self._recoverable_failure_pause(
                                 message,
                                 now=datetime.now(UTC),
+                                default_pause_seconds=execution_semantics[
+                                    "usage_limit_pause_seconds"
+                                ],
                             )
 
                 if resume_route_state is not None and cancelled_result is None:
@@ -10713,7 +10754,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         aclosing(
                             self._adapter.execute_task(  # type: ignore[type-var]
                                 prompt=(
-                                    build_task_prompt(seed)
+                                    build_task_prompt(seed, strategy=strategy)
                                     + "\n\nThe resumed route failed. Continue in a fresh "
                                     "session and satisfy the same Seed contracts."
                                 ),
@@ -10752,6 +10793,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 recoverable_resume_failure = self._recoverable_failure_pause(
                                     message,
                                     now=datetime.now(UTC),
+                                    default_pause_seconds=execution_semantics[
+                                        "usage_limit_pause_seconds"
+                                    ],
                                 )
                     if cancelled_result is None:
                         cancelled_result = await self._handle_requested_cancellation(

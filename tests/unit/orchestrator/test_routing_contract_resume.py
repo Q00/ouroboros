@@ -313,7 +313,7 @@ def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effec
         )
 
 
-@pytest.mark.parametrize("legacy_version", [5, 6])
+@pytest.mark.parametrize("legacy_version", [5, 6, 7])
 def test_recent_contracts_without_complete_effect_inputs_fail_closed(
     legacy_version: int,
 ) -> None:
@@ -344,11 +344,12 @@ def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() ->
     assert len(inputs["tool_catalog_fingerprint"]) == 64
 
 
-def test_v7_inputs_freeze_context_profile_and_parent_lineage(
+def test_v8_inputs_freeze_context_profile_parent_lineage_and_pause_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+    monkeypatch.delenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", raising=False)
     manifest = tmp_path / "pyproject.toml"
     manifest.write_text(
         '[project]\nname = "frozen-app"\nversion = "1.0.0"\n',
@@ -364,7 +365,10 @@ def test_v7_inputs_freeze_context_profile_and_parent_lineage(
     contract = runner._build_execution_contract(seed=seed)
 
     inputs = contract["execution_inputs"]
+    semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
+    assert semantics["version"] == 2
+    assert semantics["usage_limit_pause_seconds"] == 18000
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
@@ -568,6 +572,23 @@ def test_resume_rejects_backend_rate_and_pacing_owner_drift(
         )
 
 
+def test_resume_rejects_usage_limit_pause_policy_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery timing is immutable execution authority, not live resume config."""
+
+    monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+    persisted = _runner()._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["usage_limit_pause_seconds"] == 3600
+
+    monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -590,12 +611,27 @@ def test_resume_rejects_backend_rate_and_pacing_owner_drift(
         "backend_requests_per_minute",
         "backend_tokens_per_minute",
         "backend_self_governs_rate_limit",
+        "usage_limit_pause_seconds",
     ],
 )
 def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract())
     del persisted["execution_semantics"][field]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("pause_seconds", [True, 0, 31_536_001])
+def test_current_execution_semantics_rejects_unbounded_pause_policy(
+    pause_seconds: object,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["usage_limit_pause_seconds"] = pause_seconds
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
     )

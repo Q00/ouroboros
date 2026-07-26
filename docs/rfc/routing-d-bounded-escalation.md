@@ -176,6 +176,19 @@ parser for seconds, milliseconds, relative durations, and absolute
 owner while escalating in another.
 Finite but unrepresentably large provider retry hints fall back to the validated
 operator pause window before constructing the durable resume timestamp.
+The operator fallback is resolved before the first provider effect, bounded to
+`1..31,536,000` seconds (one year), and stored in execution contract v8. Direct
+and parallel pause construction consume that exact integer after a provider
+turn; they never reread environment or YAML at the recovery boundary.
+
+Within one Routing D batch, quota ownership propagates immediately through a
+shared pause signal. Semaphore-waiting siblings recheck the signal under their
+permit before provider entry, already-running sibling scopes are cancelled, and
+the completed result scan recognizes the real quota owner before any decomposed
+legacy recovery can dispatch. Interrupted siblings remain pending: they produce
+no failure judgment, terminal result, completed stage, checkpoint, coordinator
+effect, or successor route. An interruption without a matching quota result is
+an internal inconsistency and fails closed.
 
 The durable parallel resume-owner marker is published only when Routing D is
 actually effect-capable for the run. Legacy parallel execution does not have
@@ -188,32 +201,36 @@ before the first route event. Resume therefore fails before dependency analysis 
 provider entry if native model enforcement, routing configuration, or durable-depth
 eligibility is no longer available.
 
-Execution contract version 7 also seals the complete scalar executor semantics
+Execution contract version 8 also seals the complete scalar executor semantics
 used by that owner: verification enablement and timeout, retry and cross-harness
 budgets, decomposition enablement/mode/depth, requested and backend-capped effective
 worker counts, backend concurrency/rate limits, adapter pacing ownership,
 fat-harness acceptance, shadow replay, checkpoint/signal capability presence, and
-the resolved context-pack mode that controls provider system prompts. The
-sub-contract has its own fingerprint and exact schema. Resume rejects any
-current-setting drift before constructing prompts or `ParallelACExecutor`. Prompt
-construction, fan-out, and rate pacing consume the immutable persisted snapshot
-instead of rereading mutable environment or config.
+the resolved context-pack mode that controls provider system prompts. Version 8
+adds the bounded usage-limit pause seconds to that exact-schema sub-contract.
+The sub-contract has its own fingerprint. Resume rejects any current-setting
+drift before constructing prompts or `ParallelACExecutor`. Prompt construction,
+fan-out, rate pacing, and pause publication consume the immutable persisted
+snapshot instead of rereading mutable environment or config.
 
-Version 7 additionally freezes the resolved execution strategy: its system-prompt
+Version 8 retains the v7 complete provider-input population and freezes the
+resolved execution strategy: its system-prompt
 fragment, task suffix, base tools, and activity map. After session-scoped MCP
 discovery, the complete canonical tool catalog and the policy-allowed tool list
 are fingerprinted and persisted before the first provider effect. Resume rebuilds
 prompts from that frozen strategy and requires the current handler catalog to be
 byte-equivalent before re-entering either the direct or parallel owner; it never
 falls back to the task-type registry or overwrites a persisted runtime catalog
-with broader current authority. The exact rendered context-pack fragment, complete
+with broader current authority. A resumed direct route that fails also builds its
+fresh successor prompt from this same persisted strategy. The exact rendered
+context-pack fragment, complete
 canonical `ExecutionProfile`, and persisted inherited `RuntimeHandle` are frozen in
 the same input fingerprint before the session is published. New and resumed direct
 or parallel execution consume those snapshots without rescanning a changed
 workspace, reloading profile YAML, or adopting a different parent conversation.
-Contractless sessions and versions 2 through 6 cannot reconstruct this complete
+Contractless sessions and versions 2 through 7 cannot reconstruct the complete v8
 effect population and therefore fail closed on resume; every new Routing D owner
-is born with version 7.
+is born with version 8.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a

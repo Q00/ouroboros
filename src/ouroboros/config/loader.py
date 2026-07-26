@@ -132,6 +132,7 @@ _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
 _DEFAULT_USAGE_LIMIT_PAUSE_HOURS = 5.0
 _SECONDS_PER_HOUR = 3600
+MAX_USAGE_LIMIT_PAUSE_SECONDS = 365 * 24 * _SECONDS_PER_HOUR
 _USAGE_LIMIT_PAUSE_CONFIG_KEY = "orchestrator.usage_limit_pause_hours"
 _RUNTIME_CONTROL_ENV_KEYS = {
     "OUROBOROS_MCP_TOOL_TIMEOUT_SECONDS": "mcp_tool_timeout_seconds",
@@ -978,7 +979,7 @@ def _parse_positive_float(value: Any, *, config_key: str) -> float:
 
     try:
         parsed = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ConfigError(
             f"{config_key} must be a positive number",
             config_key=config_key,
@@ -1002,6 +1003,21 @@ def _parse_positive_float(value: Any, *, config_key: str) -> float:
     return parsed
 
 
+def _bounded_usage_limit_pause_seconds(hours: float, *, config_key: str) -> int:
+    """Convert a validated hour value into one finite durable policy value."""
+    seconds = hours * _SECONDS_PER_HOUR
+    if not math.isfinite(seconds) or seconds > MAX_USAGE_LIMIT_PAUSE_SECONDS:
+        raise ConfigError(
+            f"{config_key} must not exceed 365 days",
+            config_key=config_key,
+            details={
+                "value": hours,
+                "max_seconds": MAX_USAGE_LIMIT_PAUSE_SECONDS,
+            },
+        )
+    return max(1, int(seconds))
+
+
 def get_usage_limit_pause_seconds() -> int:
     """Get the default pause window for provider usage/quota limits.
 
@@ -1016,7 +1032,10 @@ def get_usage_limit_pause_seconds() -> int:
             env_value,
             config_key="OUROBOROS_USAGE_LIMIT_PAUSE_HOURS",
         )
-        return max(1, int(hours * _SECONDS_PER_HOUR))
+        return _bounded_usage_limit_pause_seconds(
+            hours,
+            config_key="OUROBOROS_USAGE_LIMIT_PAUSE_HOURS",
+        )
 
     config_path = get_config_dir() / "config.yaml"
     if not config_path.exists():
@@ -1068,7 +1087,10 @@ def get_usage_limit_pause_seconds() -> int:
         orchestrator_config["usage_limit_pause_hours"],
         config_key=_USAGE_LIMIT_PAUSE_CONFIG_KEY,
     )
-    return max(1, int(hours * _SECONDS_PER_HOUR))
+    return _bounded_usage_limit_pause_seconds(
+        hours,
+        config_key=_USAGE_LIMIT_PAUSE_CONFIG_KEY,
+    )
 
 
 def get_max_parallel_workers() -> int:

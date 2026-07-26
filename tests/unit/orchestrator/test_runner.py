@@ -1243,6 +1243,56 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    async def test_direct_pause_consumes_pre_effect_durable_pause_policy(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A provider cannot change the fallback pause window after contract publication."""
+
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again later.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-durable-pause",
+                session_id="session-durable-pause",
+            )
+
+        assert result.is_ok and result.value.success is False
+        mark_paused.assert_awaited_once()
+        assert mark_paused.await_args.kwargs["pause_seconds"] == 3600
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(("status_field", "status_value"), _LONG_WINDOW_429_ENCODINGS)
     async def test_parallel_bounded_usage_limit_pauses_without_escalation(
         self,
@@ -1339,6 +1389,107 @@ class TestOrchestratorRunner:
         }
         assert "execution.ac.route_observed" not in emitted_types
         assert "execution.ac.attempt_judged" not in emitted_types
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_parallel_pause_consumes_pre_effect_durable_pause_policy(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parallel pause publication consumes the same frozen fallback policy."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-parallel-durable-pause",
+            seed.metadata.seed_id,
+            session_id="session-parallel-durable-pause",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        pause_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again later.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(pause_message,),
+                    final_message=pause_message.content,
+                    outcome=ACExecutionOutcome.FAILED,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            recoverable_route_pause=True,
+        )
+
+        async def provider_boundary(**_kwargs: Any) -> ParallelExecutionResult:
+            monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+            return parallel_result
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                side_effect=provider_boundary,
+            ),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok and result.value.success is False
+        mark_paused.assert_awaited_once()
+        assert mark_paused.await_args.kwargs["pause_seconds"] == 3600
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id=tracker.execution_id,
@@ -1870,6 +2021,7 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         _enable_direct_bounded_routes(runner, mock_adapter)
@@ -1891,10 +2043,28 @@ class TestOrchestratorRunner:
         )
         models: list[str] = []
         handles: list[RuntimeHandle | None] = []
+        prompts: list[str] = []
+
+        execution_contract = paused_tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+        persisted_strategy = runner._execution_strategy_snapshot(
+            execution_contract,
+            require_bound=False,
+        )
+        persisted_suffix = persisted_strategy.get_task_prompt_suffix()
+
+        from ouroboros.orchestrator import execution_strategy
+        from ouroboros.orchestrator.execution_strategy import CodeStrategy
+
+        class DriftedCodeStrategy(CodeStrategy):
+            def get_task_prompt_suffix(self) -> str:
+                return "MUTATED LIVE REGISTRY SUFFIX"
+
+        monkeypatch.setitem(execution_strategy._STRATEGY_REGISTRY, "code", DriftedCodeStrategy())
 
         async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             models.append(kwargs["model"])
             handles.append(kwargs.get("resume_handle"))
+            prompts.append(kwargs["prompt"])
             if len(models) == 1:
                 yield AgentMessage(
                     type="result",
@@ -1968,6 +2138,9 @@ class TestOrchestratorRunner:
         assert handles[0] is not None
         assert handles[0].native_session_id == runtime_handle.native_session_id
         assert handles[1] is None
+        assert len(prompts) == 2
+        assert all(persisted_suffix in prompt for prompt in prompts)
+        assert all("MUTATED LIVE REGISTRY SUFFIX" not in prompt for prompt in prompts)
         observations = [
             call.args[0]
             for call in mock_event_store.append.await_args_list

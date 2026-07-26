@@ -125,6 +125,7 @@ def _executor(
     event_log: list[BaseEvent] | None = None,
     adapter_override: Any | None = None,
     ac_retry_attempts: int = 99,
+    max_concurrent: int = 3,
 ) -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
     economics = _economics()
     router = build_model_router(
@@ -162,6 +163,7 @@ def _executor(
         model_router=router,
         route_economics=economics,
         ac_retry_attempts=ac_retry_attempts,
+        max_concurrent=max_concurrent,
         process_local_resume_nonce=process_local_resume_nonce,
     )
     return executor, store, events
@@ -685,6 +687,115 @@ async def test_parallel_usage_limit_pauses_before_route_observation_or_escalatio
     assert pause.data["route"]["route_id"] == "compat:claude:frugal"
     assert pause.data["prior_route_ids"] == []
     assert pause.data["attempt_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_quota_cancels_waiting_sibling_before_provider_effect(
+    tmp_path: Any,
+) -> None:
+    """A shared quota closes every not-yet-entered provider boundary in the batch."""
+
+    provider_effects: list[str] = []
+
+    async def execute_task(**kwargs: Any):
+        provider_effects.append(kwargs["model"])
+        if len(provider_effects) != 1:
+            raise AssertionError("waiting sibling crossed the shared quota gate")
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again later.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+
+    executor, _store, events = _executor(
+        max_concurrent=1,
+        execute_task=execute_task,
+        working_directory=str(tmp_path),
+    )
+    seed = _multi_seed()
+    graph = DependencyGraph(
+        nodes=(
+            ACNode(index=0, content="ship first", depends_on=()),
+            ACNode(index=1, content="ship second", depends_on=()),
+        ),
+        execution_levels=((0, 1),),
+    )
+
+    result = await executor.execute_parallel(
+        seed,
+        execution_plan=graph.to_execution_plan(),
+        session_id="session-quota-gate",
+        execution_id="execution-quota-gate",
+        tools=[],
+        system_prompt="sys",
+    )
+
+    assert len(provider_effects) == 1
+    assert result.recoverable_route_pause is True
+    assert [item.ac_index for item in result.results] == [0]
+    assert result.stages == ()
+    assert not any(
+        event.type == "execution.ac.attempt_judged" and event.data.get("root_ac_index") == 1
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_quota_preempts_completed_sibling_composite_recovery() -> None:
+    """Post-batch legacy recovery cannot dispatch after any sibling reports quota."""
+
+    executor, _store, events = _executor(enable_decomposition=True)
+    pause_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again later.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship first",
+                success=False,
+                is_decomposed=True,
+                sub_results=(),
+                outcome=ACExecutionOutcome.FAILED,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="ship second",
+                success=False,
+                messages=(pause_message,),
+                final_message=pause_message.content,
+                outcome=ACExecutionOutcome.FAILED,
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            ),
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    continue_composite = AsyncMock(
+        side_effect=AssertionError("composite recovery crossed the quota boundary")
+    )
+    executor._continue_decomposed_legacy_recovery = continue_composite  # type: ignore[method-assign]
+
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_multi_seed(),
+        batch_executable=[0, 1],
+        session_id="session-composite-quota",
+        execution_id="execution-composite-quota",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0, 1: 0},
+        execution_counters=None,
+    )
+
+    continue_composite.assert_not_awaited()
+    assert isinstance(results[0], BaseException)
+    assert isinstance(results[1], ACExecutionResult)
+    assert [event.type for event in events].count("execution.ac.route_paused") == 1
+    assert not any(event.type == "execution.ac.attempt_judged" for event in events)
 
 
 @pytest.mark.asyncio
