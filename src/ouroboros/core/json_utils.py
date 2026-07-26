@@ -52,26 +52,29 @@ def _extract_fenced_json_payload(
             fallback_parts.append(text[fence_start:])
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
-        info_start = opener + 3
+        opener_length = _backtick_run_length(text, opener)
+        info_start = opener + opener_length
         line_end = text.find("\n", info_start)
         if line_end == -1:
             return (_FenceScanState.MALFORMED, None, ())
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
-            closing = _find_closing_fence(text, line_end + 1)
+            closing = _find_closing_fence(text, line_end + 1, opener_length)
             if closing is None:
                 return (_FenceScanState.MALFORMED, None, ())
+            closing_start, closing_length = closing
             fallback_parts.append(text[fence_start:opener])
-            fence_start = closing + 3
+            fence_start = closing_start + closing_length
             continue
 
         body_start = line_end + 1
-        closing = _find_closing_fence(text, body_start)
+        closing = _find_closing_fence(text, body_start, opener_length)
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
+        closing_start, _ = closing
 
-        body = text[body_start:closing].strip()
+        body = text[body_start:closing_start].strip()
         try:
             parsed = json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -84,20 +87,32 @@ def _extract_fenced_json_payload(
         return (_FenceScanState.MALFORMED, None, ())
 
 
-def _find_closing_fence(text: str, start: int) -> int | None:
-    """Return the next markdown closing fence at line start."""
+def _backtick_run_length(text: str, start: int) -> int:
+    end = start
+    while end < len(text) and text[end] == "`":
+        end += 1
+    return end - start
+
+
+def _find_closing_fence(text: str, start: int, opener_length: int) -> tuple[int, int] | None:
+    """Return the next clean line-start fence at least as long as the opener."""
     pos = start
     while True:
         candidate = text.find("```", pos)
         if candidate == -1:
             return None
 
-        line_start = text.rfind("\n", start, candidate) + 1
+        candidate_length = _backtick_run_length(text, candidate)
+        line_start = text.rfind("\n", 0, candidate) + 1
+        line_end = text.find("\n", candidate + candidate_length)
+        if line_end == -1:
+            line_end = len(text)
         prefix = text[line_start:candidate]
-        if prefix.strip() == "":
-            return candidate
+        suffix = text[candidate + candidate_length : line_end]
+        if candidate_length >= opener_length and prefix.strip() == "" and suffix.strip() == "":
+            return candidate, candidate_length
 
-        pos = candidate + 3
+        pos = candidate + candidate_length
 
 
 def _extract_first_json_from_text(text: str) -> str | None:

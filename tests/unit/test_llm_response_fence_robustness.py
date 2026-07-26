@@ -32,6 +32,8 @@ _ONTOLOGY = OntologySchema(
     fields=(OntologyField(name="user", field_type="entity", description="A user"),),
 )
 
+LONG_FENCE_CASES = [(4, "json"), (4, ""), (5, "json"), (5, "")]
+
 
 def _seed(num_acs: int = 3) -> Seed:
     return Seed(
@@ -51,9 +53,30 @@ def _wrap(variant: str, payload: str) -> str:
         return f"```json\n{payload}\n```\nLet me know if you need anything else."
     if variant == "bare_fence":
         return f"```\n{payload}\n```"
+    if variant == "long_json_fence":
+        return _wrap_long_supported_fence(payload, 4, "json")
+    if variant == "long_bare_fence":
+        return _wrap_long_supported_fence(payload, 4, "")
+    if variant == "longer_json_fence":
+        return _wrap_long_supported_fence(payload, 5, "json")
+    if variant == "longer_bare_fence":
+        return _wrap_long_supported_fence(payload, 5, "")
     if variant == "no_fence":
         return payload
     raise AssertionError(f"unknown variant: {variant}")
+
+
+def _wrap_long_supported_fence(
+    payload: str,
+    fence_length: int,
+    fence_info: str,
+    later_payload: str | None = None,
+) -> str:
+    delimiter = "`" * fence_length
+    content = f"{delimiter}{fence_info}\n{payload}\n{delimiter}"
+    if later_payload is not None:
+        content += f"\nLater fallback: {later_payload}"
+    return content
 
 
 def _wrap_after_unsupported_fence(example_payload: str, actual_payload: str) -> str:
@@ -100,9 +123,18 @@ def _wrap_invalid_supported_fence_with_nested_payload(fence_info: str, nested_pa
 
 
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
-# old heuristic got wrong; ``bare_fence`` and ``no_fence`` guard against
-# regressions on the paths it did handle.
-FENCE_VARIANTS = ["prose_prefix_fence", "fence_trailing_prose", "bare_fence", "no_fence"]
+# old heuristic got wrong; the remaining variants preserve plain, bare, and
+# longer supported-fence behavior.
+FENCE_VARIANTS = [
+    "prose_prefix_fence",
+    "fence_trailing_prose",
+    "bare_fence",
+    "long_json_fence",
+    "long_bare_fence",
+    "longer_json_fence",
+    "longer_bare_fence",
+    "no_fence",
+]
 
 
 class TestWonderFenceRobustness:
@@ -124,6 +156,34 @@ class TestWonderFenceRobustness:
         assert out.reasoning == "grounded reasoning"
         assert out.should_continue is True
         assert any("token refresh" in q for q in out.questions)
+
+    @pytest.mark.parametrize(("fence_length", "fence_info"), LONG_FENCE_CASES)
+    def test_long_supported_fence_wins_over_later_stale_json(
+        self, fence_length: int, fence_info: str
+    ) -> None:
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual token refresh question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual answer",
+            }
+        )
+        stale_payload = json.dumps(
+            {
+                "questions": [{"question": "stale example question", "kind": "gap"}],
+                "should_continue": False,
+                "reasoning": "stale example",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_long_supported_fence(actual_payload, fence_length, fence_info, stale_payload),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual answer"
+        assert out.should_continue is True
+        assert out.questions == ("actual token refresh question",)
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(
@@ -309,6 +369,56 @@ class TestReflectFenceRobustness:
         assert result.is_ok
         assert result.value.reasoning == "reflect reasoning"
         assert result.value.ontology_mutations[0].field_name == "refresh_token"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("fence_length", "fence_info"), LONG_FENCE_CASES)
+    async def test_long_supported_fence_wins_over_later_stale_json(
+        self, fence_length: int, fence_info: str
+    ) -> None:
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Build a login system with refresh-token clarity",
+                "refined_constraints": ["Must use OAuth"],
+                "ac_patches": [{"op": "keep", "index": 0, "reason": "still valid"}],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap_long_supported_fence(
+                    actual_payload, fence_length, fence_info, stale_payload
+                ),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What handles token refresh?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_ok
+        assert result.value.reasoning == "actual reflect"
+        assert result.value.refined_goal == "Build a login system with refresh-token clarity"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fence_info", ["json", ""])
@@ -553,6 +663,39 @@ class TestAssertionExtractorFenceRobustness:
         assert len(assertions) == 1
         assert assertions[0].ac_index == 0
         assert assertions[0].description == "build passes"
+
+    @pytest.mark.parametrize(("fence_length", "fence_info"), LONG_FENCE_CASES)
+    def test_long_supported_fence_wins_over_later_stale_json(
+        self, fence_length: int, fence_info: str
+    ) -> None:
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale example",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_long_supported_fence(actual_payload, fence_length, fence_info, stale_payload),
+            ("AC number 1",),
+        )
+
+        assert len(assertions) == 1
+        assert assertions[0].description == "actual assertion"
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(

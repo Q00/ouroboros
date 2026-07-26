@@ -4,6 +4,8 @@ import pytest
 
 from ouroboros.evaluation.json_utils import extract_json_payload
 
+LONG_FENCE_CASES = [(4, "json"), (4, ""), (5, "json"), (5, "")]
+
 
 class TestExtractJsonPayload:
     """extract_json_payload must find the first *valid* JSON object."""
@@ -29,6 +31,34 @@ class TestExtractJsonPayload:
         assert result.startswith("{")
         assert '"message": "literal }``` marker"' in result
         assert '"questions": ["keep outer object"]' in result
+
+    @pytest.mark.parametrize(("fence_length", "fence_info"), LONG_FENCE_CASES)
+    def test_long_supported_fence_parses_json_and_bare_payloads(
+        self, fence_length: int, fence_info: str
+    ) -> None:
+        delimiter = "`" * fence_length
+        text = f'{delimiter}{fence_info}\n{{"actual": true}}\n{delimiter}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    @pytest.mark.parametrize(("fence_length", "fence_info"), LONG_FENCE_CASES)
+    def test_long_supported_fence_wins_over_later_prose_json(
+        self, fence_length: int, fence_info: str
+    ) -> None:
+        delimiter = "`" * fence_length
+        text = f'{delimiter}{fence_info}\n{{"actual": true}}\n{delimiter}\nLater: {{"stale": true}}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_long_fence_allows_embedded_triple_backticks_in_json_string(self) -> None:
+        text = '````json\n{"marker": "```", "actual": true}\n````\nLater: {"stale": true}'
+        assert extract_json_payload(text) == '{"marker": "```", "actual": true}'
+
+    def test_long_fence_accepts_longer_clean_closer(self) -> None:
+        text = '````json\n{"actual": true}\n`````'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_long_fence_rejects_closer_with_trailing_text(self) -> None:
+        text = '````json\n{"actual": true}\n```` trailing\nLater: {"stale": true}'
+        assert extract_json_payload(text) is None
 
     def test_prose_before_json(self):
         """The classic Anthropic prefill failure: prose with braces before JSON."""
@@ -140,6 +170,10 @@ class TestExtractJsonPayload:
             '```yaml\nstale: {"stale": 2}\n```\n'
             'Actual: {"actual": true}'
         )
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_long_unsupported_fence_body_is_excluded_from_fallback(self) -> None:
+        text = '````python\n{"stale": true}\n`````\nActual: {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'
 
 
