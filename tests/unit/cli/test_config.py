@@ -190,6 +190,21 @@ class TestConfigBackend:
         assert config["orchestrator"]["runtime_backend"] == "codex"
         assert config["llm"]["backend"] == "codex"
 
+    def test_switch_to_claude_exits_nonzero_when_setup_raises(self, codex_config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=codex_config_dir),
+            patch("shutil.which", return_value="/usr/bin/claude"),
+            patch(
+                "ouroboros.cli.commands.setup._setup_claude",
+                side_effect=OSError("setup exploded"),
+            ),
+        ):
+            result = runner.invoke(app, ["backend", "claude"])
+
+        assert result.exit_code == 1
+        assert "Switched backend" not in result.output
+        assert "setup steps failed" in result.output
+
     def test_switch_to_hermes_delegates_to_setup(self, config_dir: Path) -> None:
         """config backend hermes should delegate to _setup_hermes."""
         with (

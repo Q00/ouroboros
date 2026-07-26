@@ -12,6 +12,7 @@ Also provides brownfield repository management subcommands:
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import contextmanager
 from copy import deepcopy
 from importlib import metadata as importlib_metadata
@@ -97,17 +98,157 @@ def _is_supported_claude_mcp_entry(entry: dict[str, object]) -> bool:
     command = entry.get("command")
     args = entry.get("args")
     url = entry.get("url")
-    transport = entry.get("transport")
+    entry_type = entry.get("type")
 
-    if isinstance(command, str):
-        return args is None or _is_string_list(args)
+    if "args" in entry and not _is_string_list(args):
+        return False
 
-    if isinstance(url, str):
-        if transport not in (None, "sse", "http", "streamable_http"):
+    if isinstance(command, str) and command.strip():
+        if entry_type not in (None, "stdio"):
             return False
-        return args is None or _is_string_list(args)
+        return "url" not in entry
+
+    if isinstance(url, str) and url.strip():
+        return entry_type in {"http", "sse", "streamable-http"}
 
     return False
+
+
+def _claude_mcp_config_path() -> Path:
+    return Path.home() / ".claude" / "mcp.json"
+
+
+def _claude_mcp_recovery_path(mcp_config_path: Path | None = None) -> Path:
+    path = mcp_config_path or _claude_mcp_config_path()
+    return path.with_name(f"{path.name}.ouroboros-recovery")
+
+
+def _read_claude_mcp_snapshot(mcp_config_path: Path) -> tuple[bool, bytes | None, int] | None:
+    """Return the exact pre-activation MCP snapshot, or ``None`` when unsafe."""
+    try:
+        if mcp_config_path.exists():
+            if not mcp_config_path.is_file() or mcp_config_path.is_symlink():
+                return None
+            stat_result = mcp_config_path.stat()
+            if stat_result.st_nlink > 1:
+                return None
+            return True, mcp_config_path.read_bytes(), stat.S_IMODE(stat_result.st_mode)
+        return False, None, 0o600
+    except OSError:
+        return None
+
+
+def _write_claude_mcp_recovery(
+    mcp_config_path: Path,
+    *,
+    existed: bool,
+    content: bytes | None,
+    mode: int,
+) -> bool:
+    payload: dict[str, object] = {
+        "version": 1,
+        "state": "pending",
+        "action": "restore" if existed else "remove",
+        "mode": mode,
+    }
+    if existed:
+        payload["content_b64"] = base64.b64encode(content or b"").decode("ascii")
+    try:
+        _atomic_write_text(
+            _claude_mcp_recovery_path(mcp_config_path),
+            json.dumps(payload, indent=2, allow_nan=False) + "\n",
+            mode=0o600,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        print_warning(f"Could not write Claude MCP recovery journal — setup aborted: {exc}")
+        return False
+    return True
+
+
+def _mark_claude_mcp_recovery_committed(mcp_config_path: Path) -> None:
+    recovery_path = _claude_mcp_recovery_path(mcp_config_path)
+    try:
+        data = json.loads(recovery_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+        data["state"] = "committed"
+        _atomic_write_text(
+            recovery_path,
+            json.dumps(data, indent=2, allow_nan=False) + "\n",
+            mode=0o600,
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        print_warning(f"Could not mark Claude MCP recovery journal complete: {exc}")
+
+
+def _clear_claude_mcp_recovery(mcp_config_path: Path) -> bool:
+    recovery_path = _claude_mcp_recovery_path(mcp_config_path)
+    try:
+        recovery_path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print_warning(f"Could not remove Claude MCP recovery journal: {exc}")
+        return False
+    return True
+
+
+def _recover_claude_mcp_activation() -> bool:
+    """Recover a previously interrupted Claude MCP activation, if any."""
+    mcp_config_path = _claude_mcp_config_path()
+    recovery_path = _claude_mcp_recovery_path(mcp_config_path)
+    try:
+        if not recovery_path.is_file():
+            return True
+        data = json.loads(recovery_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print_warning(f"Could not read Claude MCP recovery journal — setup aborted: {exc}")
+        return False
+    if not isinstance(data, dict):
+        print_warning("Claude MCP recovery journal is malformed — setup aborted.")
+        return False
+
+    if data.get("state") == "committed":
+        return _clear_claude_mcp_recovery(mcp_config_path)
+
+    if data.get("state") != "pending":
+        print_warning("Claude MCP recovery journal has unknown state — setup aborted.")
+        return False
+
+    action = data.get("action")
+    try:
+        if action == "restore":
+            raw_content = data.get("content_b64")
+            raw_mode = data.get("mode", 0o600)
+            if not isinstance(raw_content, str) or not isinstance(raw_mode, int):
+                print_warning("Claude MCP recovery journal is malformed — setup aborted.")
+                return False
+            content = base64.b64decode(raw_content.encode("ascii"), validate=True)
+            _atomic_write_text(
+                mcp_config_path,
+                content.decode("utf-8"),
+                mode=raw_mode,
+            )
+        elif action == "remove":
+            try:
+                if mcp_config_path.exists():
+                    if not mcp_config_path.is_file() or mcp_config_path.is_symlink():
+                        print_warning(
+                            f"Could not recover Claude MCP registration because {mcp_config_path} "
+                            "is not a regular file."
+                        )
+                        return False
+                    mcp_config_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            print_warning("Claude MCP recovery journal has unknown action — setup aborted.")
+            return False
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print_warning(f"Could not recover Claude MCP registration — setup aborted: {exc}")
+        return False
+
+    return _clear_claude_mcp_recovery(mcp_config_path)
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -136,7 +277,7 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
     return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
 
 
-def _ensure_claude_mcp_entry(*, emit_status: bool = True) -> bool:
+def _ensure_claude_mcp_entry(*, emit_status: bool = True, recover_pending: bool = True) -> bool:
     """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
 
     Creates the entry if missing (detecting install method), updates stale
@@ -147,7 +288,10 @@ def _ensure_claude_mcp_entry(*, emit_status: bool = True) -> bool:
         True when the entry is registered or already usable, False when the
         existing configuration could not be updated safely.
     """
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
+    if recover_pending and not _recover_claude_mcp_activation():
+        return False
+
+    mcp_config_path = _claude_mcp_config_path()
     try:
         mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -2406,6 +2550,26 @@ def _setup_goose(goose_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
+def _ensure_credentials_file(config_dir: Path) -> bool:
+    """Create the companion credentials file when setup is initializing config."""
+    from ouroboros.config.models import get_default_credentials
+
+    credentials_path = config_dir / "credentials.yaml"
+    try:
+        if credentials_path.exists():
+            return True
+        credentials_dict = get_default_credentials().model_dump(mode="json")
+        _atomic_write_text(
+            credentials_path,
+            yaml.dump(credentials_dict, default_flow_style=False, sort_keys=False),
+            mode=0o600,
+        )
+    except OSError as exc:
+        print_warning(f"Could not write {credentials_path} — setup aborted: {exc}")
+        return False
+    return True
+
+
 def _setup_claude(claude_path: str) -> bool:
     """Configure Ouroboros for the Claude Code runtime."""
     from ouroboros.config.loader import ensure_config_dir
@@ -2433,12 +2597,45 @@ def _setup_claude(claude_path: str) -> bool:
         print_warning("Could not stage Claude config safely — setup aborted.")
         return False
 
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    had_mcp_config = mcp_config_path.exists()
-    previous_mcp_content = mcp_config_path.read_bytes() if had_mcp_config else None
-    previous_mcp_mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if had_mcp_config else 0o600
+    mcp_config_path = _claude_mcp_config_path()
+    if not _recover_claude_mcp_activation():
+        return False
 
-    if not _ensure_claude_mcp_entry(emit_status=False):
+    snapshot = _read_claude_mcp_snapshot(mcp_config_path)
+    if snapshot is None:
+        print_warning(f"Could not snapshot {mcp_config_path} safely — Claude setup aborted.")
+        return False
+    had_mcp_config, previous_mcp_content, previous_mcp_mode = snapshot
+
+    if not _write_claude_mcp_recovery(
+        mcp_config_path,
+        existed=had_mcp_config,
+        content=previous_mcp_content,
+        mode=previous_mcp_mode,
+    ):
+        return False
+
+    if not _ensure_claude_mcp_entry(emit_status=False, recover_pending=False):
+        _clear_claude_mcp_recovery(mcp_config_path)
+        return False
+
+    if not _ensure_credentials_file(config_dir):
+        if had_mcp_config and previous_mcp_content is not None:
+            try:
+                _atomic_write_text(
+                    mcp_config_path,
+                    previous_mcp_content.decode("utf-8"),
+                    mode=previous_mcp_mode,
+                )
+            except OSError as rollback_exc:
+                print_warning(f"Could not roll back Claude MCP registration: {rollback_exc}")
+        elif mcp_config_path.exists():
+            try:
+                mcp_config_path.unlink()
+            except OSError as rollback_exc:
+                print_warning(
+                    f"Could not remove rolled-back Claude MCP registration: {rollback_exc}"
+                )
         return False
 
     try:
@@ -2463,6 +2660,9 @@ def _setup_claude(claude_path: str) -> bool:
                 )
         print_warning(f"Could not write {config_path} — Claude setup aborted: {exc}")
         return False
+
+    _mark_claude_mcp_recovery_committed(mcp_config_path)
+    _clear_claude_mcp_recovery(mcp_config_path)
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")

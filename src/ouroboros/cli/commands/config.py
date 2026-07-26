@@ -573,7 +573,7 @@ def backend(
         setup_mod.print_error = _orig_print_error  # type: ignore[assignment]
 
     if setup_failed:
-        pass  # Already warned above
+        raise typer.Exit(1)
     elif setup_returned_failure:
         print_warning("Backend switch aborted because Claude setup could not complete safely.")
         raise typer.Exit(1)
