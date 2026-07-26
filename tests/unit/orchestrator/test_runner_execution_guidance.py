@@ -59,6 +59,27 @@ def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[Orchestrato
         return OrchestratorRunner(adapter, event_store, MagicMock()), event_store
 
 
+@pytest.fixture(autouse=True)
+def _mock_prepared_sessions_are_reconstructable(monkeypatch: pytest.MonkeyPatch):
+    original_prepare_session = OrchestratorRunner.prepare_session
+
+    async def prepare_and_mock_reconstruct(
+        self: OrchestratorRunner,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Result[SessionTracker, OrchestratorError]:
+        result = await original_prepare_session(self, *args, **kwargs)
+        if result.is_ok and isinstance(self._event_store, AsyncMock):
+            self._session_repo.reconstruct_session = AsyncMock(return_value=result)
+        return result
+
+    monkeypatch.setattr(
+        OrchestratorRunner,
+        "prepare_session",
+        prepare_and_mock_reconstruct,
+    )
+
+
 def test_empty_guidance_preserves_prompt_bytes() -> None:
     seed = _seed()
     baseline = build_system_prompt(seed)
@@ -394,6 +415,7 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
         execution_contract=contract,
     )
     tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
     expected = Result.ok(
         OrchestratorResult(
             success=True,
@@ -457,6 +479,9 @@ async def test_fresh_runner_rejects_precreated_session_with_persisted_guidance(
     assert prepared.is_ok
 
     executing_runner, _store = _runner(tmp_path, ())
+    executing_runner._session_repo.reconstruct_session = AsyncMock(
+        return_value=Result.ok(prepared.value)
+    )
     get_tools = AsyncMock(side_effect=AssertionError("fresh runner must stop before setup"))
     executing_runner._get_merged_tools = get_tools
 

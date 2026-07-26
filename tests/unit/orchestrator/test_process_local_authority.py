@@ -147,10 +147,12 @@ async def _prepare(
     *,
     session_id: str,
     execution_id: str,
+    seed: Seed | None = None,
 ) -> SessionTracker:
+    prepared_seed = seed or _seed()
     tracker = SessionTracker.create(
         execution_id,
-        _seed().metadata.seed_id,
+        prepared_seed.metadata.seed_id,
         session_id=session_id,
     )
     with (
@@ -166,11 +168,12 @@ async def _prepare(
         ),
     ):
         prepared = await runner.prepare_session(
-            _seed(),
+            prepared_seed,
             execution_id=execution_id,
             session_id=session_id,
         )
     assert prepared.is_ok
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(prepared.value))
     return prepared.value
 
 
@@ -521,6 +524,67 @@ async def test_paused_projection_failure_keeps_durable_paused_owner(tmp_path) ->
             execution_id=tracker.execution_id,
         )
         runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_precreated_tracker_observes_durable_pause_before_effects(
+    tmp_path: Path,
+) -> None:
+    """Reusing the original prepared tracker must not restart a paused session."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'stale-precreated-paused.db'}")
+    await event_store.initialize()
+    runtime = _RecoverablePauseRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-stale-precreated-paused",
+        session_id="session-stale-precreated-paused",
+    )
+    assert prepared.is_ok
+    stale_tracker = prepared.value
+
+    try:
+        first = await runner.execute_precreated_session(
+            seed=_seed(),
+            tracker=stale_tracker,
+            parallel=False,
+        )
+
+        assert first.is_ok
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(stale_tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.PAUSED
+        assert stale_tracker.status == SessionStatus.RUNNING
+
+        get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
+        runner._get_merged_tools = get_tools
+        with patch.object(
+            runner,
+            "_claim_process_local_authority_generation",
+            side_effect=AssertionError("authority claim must not run"),
+        ):
+            second = await runner.execute_precreated_session(
+                seed=_seed(),
+                tracker=stale_tracker,
+                parallel=False,
+            )
+
+        assert second.is_err
+        assert second.error.details["resume_blocked"] == "session_paused_use_resume"
+        assert second.error.details["status"] == SessionStatus.PAUSED.value
+        assert runtime.execute_calls == 1
+        get_tools.assert_not_called()
+        durable = await SessionRepository(event_store).reconstruct_session(stale_tracker.session_id)
+        assert durable.is_ok
+        assert durable.value.status == SessionStatus.PAUSED
+    finally:
+        runner._retire_process_local_authority(
+            session_id=stale_tracker.session_id,
+            execution_id=stale_tracker.execution_id,
+        )
+        runner._unregister_session(stale_tracker.execution_id, stale_tracker.session_id)
         await event_store.close()
 
 
@@ -993,7 +1057,7 @@ async def test_legacy_precreated_tracker_fails_before_tool_setup() -> None:
     result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
 
     assert result.is_err
-    assert result.error.details["resume_blocked"] == "process_local_resume_unavailable"
+    assert result.error.details["resume_blocked"] == "precreated_state_unverified"
     assert runtime.identity_provider_calls == 0
     assert runtime.resume_selector_calls == 0
     assert runtime.execute_calls == 0
@@ -1167,6 +1231,54 @@ async def test_terminal_precreated_tracker_retires_a_stale_live_authority() -> N
         contract,
     )
     get_tools.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminal_precreated_tracker_uses_verified_durable_running_state() -> None:
+    runner = _runner(_SuccessfulRuntime())
+    seed = _seed().model_copy(
+        update={
+            "acceptance_criteria": (
+                "Use verified durable state",
+                "Ignore stale terminal progress",
+            )
+        }
+    )
+    prepared = await _prepare(
+        runner,
+        session_id="session-terminal-copy-durable-running",
+        execution_id="exec-terminal-copy-durable-running",
+        seed=seed,
+    )
+    stale_terminal = prepared.with_status(SessionStatus.COMPLETED).with_progress(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: {"stale": "terminal progress must not execute"}}
+    )
+    expected = Result.ok(
+        OrchestratorResult(
+            success=True,
+            session_id=prepared.session_id,
+            execution_id=prepared.execution_id,
+        )
+    )
+
+    try:
+        with (
+            patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
+        ):
+            result = await runner.execute_precreated_session(
+                seed,
+                stale_terminal,
+                parallel=True,
+            )
+
+        assert result is expected
+        assert execute.await_args.kwargs["tracker"] == prepared
+    finally:
+        runner._retire_process_local_authority(
+            session_id=prepared.session_id,
+            execution_id=prepared.execution_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -1882,6 +1994,7 @@ async def test_repeated_post_cas_cancellation_drains_terminal_cleanup(tmp_path) 
     original_reconstruct = runner._session_repo.reconstruct_session
     reconciliation_started = asyncio.Event()
     allow_reconciliation = asyncio.Event()
+    reconstruct_calls = 0
 
     async def _cancel_terminal_projection(event: object):
         if getattr(event, "type", None) == "execution.terminal":
@@ -1889,6 +2002,10 @@ async def test_repeated_post_cas_cancellation_drains_terminal_cleanup(tmp_path) 
         return await original_append(event)  # type: ignore[arg-type]
 
     async def _delayed_reconstruct(session_id: str):
+        nonlocal reconstruct_calls
+        reconstruct_calls += 1
+        if reconstruct_calls == 1:
+            return await original_reconstruct(session_id)
         reconciliation_started.set()
         await allow_reconciliation.wait()
         return await original_reconstruct(session_id)
@@ -5272,6 +5389,7 @@ async def test_foreign_precreated_running_tracker_rejects_without_revoking_owner
         execution_id="exec-foreign-precreated",
     )
     observer = _runner(_CountingRuntime())
+    observer._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
     observer._get_merged_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
 
     try:

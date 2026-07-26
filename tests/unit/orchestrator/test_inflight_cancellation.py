@@ -76,6 +76,27 @@ def runner(
 
 
 @pytest.fixture(autouse=True)
+def _mock_prepared_sessions_are_reconstructable(monkeypatch: pytest.MonkeyPatch):
+    original_prepare_session = OrchestratorRunner.prepare_session
+
+    async def prepare_and_mock_reconstruct(
+        self: OrchestratorRunner,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Result:
+        result = await original_prepare_session(self, *args, **kwargs)
+        if result.is_ok and isinstance(self._event_store, AsyncMock):
+            self._session_repo.reconstruct_session = AsyncMock(return_value=result)
+        return result
+
+    monkeypatch.setattr(
+        OrchestratorRunner,
+        "prepare_session",
+        prepare_and_mock_reconstruct,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _clean_cancellation_registry():
     """Ensure cancellation registry is clean before/after each test."""
     from ouroboros.orchestrator.runner import _cancellation_registry
@@ -127,7 +148,9 @@ def _attach_live_process_local_contract(
         generation=generation,
         execution_contract=contract,
     )
-    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    prepared = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(prepared))
+    return prepared
 
 
 # =============================================================================
@@ -854,7 +877,12 @@ class TestInFlightCancellationGraceful:
             patch.object(
                 runner._session_repo,
                 "reconstruct_session",
-                new=AsyncMock(return_value=Result.ok(completed_tracker)),
+                new=AsyncMock(
+                    side_effect=[
+                        Result.ok(tracker),
+                        Result.ok(completed_tracker),
+                    ]
+                ),
             ),
             patch.object(
                 runner._session_repo,

@@ -8456,26 +8456,20 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
-        if tracker.status in (
-            SessionStatus.COMPLETED,
-            SessionStatus.CANCELLED,
-            SessionStatus.FAILED,
-        ):
-            durable_tracker_result = await self._session_repo.reconstruct_session(
-                tracker.session_id
-            )
-            if durable_tracker_result.is_err:
-                return Result.err(
-                    OrchestratorError(
-                        message="Cannot verify caller-supplied terminal session state",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                            "cause": str(durable_tracker_result.error),
-                            "resume_blocked": "terminal_state_unverified",
-                        },
-                    )
+        durable_tracker_result = await self._session_repo.reconstruct_session(tracker.session_id)
+        if durable_tracker_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message="Cannot verify durable precreated session state",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "cause": str(durable_tracker_result.error),
+                        "resume_blocked": "precreated_state_unverified",
+                    },
                 )
+            )
+        else:
             durable_tracker = durable_tracker_result.value
             if (
                 durable_tracker.session_id != tracker.session_id
@@ -8511,8 +8505,28 @@ class OrchestratorRunner:
                         },
                     )
                 )
-            tracker = durable_tracker
-            exec_id = tracker.execution_id
+            if durable_tracker.status is SessionStatus.PAUSED:
+                return Result.err(
+                    OrchestratorError(
+                        message=(
+                            "Session is paused and must be resumed through the "
+                            "session resume owner, not re-executed from a prepared tracker"
+                        ),
+                        details={
+                            "session_id": durable_tracker.session_id,
+                            "execution_id": durable_tracker.execution_id,
+                            "status": durable_tracker.status.value,
+                            "resume_blocked": "session_paused_use_resume",
+                        },
+                    )
+                )
+            if tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                tracker = durable_tracker
+                exec_id = tracker.execution_id
 
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
 
