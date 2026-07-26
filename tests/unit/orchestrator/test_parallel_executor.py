@@ -1614,6 +1614,155 @@ def test_tests_passed_rejects_collect_only_from_environment_configuration() -> N
     )
 
 
+def test_file_claim_supports_successful_pathlib_write_bytes(tmp_path) -> None:
+    """ZCode Bash evidence can prove a file touched through pathlib write_bytes."""
+    target = tmp_path / "ozo_gui_smoke.txt"
+    target.write_bytes(b"OZO")
+    command = f"python3 -c \"from pathlib import Path; Path('{target}').write_bytes(b'OZO')\""
+    started = AgentMessage(
+        type="tool",
+        content="run byte writer",
+        tool_name="Bash",
+        data={
+            "tool_call_id": "bash_write_1",
+            "tool_input": {"command": command},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="ok",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "bash_write_1",
+            "is_error": False,
+            "output": "ok",
+        },
+    )
+
+    assert _runtime_messages_support_file_claim(
+        "ozo_gui_smoke.txt",
+        (started, completed),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_tests_passed_accepts_successful_ad_hoc_python_verifier() -> None:
+    """A transcript-backed Python equality verifier can support tests_passed."""
+    command = (
+        'python3 -c "from pathlib import Path; '
+        "expected = b'OZO'; observed = Path('ozo_gui_smoke.txt').read_bytes(); "
+        "print('equality:', observed == expected)\""
+    )
+    started = AgentMessage(
+        type="tool",
+        content="run byte verifier",
+        tool_name="Bash",
+        data={
+            "tool_call_id": "bash_verify_1",
+            "tool_input": {"command": command},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="equality: True",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "bash_verify_1",
+            "is_error": False,
+            "output": "equality: True",
+        },
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(started, completed),
+        task_cwd=None,
+    )
+
+
+def test_python_c_command_claim_matches_multiline_runtime_payload() -> None:
+    """ZCode may cite a multiline python -c command as a semicolon command."""
+    runtime_command = (
+        'python3 -c "\n'
+        "from pathlib import Path\n"
+        "target = Path('ozo_gui_smoke.txt')\n"
+        "expected = b'OZO'\n"
+        "target.write_bytes(expected)\n"
+        "observed = target.read_bytes()\n"
+        "print('equality:', observed == expected)\n"
+        '"'
+    )
+    claim = (
+        "python3 -c \"from pathlib import Path; target = Path('ozo_gui_smoke.txt'); "
+        "expected = b'OZO'; target.write_bytes(expected); observed = target.read_bytes(); "
+        "print('equality:', observed == expected)\""
+    )
+    started = AgentMessage(
+        type="tool",
+        content="run byte verifier",
+        tool_name="Bash",
+        data={
+            "tool_call_id": "bash_verify_multiline",
+            "tool_input": {"command": runtime_command},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="equality: True",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "bash_verify_multiline",
+            "is_error": False,
+            "output": "equality: True",
+        },
+    )
+
+    assert _runtime_messages_support_command_claim(claim, (started,))
+    assert _runtime_messages_support_test_claim(
+        value=claim,
+        backed_commands=(claim,),
+        messages=(started, completed),
+        task_cwd=None,
+    )
+
+
+def test_tests_passed_rejects_failed_ad_hoc_python_verifier() -> None:
+    """The ad-hoc verifier path still fails closed on negative equality output."""
+    command = (
+        'python3 -c "from pathlib import Path; '
+        "expected = b'OZO'; observed = Path('ozo_gui_smoke.txt').read_bytes(); "
+        "print('equality:', observed == expected)\""
+    )
+    started = AgentMessage(
+        type="tool",
+        content="run byte verifier",
+        tool_name="Bash",
+        data={
+            "tool_call_id": "bash_verify_2",
+            "tool_input": {"command": command},
+        },
+    )
+    completed = AgentMessage(
+        type="tool_result",
+        content="equality: False",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "bash_verify_2",
+            "is_error": False,
+            "output": "equality: False",
+        },
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(started, completed),
+        task_cwd=None,
+    )
+
+
 def test_tests_passed_rejects_tool_call_narration_without_runtime_result() -> None:
     command = "pytest tests/test_app.py"
     message = AgentMessage(
@@ -1832,6 +1981,22 @@ def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> 
     """Validation-only ACs prove command/test evidence without requiring file mutation."""
     schema = _effective_evidence_schema_for_ac(load_profile("code"), ac_content)
     assert schema.required == ("commands_run", "tests_passed")
+
+
+@pytest.mark.parametrize(
+    "ac_content",
+    (
+        "No files other than the target file are created or modified in the project tree.",
+        "Only the requested file is changed.",
+        "git status shows only the target file.",
+    ),
+)
+def test_workspace_isolation_validation_ac_requires_only_commands_run(
+    ac_content: str,
+) -> None:
+    """No-collateral-change ACs are verification ACs, not code/test mutation ACs."""
+    schema = _effective_evidence_schema_for_ac(load_profile("code"), ac_content)
+    assert schema.required == ("commands_run",)
 
 
 @pytest.mark.parametrize(

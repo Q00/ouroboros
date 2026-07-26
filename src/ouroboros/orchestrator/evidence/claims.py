@@ -414,10 +414,18 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
     normalized_command = command.strip().lower()
     if not normalized_command:
         return False
-    if not _file_reference_pattern(normalized_reference).search(normalized_command):
+    reference_in_command = _file_reference_pattern(normalized_reference).search(
+        normalized_command
+    ) or re.search(
+        rf"(^|[/\\'\"]){re.escape(normalized_reference)}(?=$|[/\\'\"])",
+        normalized_command,
+    )
+    if not reference_in_command:
         return False
     quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
     if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
+        return True
+    if re.search(r"\.(write_text|write_bytes)\s*\(", normalized_command):
         return True
     return bool(
         re.search(

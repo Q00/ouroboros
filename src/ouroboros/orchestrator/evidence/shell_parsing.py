@@ -616,6 +616,28 @@ def _is_pipefail_parts(parts: list[str]) -> bool:
     return parts == ["set", "-o", "pipefail"]
 
 
+def _normalized_python_c_payload_alias(command: str) -> str | None:
+    """Return a stable alias for direct ``python -c`` payload equivalence."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    parts = _strip_env_prefix(parts)
+    if len(parts) < 3 or not _is_python_executable(parts[0]):
+        return None
+    try:
+        option_index = parts.index("-c")
+    except ValueError:
+        return None
+    if option_index + 1 >= len(parts):
+        return None
+    payload = parts[option_index + 1]
+    normalized_payload = re.sub(r"[;\s]+", " ", payload.lower()).strip()
+    if not normalized_payload:
+        return None
+    return f"python -c {normalized_payload}"
+
+
 def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
     """Return normalized command forms that a concise evidence claim may use.
 
@@ -634,10 +656,12 @@ def _normalized_command_claim_aliases(command: str) -> tuple[str, ...]:
             aliases.append(candidate)
 
     append_alias(_normalized_shell_words_text(command))
+    append_alias(_normalized_python_c_payload_alias(command))
     shell_body = _shell_command_body(command)
     normalized_shell_body = _normalized_evidence_text(shell_body) if shell_body else None
     append_alias(normalized_shell_body)
     append_alias(_normalized_shell_words_text(shell_body) if shell_body else None)
+    append_alias(_normalized_python_c_payload_alias(shell_body) if shell_body else None)
     test_invocation = _test_command_invocation(command)
     append_alias(test_invocation)
     # A recorded command may append output plumbing (``... 2>&1 | tail -20``)

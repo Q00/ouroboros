@@ -160,6 +160,30 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
     return _text_proves_test_execution_success(_runtime_message_test_proof_text(message))
 
 
+def _text_contains_verification_success(text: str) -> bool:
+    """Return True for explicit ad-hoc verification command success output."""
+    normalized = text.lower()
+    if re.search(r"\b(equality|equal|matches|match|verified)\s*[:=]\s*false\b", normalized):
+        return False
+    if re.search(r"\b(no_trailing_newline|no trailing newline)\s*[:=]\s*false\b", normalized):
+        return False
+    return bool(
+        re.search(r"\b(equality|equal|matches|match|verified)\s*[:=]\s*true\b", normalized)
+        or re.search(r"\bverification\s+(passed|succeeded|successful)\b", normalized)
+    )
+
+
+def _looks_like_ad_hoc_verification_command(command: str) -> bool:
+    """Return True for shell commands that perform a self-contained assertion."""
+    normalized = command.lower()
+    if "python" not in normalized or " -c " not in normalized:
+        return False
+    return bool(
+        ("read_bytes" in normalized or "read_text" in normalized)
+        and ("==" in normalized or "assert " in normalized)
+    )
+
+
 def _test_chunk_has_structured_failure(chunk: list[AgentMessage]) -> bool:
     """Return whether a Bash/result chunk carries failure or malformed status.
 
@@ -378,7 +402,13 @@ def _runtime_messages_support_test_claim(
         matching_commands = tuple(
             candidate
             for candidate in candidate_commands
-            if _looks_like_test_command(candidate)
+            if (
+                _looks_like_test_command(candidate)
+                or (
+                    candidate == value.strip()
+                    and _looks_like_ad_hoc_verification_command(candidate)
+                )
+            )
             and _runtime_message_supports_command_claim(candidate, message)
         )
         if not matching_commands:
@@ -398,9 +428,16 @@ def _runtime_messages_support_test_claim(
             )
         ):
             continue
+        chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
+        if any(
+            command == value.strip()
+            and _looks_like_ad_hoc_verification_command(command)
+            and _text_contains_verification_success(chunk_test_proof_text)
+            for command in matching_commands
+        ):
+            return True
         if not any(_message_contains_test_success(item) for item in chunk):
             continue
-        chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
         if any(
             _test_command_targets_claim(
                 command=command,

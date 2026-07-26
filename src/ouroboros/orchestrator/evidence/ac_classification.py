@@ -100,6 +100,17 @@ _VALIDATION_ONLY_TEST_SIGNAL_RE = re.compile(
     r"test_[\w.-]+\.py|python\s+-m\s+unittest)\b",
     re.IGNORECASE,
 )
+_WORKSPACE_ISOLATION_VALIDATION_RE = re.compile(
+    r"("
+    r"\bno\s+(?:files?|paths?)\s+other\s+than\b"
+    r"|"
+    r"\bonly\s+(?:the\s+)?(?:target|requested|specified)\s+files?\b"
+    r".{0,80}\b(?:changed|created|modified|edited|touched)\b"
+    r"|"
+    r"\bgit\s+status\b.{0,80}\bonly\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _has_mixed_code_and_documentation_work(ac_content: str) -> bool:
@@ -252,6 +263,23 @@ def _is_validation_only_ac(ac_content: str) -> bool:
     )
 
 
+def _is_workspace_isolation_validation_ac(ac_content: str) -> bool:
+    """Return True when an AC only verifies no collateral file changes."""
+    normalized = " ".join(ac_content.split())
+    if not normalized:
+        return False
+    if not _WORKSPACE_ISOLATION_VALIDATION_RE.search(normalized):
+        return False
+    if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
+        return False
+    stripped = _NO_MUTATION_VALIDATION_RE.sub("", normalized)
+    return not (
+        _CODE_MUTATION_ACTION_RE.search(stripped)
+        and _CODE_WORK_SIGNAL_RE.search(stripped)
+        and not re.search(r"\bother\s+than\b|\bonly\b", stripped, re.IGNORECASE)
+    )
+
+
 def _drop_required_evidence_field(schema: EvidenceSchema, field: str) -> EvidenceSchema:
     """Return a schema copy with ``field`` removed from required and rejected_if."""
     required = tuple(name for name in schema.required if name != field)
@@ -296,7 +324,10 @@ def _effective_evidence_schema_for_ac(
     unaffected — those are not gate delegations.
     """
     schema = profile.evidence_schema
-    if _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
+    if _is_workspace_isolation_validation_ac(ac_content):
+        schema = _drop_required_evidence_field(schema, "files_touched")
+        schema = _drop_required_evidence_field(schema, "tests_passed")
+    elif _is_validation_only_ac(ac_content) and "files_touched" in schema.required:
         schema = _drop_required_evidence_field(schema, "files_touched")
     elif _is_documentation_only_ac(ac_content) and "tests_passed" in schema.required:
         schema = _drop_required_evidence_field(schema, "tests_passed")
