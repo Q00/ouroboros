@@ -42,7 +42,10 @@ def _extract_fenced_json_payload(text: str) -> str | None:
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
-            fence_start = info_start
+            closing = _find_closing_fence(text, line_end + 1)
+            if closing is None:
+                return None
+            fence_start = closing + 3
             continue
 
         body_start = line_end + 1

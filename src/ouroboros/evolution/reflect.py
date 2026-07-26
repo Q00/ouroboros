@@ -45,6 +45,13 @@ def get_reflect_model(backend: str | None = None) -> str:
     return get_llm_model_for_role("reflect", backend=backend)
 
 
+def _clean_required_text(value: str, field_name: str) -> str:
+    text = value.strip()
+    if not text:
+        raise TypeError(f"Expected {field_name} to be a non-empty string")
+    return text
+
+
 class OntologyMutation(BaseModel, frozen=True):
     """A specific proposed change to the ontology schema."""
 
@@ -119,24 +126,33 @@ def _parse_ontology_mutations(data: dict[str, object]) -> list[OntologyMutation]
         raw_field_type = item.get("field_type")
         if raw_field_type is not None and not isinstance(raw_field_type, str):
             raise TypeError("Expected ontology mutation field_type to be a string or null")
+        field_type = (
+            _clean_required_text(raw_field_type, "ontology mutation field_type")
+            if raw_field_type is not None
+            else None
+        )
         raw_description = item.get("description")
         if raw_description is not None and not isinstance(raw_description, str):
             raise TypeError("Expected ontology mutation description to be a string or null")
+        description = (
+            _clean_required_text(raw_description, "ontology mutation description")
+            if raw_description is not None
+            else None
+        )
         raw_reason = item.get("reason", "")
         if not isinstance(raw_reason, str):
             raise TypeError("Expected ontology mutation reason to be a string")
-        if action is MutationAction.ADD and not (
-            (raw_description and raw_description.strip()) or raw_reason.strip()
-        ):
+        reason = raw_reason.strip()
+        if action is MutationAction.ADD and not (description or reason):
             raise TypeError("Expected add ontology mutation description or reason to be non-empty")
 
         mutations.append(
             OntologyMutation(
                 action=action,
                 field_name=field_name,
-                field_type=raw_field_type,
-                description=raw_description,
-                reason=raw_reason,
+                field_type=field_type,
+                description=description,
+                reason=reason,
             )
         )
     return mutations
@@ -159,9 +175,11 @@ def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
             raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else None
         )
         raw_content = item.get("content")
-        content = raw_content if isinstance(raw_content, str) else None
+        content = None
+        if isinstance(raw_content, str):
+            content = _clean_required_text(raw_content, "acceptance criterion patch content")
         raw_reason = item.get("reason", "")
-        reason = raw_reason if isinstance(raw_reason, str) else ""
+        reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
         patches.append(ACPatch(op=op, index=index, content=content, reason=reason))
     return patches
 
@@ -704,18 +722,24 @@ Guidelines:
                 raise TypeError("Expected refined_goal to be a string")
             if not refined_goal.strip():
                 raise TypeError("Expected refined_goal to be a non-empty string")
-            refined_constraints = data.get("refined_constraints", list(current_seed.constraints))
-            if not isinstance(refined_constraints, list | tuple) or not all(
-                isinstance(constraint, str) for constraint in refined_constraints
+            raw_refined_constraints = data.get(
+                "refined_constraints", list(current_seed.constraints)
+            )
+            if not isinstance(raw_refined_constraints, list | tuple) or not all(
+                isinstance(constraint, str) for constraint in raw_refined_constraints
             ):
                 raise TypeError("Expected refined_constraints to be a list of strings")
+            refined_constraints = tuple(
+                _clean_required_text(constraint, "refined constraint")
+                for constraint in raw_refined_constraints
+            )
             reasoning = data.get("reasoning", "")
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
 
             return ReflectOutput(
                 refined_goal=refined_goal,
-                refined_constraints=tuple(refined_constraints),
+                refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
                 settled_ac_indices=settled,
@@ -767,7 +791,9 @@ Guidelines:
             isinstance(ac, str) for ac in raw_refined_acs
         ):
             raise TypeError("Expected refined_acs to be a list of strings")
-        llm_refined_acs = tuple(raw_refined_acs)
+        llm_refined_acs = tuple(
+            _clean_required_text(ac, "refined acceptance criterion") for ac in raw_refined_acs
+        )
         legacy_patches = _derive_legacy_patches(llm_refined_acs, parent_acs)
         if legacy_patches is None:
             # Shorter list → full-rewrite semantics: use the LLM list as-is with

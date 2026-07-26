@@ -56,6 +56,20 @@ def _wrap(variant: str, payload: str) -> str:
     raise AssertionError(f"unknown variant: {variant}")
 
 
+def _wrap_after_unsupported_fence(example_payload: str, actual_payload: str) -> str:
+    return (
+        "Do not use this example:\n"
+        "```python\n"
+        f"EXAMPLE = {example_payload}\n"
+        "```\n"
+        f"Earlier example: {example_payload}\n"
+        "Actual answer:\n"
+        "```json\n"
+        f"{actual_payload}\n"
+        "```"
+    )
+
+
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
 # old heuristic got wrong; ``bare_fence`` and ``no_fence`` guard against
 # regressions on the paths it did handle.
@@ -81,6 +95,31 @@ class TestWonderFenceRobustness:
         assert out.reasoning == "grounded reasoning"
         assert out.should_continue is True
         assert any("token refresh" in q for q in out.questions)
+
+    def test_unsupported_fence_pair_does_not_let_later_prose_example_win(self) -> None:
+        example_payload = json.dumps(
+            {
+                "questions": [{"question": "stale example question", "kind": "gap"}],
+                "should_continue": False,
+                "reasoning": "stale example",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual token refresh question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual answer",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_after_unsupported_fence(example_payload, actual_payload),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual answer"
+        assert out.should_continue is True
+        assert out.questions == ("actual token refresh question",)
 
     def test_malformed_outer_object_with_nested_array_uses_fallback(self) -> None:
         content = '{"questions": ["What remains unknown?"], }'
@@ -265,6 +304,36 @@ class TestAssertionExtractorFenceRobustness:
         assert len(assertions) == 1
         assert assertions[0].ac_index == 0
         assert assertions[0].description == "build passes"
+
+    def test_unsupported_fence_pair_does_not_let_later_prose_example_win(self) -> None:
+        example_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale example",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_after_unsupported_fence(example_payload, actual_payload),
+            ("AC number 1",),
+        )
+
+        assert len(assertions) == 1
+        assert assertions[0].description == "actual assertion"
 
     def test_incidental_non_object_array_is_ignored(self) -> None:
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(

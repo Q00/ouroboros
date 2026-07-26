@@ -301,6 +301,113 @@ class TestMalformedPatches:
 
 
 class TestReflectEndToEnd:
+    async def test_whitespace_only_refined_constraints_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1", "   "],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    async def test_whitespace_only_ac_patch_content_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "revise", "index": 1, "content": "   "}],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    async def test_whitespace_only_legacy_refined_acs_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "refined_acs": ["AC zero", "   ", "AC two"],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            {"action": "modify", "field_name": "f", "field_type": "   "},
+            {"action": "modify", "field_name": "f", "description": "   "},
+        ],
+    )
+    async def test_whitespace_only_ontology_values_rejected_before_seed_materialization(
+        self, mutation: dict[str, str]
+    ) -> None:
+        parent = _seed_with_ontology(
+            (OntologyField(name="f", field_type="entity", description="a field"),)
+        )
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [mutation],
+                "reasoning": "r",
+            }
+        )
+
+        reflect_result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response), model="test"
+        ).reflect(
+            current_seed=parent,
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert reflect_result.is_err
+
     async def test_reflect_composes_from_patches(self) -> None:
         response = json.dumps(
             {
