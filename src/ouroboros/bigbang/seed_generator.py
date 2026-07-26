@@ -929,8 +929,20 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                     break
             if matched_prefix:
                 continue
-            if current_multiline_key == "acceptance_criteria" and line.startswith("AC:"):
-                multiline_values.setdefault(current_multiline_key, []).append(line)
+            if current_multiline_key == "acceptance_criteria":
+                if line.startswith("AC:"):
+                    multiline_values.setdefault(current_multiline_key, []).append(line)
+                    continue
+                continuation_marker = _AC_CONTRACT_FIELD_RE.search(line)
+                if continuation_marker is None:
+                    continuation_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.search(line)
+                if continuation_marker is not None:
+                    field_name = continuation_marker.group(1).lower()
+                    raise ValueError(
+                        "Acceptance criterion continuation contains reserved "
+                        f"{field_name} field; every nonempty line must start with AC:"
+                    )
+                raise ValueError("Every nonempty ACCEPTANCE_CRITERIA line must start with AC:")
 
         if multiline_values.get("acceptance_criteria"):
             requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
