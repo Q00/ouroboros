@@ -4137,7 +4137,11 @@ class TestOrchestratorRunner:
             data={"subtype": "error", "error_type": "CodexCliError"},
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_kind == "usage_limit"
@@ -4164,6 +4168,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause(
             message,
             now=datetime(2026, 1, 1, tzinfo=UTC),
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -4189,7 +4194,11 @@ class TestOrchestratorRunner:
             data=classify_subprocess_failure(failure_text, exit_code=1),
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_kind == "usage_limit"
@@ -4251,7 +4260,11 @@ class TestOrchestratorRunner:
             data={"subtype": "error", "error_type": "CodexCliError"},
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_seconds == 5400
@@ -4336,20 +4349,21 @@ class TestOrchestratorRunner:
                 "retry_after_seconds": huge_retry,
             },
         )
-        with patch("ouroboros.config.get_usage_limit_pause_seconds", return_value=18000):
-            pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
 
-    def test_recoverable_failure_propagates_invalid_usage_limit_config(
+    def test_recoverable_failure_requires_durable_usage_limit_policy(
         self,
         runner: OrchestratorRunner,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Invalid pause-window config should not be hidden by a fallback."""
-        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "invalid")
+        """Pause construction cannot reread a live fallback after provider effect."""
         message = AgentMessage(
             type="result",
             content="Usage limit reached. Please try again later.",
@@ -4391,6 +4405,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -4434,6 +4449,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -4481,6 +4497,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is None
@@ -4526,6 +4543,7 @@ class TestOrchestratorRunner:
             parallel_result,
             now=now,
             require_all_failures_recoverable=False,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -4572,6 +4590,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None

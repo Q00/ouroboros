@@ -6691,14 +6691,12 @@ class OrchestratorRunner:
         if not is_usage_limit_pause_message(message, now=now):
             return None
 
-        if default_pause_seconds is None:
-            default_pause_seconds = get_usage_limit_pause_seconds()
         if (
             type(default_pause_seconds) is not int
             or not 1 <= default_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
         ):
             raise ConfigError(
-                "Resolved usage-limit pause policy is outside the durable range",
+                "Durable usage-limit pause policy is missing or outside its range",
                 config_key="orchestrator.usage_limit_pause_hours",
                 details={
                     "pause_seconds": default_pause_seconds,
@@ -6780,10 +6778,6 @@ class OrchestratorRunner:
             now=now or datetime.now(UTC),
             default_pause_seconds=default_pause_seconds,
         )
-
-    def _is_recoverable_resume_failure(self, message: AgentMessage) -> bool:
-        """Return True when a final error should leave the session resumable."""
-        return self._recoverable_failure_pause(message) is not None
 
     def _recoverable_failure_pause_from_parallel_result(
         self,
