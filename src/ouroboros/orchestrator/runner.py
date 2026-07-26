@@ -8699,6 +8699,7 @@ class OrchestratorRunner:
                 {EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract},
                 seed=seed,
                 authority_generation=authority_generation,
+                prepared_live_execution=True,
             )
             execution_semantics = self._execution_semantics_snapshot(execution_contract)
             system_prompt = build_system_prompt(
