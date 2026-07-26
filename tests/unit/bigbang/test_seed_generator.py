@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import tempfile
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -41,6 +41,11 @@ from ouroboros.core.seed import (
     ac_texts,
 )
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelACExecutor,
+)
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS = (
@@ -48,6 +53,25 @@ _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS = (
     "echo foo'| artifacts: literal'",
     "python -c'print(\"| verify: literal\")'",
 )
+
+
+class _RuntimeVerifyAdapter:
+    def __init__(self, working_directory: str) -> None:
+        self.runtime_backend = "claude"
+        self.self_governs_rate_limit = True
+        self.working_directory = working_directory
+        self.permission_mode = "acceptEdits"
+
+
+def create_runtime_verify_executor(working_directory: str) -> ParallelACExecutor:
+    return ParallelACExecutor(
+        adapter=_RuntimeVerifyAdapter(working_directory),  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        verify_command_timeout_seconds=5,
+        ac_retry_attempts=0,
+    )
 
 
 def create_mock_completion_response(
@@ -523,6 +547,39 @@ class TestSeedGeneratorExtraction:
     ) -> None:
         with pytest.raises(ValueError, match=rf"Escaped {field_name} field"):
             _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            (
+                'AC: Output file exists "| artifacts: schema v2 outputs.json"',
+                "artifacts",
+            ),
+            ('AC: Output file exists "| artifacts schema v2 outputs.json"', "artifacts"),
+            ('AC: Command status is enforced "| verify: exit 1"', "verify"),
+            ('AC: Command output is checked "| expect: READY"', "expect"),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_quoted_pre_marker_reserved_fields(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Quoted {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    def test_acceptance_contract_parser_allows_closed_quote_without_reserved_marker(
+        self,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            'AC: Output file is named "draft | final" | verify: true | '
+            "artifacts: output.txt | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.description == 'Output file is named "draft | final"'
+        assert criterion.verify_command == "true"
+        assert criterion.expected_artifacts == ("output.txt",)
 
     def test_acceptance_contract_parser_allows_unmatched_quote_without_reserved_marker(
         self,
@@ -1256,6 +1313,91 @@ class TestSeedGeneratorExtraction:
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bypass_attempt,repaired_contract,expected_gate_error",
+        (
+            (
+                'AC: Command status is enforced "| verify: exit 1"',
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+            (
+                'AC: Output file exists "| artifacts: schema v2 outputs.json"',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Output file exists "| artifacts schema v2 outputs.json"',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Command output is checked "| expect: READY"',
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+        ),
+    )
+    async def test_generate_retries_quoted_pre_marker_contracts_before_runtime_gate(
+        self,
+        bypass_attempt: str,
+        repaired_contract: str,
+        expected_gate_error: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bypass_attempt}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            seed = result.value
+            assert isinstance(seed, Seed)
+            assert mock_adapter.complete.await_count == 2
+            (criterion,) = seed.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.has_success_contract
+
+            grade = GradeGate().grade_seed(seed)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            executor = create_runtime_verify_executor(tmp_dir)
+            gated = await executor._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="quoted-pre-marker-test",
+                execution_id="quoted-pre-marker-test",
+            )
+
+        assert gated.success is False
+        assert gated.outcome is ACExecutionOutcome.FAILED
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is False
+        assert expected_gate_error in (gated.error or "")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)

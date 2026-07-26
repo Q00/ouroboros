@@ -136,6 +136,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     """Return structured AC field markers found outside quoted/escaped payloads."""
     markers: list[_ACFieldMarker] = []
     quote: str | None = None
+    quote_start: int | None = None
     structured_payload_started = False
     escaped = False
     index = 0
@@ -159,7 +160,16 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             continue
         if quote is not None:
             if char == quote:
+                if not structured_payload_started and quote_start is not None:
+                    quoted_payload = body[quote_start:index]
+                    quoted_marker = _AC_CONTRACT_FIELD_RE.search(quoted_payload)
+                    if quoted_marker is None:
+                        quoted_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.search(quoted_payload)
+                    if quoted_marker is not None:
+                        field_name = quoted_marker.group(1).lower()
+                        raise ValueError(f"Quoted {field_name} field in acceptance criterion")
                 quote = None
+                quote_start = None
             index += 1
             continue
         if char in {"'", '"'} and not (
@@ -168,6 +178,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             and _is_description_word_apostrophe(body, index)
         ):
             quote = char
+            quote_start = index + 1
             index += 1
             continue
         if char != "|":
