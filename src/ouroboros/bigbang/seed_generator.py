@@ -62,6 +62,13 @@ _AC_RESERVED_FIELD_FRAGMENT_RE = re.compile(
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
+@dataclass(frozen=True)
+class _ACFieldMarker:
+    name: str
+    start: int
+    end: int
+
+
 def _parse_string_array_values(
     raw_value: object, *, field_label: str, strict: bool = False
 ) -> tuple[str, ...]:
@@ -121,6 +128,55 @@ def _parse_string_array_values(
     return tuple(item.strip() for item in text.split("|") if item.strip())
 
 
+def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
+    """Return structured AC field markers found outside quoted/escaped payloads."""
+    markers: list[_ACFieldMarker] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char != "|":
+            index += 1
+            continue
+
+        remainder = body[index:]
+        match = _AC_CONTRACT_FIELD_RE.match(remainder)
+        if match is not None:
+            markers.append(
+                _ACFieldMarker(
+                    name=match.group(1).lower(),
+                    start=index,
+                    end=index + match.end(),
+                )
+            )
+            index += match.end()
+            continue
+        malformed = _AC_RESERVED_FIELD_FRAGMENT_RE.match(remainder)
+        if malformed is not None:
+            field_name = malformed.group(1).lower()
+            raise ValueError(f"Malformed {field_name} field in acceptance criterion")
+        index += 1
+    return tuple(markers)
+
+
 def _parse_acceptance_criteria_contracts(
     raw_value: object,
 ) -> tuple[AcceptanceCriterionSpec | str, ...]:
@@ -153,24 +209,20 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
     if not line.startswith("AC:"):
         return None
     body = line.removeprefix("AC:").strip()
-    matches = tuple(_AC_CONTRACT_FIELD_RE.finditer(body))
-    malformed_reserved_field = _AC_RESERVED_FIELD_FRAGMENT_RE.search(body)
-    if malformed_reserved_field is not None:
-        field_name = malformed_reserved_field.group(1).lower()
-        raise ValueError(f"Malformed {field_name} field in acceptance criterion")
-    description_end = matches[0].start() if matches else len(body)
+    matches = _iter_outer_ac_field_markers(body)
+    description_end = matches[0].start if matches else len(body)
     description = body[:description_end].strip()
     if not description:
         return None
     fields: dict[str, object] = {"description": description}
     seen_fields: set[str] = set()
     for index, match in enumerate(matches):
-        normalized_key = match.group(1).lower()
+        normalized_key = match.name
         if normalized_key in seen_fields:
             raise ValueError(f"Duplicate {normalized_key} field in acceptance criterion")
         seen_fields.add(normalized_key)
-        value_start = match.end()
-        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        value_start = match.end
+        value_end = matches[index + 1].start if index + 1 < len(matches) else len(body)
         normalized_value = body[value_start:value_end].strip(" ")
         if normalized_key == "artifacts" and not normalized_value:
             raise ValueError("Empty artifacts field; use artifacts: NONE")

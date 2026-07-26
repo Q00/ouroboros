@@ -841,6 +841,66 @@ class TestSeedGeneratorExtraction:
             assert third.verify_command is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_command", "expected_artifact"),
+        (
+            (
+                """bash -lc "printf '%s\\n' '| artifacts: literal' | tee out.log" """.strip(),
+                "out.log",
+            ),
+            (
+                """sh -c 'printf "%s\\n" "| verify: literal" | tee reports/verify.log'""",
+                "reports/verify.log",
+            ),
+            (
+                r"""python -c "print(\"| expect: literal\")" > escaped-quote.txt""",
+                "escaped-quote.txt",
+            ),
+            (
+                r"""printf \|\ artifacts:literal > escaped-pipe.txt""",
+                "escaped-pipe.txt",
+            ),
+        ),
+    )
+    async def test_generate_preserves_quoted_reserved_pipe_literals_in_contracts(
+        self,
+        verify_command: str,
+        expected_artifact: str,
+    ) -> None:
+        """Quoted/escaped reserved pipe text is verify payload, not an outer AC field."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                f"AC: Command preserves reserved pipe literal | verify: {verify_command} | "
+                f"artifacts: {expected_artifact} | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 1
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert criterion.expected_artifacts == (expected_artifact,)
+            assert criterion.output_assertion is None
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+
+    @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
         """Generated contract assertions must be literal stdout, not status prose."""
         mock_adapter = AsyncMock()
