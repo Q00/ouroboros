@@ -8573,8 +8573,12 @@ class OrchestratorRunner:
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
-            model_router=self._model_router if parallel_bounded_routing else None,
-            route_economics=self._route_economics if parallel_bounded_routing else None,
+            # Legacy model selection predates Routing D and remains active when
+            # durable route ownership is unavailable (for example, configured
+            # decomposition depths above four). ParallelACExecutor separately
+            # gates only bounded escalation/replay with its durable-depth flag.
+            model_router=self._model_router,
+            route_economics=self._route_economics,
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,

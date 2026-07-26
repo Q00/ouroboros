@@ -198,6 +198,29 @@ async def _run_one_ac(
 
 class TestExecutorModelWiring:
     @pytest.mark.asyncio
+    async def test_depth_above_durable_keeps_legacy_configured_model_selection(self) -> None:
+        """Disabling Routing D ownership must not drop the established router."""
+
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_decomposition_depth=5,
+            model_router=_claude_router(),
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert executor._durable_decomposition_replay_enabled is False
+        assert executor._bounded_route_escalation_enabled is False
+        assert result.success is True
+        assert result.route_candidate is None
+        assert runtime.received_model == "sonnet-x"
+
+    @pytest.mark.asyncio
     async def test_bounded_parallel_honors_frontier_starting_tier(self) -> None:
         runtime = _EnforcedModelRuntime()
         executor = ParallelACExecutor(

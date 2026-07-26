@@ -4272,11 +4272,15 @@ class TestOrchestratorRunner:
             total_messages=len(sample_seed.acceptance_criteria),
         )
         track_progress = AsyncMock(return_value=Result.ok(None))
+        execute_parallel = AsyncMock(return_value=legacy_pause)
+        parallel_executor = MagicMock()
+        parallel_executor.execute_parallel = execute_parallel
+        executor_cls = MagicMock(return_value=parallel_executor)
         with (
             patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
             patch(
-                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
-                AsyncMock(return_value=legacy_pause),
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                executor_cls,
             ),
             patch.object(runner._session_repo, "track_progress", track_progress),
             patch.object(
@@ -4300,6 +4304,9 @@ class TestOrchestratorRunner:
 
         assert result.is_ok and result.value.success is False
         track_progress.assert_not_awaited()
+        if compatibility_mode == "depth_above_durable":
+            assert executor_cls.call_args.kwargs["model_router"] is runner._model_router
+            assert executor_cls.call_args.kwargs["route_economics"] is runner._route_economics
 
     @pytest.mark.asyncio
     async def test_parallel_paused_projection_failure_preserves_owner(
