@@ -40,6 +40,7 @@ from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PM_UNCERTAINTY_GUIDANCE, PMInterviewEngine
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.initial_context import resolve_initial_context_input
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -185,8 +186,21 @@ def _save_pm_meta(
         meta.update(extra)
 
     path = _meta_path(session_id, data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if data_dir is None:
+        secure_directory(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    durability_confirmed = write_owner_only(
+        path,
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not durability_confirmed:
+        log.warning(
+            "pm_handler.meta_save_durability_unconfirmed",
+            session_id=session_id,
+            path=str(path),
+        )
     log.debug("pm_handler.meta_saved", session_id=session_id, path=str(path))
 
 

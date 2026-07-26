@@ -3,14 +3,100 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
 import typer
 
-from ouroboros.cli.commands.pm import _run_pm_interview, pm_command
+from ouroboros.cli.commands.pm import _run_pm_interview, _save_cli_pm_meta, pm_command
 from ouroboros.core.types import Result
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def _make_pm_meta_engine() -> SimpleNamespace:
+    return SimpleNamespace(
+        _reframe_map={},
+        deferred_items=[],
+        decide_later_items=[],
+        codebase_context="",
+        _selected_brownfield_repos=[],
+        classifications=[],
+    )
+
+
+def test_save_cli_pm_meta_is_owner_only_under_umask_022(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI pm_meta lives in the package-owned data dir and is always 0600."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    previous_umask = os.umask(0o022)
+    try:
+        _save_cli_pm_meta("sess-owner", _make_pm_meta_engine())
+    finally:
+        os.umask(previous_umask)
+
+    data_dir = tmp_path / ".ouroboros" / "data"
+    meta_path = data_dir / "pm_meta_sess-owner.json"
+    assert _mode(data_dir) == 0o700
+    assert _mode(meta_path) == 0o600
+
+
+def test_save_cli_pm_meta_failure_propagates_without_leftover_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI pm_meta persistence keeps the owner-only writer's failure contract."""
+    import ouroboros.cli.commands.pm as pm
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+
+    def _fail_write(*_args: object, **_kwargs: object) -> bool:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pm, "write_owner_only", _fail_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        _save_cli_pm_meta("sess-fail", _make_pm_meta_engine())
+
+    assert not (tmp_path / ".ouroboros" / "data" / "pm_meta_sess-fail.json").exists()
+
+
+def test_save_cli_pm_meta_logs_unconfirmed_durability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI helper returns None, so unconfirmed durability is logged."""
+    import ouroboros.cli.commands.pm as pm
+
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setattr(pm, "write_owner_only", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        pm.log,
+        "warning",
+        lambda event, **kwargs: warnings.append((event, kwargs)),
+    )
+
+    _save_cli_pm_meta("sess-uncertain", _make_pm_meta_engine())
+
+    assert warnings == [
+        (
+            "pm.meta_save_durability_unconfirmed",
+            {
+                "session_id": "sess-uncertain",
+                "path": str(tmp_path / ".ouroboros" / "data" / "pm_meta_sess-uncertain.json"),
+            },
+        )
+    ]
 
 
 def test_run_pm_interview_uses_factory_for_interview_adapter_on_resume() -> None:
