@@ -177,6 +177,8 @@ The durable parallel resume-owner marker is published only when Routing D is
 actually effect-capable for the run. Legacy parallel execution does not have
 complete completed-stage replay without a checkpoint, so it cannot advertise the
 stronger Routing D owner contract or redirect resume through that state machine.
+The owner decision and executor are bound to the same pre-await capability/config
+snapshot, preventing cancellation checks from opening a drift window between them.
 
 Live decomposition depth is admitted only in the inclusive range 0-2. At the
 maximum five-way branching factor this yields at most 30 persisted child nodes

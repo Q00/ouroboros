@@ -8594,6 +8594,7 @@ class OrchestratorRunner:
         # Execute in parallel. Reuse the base effort resolved once in __init__
         # (self._reasoning_effort) so a single runner instance has one consistent
         # effort source across its direct paths and the parallel executor.
+        parallel_bounded_routing = self._bounded_route_runtime_active()
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -8628,7 +8629,7 @@ class OrchestratorRunner:
                 expected_root_indices=range(len(seed.acceptance_criteria)),
             )
 
-        if self._bounded_route_runtime_active():
+        if parallel_bounded_routing:
             # Publish the parallel effect owner before Routing D can append a
             # route judgment, observation, pause, or enter a provider boundary.
             # Legacy parallel execution has no complete durable stage replay

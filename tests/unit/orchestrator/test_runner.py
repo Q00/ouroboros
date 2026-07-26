@@ -4144,7 +4144,7 @@ class TestOrchestratorRunner:
         runner: OrchestratorRunner,
         sample_seed: Seed,
     ) -> None:
-        """No parallel provider boundary may precede its durable resume owner."""
+        """One pre-await Routing D snapshot owns executor and owner publication."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
         tracker = SessionTracker.create(
@@ -4153,11 +4153,25 @@ class TestOrchestratorRunner:
             session_id="sess_parallel_owner_first",
         )
         _enable_direct_bounded_routes(runner, runner._adapter)
+
+        async def drift_capability_after_snapshot(*_args: Any, **_kwargs: Any) -> bool:
+            runner._adapter.capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.IGNORED,
+            )
+            return False
+
         execute_parallel = AsyncMock(
             side_effect=AssertionError("parallel executor entered before owner publication")
         )
         with (
-            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner,
+                "_check_cancellation",
+                AsyncMock(side_effect=drift_capability_after_snapshot),
+            ),
             patch(
                 "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
                 execute_parallel,
