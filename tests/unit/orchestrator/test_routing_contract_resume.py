@@ -261,6 +261,8 @@ def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
     del routing["reasoning_effort"]
     del routing["route_compat"]
     del routing["requested_model_tier"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
     )
@@ -284,6 +286,8 @@ def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> No
     persisted["version"] = 3
     routing = persisted["model_routing"]
     del routing["requested_model_tier"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
     )
@@ -300,6 +304,27 @@ def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> No
     assert resumed._execution_contract["model_routing"]["requested_model_tier"] == "frontier"
 
 
+def test_pre_execution_semantics_v4_contract_migrates_once_to_current_version() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 4
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+        seed=_seed(),
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["version"] == EXECUTION_CONTRACT_VERSION
+    assert resumed._execution_contract["execution_semantics"] == (
+        resumed._execution_semantics_contract()
+    )
+
+
 def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract())
@@ -307,8 +332,82 @@ def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None
     routing = persisted["model_routing"]
     del routing["requested_model_tier"]
     del routing["reasoning_effort"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_execution_semantics_change_contract_without_changing_route_identity() -> None:
+    runner = _runner()
+    baseline = runner._build_execution_contract()
+    baseline_routing_fingerprint = baseline["frugality_proof"]["routing_fingerprint"]
+
+    runner._run_verify_commands = False
+    runner._verify_command_timeout_seconds = 7
+    runner._ac_retry_attempts = 9
+    runner._enable_decomposition = False
+    runner._decomposition_mode = "off"
+    runner._max_decomposition_depth = 7
+    runner._fat_harness_mode = True
+    changed = runner._build_execution_contract()
+
+    assert changed["model_routing"] == baseline["model_routing"]
+    assert changed["frugality_proof"]["routing_fingerprint"] == baseline_routing_fingerprint
+    assert changed["execution_semantics"] != baseline["execution_semantics"]
+    assert (
+        changed["frugality_proof"]["execution_semantics_fingerprint"]
+        != (baseline["frugality_proof"]["execution_semantics_fingerprint"])
+    )
+
+
+def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> None:
+    original = _runner(fat_harness_mode=True, max_decomposition_depth=4)
+    original._run_verify_commands = True
+    original._verify_command_timeout_seconds = 600
+    original._ac_retry_attempts = 2
+    persisted = original._build_execution_contract(seed=_seed())
+
+    resumed = _runner(enable_decomposition=False, fat_harness_mode=False)
+    resumed._run_verify_commands = False
+    resumed._verify_command_timeout_seconds = 1
+    resumed._ac_retry_attempts = 0
+    resumed._max_decomposition_depth = 0
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_verify_commands",
+        "verify_command_timeout_seconds",
+        "ac_retry_attempts",
+        "cross_harness_redispatch",
+        "enable_decomposition",
+        "decomposition_mode",
+        "max_decomposition_depth",
+        "max_parallel_workers",
+        "fat_harness_mode",
+        "shadow_replay_enabled",
+        "checkpoint_store_enabled",
+        "session_signal_hub_enabled",
+    ],
+)
+def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    del persisted["execution_semantics"][field]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
     )
 
     with pytest.raises(OrchestratorError, match="invalid execution contract"):

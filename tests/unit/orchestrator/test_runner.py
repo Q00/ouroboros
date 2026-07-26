@@ -4286,6 +4286,50 @@ class TestOrchestratorRunner:
         executor_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_parallel_dispatch_rejects_post_restore_execution_semantics_drift(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """The invocation snapshot stays authoritative after restore returns."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_semantics_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_semantics_drift",
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        runner._run_verify_commands = not runner._run_verify_commands
+        analyzer = MagicMock()
+        analyzer.analyze = AsyncMock(
+            side_effect=AssertionError("dependency analyzer entered after semantics drift")
+        )
+        runner._build_dependency_analyzer = MagicMock(return_value=analyzer)  # type: ignore[method-assign]
+        executor_cls = MagicMock(
+            side_effect=AssertionError("parallel executor entered after semantics drift")
+        )
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+            executor_cls,
+        ):
+            with pytest.raises(OrchestratorError, match="execution semantics drifted"):
+                await runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                    execution_contract=execution_contract,
+                )
+
+        analyzer.analyze.assert_not_awaited()
+        executor_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resume_session_enforces_owner_marker_before_provider_when_capability_is_lost(
         self,
         runner: OrchestratorRunner,

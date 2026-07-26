@@ -183,6 +183,20 @@ complete completed-stage replay without a checkpoint, so it cannot advertise the
 stronger Routing D owner contract or redirect resume through that state machine.
 The owner decision and executor are bound to the same pre-await capability/config
 snapshot, preventing cancellation checks from opening a drift window between them.
+The owner marker itself is durable Routing D evidence even when a crash occurs
+before the first route event. Resume therefore fails before dependency analysis or
+provider entry if native model enforcement, routing configuration, or durable-depth
+eligibility is no longer available.
+
+Execution contract version 5 also seals the complete scalar executor semantics
+used by that owner: verification enablement and timeout, retry and cross-harness
+budgets, decomposition enablement/mode/depth, worker count, fat-harness acceptance,
+shadow replay, and checkpoint/signal capability presence. The sub-contract has its
+own fingerprint and exact schema. Resume rejects any current-setting drift before
+constructing `ParallelACExecutor`, and the invocation consumes the immutable
+persisted snapshot rather than rereading mutable runner fields. Version 4 and older
+contracts predate Routing D ownership and migrate once using their legacy current
+settings; every new Routing D owner is born with version 5.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
@@ -218,6 +232,13 @@ the live registry and either the cheapest initial admission or the exact last
 escalation decision, then resumes the same provider handle with that exact
 route. Any same-session route evidence with a missing or non-runner call site
 blocks direct replay.
+
+Hard provider preconditions share one direct/parallel classifier. Typed error
+labels are canonicalized across prose, CamelCase, snake_case, kebab-case, and
+dotted machine identifiers; numeric HTTP authorization statuses `401` and `403`
+are admitted only from status/code fields. Missing access, tools, credentials,
+configuration, or authentication produces one `BLOCKED` observation and immediate
+human handoff, never a costlier successor.
 
 Both owners compare a paused candidate with the complete predecessor
 `selected_route` snapshot, or with the exact live initial admission when no

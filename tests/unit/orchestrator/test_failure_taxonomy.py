@@ -140,6 +140,15 @@ class TestHardPreconditionClassification:
             ("environment variable is not configured", {}),
             ("", {"failure_class": "BLOCKED"}),
             ("", {"details": {"status": "FORBIDDEN"}}),
+            ("", {"errorType": "PermissionDenied"}),
+            ("", {"kind": "PermissionDenied"}),
+            ("", {"error_code": "MISSING_TOOL"}),
+            ("", {"cause": {"kind": "MISSING_TOOL"}}),
+            ("", {"reason": "AUTHENTICATION_REQUIRED"}),
+            ("", {"details": {"status": "environment_variable_not_configured"}}),
+            ("", {"status": 401}),
+            ("", {"httpStatusCode": 403}),
+            ("", {"response": {"status_code": "401"}}),
         ],
     )
     def test_complete_compatibility_population_is_blocked(
@@ -155,6 +164,7 @@ class TestHardPreconditionClassification:
             "permission check passed but evidence is missing",
             "configuration migration returned a transient network error",
             "tool output was incomplete",
+            "processed 401 records successfully",
         ],
     )
     def test_nearby_non_preconditions_remain_retryable(self, content: str) -> None:
@@ -169,6 +179,10 @@ class TestHardPreconditionClassification:
             cursor = child
 
         assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
+
+    @pytest.mark.parametrize("status", [400, 404, 408, 409, 429, 500, 503])
+    def test_non_authorization_http_statuses_remain_retryable(self, status: int) -> None:
+        assert classify_hard_precondition("provider failure", {"status": status}) is None
 
 
 class TestPolicyTable:

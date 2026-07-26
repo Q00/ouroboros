@@ -669,9 +669,10 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 4
+EXECUTION_CONTRACT_VERSION = 5
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
+PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -900,6 +901,9 @@ class OrchestratorRunner:
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
+        from ouroboros.config import get_cross_harness_redispatch_enabled
+
+        self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
         self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
             "off"
@@ -2140,7 +2144,7 @@ class OrchestratorRunner:
                 break
         return current_seed_id, tuple(cohort)
 
-    def _plan_parallel_workers(self) -> int:
+    def _plan_parallel_workers(self, requested_workers: int | None = None) -> int:
         """Return the effective fan-out worker count for the connected backend.
 
         Ouroboros caps delivery fan-out to the connected backend's known
@@ -2150,7 +2154,8 @@ class OrchestratorRunner:
         ``OUROBOROS_MAX_CONCURRENCY``.
         """
         limits = resolve_backend_limits(self._adapter.runtime_backend)
-        return plan_fan_out_concurrency(self._max_parallel_workers, limits)
+        requested = self._max_parallel_workers if requested_workers is None else requested_workers
+        return plan_fan_out_concurrency(requested, limits)
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -3032,6 +3037,91 @@ class OrchestratorRunner:
             ensure_ascii=True,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _execution_semantics_fingerprint(semantics_contract: Mapping[str, Any]) -> str:
+        """Hash the complete scalar executor contract used by resume."""
+        encoded = json.dumps(
+            dict(semantics_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _execution_semantics_contract(self) -> dict[str, object]:
+        """Return every scalar setting that can change resumed AC effects."""
+        return {
+            "version": 1,
+            "run_verify_commands": self._run_verify_commands,
+            "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "ac_retry_attempts": self._ac_retry_attempts,
+            "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
+            "enable_decomposition": self._enable_decomposition,
+            "decomposition_mode": self._decomposition_mode,
+            "max_decomposition_depth": self._max_decomposition_depth,
+            "max_parallel_workers": self._max_parallel_workers,
+            "fat_harness_mode": self._fat_harness_mode,
+            "shadow_replay_enabled": self._shadow_replay_enabled,
+            "checkpoint_store_enabled": self._checkpoint_store is not None,
+            "session_signal_hub_enabled": self._session_signal_hub is not None,
+        }
+
+    @staticmethod
+    def _valid_execution_semantics_contract(value: object) -> bool:
+        """Validate the exact version-one scalar executor schema."""
+        expected_keys = frozenset(
+            {
+                "version",
+                "run_verify_commands",
+                "verify_command_timeout_seconds",
+                "ac_retry_attempts",
+                "cross_harness_redispatch",
+                "enable_decomposition",
+                "decomposition_mode",
+                "max_decomposition_depth",
+                "max_parallel_workers",
+                "fat_harness_mode",
+                "shadow_replay_enabled",
+                "checkpoint_store_enabled",
+                "session_signal_hub_enabled",
+            }
+        )
+        if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
+            return False
+        boolean_keys = (
+            "run_verify_commands",
+            "cross_harness_redispatch",
+            "enable_decomposition",
+            "fat_harness_mode",
+            "shadow_replay_enabled",
+            "checkpoint_store_enabled",
+            "session_signal_hub_enabled",
+        )
+        if (
+            type(value.get("version")) is not int
+            or value.get("version") != 1
+            or any(type(value.get(key)) is not bool for key in boolean_keys)
+        ):
+            return False
+        timeout = value.get("verify_command_timeout_seconds")
+        retries = value.get("ac_retry_attempts")
+        max_depth = value.get("max_decomposition_depth")
+        max_workers = value.get("max_parallel_workers")
+        mode = value.get("decomposition_mode")
+        return bool(
+            type(timeout) is int
+            and timeout >= 1
+            and type(retries) is int
+            and retries >= 0
+            and type(max_depth) is int
+            and max_depth >= 0
+            and type(max_workers) is int
+            and max_workers >= 1
+            and isinstance(mode, str)
+            and mode in {"preflight", "bounce_only", "off"}
+            and (value.get("enable_decomposition") is True or mode == "off")
+        )
 
     @staticmethod
     def _seed_semantics_fingerprint(seed: Seed) -> str:
@@ -4436,6 +4526,7 @@ class OrchestratorRunner:
         )
 
         guidance_bundle = self._ensure_new_run_guidance()
+        execution_semantics = self._execution_semantics_contract()
         routing_contract = serialize_model_router(self._model_router)
         routing_contract["requested_model_tier"] = self._requested_model_tier
         # Effort routing is independent of model-tier routing. Persist it even
@@ -4457,6 +4548,9 @@ class OrchestratorRunner:
         proof_contract: dict[str, Any] = {
             "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
             "routing_fingerprint": self._routing_fingerprint(routing_contract),
+            "execution_semantics_fingerprint": self._execution_semantics_fingerprint(
+                execution_semantics
+            ),
         }
         workspace_identity = self._proof_workspace_identity()
         if workspace_identity is not None:
@@ -4483,6 +4577,7 @@ class OrchestratorRunner:
             "version": EXECUTION_CONTRACT_VERSION,
             "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
+            "execution_semantics": execution_semantics,
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
             "guidance": self._guidance_contract(guidance_bundle),
@@ -4498,7 +4593,6 @@ class OrchestratorRunner:
         session_id: str,
     ) -> None:
         """Persist the user-facing run configuration before any AC dispatch."""
-        from ouroboros.config import get_cross_harness_redispatch_enabled
         from ouroboros.events.base import BaseEvent
 
         starting_tier = self._model_router.base_tier if self._model_router else None
@@ -4525,7 +4619,7 @@ class OrchestratorRunner:
                     "starting_model_tier": starting_tier,
                     "starting_model": starting_model,
                     "progressive_escalation_enabled": self._model_router is not None,
-                    "alternate_harness_enabled": get_cross_harness_redispatch_enabled(),
+                    "alternate_harness_enabled": self._cross_harness_redispatch_enabled,
                     "strict_baseline_authorized": (
                         self._execution_preferences.strict_baseline_authorized
                     ),
@@ -4981,6 +5075,7 @@ class OrchestratorRunner:
             not in {
                 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
                 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
+                PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -4991,10 +5086,13 @@ class OrchestratorRunner:
 
         migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
         migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
+        migrate_v4_contract = raw_version == PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION
+        migrate_legacy_contract = migrate_v2_contract or migrate_v3_contract or migrate_v4_contract
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        raw_execution_semantics = raw_contract.get("execution_semantics")
         raw_authority = raw_contract.get("foundation_a_authority")
         if (
             not isinstance(raw_proof, Mapping)
@@ -5010,8 +5108,16 @@ class OrchestratorRunner:
             )
 
         # Version 2 predates effort/Route B fields; version 3 predates the
-        # independent requested-tier field. Only those exact shapes migrate.
+        # independent requested-tier field; version 4 predates the complete
+        # executor-semantics snapshot. Only those exact shapes migrate.
         # A malformed current contract must never fall through either path.
+        if migrate_legacy_contract and (
+            "execution_semantics" in raw_contract or "execution_semantics_fingerprint" in raw_proof
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": f"version {raw_version} execution semantics extension"},
+            )
         if migrate_v2_contract and (
             "reasoning_effort" in raw_routing
             or "route_compat" in raw_routing
@@ -5033,6 +5139,7 @@ class OrchestratorRunner:
         persisted_project_root = raw_proof.get("project_root")
         persisted_workspace_path = raw_proof.get("workspace_path")
         persisted_routing_fingerprint = raw_proof.get("routing_fingerprint")
+        persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
         persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
         persisted_constructor_model = raw_routing.get("constructor_model")
         persisted_runtime_execution = raw_routing.get("runtime_execution")
@@ -5059,6 +5166,15 @@ class OrchestratorRunner:
             or not persisted_workspace_path.strip()
             or not isinstance(persisted_routing_fingerprint, str)
             or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
+            or (
+                not migrate_legacy_contract
+                and (
+                    not self._valid_execution_semantics_contract(raw_execution_semantics)
+                    or not isinstance(persisted_execution_semantics_fingerprint, str)
+                    or persisted_execution_semantics_fingerprint
+                    != self._execution_semantics_fingerprint(raw_execution_semantics)
+                )
+            )
             or (seed is not None and not valid_seed_fingerprint)
             or not self._valid_constructor_model_contract(persisted_constructor_model)
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
@@ -5352,6 +5468,21 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        if (
+            not migrate_legacy_contract
+            and dict(raw_execution_semantics) != self._execution_semantics_contract()
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with changed execution semantics",
+                details={
+                    "persisted_execution_semantics": dict(raw_execution_semantics),
+                    "current_execution_semantics": self._execution_semantics_contract(),
+                    "hint": (
+                        "Restore the original verification, retry, decomposition, and "
+                        "executor settings or start a new session."
+                    ),
+                },
+            )
         if self._model_routing_override_explicit:
             replacement = self._build_execution_contract(
                 seed=seed,
@@ -5369,7 +5500,7 @@ class OrchestratorRunner:
 
         self._model_router = restored_router
         self._requested_model_tier = persisted_requested_model_tier
-        if migrate_v2_contract or migrate_v3_contract:
+        if migrate_legacy_contract:
             replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
@@ -8436,12 +8567,56 @@ class OrchestratorRunner:
             ac_count=len(seed.acceptance_criteria),
         )
 
+        # Consume one immutable scalar snapshot for the whole invocation. The
+        # public new/resume paths pass the exact durable contract; low-level
+        # callers without one retain their current constructor semantics.
+        contract_source = execution_contract
+        if contract_source is None and isinstance(tracker.progress, Mapping):
+            tracker_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+            contract_source = tracker_contract if isinstance(tracker_contract, Mapping) else None
+        raw_execution_semantics = (
+            contract_source.get("execution_semantics")
+            if isinstance(contract_source, Mapping)
+            else None
+        )
+        execution_semantics: dict[str, Any]
+        if raw_execution_semantics is None:
+            execution_semantics = self._execution_semantics_contract()
+        elif self._valid_execution_semantics_contract(raw_execution_semantics):
+            execution_semantics = dict(raw_execution_semantics)
+        else:
+            raise OrchestratorError(
+                message="Cannot execute with an invalid execution-semantics snapshot",
+                details={"invalid": "execution_semantics"},
+            )
+        if execution_semantics != self._execution_semantics_contract():
+            raise OrchestratorError(
+                message="Cannot execute after execution semantics drifted",
+                details={
+                    "persisted_execution_semantics": execution_semantics,
+                    "current_execution_semantics": self._execution_semantics_contract(),
+                },
+            )
+        max_decomposition_depth = execution_semantics["max_decomposition_depth"]
+        max_parallel_workers = execution_semantics["max_parallel_workers"]
+        parallel_bounded_routing = bool(
+            has_durable_decomposition_replay(max_decomposition_depth)
+            and self._model_router is not None
+            and self._route_economics is not None
+            and getattr(
+                getattr(self._adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            is ParamSupport.NATIVE
+        )
+
         # Capture Routing D effect capability once at the dispatch choke point.
         # A durable parallel owner is itself sufficient replay evidence: it is
         # persisted before the first route event, so absence of those events
         # cannot authorize a fallthrough to the legacy executor after a crash.
         persisted_parallel_owner = tracker.progress.get("routing_resume_owner") == "parallel"
-        if persisted_parallel_owner and not self._bounded_route_runtime_active():
+        if persisted_parallel_owner and not parallel_bounded_routing:
             self._preserve_process_local_owner_for_retry(
                 session_id=tracker.session_id,
                 execution_id=exec_id,
@@ -8528,17 +8703,17 @@ class OrchestratorRunner:
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
-        effective_workers = self._plan_parallel_workers()
-        if effective_workers < self._max_parallel_workers:
+        effective_workers = self._plan_parallel_workers(max_parallel_workers)
+        if effective_workers < max_parallel_workers:
             self._console.print(
                 f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
-                f"'{self._adapter.runtime_backend}' (requested {self._max_parallel_workers}). "
+                f"'{self._adapter.runtime_backend}' (requested {max_parallel_workers}). "
                 f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
             )
             log.info(
                 "orchestrator.runner.fan_out_capped",
                 runtime_backend=self._adapter.runtime_backend,
-                requested_workers=self._max_parallel_workers,
+                requested_workers=max_parallel_workers,
                 effective_workers=effective_workers,
             )
 
@@ -8547,20 +8722,19 @@ class OrchestratorRunner:
         # effort source across its direct paths and the parallel executor.
         # Capture the activation snapshot immediately before construction so
         # the executor and the later owner publication use the same decision.
-        parallel_bounded_routing = self._bounded_route_runtime_active()
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
             console=self._console,
-            enable_decomposition=self._enable_decomposition,
-            decomposition_mode=self._decomposition_mode,
+            enable_decomposition=execution_semantics["enable_decomposition"],
+            decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
-            max_decomposition_depth=self._max_decomposition_depth,
+            max_decomposition_depth=max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
-            fat_harness_mode=self._fat_harness_mode,
+            fat_harness_mode=execution_semantics["fat_harness_mode"],
             reasoning_effort=self._reasoning_effort,
             # Legacy model selection predates Routing D and remains active when
             # durable route ownership is unavailable (for example, configured
@@ -8568,10 +8742,11 @@ class OrchestratorRunner:
             # gates only bounded escalation/replay with its durable-depth flag.
             model_router=self._model_router,
             route_economics=self._route_economics,
-            run_verify_commands=self._run_verify_commands,
-            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
-            ac_retry_attempts=self._ac_retry_attempts,
-            shadow_replay_enabled=self._shadow_replay_enabled,
+            run_verify_commands=execution_semantics["run_verify_commands"],
+            verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            ac_retry_attempts=execution_semantics["ac_retry_attempts"],
+            cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
+            shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],
             session_signal_hub=self._session_signal_hub,
             process_local_resume_nonce=self._parallel_process_local_resume_nonce(tracker),
         )
@@ -8674,7 +8849,7 @@ class OrchestratorRunner:
         verification_report = render_parallel_verification_report(
             parallel_result,
             len(seed.acceptance_criteria),
-            max_decomposition_depth=self._max_decomposition_depth,
+            max_decomposition_depth=max_decomposition_depth,
         )
         execution_summary = {
             "goal": seed.goal,
@@ -8690,8 +8865,8 @@ class OrchestratorRunner:
             "invalid_count": parallel_result.invalid_count,
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
-            "max_decomposition_depth": self._max_decomposition_depth,
-            "max_parallel_workers": self._max_parallel_workers,
+            "max_decomposition_depth": max_decomposition_depth,
+            "max_parallel_workers": max_parallel_workers,
             "effective_parallel_workers": effective_workers,
             "verification_report": verification_report,
             **self._task_summary(),

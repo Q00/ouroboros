@@ -56,22 +56,14 @@ class FailureClass(StrEnum):
     BLOCKED = "BLOCKED"
 
 
-_HARD_PRECONDITION_METADATA_KEYS = (
-    "failure_class",
-    "status",
-    "code",
-    "error_code",
-    "error_type",
-    "type",
-    "reason",
+_HARD_PRECONDITION_VALUE_KEY_TOKENS = frozenset(
+    {"failure", "status", "code", "error", "type", "reason", "kind", "cause", "message"}
 )
-_HARD_PRECONDITION_CHILD_KEYS = (
-    "blocker",
-    "error",
-    "details",
-    "metadata",
-    "response",
+_HARD_PRECONDITION_CHILD_KEY_TOKENS = frozenset(
+    {"blocker", "error", "detail", "details", "metadata", "response", "cause", "exception"}
 )
+_AUTHORIZATION_STATUS_KEY_TOKENS = frozenset({"status", "code"})
+_AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
 _HARD_PRECONDITION_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -85,6 +77,13 @@ _HARD_PRECONDITION_PATTERNS = tuple(
     )
 )
 _MAX_HARD_PRECONDITION_METADATA_MAPPINGS = 32
+
+
+def _normalize_machine_identifier(value: str) -> str:
+    """Canonicalize prose, CamelCase, snake/kebab case, and dotted labels."""
+    acronym_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", value)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", acronym_split)
+    return " ".join(re.sub(r"[^A-Za-z0-9]+", " ", camel_split).lower().split())
 
 
 def classify_hard_precondition(
@@ -111,18 +110,35 @@ def classify_hard_precondition(
         if len(seen) >= _MAX_HARD_PRECONDITION_METADATA_MAPPINGS:
             return FailureClass.BLOCKED
         seen.add(id(value))
-        for key in _HARD_PRECONDITION_METADATA_KEYS:
-            raw = value.get(key)
+        for key, raw in value.items():
+            if not isinstance(key, str):
+                continue
+            key_label = _normalize_machine_identifier(key)
+            key_tokens = frozenset(key_label.split())
+            if key_tokens & _HARD_PRECONDITION_CHILD_KEY_TOKENS:
+                pending.append(raw)
+            if not key_tokens & _HARD_PRECONDITION_VALUE_KEY_TOKENS:
+                continue
+            if key_tokens & _AUTHORIZATION_STATUS_KEY_TOKENS:
+                numeric_status = (
+                    int(raw)
+                    if isinstance(raw, int) and not isinstance(raw, bool)
+                    else (
+                        int(raw.strip())
+                        if isinstance(raw, str) and raw.strip().isdecimal()
+                        else None
+                    )
+                )
+                if numeric_status in _AUTHORIZATION_STATUS_CODES:
+                    return FailureClass.BLOCKED
             if not isinstance(raw, str):
                 continue
-            normalized = raw.strip().upper().replace("-", "_").replace(" ", "_")
-            if normalized == FailureClass.BLOCKED.value:
+            normalized = _normalize_machine_identifier(raw)
+            if normalized == FailureClass.BLOCKED.value.lower():
                 return FailureClass.BLOCKED
-            metadata_text.append(raw)
-        for key in _HARD_PRECONDITION_CHILD_KEYS:
-            pending.append(value.get(key))
+            metadata_text.append(normalized)
 
-    normalized_text = " ".join((content, *metadata_text)).lower()
+    normalized_text = " ".join((_normalize_machine_identifier(content), *metadata_text))
     if any(pattern.search(normalized_text) for pattern in _HARD_PRECONDITION_PATTERNS):
         return FailureClass.BLOCKED
     return None

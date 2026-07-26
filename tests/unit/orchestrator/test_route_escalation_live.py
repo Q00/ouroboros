@@ -497,15 +497,23 @@ async def test_route_exhaustion_is_durable_blocked_human_handoff() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "provider_error",
+    ("provider_error", "provider_metadata"),
     [
-        "permission denied: missing access to deployment",
-        "missing required tool terraform",
-        "configuration is not configured",
+        ("permission denied: missing access to deployment", {}),
+        ("missing required tool terraform", {}),
+        ("configuration is not configured", {}),
+        ("provider failed", {"errorType": "PermissionDenied"}),
+        ("provider failed", {"kind": "PermissionDenied"}),
+        ("provider failed", {"error_code": "MISSING_TOOL"}),
+        ("provider failed", {"reason": "AUTHENTICATION_REQUIRED"}),
+        ("provider failed", {"status": "environment_variable_not_configured"}),
+        ("provider failed", {"status": 401}),
+        ("provider failed", {"httpStatusCode": 403}),
     ],
 )
 async def test_parallel_hard_preconditions_stop_before_route_successor(
     provider_error: str,
+    provider_metadata: dict[str, object],
 ) -> None:
     """Every established hard-block class spends exactly one provider call."""
 
@@ -517,7 +525,7 @@ async def test_parallel_hard_preconditions_stop_before_route_successor(
         yield AgentMessage(
             type="result",
             content=provider_error,
-            data={"subtype": "error"},
+            data={"subtype": "error", **provider_metadata},
         )
 
     executor, _store, events = _executor(execute_task=execute_task)
