@@ -2244,6 +2244,145 @@ class TestClaudeSetup:
         assert recovery_path.exists()
         assert "unsupported version" in warning.call_args.args[0]
 
+    @pytest.mark.parametrize(
+        (
+            "target_name",
+            "phase",
+            "target_exists",
+            "operation",
+            "content_b64",
+            "sha256",
+        ),
+        [
+            ("mcp", "prepared", False, "noop", None, None),
+            ("mcp", "prepared", True, {"invalid": True}, None, None),
+            ("mcp", "prepared", True, "noop", 123, None),
+            ("mcp", "prepared", True, "write", "e30=", None),
+            ("config", "mcp_written", True, "noop", None, None),
+            ("config", "mcp_written", True, "write", None, "deadbeef"),
+            ("credentials", "config_written", False, "noop", None, None),
+            ("credentials", "config_written", True, "noop", None, "deadbeef"),
+            ("credentials", "config_written", True, "write", "e30=", None),
+        ],
+        ids=[
+            "missing-mcp-noop",
+            "mcp-invalid-operation-shape",
+            "mcp-non-string-content",
+            "mcp-content-without-hash",
+            "config-noop-forbidden",
+            "config-null-content-with-hash",
+            "missing-credentials-noop",
+            "credentials-null-content-with-hash",
+            "credentials-content-without-hash",
+        ],
+    )
+    def test_setup_claude_malformed_target_manifest_fails_closed(
+        self,
+        tmp_path: Path,
+        target_name: str,
+        phase: str,
+        target_exists: bool,
+        operation: object,
+        content_b64: object,
+        sha256: object,
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: claude\n  cli_path: /usr/local/bin/claude\n"
+            "llm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        credentials_path = config_dir / "credentials.yaml"
+        credentials_path.write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "docker",
+                            "args": ["run", "ouroboros-mcp"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        target_paths = {
+            "mcp": mcp_path,
+            "config": config_path,
+            "credentials": credentials_path,
+        }
+        target_path = target_paths[target_name]
+        if not target_exists:
+            target_path.unlink()
+
+        snapshots = {
+            name: setup_cmd._read_claude_setup_file_snapshot(path)
+            for name, path in target_paths.items()
+        }
+        assert all(snapshot is not None for snapshot in snapshots.values())
+        mcp_snapshot = snapshots["mcp"]
+        config_snapshot = snapshots["config"]
+        credentials_snapshot = snapshots["credentials"]
+        assert mcp_snapshot is not None
+        assert config_snapshot is not None
+        assert credentials_snapshot is not None
+
+        manifest = setup_cmd._build_claude_setup_manifest(
+            mcp=setup_cmd._ClaudeSetupStagedFile(
+                mcp_path,
+                mcp_snapshot,
+                None if mcp_snapshot.existed else b'{"mcpServers": {}}\n',
+                mcp_snapshot.mode if mcp_snapshot.existed else 0o600,
+            ),
+            config=setup_cmd._ClaudeSetupStagedFile(
+                config_path,
+                config_snapshot,
+                config_snapshot.content,
+                config_snapshot.mode,
+            ),
+            credentials=setup_cmd._ClaudeSetupStagedFile(
+                credentials_path,
+                credentials_snapshot,
+                None if credentials_snapshot.existed else b"providers: {}\n",
+                credentials_snapshot.mode if credentials_snapshot.existed else 0o600,
+            ),
+            claude_path="/usr/local/bin/claude",
+        )
+        manifest["phase"] = phase
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        if phase in {"mcp_written", "config_written"}:
+            targets["mcp"]["post"] = setup_cmd._snapshot_to_manifest(mcp_snapshot)
+        if phase == "config_written":
+            targets["config"]["post"] = setup_cmd._snapshot_to_manifest(config_snapshot)
+
+        raw_target = targets[target_name]
+        raw_target["operation"] = operation
+        raw_target["content_b64"] = content_b64
+        raw_target["sha256"] = sha256
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+        before = target_path.read_bytes() if target_path.exists() else None
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert (target_path.read_bytes() if target_path.exists() else None) == before
+        assert "incomplete" in warning.call_args.args[0]
+
     def test_setup_claude_commit_marker_failure_remains_retryable_without_rollback(
         self, tmp_path: Path
     ) -> None:

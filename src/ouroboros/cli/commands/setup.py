@@ -293,6 +293,8 @@ def _snapshot_from_manifest(data: dict[str, object]) -> _ClaudeSetupFileSnapshot
     if not isinstance(existed, bool) or not isinstance(mode, int):
         return None
     if not existed:
+        if identity is not None or sha256 is not None or content_b64 is not None:
+            return None
         return _ClaudeSetupFileSnapshot(False, None, mode, None, None)
     if (
         not isinstance(identity, dict)
@@ -491,6 +493,10 @@ def _load_claude_mcp_recovery_manifest(recovery_path: Path) -> dict[str, object]
     if data.get("phase") not in _CLAUDE_MCP_RECOVERY_PHASES:
         print_warning("Claude MCP recovery journal has unknown phase — setup aborted.")
         return None
+    for target_name in ("mcp", "config", "credentials"):
+        if _manifest_target(data, target_name) is None:
+            print_warning("Claude MCP recovery journal target is incomplete — setup aborted.")
+            return None
     return data
 
 
@@ -570,6 +576,8 @@ def _manifest_target(
     manifest: dict[str, object],
     name: str,
 ) -> tuple[Path, _ClaudeSetupFileSnapshot, bytes | None, int] | None:
+    if name not in {"mcp", "config", "credentials"}:
+        return None
     targets = manifest.get("targets")
     if not isinstance(targets, dict):
         return None
@@ -578,10 +586,14 @@ def _manifest_target(
         return None
     raw_path = raw.get("path")
     raw_content = raw.get("content_b64")
+    raw_operation = raw.get("operation")
     raw_mode = raw.get("mode")
     raw_pre = raw.get("pre")
     if (
         not isinstance(raw_path, str)
+        or not raw_path
+        or not isinstance(raw_operation, str)
+        or raw_operation not in {"write", "noop"}
         or not isinstance(raw_mode, int)
         or not isinstance(raw_pre, dict)
     ):
@@ -589,16 +601,62 @@ def _manifest_target(
     pre = _snapshot_from_manifest(raw_pre)
     if pre is None:
         return None
-    content: bytes | None = None
-    if isinstance(raw_content, str):
+    raw_sha = raw.get("sha256")
+    if raw_content is None:
+        if raw_sha is not None or raw_operation != "noop":
+            return None
+        if not _manifest_noop_target_is_valid(name, pre):
+            return None
+        content: bytes | None = None
+    else:
+        if not isinstance(raw_content, str) or not isinstance(raw_sha, str):
+            return None
+        if raw_operation != "write":
+            return None
         try:
             content = base64.b64decode(raw_content.encode("ascii"), validate=True)
         except (ValueError, UnicodeEncodeError):
             return None
-        raw_sha = raw.get("sha256")
-        if not isinstance(raw_sha, str) or hashlib.sha256(content).hexdigest() != raw_sha:
+        if hashlib.sha256(content).hexdigest() != raw_sha:
             return None
     return Path(raw_path), pre, content, raw_mode
+
+
+def _manifest_noop_target_is_valid(name: str, pre: _ClaudeSetupFileSnapshot) -> bool:
+    if not pre.existed or pre.content is None:
+        return False
+    if name == "mcp":
+        try:
+            data = json.loads(
+                pre.content.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_json_constant,
+            )
+            _reject_non_finite_json_numbers(data)
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            RecursionError,
+        ):
+            return False
+        if not isinstance(data, dict):
+            return False
+        servers = data.get("mcpServers")
+        entry = servers.get("ouroboros") if isinstance(servers, dict) else None
+        return isinstance(entry, dict) and _is_supported_claude_mcp_entry(entry)
+    if name == "credentials":
+        from ouroboros.config.models import CredentialsConfig
+
+        try:
+            data = yaml.safe_load(pre.content.decode("utf-8"))
+            if data is None:
+                data = {}
+            CredentialsConfig.model_validate(data)
+        except (UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError, RecursionError):
+            return False
+        return True
+    return False
 
 
 def _manifest_claude_cli_path(manifest: dict[str, object]) -> str | None:
@@ -640,6 +698,7 @@ def _set_manifest_target_stage(
         return False
     raw_target["pre"] = _snapshot_to_manifest(snapshot)
     raw_target["mode"] = mode
+    raw_target["operation"] = "write" if content is not None else "noop"
     raw_target["content_b64"] = (
         base64.b64encode(content).decode("ascii") if content is not None else None
     )
@@ -3377,6 +3436,7 @@ def _build_claude_setup_manifest(
             "path": str(staged.path),
             "mode": staged.mode,
             "pre": _snapshot_to_manifest(staged.snapshot),
+            "operation": "write" if content is not None else "noop",
             "content_b64": (
                 base64.b64encode(content).decode("ascii") if content is not None else None
             ),
