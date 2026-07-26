@@ -3729,6 +3729,11 @@ class TestOrchestratorRunner:
             with (
                 patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
                 patch.object(
+                    runner,
+                    "_restore_execution_contract_snapshot",
+                    wraps=runner._restore_execution_contract_snapshot,
+                ) as restore_contract,
+                patch.object(
                     runner, "_execute_parallel", AsyncMock(return_value=expected)
                 ) as execute,
             ):
@@ -3742,6 +3747,11 @@ class TestOrchestratorRunner:
             assert (
                 execute.await_args.kwargs["execution_contract"]
                 == tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+            )
+            assert restore_contract.call_count == 2
+            assert all(
+                call.kwargs["prepared_live_execution"] is True
+                for call in restore_contract.call_args_list
             )
         finally:
             runner._retire_process_local_authority(
