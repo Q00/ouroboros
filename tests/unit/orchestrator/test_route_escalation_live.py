@@ -43,6 +43,8 @@ from ouroboros.orchestrator.model_routing import build_model_router
 from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     ParallelExecutionCancelled,
+    _collect_result_conflict_files,
+    _deserialize_conflict_files,
     _VerifyGateOutcome,
 )
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -112,6 +114,21 @@ def _multi_seed() -> Seed:
         ontology_schema=OntologySchema(name="n", description="d"),
         metadata=SeedMetadata(ambiguity_score=0.05),
     )
+
+
+def test_durable_conflict_projection_keeps_a_finite_per_path_bound() -> None:
+    oversized = "p" * 32_769
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        conflict_files=(oversized,),
+    )
+
+    with pytest.raises(RuntimeError, match="conflict projection"):
+        _collect_result_conflict_files(result)
+    with pytest.raises(RuntimeError, match="conflict projection"):
+        _deserialize_conflict_files([oversized])
 
 
 def _executor(

@@ -64,6 +64,7 @@ _COORDINATOR_ARTIFACT_TYPE = "coordinator_review"
 _MAX_COORDINATOR_STRING_ITEMS = 1_024
 _MAX_COORDINATOR_ID_CHARS = 1_024
 _MAX_COORDINATOR_PATH_CHARS = 4_096
+_MAX_COORDINATOR_CONFLICT_PATH_CHARS = 32_768
 _MAX_COORDINATOR_ITEM_CHARS = 8_192
 _MAX_COORDINATOR_SUMMARY_CHARS = 64_000
 _MAX_COORDINATOR_ARTIFACT_CHARS = 256_000
@@ -159,6 +160,7 @@ def _validate_file_conflict(conflict: object) -> FileConflict:
     if (
         type(conflict.file_path) is not str
         or not conflict.file_path
+        or len(conflict.file_path) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
         or type(conflict.ac_indices) is not tuple
         or any(type(index) is not int or index < 0 for index in conflict.ac_indices)
         or tuple(sorted(set(conflict.ac_indices))) != conflict.ac_indices
@@ -310,6 +312,7 @@ def validate_coordinator_started_payload(
         if (
             raw_conflict.get("file_path") != expected.file_path
             or type(raw_conflict.get("file_path")) is not str
+            or len(raw_conflict["file_path"]) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
             or type(raw_indices) is not list
             or len(raw_indices) != len(expected.ac_indices)
             or any(type(index) is not int or index < 0 for index in raw_indices)
@@ -573,6 +576,7 @@ class CoordinatorReview:
             if (
                 type(file_path) is not str
                 or not file_path
+                or len(file_path) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
                 or file_path != expected_conflict.file_path
             ):
                 raise ValueError("coordinator artifact conflict path is invalid")
@@ -1146,7 +1150,11 @@ def _parse_review_response(
                     if type(item) is str
                 ]
             if type(raw_resolved) is list:
-                resolved_files = {item for item in raw_resolved if type(item) is str and item}
+                resolved_files = {
+                    item
+                    for item in raw_resolved
+                    if type(item) is str and 0 < len(item) <= _MAX_COORDINATOR_CONFLICT_PATH_CHARS
+                }
         except (AttributeError, json.JSONDecodeError, IndexError):
             log.warning(
                 "coordinator.parse_failed",
