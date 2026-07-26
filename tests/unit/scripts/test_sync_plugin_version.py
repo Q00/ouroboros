@@ -106,11 +106,15 @@ def test_main_write_updates_both_setup_skill_markers(
     assert bundled_skill.read_text() == "<!-- ooo:VERSION:1.2.4 -->\nbundled\n"
 
 
-def test_update_version_marker_preserves_unrelated_bytes_with_bom_and_crlf(tmp_path: Path) -> None:
+def test_update_version_marker_preserves_unrelated_bytes_with_bom_and_crlf(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     marker = b"<!-- ooo:VERSION:1.2.3 -->"
     target = tmp_path / "SKILL.md"
     original = b"\xef\xbb\xbfheading\r\n" + marker + "\r\nbody café\r\n".encode()
     target.write_bytes(original)
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
 
     assert sync_plugin_version.update_version_marker(target, "1.2.4") is not None
 
@@ -829,6 +833,56 @@ def test_atomic_exchange_preserves_open_descriptor_write_displaced_to_temp(
     assert late_external in reachable_bytes
 
 
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
+def test_atomic_exchange_quarantines_late_open_descriptor_write_on_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    content = b'{"version":"1.2.4"}\n'
+    late_external = b'{"version":"1.2.3","note":"late fd during cleanup"}\n'
+    target.write_bytes(original)
+    expected_generation = sync_plugin_version._path_generation(target)
+    displaced_fd = os.open(target, os.O_WRONLY)
+    real_quarantine = sync_plugin_version._quarantine_displaced_path
+    quarantined_path: Path | None = None
+
+    def write_before_quarantine(temp_path: Path, path: Path) -> Path:
+        nonlocal quarantined_path
+        os.lseek(displaced_fd, 0, os.SEEK_SET)
+        os.write(displaced_fd, late_external)
+        os.ftruncate(displaced_fd, len(late_external))
+        os.fsync(displaced_fd)
+        quarantined_path = real_quarantine(temp_path, path)
+        return quarantined_path
+
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        sync_plugin_version,
+        "_quarantine_displaced_path",
+        write_before_quarantine,
+    )
+
+    try:
+        owned_generation = sync_plugin_version._atomic_write_bytes(
+            target,
+            content,
+            expected_current=original,
+            expected_generation=expected_generation,
+        )
+    finally:
+        os.close(displaced_fd)
+
+    assert target.read_bytes() == content
+    assert sync_plugin_version._path_generation(target) == owned_generation
+    assert quarantined_path is not None
+    assert quarantined_path.read_bytes() == late_external
+
+
 def test_atomic_write_fails_closed_when_exchange_is_unavailable(
     tmp_path: Path,
     monkeypatch,
@@ -854,7 +908,7 @@ def test_atomic_write_fails_closed_when_exchange_is_unavailable(
     not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="atomic pathname exchange is unavailable on this platform",
 )
-def test_atomic_write_cleanup_failure_does_not_mask_active_owned_write_error(
+def test_atomic_write_quarantines_displaced_inode_before_directory_sync_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -863,20 +917,22 @@ def test_atomic_write_cleanup_failure_does_not_mask_active_owned_write_error(
     content = b'{"version":"1.2.4"}\n'
     target.write_bytes(original)
     real_open = sync_plugin_version.os.open
-    real_unlink = Path.unlink
+    real_quarantine = sync_plugin_version._quarantine_displaced_path
+    quarantined_path: Path | None = None
 
     def fail_directory_open(path, flags, *args, **kwargs):
         if Path(path) == tmp_path:
             raise OSError("injected directory open failure")
         return real_open(path, flags, *args, **kwargs)
 
-    def fail_displaced_temp_unlink(path: Path, *, missing_ok: bool = False) -> None:
-        if path != target and path.parent == tmp_path and path.read_bytes() == original:
-            raise OSError("injected displaced temp unlink failure")
-        real_unlink(path, missing_ok=missing_ok)
+    def capture_quarantine(temp_path: Path, path: Path) -> Path:
+        nonlocal quarantined_path
+        quarantined_path = real_quarantine(temp_path, path)
+        return quarantined_path
 
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
     monkeypatch.setattr(sync_plugin_version.os, "open", fail_directory_open)
-    monkeypatch.setattr(Path, "unlink", fail_displaced_temp_unlink)
+    monkeypatch.setattr(sync_plugin_version, "_quarantine_displaced_path", capture_quarantine)
 
     with pytest.raises(sync_plugin_version._OwnedWriteError) as raised:
         sync_plugin_version._atomic_write_bytes(
@@ -888,8 +944,9 @@ def test_atomic_write_cleanup_failure_does_not_mask_active_owned_write_error(
     assert "directory open failure" in str(raised.value)
     assert isinstance(raised.value.__cause__, OSError)
     assert "directory open failure" in str(raised.value.__cause__)
-    assert any("displaced temp unlink failure" in note for note in raised.value.__notes__)
     assert target.read_bytes() == content
+    assert quarantined_path is not None
+    assert quarantined_path.read_bytes() == original
 
 
 def test_main_write_rolls_back_when_later_write_fails(
@@ -1147,7 +1204,7 @@ def test_main_write_rolls_back_owned_exchange_when_parent_dir_open_fails(
     not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="atomic pathname exchange is unavailable on this platform",
 )
-def test_main_write_rolls_back_owned_exchange_when_displaced_temp_unlink_fails(
+def test_main_write_rolls_back_owned_exchange_when_displaced_quarantine_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1176,36 +1233,35 @@ def test_main_write_rolls_back_owned_exchange_when_displaced_temp_unlink_fails(
         "argv",
         ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
     )
-    real_unlink = Path.unlink
-    cleanup_failure_injected = False
+    real_quarantine = sync_plugin_version._quarantine_displaced_path
+    quarantine_failure_injected = False
     foreign_generation = None
 
-    def fail_marketplace_displaced_temp_unlink(
-        path: Path,
-        *,
-        missing_ok: bool = False,
-    ) -> None:
-        nonlocal cleanup_failure_injected, foreign_generation
+    def fail_marketplace_displaced_quarantine(temp_path: Path, path: Path) -> Path:
+        nonlocal quarantine_failure_injected, foreign_generation
         if (
-            not cleanup_failure_injected
-            and path.parent == marketplace_json.parent
-            and path.name.startswith(f".{marketplace_json.name}.")
-            and path.read_bytes() == originals[marketplace_json]
+            not quarantine_failure_injected
+            and path == marketplace_json
+            and temp_path.read_bytes() == originals[marketplace_json]
         ):
             replacement = tmp_path / "source-skill-same-bytes-foreign-generation"
             replacement.write_bytes(originals[source_skill])
             os.replace(replacement, source_skill)
             foreign_generation = sync_plugin_version._path_generation(source_skill)
-            cleanup_failure_injected = True
-            raise OSError("injected displaced temp unlink failure")
-        real_unlink(path, missing_ok=missing_ok)
+            quarantine_failure_injected = True
+            raise OSError("injected displaced quarantine failure")
+        return real_quarantine(temp_path, path)
 
-    monkeypatch.setattr(Path, "unlink", fail_marketplace_displaced_temp_unlink)
+    monkeypatch.setattr(
+        sync_plugin_version,
+        "_quarantine_displaced_path",
+        fail_marketplace_displaced_quarantine,
+    )
 
-    with pytest.raises(sync_plugin_version._OwnedWriteError, match="displaced temp unlink failure"):
+    with pytest.raises(sync_plugin_version._OwnedWriteError, match="displaced quarantine failure"):
         sync_plugin_version.main()
 
-    assert cleanup_failure_injected
+    assert quarantine_failure_injected
     assert foreign_generation is not None
     assert source_skill.read_bytes() == originals[source_skill]
     assert sync_plugin_version._path_generation(source_skill) == foreign_generation

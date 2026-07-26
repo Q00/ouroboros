@@ -33,6 +33,7 @@ BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.m
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
 VERSION_MARKER_ENVELOPE_RE = re.compile(r"<!-- ooo:VERSION:(.*?) -->", re.DOTALL)
 _MAX_CONFLICT_RESTORE_EXCHANGES = 8
+_QUARANTINE_DIR_NAME = "ouroboros-sync-plugin-version-quarantine"
 _PathGeneration = tuple[int, int, int, int, int, int, int, int, int, int, str]
 
 
@@ -240,6 +241,78 @@ def _path_generation(path: Path) -> _PathGeneration:
     )
 
 
+def _git_directory() -> Path | None:
+    marker = ROOT / ".git"
+    if marker.is_dir():
+        git_dir = marker
+    else:
+        try:
+            value = marker.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return None
+        prefix = "gitdir:"
+        if not value.startswith(prefix):
+            return None
+        git_dir = Path(value.removeprefix(prefix).strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+    try:
+        common_value = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return git_dir
+    common_dir = Path(common_value)
+    return common_dir if common_dir.is_absolute() else (git_dir / common_dir).resolve()
+
+
+def _quarantine_directory(path: Path) -> Path:
+    """Return a writable quarantine directory on the target filesystem."""
+    target_device = path.parent.stat().st_dev
+    git_dir = _git_directory()
+    candidates: list[Path] = []
+    if git_dir is not None:
+        candidates.append(git_dir / _QUARANTINE_DIR_NAME)
+    candidates.extend(
+        [
+            ROOT / f".{_QUARANTINE_DIR_NAME}",
+            path.parent / f".{_QUARANTINE_DIR_NAME}",
+        ]
+    )
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if candidate.parent.stat().st_dev != target_device:
+                continue
+            candidate.mkdir(parents=True, exist_ok=True)
+            if candidate.stat().st_dev == target_device:
+                return candidate
+        except OSError:
+            continue
+    raise RuntimeError(f"could not create same-filesystem write quarantine for {path}")
+
+
+def _quarantine_displaced_path(temp_path: Path, path: Path) -> Path:
+    """Move a displaced inode to durable storage instead of unlinking it."""
+    # Quarantines persist because an uncooperative pre-exchange descriptor has
+    # no observable point at which it is safe to delete the displaced inode.
+    quarantine_dir = _quarantine_directory(path)
+    fd, quarantine_name = tempfile.mkstemp(
+        prefix=f"{path.name}.",
+        suffix=".displaced",
+        dir=quarantine_dir,
+    )
+    os.close(fd)
+    quarantine_path = Path(quarantine_name)
+    try:
+        os.replace(temp_path, quarantine_path)
+    except BaseException:
+        quarantine_path.unlink(missing_ok=True)
+        raise
+    return quarantine_path
+
+
 def _restore_latest_exchanged_content(
     temp_path: Path,
     path: Path,
@@ -271,6 +344,7 @@ def _atomic_write_bytes(
     temp_path = Path(temp_name)
     preserve_temp = False
     replaced_target = False
+    quarantine_path: Path | None = None
     try:
         with os.fdopen(fd, "wb") as temp_file:
             temp_file.write(content)
@@ -309,14 +383,20 @@ def _atomic_write_bytes(
                     f"write conflict for {path}: file changed since preflight; "
                     f"preserved exchanged content at {temp_path}"
                 )
+            preserve_temp = True
+            quarantine_path = _quarantine_displaced_path(temp_path, path)
         else:
             os.replace(temp_path, path)
             replaced_target = True
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        directories = [path.parent]
+        if quarantine_path is not None and quarantine_path.parent != path.parent:
+            directories.append(quarantine_path.parent)
+        for directory in directories:
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         return staged_generation
     except BaseException as exc:
         if replaced_target and not isinstance(exc, _OwnedWriteError):
