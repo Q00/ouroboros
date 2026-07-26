@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ouroboros.core.lineage import ACResult, EvaluationSummary
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.reflect import (
@@ -118,6 +120,11 @@ class TestPatchParse:
         # True is an int subclass; must not be treated as index 1.
         patches = _parse_ac_patches([{"op": "keep", "index": True}])
         assert patches[0].index is None
+
+    @pytest.mark.parametrize("raw_patches", [None, {"op": "keep"}, "not-a-list"])
+    def test_wrong_shaped_ac_patches_rejected(self, raw_patches: object) -> None:
+        with pytest.raises(TypeError, match="Expected ac_patches to be a list"):
+            _parse_ac_patches(raw_patches)
 
 
 class TestComposition:
@@ -240,6 +247,17 @@ class TestLegacyFallbackDiff:
         assert patches[0].op == "keep"
         assert patches[1].op == "revise"
         assert patches[1].content == "X"
+
+    @pytest.mark.parametrize("raw_patches", [None, {"0": {"op": "keep"}}, "not-a-list"])
+    def test_present_wrong_shaped_ac_patches_do_not_use_legacy_fallback(
+        self, raw_patches: object
+    ) -> None:
+        data = {
+            "ac_patches": raw_patches,
+            "refined_acs": ["AC zero", "CHANGED one", "AC two", "NEW three"],
+        }
+        with pytest.raises(TypeError, match="Expected ac_patches to be a list"):
+            _compose(data, challenge=(1,))
 
 
 class TestMalformedPatches:

@@ -107,7 +107,9 @@ def _parse_ontology_mutations(data: dict[str, object]) -> list[OntologyMutation]
         if not isinstance(raw_field_name, str) or not raw_field_name.strip():
             raise TypeError("Expected ontology mutation field_name to be a non-empty string")
 
-        raw_action = item.get("action", "modify")
+        if "action" not in item:
+            raise TypeError("Expected ontology mutation action to be explicit")
+        raw_action = item["action"]
         try:
             action = MutationAction(raw_action)
         except (TypeError, ValueError):
@@ -139,7 +141,7 @@ def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
     """Parse raw LLM patch objects, coercing unknown/``remove`` ops to keep."""
     patches: list[ACPatch] = []
     if not isinstance(raw_patches, list):
-        return patches
+        raise TypeError("Expected ac_patches to be a list")
     for item in raw_patches:
         if not isinstance(item, dict):
             continue
@@ -747,8 +749,8 @@ Guidelines:
         # from the settleable set before the backstop decides settling.
         settleable = passed_indices - regressed
 
-        raw_patches = data.get("ac_patches")
-        if isinstance(raw_patches, list) and raw_patches:
+        if "ac_patches" in data:
+            raw_patches = data["ac_patches"]
             patches = _parse_ac_patches(raw_patches)
             return _apply_satisficing_backstop(parent_acs, patches, protected, settleable)
 

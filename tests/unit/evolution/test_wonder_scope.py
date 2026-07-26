@@ -167,3 +167,19 @@ class TestWonderParseResponseFallback:
 
         assert len(output.questions) == 1
         assert output.should_continue is True
+
+    def test_tensions_with_should_continue_false_use_fail_closed_fallback(self) -> None:
+        """Contradictory envelopes must not silently converge."""
+        from unittest.mock import AsyncMock
+
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+        seed = _make_seed()
+
+        output = engine._parse_response(
+            '{"questions": [], "ontology_tensions": ["contradiction"], "should_continue": false}',
+            seed,
+        )
+
+        assert output.should_continue is True
+        assert len(output.questions) == 1
+        assert output.ontology_tensions == ()

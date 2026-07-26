@@ -201,6 +201,15 @@ class AssertionExtractor:
                         item,
                     )
                     continue
+                if (
+                    tier is VerificationTier.T1_CONSTANT
+                    and not text_fields["expected_value"].strip()
+                ):
+                    logger.warning(
+                        "Ignoring t1_constant assertion without expected_value: %r",
+                        item,
+                    )
+                    continue
 
                 try:
                     assertions.append(

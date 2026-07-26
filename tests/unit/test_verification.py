@@ -377,6 +377,32 @@ class TestAssertionExtractor:
         assert assertions[0].expected_value == "10"
 
     @pytest.mark.asyncio
+    async def test_t1_assertion_requires_expected_value_before_verifier(self) -> None:
+        """Empty T1 expected_value is rejected before regex presence can verify it."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"WARMUP_FRAMES\s*=\s*",
+                    "expected_value": "",
+                    "file_hint": "*.py",
+                    "description": "Warmup frames check",
+                }
+            ]
+        )
+        result = await extractor.extract("seed_empty_expected", ("WARMUP_FRAMES should be 10",))
+        assert result.is_ok
+        assert result.value == ()
+
+        project = TestSpecVerifier()._create_project({"config.py": "WARMUP_FRAMES = 999\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(
+            result.value, agent_results={0: True}
+        )
+        assert summary.total_assertions == 0
+        assert summary.verified_count == 0
+
+    @pytest.mark.asyncio
     async def test_caches_by_seed_id(self) -> None:
         """Second call with same seed_id returns cached results."""
         extractor = self._make_extractor(

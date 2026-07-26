@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import json
 import logging
+import math
 import re
 from typing import Literal
 
@@ -64,10 +65,10 @@ def _ground_ac_indices(refs: Iterable[object], total_acs: int | None) -> tuple[i
     """Convert 1-based AC refs to deduped, in-range 0-based indices."""
     seen: list[int] = []
     for ref in refs:
-        try:
-            idx = int(ref) - 1  # type: ignore[call-overload]
-        except (TypeError, ValueError):
+        one_based = _coerce_finite_integer_ref(ref)
+        if one_based is None:
             continue
+        idx = one_based - 1
         if idx < 0:
             continue
         if total_acs is not None and idx >= total_acs:
@@ -75,6 +76,26 @@ def _ground_ac_indices(refs: Iterable[object], total_acs: int | None) -> tuple[i
         if idx not in seen:
             seen.append(idx)
     return tuple(seen)
+
+
+def _coerce_finite_integer_ref(ref: object) -> int | None:
+    """Return a finite integer AC ref, rejecting bools and non-finite numerics."""
+    if isinstance(ref, bool):
+        return None
+    if isinstance(ref, int):
+        return ref
+    if isinstance(ref, float):
+        if math.isfinite(ref) and ref.is_integer():
+            return int(ref)
+        return None
+    if isinstance(ref, str):
+        try:
+            value = float(ref)
+        except ValueError:
+            return None
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+    return None
 
 
 def ground_question_text(text: str, total_acs: int | None) -> GroundedQuestion:
@@ -424,6 +445,8 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             should_continue = data.get("should_continue", True)
             if not isinstance(should_continue, bool):
                 raise TypeError("Expected should_continue to be a boolean")
+            if ontology_tensions and not should_continue:
+                raise TypeError("Expected should_continue=true when ontology_tensions are present")
             reasoning = data.get("reasoning", "")
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
