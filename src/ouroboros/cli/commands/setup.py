@@ -122,13 +122,41 @@ def _is_supported_claude_mcp_entry(entry: dict[str, object]) -> bool:
         return "url" not in entry and "headers" not in entry
 
     if isinstance(url, str) and url.strip():
-        return (
-            entry_type in {"http", "sse", "streamable-http"}
-            and "command" not in entry
-            and "args" not in entry
-            and "env" not in entry
-        )
+        if entry_type in {"http", "sse", "streamable-http"}:
+            return "command" not in entry and "args" not in entry and "env" not in entry
+        if entry_type in {"ws", "websocket"}:
+            return (
+                url.startswith(("ws://", "wss://"))
+                and "command" not in entry
+                and "args" not in entry
+                and "env" not in entry
+            )
 
+    return False
+
+
+def _is_setup_managed_claude_mcp_entry(entry: dict[str, object]) -> bool:
+    command = entry.get("command")
+    raw_args = entry.get("args")
+    if (
+        not isinstance(command, str)
+        or not isinstance(raw_args, list)
+        or not all(isinstance(item, str) for item in raw_args)
+    ):
+        return False
+    args = [item for item in raw_args if isinstance(item, str)]
+    if command == "uvx":
+        package_spec = args[1] if len(args) >= 2 else ""
+        return (
+            len(args) >= 5
+            and args[0] == "--from"
+            and (package_spec == "ouroboros-ai" or package_spec.startswith("ouroboros-ai["))
+            and args[2:5] == ["ouroboros", "mcp", "serve"]
+        )
+    if command == "ouroboros":
+        return args[:2] == ["mcp", "serve"]
+    if command in {"python", "python3"}:
+        return args[:4] == ["-m", "ouroboros", "mcp", "serve"]
     return False
 
 
@@ -181,6 +209,17 @@ class _ClaudeSetupConflictError(OSError):
 
 class _ParentDirectoryFsyncError(OSError):
     """A promoted directory entry could not be made durable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backup_path: Path | None = None,
+        promoted_snapshot: _ClaudeSetupFileSnapshot | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.backup_path = backup_path
+        self.promoted_snapshot = promoted_snapshot
 
 
 def _expected_claude_setup_target_paths() -> dict[str, Path]:
@@ -600,6 +639,7 @@ def _promote_text_cas(
     backup_path: Path | None = None
     claimed_existing = False
     published = False
+    remove_backup = False
     try:
         if expected.existed:
             if not _claude_setup_file_matches(path, expected):
@@ -628,11 +668,6 @@ def _promote_text_cas(
                 tmp_path.unlink()
             except FileExistsError as exc:
                 raise _ClaudeSetupConflictError(f"{path} changed during setup") from exc
-            except OSError:
-                if not path.exists():
-                    os.rename(backup_path, path)
-                    claimed_existing = False
-                raise
         else:
             if not _claude_setup_file_matches(path, expected):
                 raise _ClaudeSetupConflictError(f"{path} changed during setup")
@@ -642,22 +677,48 @@ def _promote_text_cas(
                 raise _ClaudeSetupConflictError(f"{path} changed during setup") from exc
             published = True
             tmp_path.unlink()
-        _fsync_parent_dir(path)
         promoted = _read_claude_setup_file_snapshot(path)
         if promoted is None or not promoted.existed:
             raise OSError(f"Could not verify promoted file: {path}")
+        try:
+            _fsync_parent_dir(path)
+        except _ParentDirectoryFsyncError as exc:
+            preserved_backup = (
+                backup_path if backup_path is not None and backup_path.exists() else None
+            )
+            suffix = (
+                f"; previous bytes preserved at {preserved_backup}"
+                if preserved_backup is not None
+                else ""
+            )
+            raise _ParentDirectoryFsyncError(
+                f"{exc}{suffix}",
+                backup_path=preserved_backup,
+                promoted_snapshot=promoted,
+            ) from exc
+        remove_backup = True
         return promoted
-    except OSError:
+    except OSError as exc:
         if claimed_existing and not published and backup_path is not None and not path.exists():
             try:
                 os.rename(backup_path, path)
                 claimed_existing = False
-            except OSError:
-                pass
+            except OSError as restore_exc:
+                raise OSError(
+                    f"{exc}; could not restore {path}; previous bytes preserved at "
+                    f"{backup_path}: {restore_exc}"
+                ) from exc
+        if (
+            published
+            and backup_path is not None
+            and backup_path.exists()
+            and not isinstance(exc, _ParentDirectoryFsyncError)
+        ):
+            raise OSError(f"{exc}; previous bytes preserved at {backup_path}") from exc
         raise
     finally:
         cleanup_paths = [tmp_path]
-        if backup_path is not None:
+        if backup_path is not None and (remove_backup or not claimed_existing):
             cleanup_paths.append(backup_path)
         for cleanup_path in cleanup_paths:
             try:
@@ -1335,17 +1396,13 @@ def _ensure_claude_mcp_entry(
         needs_write = True
         registered = True
     else:
-        # Remove legacy timeout key
-        if "timeout" in existing:
+        setup_managed = _is_setup_managed_claude_mcp_entry(existing)
+        if setup_managed and "timeout" in existing:
             del existing["timeout"]
             needs_write = True
             removed_timeout = True
 
-        # Update entry to match currently detected install method, but only
-        # for known standard commands. Custom entries (docker, nix, etc.) are
-        # left untouched so we don't break user-managed configurations.
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
-        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
+        if setup_managed and detected is not None:
             if (
                 existing.get("command") != detected["command"]
                 or existing.get("args") != detected["args"]
@@ -3532,7 +3589,7 @@ def _validate_existing_credentials_file(credentials_path: Path) -> bool:
 
     try:
         load_credentials(credentials_path)
-    except ConfigError as exc:
+    except (ConfigError, UnicodeDecodeError, OSError) as exc:
         print_warning(f"Could not validate {credentials_path} — Claude setup aborted: {exc}")
         return False
     return True
@@ -3727,11 +3784,11 @@ def _stage_claude_mcp_content(
         servers["ouroboros"] = detected
         registered = True
     else:
-        if "timeout" in existing:
+        setup_managed = _is_setup_managed_claude_mcp_entry(existing)
+        if setup_managed and "timeout" in existing:
             del existing["timeout"]
             removed_timeout = True
-        known_commands = {"uvx", "ouroboros", "python3", "python"}
-        if detected is not None and existing.get("command") in known_commands:
+        if setup_managed and detected is not None:
             if (
                 existing.get("command") != detected["command"]
                 or existing.get("args") != detected["args"]
@@ -3778,6 +3835,66 @@ def _promote_claude_setup_target(
     return _update_claude_mcp_recovery_phase(
         mcp_config_path, manifest, phase, target=name, snapshot=promoted
     )
+
+
+def _claude_setup_live_state_is_committed(
+    mcp_config_path: Path,
+    config_path: Path,
+    credentials_path: Path,
+    claude_path: str,
+) -> bool:
+    mcp_snapshot = _read_claude_setup_file_snapshot(mcp_config_path)
+    config_snapshot = _read_claude_setup_file_snapshot(config_path)
+    credentials_snapshot = _read_claude_setup_file_snapshot(credentials_path)
+    if mcp_snapshot is None or config_snapshot is None or credentials_snapshot is None:
+        return False
+    return (
+        _manifest_noop_target_is_valid("mcp", mcp_snapshot)
+        and _claude_config_snapshot_has_owned_values(config_snapshot, claude_path)
+        and _manifest_noop_target_is_valid("credentials", credentials_snapshot)
+    )
+
+
+def _report_claude_setup_success(
+    claude_path: str,
+    config_path: Path,
+    *,
+    registered: bool,
+    removed_timeout: bool,
+    updated_entry: bool,
+) -> None:
+    print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
+    if registered:
+        print_success("Registered MCP server in ~/.claude/mcp.json")
+    if removed_timeout:
+        print_info("Removed legacy MCP timeout override.")
+    if updated_entry:
+        print_info("Updated MCP server entry to match current install method.")
+    print_info(f"Config saved to: {config_path}")
+
+
+def _complete_recovered_claude_setup(
+    mcp_config_path: Path,
+    config_path: Path,
+    credentials_path: Path,
+    claude_path: str,
+    *,
+    registered: bool,
+    removed_timeout: bool,
+    updated_entry: bool,
+) -> bool:
+    if not _recover_claude_mcp_activation() or not _claude_setup_live_state_is_committed(
+        mcp_config_path, config_path, credentials_path, claude_path
+    ):
+        return False
+    _report_claude_setup_success(
+        claude_path,
+        config_path,
+        registered=registered,
+        removed_timeout=removed_timeout,
+        updated_entry=updated_entry,
+    )
+    return True
 
 
 def _setup_claude(claude_path: str) -> bool:
@@ -3841,37 +3958,81 @@ def _setup_claude(claude_path: str) -> bool:
 
     try:
         if not _promote_claude_setup_target(mcp_config_path, manifest, "mcp", "mcp_written"):
-            _recover_claude_mcp_activation()
-            return False
+            return _complete_recovered_claude_setup(
+                mcp_config_path,
+                config_path,
+                credentials_path,
+                claude_path,
+                registered=registered,
+                removed_timeout=removed_timeout,
+                updated_entry=updated_entry,
+            )
         if not _promote_live_claude_config_target(mcp_config_path, manifest, "config_written"):
-            _recover_claude_mcp_activation()
-            return False
+            return _complete_recovered_claude_setup(
+                mcp_config_path,
+                config_path,
+                credentials_path,
+                claude_path,
+                registered=registered,
+                removed_timeout=removed_timeout,
+                updated_entry=updated_entry,
+            )
         if not _promote_claude_setup_target(
             mcp_config_path, manifest, "credentials", "credentials_written"
         ):
-            _recover_claude_mcp_activation()
-            return False
+            return _complete_recovered_claude_setup(
+                mcp_config_path,
+                config_path,
+                credentials_path,
+                claude_path,
+                registered=registered,
+                removed_timeout=removed_timeout,
+                updated_entry=updated_entry,
+            )
     except _ParentDirectoryFsyncError as exc:
         print_warning(f"Claude setup durability is pending: {exc}")
         return False
 
     if not _update_claude_mcp_recovery_phase(mcp_config_path, manifest, "committed"):
         print_warning("Claude MCP recovery journal cleanup is pending.")
-        return False
+        return _complete_recovered_claude_setup(
+            mcp_config_path,
+            config_path,
+            credentials_path,
+            claude_path,
+            registered=registered,
+            removed_timeout=removed_timeout,
+            updated_entry=updated_entry,
+        )
     if not _update_claude_mcp_recovery_phase(mcp_config_path, manifest, "cleanup_pending"):
         print_warning("Claude MCP recovery journal cleanup is pending.")
-        return False
+        return _complete_recovered_claude_setup(
+            mcp_config_path,
+            config_path,
+            credentials_path,
+            claude_path,
+            registered=registered,
+            removed_timeout=removed_timeout,
+            updated_entry=updated_entry,
+        )
     if not _clear_claude_mcp_recovery(mcp_config_path, non_blocking=True):
-        return False
+        return _complete_recovered_claude_setup(
+            mcp_config_path,
+            config_path,
+            credentials_path,
+            claude_path,
+            registered=registered,
+            removed_timeout=removed_timeout,
+            updated_entry=updated_entry,
+        )
 
-    print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
-    if registered:
-        print_success("Registered MCP server in ~/.claude/mcp.json")
-    if removed_timeout:
-        print_info("Removed legacy MCP timeout override.")
-    if updated_entry:
-        print_info("Updated MCP server entry to match current install method.")
-    print_info(f"Config saved to: {config_path}")
+    _report_claude_setup_success(
+        claude_path,
+        config_path,
+        registered=registered,
+        removed_timeout=removed_timeout,
+        updated_entry=updated_entry,
+    )
     return True
 
 

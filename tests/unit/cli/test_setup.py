@@ -1361,6 +1361,32 @@ class TestClaudeSetup:
             == "providers:\n  custom:\n    api_key: keep\n"
         )
 
+    def test_setup_claude_invalid_utf8_credentials_fail_closed(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
+        credentials_path = config_dir / "credentials.yaml"
+        original_credentials = b"\xff\xfe\x00secret"
+        credentials_path.write_bytes(original_credentials)
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        mcp_path.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert credentials_path.read_bytes() == original_credentials
+        assert json.loads(mcp_path.read_text(encoding="utf-8")) == {"mcpServers": {}}
+        assert not (claude_dir / "mcp.json.ouroboros-recovery").exists()
+        assert "Could not validate" in warning.call_args.args[0]
+
     def test_setup_cli_exits_when_claude_mcp_registration_fails(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1499,11 +1525,22 @@ class TestClaudeSetup:
         "entry",
         [
             {"url": "https://example.test/mcp", "type": "sse"},
-            {"url": "https://example.test/mcp", "type": "http"},
+            {
+                "url": "https://example.test/mcp",
+                "type": "http",
+                "timeout": 45,
+                "metadata": {"owner": "operator"},
+            },
             {
                 "url": "https://example.test/mcp",
                 "type": "streamable-http",
                 "headers": {"Authorization": "Bearer test"},
+            },
+            {
+                "url": "wss://example.test/mcp",
+                "type": "websocket",
+                "timeout": 90,
+                "metadata": {"owner": "operator"},
             },
             {"command": "docker", "env": {"CUSTOM": "1"}},
             {"command": "docker"},
@@ -1513,6 +1550,7 @@ class TestClaudeSetup:
             "sse-url",
             "http-url",
             "streamable-http-url-with-headers",
+            "websocket-url-with-custom-fields",
             "custom-command-env",
             "custom-command-no-args",
             "custom-command",
@@ -1543,6 +1581,37 @@ class TestClaudeSetup:
         assert (
             json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
             == entry
+        )
+
+    def test_operator_uvx_entry_with_custom_args_and_timeout_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        operator_entry = {
+            "command": "uvx",
+            "args": ["--from", "ouroboros-ai-wrapper", "custom-mcp"],
+            "timeout": 120,
+            "env": {"CUSTOM": "keep"},
+        }
+        claude_config.write_text(
+            json.dumps({"mcpServers": {"ouroboros": operator_entry}}), encoding="utf-8"
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["ouroboros", "mcp", "serve"]},
+            ),
+        ):
+            registered = setup_cmd._ensure_claude_mcp_entry()
+
+        assert registered is True
+        assert (
+            json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
+            == operator_entry
         )
 
     def test_non_utf8_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
@@ -2675,7 +2744,7 @@ class TestClaudeSetup:
         assert config["orchestrator"]["runtime_backend"] == "claude"
         assert config["llm"]["backend"] == "claude"
 
-    def test_setup_claude_post_state_record_failure_remains_roll_forward_recoverable(
+    def test_setup_claude_post_state_record_failure_returns_success_after_recovery(
         self, tmp_path: Path
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
@@ -2708,14 +2777,16 @@ class TestClaudeSetup:
                 "ouroboros.cli.commands.setup._atomic_write_text",
                 side_effect=fail_post_state_record,
             ),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
         ):
             configured = setup_cmd._setup_claude("/usr/local/bin/claude")
 
-        assert configured is False
+        assert configured is True
         assert not recovery_path.exists()
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["orchestrator"]["runtime_backend"] == "claude"
         assert config["llm"]["backend"] == "claude"
+        assert success.call_args_list[0].args[0].startswith("Configured Claude Code runtime")
 
     def test_atomic_write_closes_descriptor_when_mode_application_fails(
         self, tmp_path: Path
@@ -2801,6 +2872,67 @@ class TestClaudeSetup:
         assert promoted.content == b"after"
         assert target.read_text(encoding="utf-8") == "after"
         assert operator_sidecar.read_text(encoding="utf-8") == "operator-owned"
+
+    def test_cas_post_publish_fsync_failure_preserves_original_backup(self, tmp_path: Path) -> None:
+        target = tmp_path / "config.yaml"
+        target.write_bytes(b"operator-before")
+        snapshot = setup_cmd._read_claude_setup_file_snapshot(target)
+        assert snapshot is not None
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._fsync_parent_dir",
+                side_effect=setup_cmd._ParentDirectoryFsyncError("directory fsync failed"),
+            ),
+            pytest.raises(setup_cmd._ParentDirectoryFsyncError) as raised,
+        ):
+            setup_cmd._promote_text_cas(
+                target,
+                b"setup-after",
+                expected=snapshot,
+                mode=0o600,
+            )
+
+        backups = list(tmp_path.glob(f".{target.name}.ouroboros-pre.*.tmp"))
+        assert target.read_bytes() == b"setup-after"
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == b"operator-before"
+        assert raised.value.backup_path == backups[0]
+        assert raised.value.promoted_snapshot is not None
+        assert raised.value.promoted_snapshot.content == b"setup-after"
+
+    def test_cas_publish_and_restore_failure_preserves_original_backup(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "credentials.yaml"
+        target.write_bytes(b"operator-before")
+        snapshot = setup_cmd._read_claude_setup_file_snapshot(target)
+        assert snapshot is not None
+        real_rename = os.rename
+
+        def fail_restore(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            source = Path(src)
+            destination = Path(dst)
+            if destination == target and ".ouroboros-pre." in source.name:
+                raise OSError("restore failed")
+            real_rename(src, dst)
+
+        with (
+            patch("os.link", side_effect=OSError("publish failed")),
+            patch("os.rename", side_effect=fail_restore),
+            pytest.raises(OSError, match="preserved at"),
+        ):
+            setup_cmd._promote_text_cas(
+                target,
+                b"setup-after",
+                expected=snapshot,
+                mode=0o600,
+            )
+
+        backups = list(tmp_path.glob(f".{target.name}.ouroboros-pre.*.tmp"))
+        assert not target.exists()
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == b"operator-before"
 
     def test_setup_claude_parent_fsync_failure_leaves_recovery_pending(
         self, tmp_path: Path
@@ -3013,6 +3145,39 @@ class TestClaudeSetup:
         # Custom command (docker) should be left untouched
         assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "docker"
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == custom_args
+
+    def test_setup_claude_preserves_websocket_entry_and_custom_fields(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
+        credentials_path = config_dir / "credentials.yaml"
+        credentials_path.write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        websocket_entry = {
+            "type": "websocket",
+            "url": "wss://example.test/mcp",
+            "timeout": 90,
+            "headers": {"Authorization": "Bearer operator"},
+            "metadata": {"owner": "operator"},
+        }
+        claude_config.write_text(
+            json.dumps({"mcpServers": {"ouroboros": websocket_entry}}), encoding="utf-8"
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is True
+        assert (
+            json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
+            == websocket_entry
+        )
 
     def test_setup_claude_updates_stale_standard_entry(self, tmp_path: Path) -> None:
         """Stale standard entry (e.g. python3) should be updated to detected method."""
