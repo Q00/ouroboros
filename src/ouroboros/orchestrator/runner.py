@@ -8591,6 +8591,17 @@ class OrchestratorRunner:
             tracker = durable_tracker
             exec_id = tracker.execution_id
 
+        # A retained lifecycle transition outranks a still-RUNNING durable
+        # snapshot.  Persistence-pending means the previous provider effect
+        # already happened and only its PAUSED/terminal publication remains;
+        # entering the normal prepared claim below would repeat that effect.
+        # Route every lifecycle kind through the same replay choke point used
+        # by ``resume_session`` before normal prepared authentication or
+        # provider entry.
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
+
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
         if not isinstance(raw_contract, Mapping):
             if self._process_local_authority_held_elsewhere(

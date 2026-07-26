@@ -291,7 +291,10 @@ process-local claim and again immediately after a successful claim. Only
 through `resume_session`; terminal status retires local authority, and an
 unreadable observation is retryable with zero provider effects. The second read
 closes the race where another execution publishes `PAUSED` between the first
-observation and claim release.
+observation and claim release. A retained persistence-pending lifecycle intent
+also outranks a durable `RUNNING` snapshot at this same ingress: it is replayed
+before the normal prepared claim, so a failed pause or terminal publication
+cannot repeat the provider effect that produced it.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a

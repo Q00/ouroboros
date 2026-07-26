@@ -620,6 +620,10 @@ The Foundation A implementation must demonstrate all of the following:
 90. execution contract v9 fingerprints the complete runtime capability and
     reasoning-effort vocabulary population, and direct/parallel provider choke
     points revalidate it after pre-dispatch awaits before effect entry.
+91. both public recovery ingresses replay a retained persistence-pending
+    lifecycle intent before normal execution admission: `resume_session` and
+    `execute_precreated_session` cannot treat the deliberately retained durable
+    `RUNNING` snapshot as permission for another provider effect.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

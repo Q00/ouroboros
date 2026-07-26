@@ -657,6 +657,106 @@ async def test_pause_persistence_failure_keeps_durable_running_owner(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_precreated_retry_replays_pending_pause_before_provider_effect(tmp_path) -> None:
+    """The prepared ingress cannot bypass a retained PAUSED publication."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'precreated-pause-retry.db'}")
+    await event_store.initialize()
+    runtime = _RecoverablePauseRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-precreated-pause-retry",
+        session_id="session-precreated-pause-retry",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+
+    try:
+        mark_paused = AsyncMock(
+            return_value=Result.err(PersistenceError("pause write unavailable"))
+        )
+        with patch.object(
+            runner._session_repo,
+            "mark_paused",
+            mark_paused,
+        ):
+            first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+            second = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert first.is_err
+        assert first.error.details["resume_blocked"] == "pause_persistence_pending"
+        assert second.is_err
+        assert second.error.details["resume_blocked"] == "pause_persistence_pending"
+        assert mark_paused.await_count == 2
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
+
+        third = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert third.is_ok
+        assert third.value.summary["replayed_pending_lifecycle"] == "paused"
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.PAUSED
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_precreated_retry_replays_pending_completion_before_provider_effect(tmp_path) -> None:
+    """Every retained lifecycle kind outranks normal prepared execution."""
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'precreated-completion-retry.db'}")
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-precreated-completion-retry",
+        session_id="session-precreated-completion-retry",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    original_mark_completed = runner._session_repo.mark_completed
+
+    try:
+        runner._session_repo.mark_completed = AsyncMock(
+            return_value=Result.err(PersistenceError("completion write unavailable"))
+        )
+        first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert first.is_err
+        assert first.error.details["resume_blocked"] == "terminal_persistence_pending"
+        assert first.error.details["requested_status"] == SessionStatus.COMPLETED.value
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
+
+        runner._session_repo.mark_completed = original_mark_completed
+        second = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert second.is_ok
+        assert second.value.summary["replayed_pending_lifecycle"] == "completed"
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.COMPLETED
+        assert tracker.session_id not in runner._pending_lifecycle_intents
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_paused_projection_failure_keeps_durable_paused_owner(tmp_path) -> None:
     """Auxiliary projection failure cannot convert durable PAUSED into FAILED."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'paused-projection.db'}")
