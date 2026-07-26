@@ -2053,13 +2053,16 @@ class EventStore:
         event_type: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        payload_equals: dict[str, str | int | float | bool | None] | None = None,
     ) -> list[BaseEvent]:
         """Query events for an execution and its child/runtime scopes.
 
         This is the execution-only counterpart to
         :meth:`query_session_related_events`: it includes the root execution
         aggregate plus events whose payload links back through ``execution_id``
-        or ``parent_execution_id``.
+        or ``parent_execution_id``. Optional top-level payload equality filters
+        are applied in SQL before ordering, offset, and limit so a bounded query
+        cannot be crowded out by unrelated events of the same type.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -2085,6 +2088,28 @@ class EventStore:
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
 
+                if payload_equals:
+                    if type(payload_equals) is not dict or len(payload_equals) > 8:
+                        raise ValueError(
+                            "execution-related payload filters require a bounded built-in dict"
+                        )
+                    for field, value in payload_equals.items():
+                        if (
+                            type(field) is not str
+                            or not field
+                            or not field.isascii()
+                            or (not field[0].isalpha() and field[0] != "_")
+                            or not field.replace("_", "").isalnum()
+                            or (value is not None and type(value) not in {str, int, float, bool})
+                        ):
+                            raise ValueError(
+                                "execution-related payload filters require "
+                                "top-level ASCII identifier keys and JSON scalar values"
+                            )
+                        query = query.where(
+                            func.json_extract(events_table.c.payload, f"$.{field}") == value
+                        )
+
                 if limit is not None:
                     query = query.limit(limit).offset(offset)
                 elif offset:
@@ -2103,6 +2128,7 @@ class EventStore:
                     "event_type": event_type,
                     "limit": limit,
                     "offset": offset,
+                    "payload_equals": dict(payload_equals or {}),
                 },
             ) from e
 

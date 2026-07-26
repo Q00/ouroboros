@@ -368,7 +368,6 @@ from ouroboros.orchestrator.verifier import (
 _MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
 _MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS = 4096
 _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS = 4096
-_MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS = 4096
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -9827,6 +9826,7 @@ Respond with either ATOMIC or the structured JSON object only.
             execution_id=execution_id,
             session_id=session_id,
             root_ac_indices=tuple(batch_executable),
+            root_ac_count=len(seed.acceptance_criteria),
         )
         if persisted_route_state and not self._bounded_route_escalation_enabled:
             # Once an episode has durable Routing D evidence it may never fall
@@ -10127,14 +10127,14 @@ Respond with either ATOMIC or the structured JSON object only.
         execution_id: str,
         session_id: str,
         root_ac_indices: tuple[int, ...],
+        root_ac_count: int,
     ) -> bool:
         """Detect any same-session Routing D evidence before choosing a dispatch path."""
 
         relevant = set(root_ac_indices)
         bounded_streams = {
-            "execution.ac.route_observed": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
-            "execution.ac.attempt_judged": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
-            "execution.ac.route_paused": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
+            "execution.ac.route_observed": root_ac_count * MAX_ROUTE_ATTEMPTS + 1,
+            "execution.ac.route_paused": root_ac_count * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1,
             "execution.ac.composite_completed": (_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1),
             "execution.ac.composite_paused": _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1,
         }
@@ -10165,10 +10165,28 @@ Respond with either ATOMIC or the structured JSON object only.
                 }:
                     if root_ac_index in relevant or type(root_ac_index) is not int:
                         return True
-                elif data.get("route_contract_version") is not None and (
-                    root_ac_index in relevant or type(root_ac_index) is not int
-                ):
-                    return True
+        judgment_limit = root_ac_count * MAX_ROUTE_ATTEMPTS + 1
+        judgment_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.attempt_judged",
+            limit=judgment_limit,
+            payload_equals={
+                "route_contract_version": 1,
+                "session_id": session_id,
+            },
+        )
+        if not isinstance(judgment_events, list | tuple):
+            return False
+        if len(judgment_events) >= judgment_limit:
+            raise RuntimeError(
+                "execution.ac.attempt_judged pre-dispatch scan exceeds its route-aware bound"
+            )
+        for event in judgment_events:
+            if getattr(event, "type", None) != "execution.ac.attempt_judged":
+                continue
+            root_ac_index = event.data.get("root_ac_index")
+            if root_ac_index in relevant or type(root_ac_index) is not int:
+                return True
         return False
 
     async def _run_batch_with_bounded_route_escalation(
@@ -10996,13 +11014,18 @@ Respond with either ATOMIC or the structured JSON object only.
                     raise RuntimeError("durable route observation is duplicated")
                 observed_attempts[key] = observation.verifier_outcome
         judged_attempts: dict[tuple[int, str, int, str], tuple[bool, str]] = {}
+        judgment_event_limit = len(seed.acceptance_criteria) * MAX_ROUTE_ATTEMPTS + 1
         judgment_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.attempt_judged",
-            limit=_MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
+            limit=judgment_event_limit,
+            payload_equals={
+                "route_contract_version": 1,
+                "session_id": session_id,
+            },
         )
-        if len(judgment_events) > _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS:
-            raise RuntimeError("route-aware attempt judgment replay exceeds its finite bound")
+        if len(judgment_events) >= judgment_event_limit:
+            raise RuntimeError("route-aware attempt judgment replay exceeds its population bound")
         for event in judgment_events:
             if event.type != "execution.ac.attempt_judged":
                 continue

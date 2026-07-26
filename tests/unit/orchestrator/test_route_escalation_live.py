@@ -43,6 +43,7 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionResult,
 )
 from ouroboros.orchestrator.route_escalation import (
+    MAX_ROUTE_ATTEMPTS,
     EscalationReason,
     RouteEscalationDecision,
     RouteObservation,
@@ -1930,6 +1931,7 @@ async def test_pre_dispatch_route_state_detector_uses_overflow_sentinels() -> No
             execution_id="execution-1",
             session_id="session-1",
             root_ac_indices=(0,),
+            root_ac_count=1,
         )
     assert observed_limits and all(limit is not None for limit in observed_limits)
 
@@ -2223,13 +2225,17 @@ async def test_route_judgment_replay_uses_finite_overflow_sentinel() -> None:
     async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
         if kwargs.get("event_type") != "execution.ac.attempt_judged":
             return []
+        assert kwargs.get("payload_equals") == {
+            "route_contract_version": 1,
+            "session_id": "session-1",
+        }
         limit = kwargs.get("limit")
         assert isinstance(limit, int) and limit > 1
         observed_limits.append(limit)
         return [_route_judgment(seed) for _ in range(limit)]
 
     store.query_execution_related_events.side_effect = query
-    with pytest.raises(RuntimeError, match="finite bound"):
+    with pytest.raises(RuntimeError, match="population bound"):
         await executor._load_bounded_route_resume_state(
             seed=seed,
             execution_id="execution-1",
@@ -2237,6 +2243,65 @@ async def test_route_judgment_replay_uses_finite_overflow_sentinel() -> None:
             root_ac_indices=(0,),
         )
     assert observed_limits
+
+
+@pytest.mark.asyncio
+async def test_legacy_judgment_population_does_not_consume_route_replay_bound() -> None:
+    """The SQL-bound route stream excludes valid unrelated legacy evidence."""
+
+    executor, store, _events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    route_judgment = _judgment_for_route_event(route_event)
+    legacy_judgment = BaseEvent(
+        type="execution.ac.attempt_judged",
+        aggregate_type="execution",
+        aggregate_id="execution-1",
+        data={
+            "execution_id": "execution-1",
+            "session_id": "session-1",
+            "root_ac_index": 0,
+            "success": False,
+            "outcome": "failed",
+        },
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        event_type = kwargs.get("event_type")
+        if event_type == "execution.ac.route_observed":
+            return [route_event]
+        if event_type != "execution.ac.attempt_judged":
+            return []
+        # Reproduce the review population: the unfiltered event type is over
+        # the former 4,096 sentinel, while the participating route stream is not.
+        if kwargs.get("payload_equals") is None:
+            return [legacy_judgment] * 4097
+        assert kwargs["payload_equals"] == {
+            "route_contract_version": 1,
+            "session_id": "session-1",
+        }
+        assert kwargs.get("limit") == len(seed.acceptance_criteria) * MAX_ROUTE_ATTEMPTS + 1
+        return [route_judgment]
+
+    store.query_execution_related_events.side_effect = query
+
+    (
+        histories,
+        overrides,
+        terminals,
+        provisional_successes,
+    ) = await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+
+    assert histories[0] == ("compat:claude:frugal",)
+    assert overrides[0].route_id == "compat:claude:standard"
+    assert terminals == {}
+    assert provisional_successes == {}
 
 
 @pytest.mark.asyncio
