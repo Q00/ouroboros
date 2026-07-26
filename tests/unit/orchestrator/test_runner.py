@@ -4330,6 +4330,64 @@ class TestOrchestratorRunner:
         executor_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_parallel_dispatch_consumes_resolved_worker_and_rate_snapshot(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """No live backend-limit reread may replace the persisted executor inputs."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_resolved_limits",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_resolved_limits",
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        semantics = execution_contract["execution_semantics"]
+        executor_cls = MagicMock()
+        cancellation_result = Result.err(
+            OrchestratorError(message="cancelled after constructor inspection")
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                executor_cls,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=True)),
+            patch.object(
+                runner,
+                "_handle_cancellation",
+                AsyncMock(return_value=cancellation_result),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                execution_contract=execution_contract,
+                force_sequential_levels=True,
+            )
+
+        assert result is cancellation_result
+        kwargs = executor_cls.call_args.kwargs
+        assert kwargs["max_concurrent"] == semantics["effective_parallel_workers"]
+        assert (
+            kwargs["resolved_self_governs_rate_limit"]
+            is semantics["backend_self_governs_rate_limit"]
+        )
+        limits = kwargs["resolved_backend_limits"]
+        assert limits.backend == semantics["backend_limits_backend"]
+        assert limits.max_concurrency == semantics["backend_max_concurrency"]
+        assert limits.requests_per_minute == semantics["backend_requests_per_minute"]
+        assert limits.tokens_per_minute == semantics["backend_tokens_per_minute"]
+
+    @pytest.mark.asyncio
     async def test_resume_session_enforces_owner_marker_before_provider_when_capability_is_lost(
         self,
         runner: OrchestratorRunner,

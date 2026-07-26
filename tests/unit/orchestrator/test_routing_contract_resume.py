@@ -385,6 +385,50 @@ def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> 
         )
 
 
+def test_resume_rejects_context_pack_and_effective_concurrency_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prompt mode and resolved fan-out are durable pre-provider semantics."""
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+    monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "1")
+    original = _runner(max_parallel_workers=3)
+    persisted = original._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["context_pack_enabled"] is True
+    assert persisted["execution_semantics"]["effective_parallel_workers"] == 1
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "0")
+    monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "3")
+    resumed = _runner(max_parallel_workers=3)
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_backend_rate_and_pacing_owner_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rate gate consumes the same durable resolved backend snapshot."""
+    monkeypatch.setenv("OUROBOROS_CLAUDE_RPM", "10")
+    original = _runner(max_parallel_workers=3)
+    original._adapter.self_governs_rate_limit = False
+    persisted = original._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["backend_requests_per_minute"] == 10
+    assert persisted["execution_semantics"]["backend_self_governs_rate_limit"] is False
+
+    monkeypatch.setenv("OUROBOROS_CLAUDE_RPM", "20")
+    resumed = _runner(max_parallel_workers=3)
+    resumed._adapter.self_governs_rate_limit = True
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -396,10 +440,17 @@ def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> 
         "decomposition_mode",
         "max_decomposition_depth",
         "max_parallel_workers",
+        "effective_parallel_workers",
         "fat_harness_mode",
         "shadow_replay_enabled",
         "checkpoint_store_enabled",
         "session_signal_hub_enabled",
+        "context_pack_enabled",
+        "backend_limits_backend",
+        "backend_max_concurrency",
+        "backend_requests_per_minute",
+        "backend_tokens_per_minute",
+        "backend_self_governs_rate_limit",
     ],
 )
 def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:

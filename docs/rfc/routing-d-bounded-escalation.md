@@ -190,13 +190,16 @@ eligibility is no longer available.
 
 Execution contract version 5 also seals the complete scalar executor semantics
 used by that owner: verification enablement and timeout, retry and cross-harness
-budgets, decomposition enablement/mode/depth, worker count, fat-harness acceptance,
-shadow replay, and checkpoint/signal capability presence. The sub-contract has its
-own fingerprint and exact schema. Resume rejects any current-setting drift before
-constructing `ParallelACExecutor`, and the invocation consumes the immutable
-persisted snapshot rather than rereading mutable runner fields. Version 4 and older
-contracts predate Routing D ownership and migrate once using their legacy current
-settings; every new Routing D owner is born with version 5.
+budgets, decomposition enablement/mode/depth, requested and backend-capped effective
+worker counts, backend concurrency/rate limits, adapter pacing ownership,
+fat-harness acceptance, shadow replay, checkpoint/signal capability presence, and
+the resolved context-pack mode that controls provider system prompts. The
+sub-contract has its own fingerprint and exact schema. Resume rejects any
+current-setting drift before constructing prompts or `ParallelACExecutor`. Prompt
+construction, fan-out, and rate pacing consume the immutable persisted snapshot
+instead of rereading mutable environment or config. Version 4 and older contracts
+predate Routing D ownership and migrate once using their legacy current settings;
+every new Routing D owner is born with version 5.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a

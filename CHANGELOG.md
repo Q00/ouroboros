@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **orchestrator/decomposition**: Preserve the historical non-negative decomposition-depth contract while defining `0..4` as the explicit Routing D durable-replay subset. The maximum five-way durable tree (780 child nodes) round-trips through node-local conflict projections; larger configured depths continue on the legacy non-resumable parallel path instead of being rejected.
-- **orchestrator/resume**: Version the durable execution contract to v5 and fingerprint every scalar `ParallelACExecutor` setting that affects effects or acceptance. Resume now rejects verification, retry, decomposition, worker, harness, replay, checkpoint, or signal-capability drift before analyzer/executor/provider entry.
+- **orchestrator/resume**: Version the durable execution contract to v5 and fingerprint every resolved runner/executor setting that affects provider prompts, effects, or acceptance. Resume now rejects context-pack, verification, retry, decomposition, requested/effective worker, backend concurrency/rate, harness, replay, checkpoint, or signal-capability drift before analyzer/executor/provider entry, and execution consumes that immutable snapshot instead of rereading live config.
 
 ### Fixed
 - **orchestrator/routing**: Canonicalize typed hard-precondition metadata across prose and machine identifier styles, recognize numeric HTTP 401/403 authorization statuses, and share the classifier across direct and parallel routing so access/tool/config blockers cannot spend a successor route.

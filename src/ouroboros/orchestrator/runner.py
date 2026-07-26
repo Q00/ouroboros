@@ -67,6 +67,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.backend_limits import (
+    BackendConcurrencyLimits,
     plan_fan_out_concurrency,
     resolve_backend_limits,
 )
@@ -455,6 +456,7 @@ def build_system_prompt(
     *,
     repo_root: str | Path | None = None,
     guidance_fragment: str = "",
+    context_pack_enabled: bool | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -470,6 +472,9 @@ def build_system_prompt(
         guidance_fragment: Explicit project execution guidance resolved and
             provenance-checked by the runner. Empty preserves the historical
             prompt byte-for-byte.
+        context_pack_enabled: Resolved context-pack mode. ``None`` preserves
+            lazy config resolution for direct helper callers; runner-owned
+            execution passes the durable contract value explicitly.
 
     Returns:
         System prompt string.
@@ -507,7 +512,11 @@ def build_system_prompt(
     if conductor_directive:
         prompt = f"{prompt}\n\n{conductor_directive}"
 
-    context_pack_fragment = _context_pack_fragment(seed, repo_root)
+    context_pack_fragment = _context_pack_fragment(
+        seed,
+        repo_root,
+        context_pack_enabled=context_pack_enabled,
+    )
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
@@ -591,6 +600,8 @@ def _resolve_context_pack_root(
 def _context_pack_fragment(
     seed: Seed,
     repo_root: str | Path | None,
+    *,
+    context_pack_enabled: bool | None = None,
 ) -> str:
     """Render the deterministic context pack fragment, or empty string.
 
@@ -602,9 +613,11 @@ def _context_pack_fragment(
     if root is None:
         return ""
 
-    from ouroboros.config import get_context_pack_enabled
+    if context_pack_enabled is None:
+        from ouroboros.config import get_context_pack_enabled
 
-    if not get_context_pack_enabled():
+        context_pack_enabled = get_context_pack_enabled()
+    if not context_pack_enabled:
         return ""
 
     from ouroboros.orchestrator.context_pack import build_context_pack, render_context_pack
@@ -901,9 +914,13 @@ class OrchestratorRunner:
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
-        from ouroboros.config import get_cross_harness_redispatch_enabled
+        from ouroboros.config import (
+            get_context_pack_enabled,
+            get_cross_harness_redispatch_enabled,
+        )
 
         self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
+        self._context_pack_enabled = get_context_pack_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
         self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
             "off"
@@ -3051,6 +3068,7 @@ class OrchestratorRunner:
 
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
+        backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
         return {
             "version": 1,
             "run_verify_commands": self._run_verify_commands,
@@ -3061,10 +3079,22 @@ class OrchestratorRunner:
             "decomposition_mode": self._decomposition_mode,
             "max_decomposition_depth": self._max_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
+            "effective_parallel_workers": plan_fan_out_concurrency(
+                self._max_parallel_workers,
+                backend_limits,
+            ),
             "fat_harness_mode": self._fat_harness_mode,
             "shadow_replay_enabled": self._shadow_replay_enabled,
             "checkpoint_store_enabled": self._checkpoint_store is not None,
             "session_signal_hub_enabled": self._session_signal_hub is not None,
+            "context_pack_enabled": self._context_pack_enabled,
+            "backend_limits_backend": backend_limits.backend,
+            "backend_max_concurrency": backend_limits.max_concurrency,
+            "backend_requests_per_minute": backend_limits.requests_per_minute,
+            "backend_tokens_per_minute": backend_limits.tokens_per_minute,
+            "backend_self_governs_rate_limit": bool(
+                getattr(self._adapter, "self_governs_rate_limit", False)
+            ),
         }
 
     @staticmethod
@@ -3081,10 +3111,17 @@ class OrchestratorRunner:
                 "decomposition_mode",
                 "max_decomposition_depth",
                 "max_parallel_workers",
+                "effective_parallel_workers",
                 "fat_harness_mode",
                 "shadow_replay_enabled",
                 "checkpoint_store_enabled",
                 "session_signal_hub_enabled",
+                "context_pack_enabled",
+                "backend_limits_backend",
+                "backend_max_concurrency",
+                "backend_requests_per_minute",
+                "backend_tokens_per_minute",
+                "backend_self_governs_rate_limit",
             }
         )
         if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
@@ -3097,6 +3134,8 @@ class OrchestratorRunner:
             "shadow_replay_enabled",
             "checkpoint_store_enabled",
             "session_signal_hub_enabled",
+            "context_pack_enabled",
+            "backend_self_governs_rate_limit",
         )
         if (
             type(value.get("version")) is not int
@@ -3108,7 +3147,20 @@ class OrchestratorRunner:
         retries = value.get("ac_retry_attempts")
         max_depth = value.get("max_decomposition_depth")
         max_workers = value.get("max_parallel_workers")
+        effective_workers = value.get("effective_parallel_workers")
         mode = value.get("decomposition_mode")
+        backend = value.get("backend_limits_backend")
+        backend_max_concurrency = value.get("backend_max_concurrency")
+        backend_limits = (
+            backend_max_concurrency,
+            value.get("backend_requests_per_minute"),
+            value.get("backend_tokens_per_minute"),
+        )
+        expected_effective_workers = (
+            min(max_workers, backend_max_concurrency)
+            if type(max_workers) is int and type(backend_max_concurrency) is int
+            else max_workers
+        )
         return bool(
             type(timeout) is int
             and timeout >= 1
@@ -3118,10 +3170,33 @@ class OrchestratorRunner:
             and max_depth >= 0
             and type(max_workers) is int
             and max_workers >= 1
+            and type(effective_workers) is int
+            and 1 <= effective_workers <= max_workers
+            and effective_workers == expected_effective_workers
             and isinstance(mode, str)
             and mode in {"preflight", "bounce_only", "off"}
             and (value.get("enable_decomposition") is True or mode == "off")
+            and isinstance(backend, str)
+            and bool(backend)
+            and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
         )
+
+    def _execution_semantics_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return one validated immutable-input snapshot from a durable contract."""
+        raw_execution_semantics = (
+            execution_contract.get("execution_semantics")
+            if isinstance(execution_contract, Mapping)
+            else None
+        )
+        if not self._valid_execution_semantics_contract(raw_execution_semantics):
+            raise OrchestratorError(
+                message="Cannot execute with an invalid execution-semantics snapshot",
+                details={"invalid": "execution_semantics"},
+            )
+        return dict(raw_execution_semantics)
 
     @staticmethod
     def _seed_semantics_fingerprint(seed: Seed) -> str:
@@ -7715,12 +7790,14 @@ class OrchestratorRunner:
             # Build prompts with strategy. The fat-harness default path must use
             # the profile-backed prompt contract so leaf agents are told to emit
             # schema-valid evidence before the acceptance gate parses it.
+            execution_semantics = self._execution_semantics_snapshot(execution_contract)
             strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
             system_prompt = build_system_prompt(
                 seed,
                 strategy=strategy,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=execution_semantics["context_pack_enabled"],
             )
             await self._record_execution_guidance_injection(
                 session_id=tracker.session_id,
@@ -8574,31 +8651,28 @@ class OrchestratorRunner:
         if contract_source is None and isinstance(tracker.progress, Mapping):
             tracker_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
             contract_source = tracker_contract if isinstance(tracker_contract, Mapping) else None
-        raw_execution_semantics = (
-            contract_source.get("execution_semantics")
-            if isinstance(contract_source, Mapping)
-            else None
-        )
-        execution_semantics: dict[str, Any]
-        if raw_execution_semantics is None:
+        if contract_source is None:
             execution_semantics = self._execution_semantics_contract()
-        elif self._valid_execution_semantics_contract(raw_execution_semantics):
-            execution_semantics = dict(raw_execution_semantics)
         else:
-            raise OrchestratorError(
-                message="Cannot execute with an invalid execution-semantics snapshot",
-                details={"invalid": "execution_semantics"},
-            )
-        if execution_semantics != self._execution_semantics_contract():
+            execution_semantics = self._execution_semantics_snapshot(contract_source)
+        current_execution_semantics = self._execution_semantics_contract()
+        if execution_semantics != current_execution_semantics:
             raise OrchestratorError(
                 message="Cannot execute after execution semantics drifted",
                 details={
                     "persisted_execution_semantics": execution_semantics,
-                    "current_execution_semantics": self._execution_semantics_contract(),
+                    "current_execution_semantics": current_execution_semantics,
                 },
             )
         max_decomposition_depth = execution_semantics["max_decomposition_depth"]
         max_parallel_workers = execution_semantics["max_parallel_workers"]
+        effective_workers = execution_semantics["effective_parallel_workers"]
+        resolved_backend_limits = BackendConcurrencyLimits(
+            backend=execution_semantics["backend_limits_backend"],
+            max_concurrency=execution_semantics["backend_max_concurrency"],
+            requests_per_minute=execution_semantics["backend_requests_per_minute"],
+            tokens_per_minute=execution_semantics["backend_tokens_per_minute"],
+        )
         parallel_bounded_routing = bool(
             has_durable_decomposition_replay(max_decomposition_depth)
             and self._model_router is not None
@@ -8703,7 +8777,6 @@ class OrchestratorRunner:
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
-        effective_workers = self._plan_parallel_workers(max_parallel_workers)
         if effective_workers < max_parallel_workers:
             self._console.print(
                 f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
@@ -8749,6 +8822,8 @@ class OrchestratorRunner:
             shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],
             session_signal_hub=self._session_signal_hub,
             process_local_resume_nonce=self._parallel_process_local_resume_nonce(tracker),
+            resolved_backend_limits=resolved_backend_limits,
+            resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
         )
 
         # Check for cancellation before starting parallel execution
@@ -9445,6 +9520,7 @@ class OrchestratorRunner:
                 seed=seed,
                 authority_generation=authority_generation,
             )
+            execution_semantics = self._execution_semantics_snapshot(execution_contract)
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
             cancellation_result = (
@@ -9538,6 +9614,7 @@ class OrchestratorRunner:
                 seed,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=execution_semantics["context_pack_enabled"],
             )
             await self._record_execution_guidance_injection(
                 session_id=session_id,

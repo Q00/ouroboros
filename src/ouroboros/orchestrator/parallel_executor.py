@@ -96,7 +96,10 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
 )
-from ouroboros.orchestrator.backend_limits import resolve_backend_limits
+from ouroboros.orchestrator.backend_limits import (
+    BackendConcurrencyLimits,
+    resolve_backend_limits,
+)
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import (
@@ -2677,6 +2680,8 @@ class ParallelACExecutor:
         shadow_replay_enabled: bool = False,
         session_signal_hub: SessionSignalHub | None = None,
         process_local_resume_nonce: str | None = None,
+        resolved_backend_limits: BackendConcurrencyLimits | None = None,
+        resolved_self_governs_rate_limit: bool | None = None,
         _foundation_a_roots: _FoundationAClosedRoots = _FOUNDATION_A_CLOSED_ROOTS,
         _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
         _foundation_a_internal_entry_roots_are_closed: bool = False,
@@ -2717,6 +2722,11 @@ class ParallelACExecutor:
             route_economics: Optional economics snapshot used to project live
                 model/effort decisions into the Routing B Admission Kernel. The
                 bridge stays dormant for low-level callers that omit it.
+            resolved_backend_limits: Optional immutable fan-out/rate snapshot.
+                Runner-owned execution passes its durable contract value so a
+                resume never rereads changed backend-limit configuration.
+            resolved_self_governs_rate_limit: Optional immutable adapter pacing
+                mode paired with ``resolved_backend_limits``.
         """
         if _foundation_a_internal_entry_roots is None:
             raise ValueError("execution authority internal entry roots are unavailable")
@@ -2826,8 +2836,18 @@ class ParallelACExecutor:
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         self._partial_composite_resumes: dict[str, _PartialCompositeResumeState] = {}
         self._execution_counters_lock = asyncio.Lock()
+        self._resolved_backend_limits = resolved_backend_limits or resolve_backend_limits(
+            getattr(adapter, "runtime_backend", None)
+        )
+        self._resolved_self_governs_rate_limit = (
+            bool(getattr(adapter, "self_governs_rate_limit", False))
+            if resolved_self_governs_rate_limit is None
+            else resolved_self_governs_rate_limit
+        )
         self._dispatch_rate_gate = self._build_dispatch_rate_gate(
             adapter,
+            limits=self._resolved_backend_limits,
+            self_governs_rate_limit=self._resolved_self_governs_rate_limit,
             rate_gate_factory=_foundation_a_roots.rate_gate_factory,
         )
         self._authority_rate_gate_acquire_root = _foundation_a_roots.rate_gate_acquire_root
@@ -2987,7 +3007,7 @@ class ParallelACExecutor:
         adapter = get_attribute(self, "_adapter")
         coordinator = get_attribute(self, "_coordinator")
         backend = getattr(adapter, "runtime_backend", None)
-        limits = resolve_backend_limits(backend if isinstance(backend, str) else None)
+        limits = get_attribute(self, "_resolved_backend_limits")
         coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
         return {
             "version": 1,
@@ -3018,10 +3038,9 @@ class ParallelACExecutor:
             "dispatch_rate": {
                 "algorithm": "rate-limit-gate/v1",
                 "backend": backend if isinstance(backend, str) else None,
-                "self_governs_rate_limit": getattr(
-                    adapter,
-                    "self_governs_rate_limit",
-                    False,
+                "self_governs_rate_limit": get_attribute(
+                    self,
+                    "_resolved_self_governs_rate_limit",
                 ),
                 "requests_per_minute": limits.requests_per_minute,
                 "tokens_per_minute": limits.tokens_per_minute,
@@ -3036,6 +3055,8 @@ class ParallelACExecutor:
     def _build_dispatch_rate_gate(
         adapter: AgentRuntime,
         *,
+        limits: BackendConcurrencyLimits | None = None,
+        self_governs_rate_limit: bool | None = None,
         rate_gate_factory: Callable[
             ..., RateLimitGate
         ] = _FOUNDATION_A_CLOSED_ROOTS.rate_gate_factory,
@@ -3053,14 +3074,16 @@ class ParallelACExecutor:
         backend_attr = getattr(adapter, "runtime_backend", "")
         backend = backend_attr if isinstance(backend_attr, str) and backend_attr else "unknown"
 
-        if getattr(adapter, "self_governs_rate_limit", False):
+        if self_governs_rate_limit is None:
+            self_governs_rate_limit = bool(getattr(adapter, "self_governs_rate_limit", False))
+        if self_governs_rate_limit:
             return rate_gate_factory(
                 backend,
                 request_limit=None,
                 token_limit=None,
             )
 
-        limits = resolve_backend_limits(backend)
+        limits = limits or resolve_backend_limits(backend)
         return rate_gate_factory(
             backend,
             request_limit=limits.requests_per_minute,
