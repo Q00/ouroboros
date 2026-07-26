@@ -496,6 +496,75 @@ async def test_route_exhaustion_is_durable_blocked_human_handoff() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        "permission denied: missing access to deployment",
+        "missing required tool terraform",
+        "configuration is not configured",
+    ],
+)
+async def test_parallel_hard_preconditions_stop_before_route_successor(
+    provider_error: str,
+) -> None:
+    """Every established hard-block class spends exactly one provider call."""
+
+    provider_calls = 0
+
+    async def execute_task(**_kwargs: Any):
+        nonlocal provider_calls
+        provider_calls += 1
+        yield AgentMessage(
+            type="result",
+            content=provider_error,
+            data={"subtype": "error"},
+        )
+
+    executor, _store, events = _executor(execute_task=execute_task)
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert provider_calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].outcome is ACExecutionOutcome.BLOCKED
+    route_events = [event for event in events if event.type == "execution.ac.route_observed"]
+    assert len(route_events) == 1
+    assert route_events[0].data["observation"]["failure_class"] == FailureClass.BLOCKED.value
+    assert route_events[0].data["decision"]["action"] == "blocked"
+    assert route_events[0].data["human_handoff_required"] is True
+
+
+def test_parallel_hard_precondition_outranks_retryable_verifier_label() -> None:
+    """A verifier cannot spend past a provider-declared environment block."""
+
+    executor, _store, _events = _executor()
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=False,
+        error="permission denied: missing access to deployment",
+        outcome=ACExecutionOutcome.FAILED,
+        atomic_verifier_verdict=VerifierVerdict(
+            passed=False,
+            reasons=("evidence unavailable",),
+            failure_class=FailureClass.EVIDENCE_MISSING.value,
+        ),
+    )
+
+    assert executor._failure_class_for_result(result) == FailureClass.BLOCKED.value
+
+
+@pytest.mark.asyncio
 async def test_parallel_usage_limit_pauses_before_route_observation_or_escalation() -> None:
     executor, _store, events = _executor()
     calls = 0

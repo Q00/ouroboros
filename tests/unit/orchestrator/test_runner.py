@@ -4223,6 +4223,129 @@ class TestOrchestratorRunner:
         execute_parallel.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "lost_prerequisite",
+        ["model_router", "route_economics", "model_enforcement", "durable_depth"],
+    )
+    async def test_persisted_parallel_owner_rejects_lost_model_enforcement_before_executor(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+        lost_prerequisite: str,
+    ) -> None:
+        """The owner marker closes every pre-first-route-event activation gap."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        _enable_direct_bounded_routes(runner, runner._adapter)
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_capability_loss",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_capability_loss",
+        ).with_progress({"routing_resume_owner": "parallel"})
+        if lost_prerequisite == "model_router":
+            runner._model_router = None
+        elif lost_prerequisite == "route_economics":
+            runner._route_economics = None
+        elif lost_prerequisite == "model_enforcement":
+            runner._adapter.capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.IGNORED,
+            )
+        else:
+            runner._max_decomposition_depth = MAX_DECOMPOSITION_DEPTH + 1
+        assert runner._bounded_route_runtime_active() is False
+        executor_cls = MagicMock(
+            side_effect=AssertionError("parallel executor entered without model enforcement")
+        )
+        analyzer = MagicMock()
+        analyzer.analyze = AsyncMock(
+            side_effect=AssertionError("dependency analyzer entered before owner enforcement")
+        )
+        runner._build_dependency_analyzer = MagicMock(return_value=analyzer)  # type: ignore[method-assign]
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+            executor_cls,
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "routing_enforcement_unavailable"
+        assert result.error.details["retryable"] is True
+        analyzer.analyze.assert_not_awaited()
+        executor_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_enforces_owner_marker_before_provider_when_capability_is_lost(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Production resume dispatch cannot fall through during the empty-event crash window."""
+
+        _enable_direct_bounded_routes(runner, runner._adapter)
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_resume_capability_loss",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_resume_capability_loss",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=criterion)
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=tuple(
+                (index,) for index in range(len(sample_seed.acceptance_criteria))
+            ),
+        )
+        tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+            {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": False,
+                "routing_parallel_plan": runner._serialize_parallel_resume_plan(
+                    graph.to_execution_plan()
+                ),
+                "routing_parallel_externally_satisfied_acs": {},
+            }
+        )
+        runner._adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        provider = MagicMock(side_effect=AssertionError("provider entered after capability loss"))
+        runner._adapter.execute_task = provider
+
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(tracker)),
+        ):
+            result = await runner.resume_session(tracker.session_id, sample_seed)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "routing_enforcement_unavailable"
+        assert result.error.details["retryable"] is True
+        provider.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("compatibility_mode", ["routing_dormant", "depth_above_durable"])
     async def test_legacy_parallel_pause_does_not_publish_routing_d_resume_owner(
         self,

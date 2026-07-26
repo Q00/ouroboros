@@ -1465,50 +1465,17 @@ class OrchestratorRunner:
         conservative evidence-missing class.
         """
 
-        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.failure_taxonomy import (
+            FailureClass,
+            classify_hard_precondition,
+        )
 
         if message is None or not (message.is_final and message.is_error):
             return FailureClass.EVIDENCE_MISSING
-
-        pending: list[object] = [message.data]
-        seen: set[int] = set()
-        metadata_text: list[str] = []
-        while pending and len(seen) < 32:
-            value = pending.pop()
-            if not isinstance(value, Mapping) or id(value) in seen:
-                continue
-            seen.add(id(value))
-            for key in (
-                "failure_class",
-                "status",
-                "code",
-                "error_code",
-                "error_type",
-                "type",
-                "reason",
-            ):
-                raw = value.get(key)
-                if isinstance(raw, str):
-                    normalized = raw.strip().upper().replace("-", "_").replace(" ", "_")
-                    if normalized == FailureClass.BLOCKED.value:
-                        return FailureClass.BLOCKED
-                    metadata_text.append(raw)
-            for key in ("blocker", "error", "details", "metadata", "response"):
-                pending.append(value.get(key))
-
-        normalized_text = " ".join([message.content, *metadata_text]).lower()
-        hard_block_patterns = (
-            r"\b(?:permission|access) denied\b",
-            r"\b(?:unauthorized|forbidden|authentication required)\b",
-            r"\bmissing (?:required )?(?:tool|access|authority|credential|credentials|"
-            r"configuration|config|environment variable|env var)\b",
-            r"\b(?:tool|access|authority|credential|credentials|configuration|config|"
-            r"environment variable|env var) (?:is |are )?(?:required|unavailable|"
-            r"not available|not configured)\b",
+        return (
+            classify_hard_precondition(message.content, message.data)
+            or FailureClass.EVIDENCE_MISSING
         )
-        if any(re.search(pattern, normalized_text) for pattern in hard_block_patterns):
-            return FailureClass.BLOCKED
-        return FailureClass.EVIDENCE_MISSING
 
     async def _persist_direct_route_outcome(
         self,
@@ -8469,6 +8436,29 @@ class OrchestratorRunner:
             ac_count=len(seed.acceptance_criteria),
         )
 
+        # Capture Routing D effect capability once at the dispatch choke point.
+        # A durable parallel owner is itself sufficient replay evidence: it is
+        # persisted before the first route event, so absence of those events
+        # cannot authorize a fallthrough to the legacy executor after a crash.
+        persisted_parallel_owner = tracker.progress.get("routing_resume_owner") == "parallel"
+        if persisted_parallel_owner and not self._bounded_route_runtime_active():
+            self._preserve_process_local_owner_for_retry(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message="Persisted parallel Routing D owner cannot enforce its route",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": exec_id,
+                        "resume_blocked": "routing_enforcement_unavailable",
+                        "routing_resume_owner": "parallel",
+                        "retryable": True,
+                    },
+                )
+            )
+
         # A paused parallel owner must reuse its already-durable plan.  Running
         # dependency analysis again would be a provider effect before Routing D
         # replay has validated its judgment/observation chain.
@@ -8555,10 +8545,9 @@ class OrchestratorRunner:
         # Execute in parallel. Reuse the base effort resolved once in __init__
         # (self._reasoning_effort) so a single runner instance has one consistent
         # effort source across its direct paths and the parallel executor.
-        parallel_bounded_routing = (
-            self._bounded_route_runtime_active()
-            and has_durable_decomposition_replay(self._max_decomposition_depth)
-        )
+        # Capture the activation snapshot immediately before construction so
+        # the executor and the later owner publication use the same decision.
+        parallel_bounded_routing = self._bounded_route_runtime_active()
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,

@@ -16,6 +16,7 @@ from ouroboros.orchestrator.failure_taxonomy import (
     RecoveryAction,
     classify,
     classify_bounce,
+    classify_hard_precondition,
     policy_for,
     policy_for_attempt,
 )
@@ -124,6 +125,50 @@ class TestClassify:
             ),
         )
         assert classify(attempt) == FailureClass.SCOPE_CREEP
+
+
+class TestHardPreconditionClassification:
+    @pytest.mark.parametrize(
+        ("content", "metadata"),
+        [
+            ("permission denied while opening the repository", {}),
+            ("Access denied by the deployment account", {}),
+            ("provider returned unauthorized", {}),
+            ("authentication required", {}),
+            ("missing required tool terraform", {}),
+            ("Missing access to the deployment account", {}),
+            ("environment variable is not configured", {}),
+            ("", {"failure_class": "BLOCKED"}),
+            ("", {"details": {"status": "FORBIDDEN"}}),
+        ],
+    )
+    def test_complete_compatibility_population_is_blocked(
+        self,
+        content: str,
+        metadata: dict[str, object],
+    ) -> None:
+        assert classify_hard_precondition(content, metadata) is FailureClass.BLOCKED
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "permission check passed but evidence is missing",
+            "configuration migration returned a transient network error",
+            "tool output was incomplete",
+        ],
+    )
+    def test_nearby_non_preconditions_remain_retryable(self, content: str) -> None:
+        assert classify_hard_precondition(content, {}) is None
+
+    def test_oversized_metadata_population_fails_closed(self) -> None:
+        metadata: dict[str, object] = {}
+        cursor = metadata
+        for _ in range(33):
+            child: dict[str, object] = {}
+            cursor["details"] = child
+            cursor = child
+
+        assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
 
 
 class TestPolicyTable:

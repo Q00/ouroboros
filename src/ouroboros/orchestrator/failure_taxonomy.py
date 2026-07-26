@@ -16,8 +16,10 @@ stays count-based until the integration PR.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 
 from ouroboros.orchestrator.decomposition_policy import BounceCause
 from ouroboros.orchestrator.verifier import Attempt, RetryAdmission
@@ -52,6 +54,78 @@ class FailureClass(StrEnum):
     SCOPE_CREEP = "SCOPE_CREEP"
     STALL = "STALL"
     BLOCKED = "BLOCKED"
+
+
+_HARD_PRECONDITION_METADATA_KEYS = (
+    "failure_class",
+    "status",
+    "code",
+    "error_code",
+    "error_type",
+    "type",
+    "reason",
+)
+_HARD_PRECONDITION_CHILD_KEYS = (
+    "blocker",
+    "error",
+    "details",
+    "metadata",
+    "response",
+)
+_HARD_PRECONDITION_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:permission|access) denied\b",
+        r"\b(?:unauthorized|forbidden|authentication required)\b",
+        r"\bmissing (?:required )?(?:tool|access|authority|credential|credentials|"
+        r"configuration|config|environment variable|env var)\b",
+        r"\b(?:tool|access|authority|credential|credentials|configuration|config|"
+        r"environment variable|env var) (?:is |are )?(?:required|unavailable|"
+        r"not available|not configured)\b",
+    )
+)
+_MAX_HARD_PRECONDITION_METADATA_MAPPINGS = 32
+
+
+def classify_hard_precondition(
+    content: str,
+    metadata: Mapping[str, object] | None = None,
+) -> FailureClass | None:
+    """Recognize an unambiguous provider hard block at one shared boundary.
+
+    Direct and parallel route owners must make the same decision for the same
+    final provider error. Explicit typed metadata wins; established provider
+    text shapes are a compatibility fallback for runtimes that expose only a
+    string. Metadata traversal is finite and fails closed when its admitted
+    population exceeds the bound, so an oversized provider envelope cannot
+    authorize a more expensive successor.
+    """
+
+    pending: list[object] = [metadata]
+    seen: set[int] = set()
+    metadata_text: list[str] = []
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, Mapping) or id(value) in seen:
+            continue
+        if len(seen) >= _MAX_HARD_PRECONDITION_METADATA_MAPPINGS:
+            return FailureClass.BLOCKED
+        seen.add(id(value))
+        for key in _HARD_PRECONDITION_METADATA_KEYS:
+            raw = value.get(key)
+            if not isinstance(raw, str):
+                continue
+            normalized = raw.strip().upper().replace("-", "_").replace(" ", "_")
+            if normalized == FailureClass.BLOCKED.value:
+                return FailureClass.BLOCKED
+            metadata_text.append(raw)
+        for key in _HARD_PRECONDITION_CHILD_KEYS:
+            pending.append(value.get(key))
+
+    normalized_text = " ".join((content, *metadata_text)).lower()
+    if any(pattern.search(normalized_text) for pattern in _HARD_PRECONDITION_PATTERNS):
+        return FailureClass.BLOCKED
+    return None
 
 
 class RecoveryAction(StrEnum):
@@ -438,6 +512,7 @@ __all__ = [
     "alt_harness_policy",
     "classify",
     "classify_bounce",
+    "classify_hard_precondition",
     "policy_for",
     "policy_for_attempt",
 ]

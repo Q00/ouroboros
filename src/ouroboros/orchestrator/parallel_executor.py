@@ -9657,12 +9657,28 @@ Respond with either ATOMIC or the structured JSON object only.
 
     def _failure_class_for_result(self, result: ACExecutionResult) -> str | None:
         """Best-effort failure taxonomy label for a failed AC result."""
+        from ouroboros.orchestrator.failure_taxonomy import (
+            FailureClass,
+            classify_hard_precondition,
+        )
+
+        if result.outcome is ACExecutionOutcome.BLOCKED:
+            return FailureClass.BLOCKED.value
+        for message in reversed(result.messages):
+            if not (message.is_final and message.is_error):
+                continue
+            hard_precondition = classify_hard_precondition(message.content, message.data)
+            if hard_precondition is not None:
+                return hard_precondition.value
+        hard_precondition = classify_hard_precondition(
+            " ".join(part for part in (result.error, result.final_message) if part)
+        )
+        if hard_precondition is not None:
+            return hard_precondition.value
         verdict = result.atomic_verifier_verdict
         if verdict is not None and verdict.failure_class:
             return verdict.failure_class
         if result.error == _STALL_SENTINEL:
-            from ouroboros.orchestrator.failure_taxonomy import FailureClass
-
             return FailureClass.STALL.value
         return None
 
