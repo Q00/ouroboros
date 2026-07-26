@@ -263,6 +263,8 @@ def test_pre_admission_v2_contract_migrates_once_to_current_version() -> None:
     del routing["requested_model_tier"]
     del persisted["execution_semantics"]
     del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
     )
@@ -288,6 +290,8 @@ def test_pre_requested_tier_v3_contract_migrates_once_to_current_version() -> No
     del routing["requested_model_tier"]
     del persisted["execution_semantics"]
     del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
         routing
     )
@@ -310,6 +314,8 @@ def test_pre_execution_semantics_v4_contract_migrates_once_to_current_version() 
     persisted["version"] = 4
     del persisted["execution_semantics"]
     del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
 
     resumed = _runner()
     changed = resumed._restore_execution_contract(
@@ -323,6 +329,49 @@ def test_pre_execution_semantics_v4_contract_migrates_once_to_current_version() 
     assert resumed._execution_contract["execution_semantics"] == (
         resumed._execution_semantics_contract()
     )
+
+
+def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() -> None:
+    runner = _runner(fat_harness_mode=True)
+    contract = runner._build_execution_contract(seed=_seed())
+
+    strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
+    inputs = contract["execution_inputs"]
+
+    assert "consolidated evidence contract" in strategy.get_system_prompt_fragment()
+    assert strategy.get_tools() == ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
+    assert inputs["allowed_tools"] == strategy.get_tools()
+    assert '"name":"Read"' in inputs["tool_catalog_json"]
+    assert len(inputs["tool_catalog_fingerprint"]) == 64
+
+
+def test_persisted_research_strategy_does_not_gain_edit_on_resume() -> None:
+    runner = _runner()
+    research_seed = _seed().model_copy(update={"task_type": "research"})
+    contract = runner._build_execution_contract(seed=research_seed)
+
+    strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
+
+    assert "Edit" not in strategy.get_tools()
+    assert "research" in strategy.get_system_prompt_fragment().lower()
+
+
+def test_complete_tool_catalog_drift_is_rejected_before_resume_dispatch() -> None:
+    from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+    runner = _runner()
+    research_seed = _seed().model_copy(update={"task_type": "research"})
+    contract = runner._build_execution_contract(seed=research_seed)
+    drifted_catalog = assemble_session_tool_catalog(
+        ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    )
+
+    with pytest.raises(OrchestratorError, match="changed prompt/tool authority"):
+        runner._bind_execution_tool_authority(
+            contract,
+            merged_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            tool_catalog=drifted_catalog,
+        )
 
 
 def test_malformed_v3_contract_does_not_enter_requested_tier_migration() -> None:

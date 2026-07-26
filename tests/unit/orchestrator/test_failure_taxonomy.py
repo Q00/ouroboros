@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+
 import pytest
 
 from ouroboros.orchestrator.evidence_schema import (
@@ -179,6 +181,46 @@ class TestHardPreconditionClassification:
             cursor = child
 
         assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
+
+    def test_oversized_key_population_fails_closed(self) -> None:
+        metadata = {f"unknown_{index}": index for index in range(33)}
+
+        assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
+
+    def test_infinite_mapping_population_is_bounded(self) -> None:
+        class InfiniteMapping(Mapping[str, object]):
+            def __getitem__(self, key: str) -> object:
+                return "transient"
+
+            def __iter__(self) -> Iterator[str]:
+                index = 0
+                while True:
+                    yield f"unknown_{index}"
+                    index += 1
+
+            def __len__(self) -> int:
+                return 2**31
+
+        assert (
+            classify_hard_precondition("provider failure", InfiniteMapping())
+            is FailureClass.BLOCKED
+        )
+
+    def test_mapping_iteration_exception_fails_closed(self) -> None:
+        class ExplodingMapping(Mapping[str, object]):
+            def __getitem__(self, key: str) -> object:
+                return "transient"
+
+            def __iter__(self) -> Iterator[str]:
+                raise RuntimeError("provider mapping iteration failed")
+
+            def __len__(self) -> int:
+                return 1
+
+        assert (
+            classify_hard_precondition("provider failure", ExplodingMapping())
+            is FailureClass.BLOCKED
+        )
 
     @pytest.mark.parametrize("status", [400, 404, 408, 409, 429, 500, 503])
     def test_non_authorization_http_statuses_remain_retryable(self, status: int) -> None:

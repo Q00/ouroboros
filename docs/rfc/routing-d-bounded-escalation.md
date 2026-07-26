@@ -188,7 +188,7 @@ before the first route event. Resume therefore fails before dependency analysis 
 provider entry if native model enforcement, routing configuration, or durable-depth
 eligibility is no longer available.
 
-Execution contract version 5 also seals the complete scalar executor semantics
+Execution contract version 6 also seals the complete scalar executor semantics
 used by that owner: verification enablement and timeout, retry and cross-harness
 budgets, decomposition enablement/mode/depth, requested and backend-capped effective
 worker counts, backend concurrency/rate limits, adapter pacing ownership,
@@ -197,9 +197,19 @@ the resolved context-pack mode that controls provider system prompts. The
 sub-contract has its own fingerprint and exact schema. Resume rejects any
 current-setting drift before constructing prompts or `ParallelACExecutor`. Prompt
 construction, fan-out, and rate pacing consume the immutable persisted snapshot
-instead of rereading mutable environment or config. Version 4 and older contracts
-predate Routing D ownership and migrate once using their legacy current settings;
-every new Routing D owner is born with version 5.
+instead of rereading mutable environment or config.
+
+Version 6 additionally freezes the resolved execution strategy: its system-prompt
+fragment, task suffix, base tools, and activity map. After session-scoped MCP
+discovery, the complete canonical tool catalog and the policy-allowed tool list
+are fingerprinted and persisted before the first provider effect. Resume rebuilds
+prompts from that frozen strategy and requires the current handler catalog to be
+byte-equivalent before re-entering either the direct or parallel owner; it never
+falls back to the task-type registry or overwrites a persisted runtime catalog
+with broader current authority. Version 5 cannot safely reconstruct these
+effect-bearing inputs and therefore fails closed on resume. Version 4 and older
+contracts predate Routing D ownership and migrate once using their legacy current
+settings; every new Routing D owner is born with version 6.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
@@ -242,6 +252,12 @@ dotted machine identifiers; numeric HTTP authorization statuses `401` and `403`
 are admitted only from status/code fields. Missing access, tools, credentials,
 configuration, or authentication produces one `BLOCKED` observation and immediate
 human handoff, never a costlier successor.
+Provider metadata traversal is bounded at both classification boundaries. Quota
+metadata is projected through a closed key vocabulary without iterating provider
+mappings; any mapping-protocol failure or population overflow pauses rather than
+authorizing a successor. Hard-precondition traversal uses per-mapping and total
+mapping sentinels, and converts iterator failures, oversized keys/text, or excess
+population into conservative `BLOCKED` handoff.
 
 Both owners compare a paused candidate with the complete predecessor
 `selected_route` snapshot, or with the exact live initial admission when no

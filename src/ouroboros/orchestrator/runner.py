@@ -168,7 +168,7 @@ from ouroboros.orchestrator.session import (
     SessionTracker,
     runtime_resume_identity_from_payload,
 )
-from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
+from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
@@ -195,6 +195,10 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 _MAX_DIRECT_ROUTE_PAUSE_EVENTS = 64
+_MAX_EXECUTION_STRATEGY_TOOLS = 256
+_MAX_EXECUTION_STRATEGY_TEXT_CHARS = 100_000
+_MAX_EXECUTION_TOOL_CATALOG_CHARS = 1_000_000
+_MAX_EXECUTION_ALLOWED_TOOLS = 1024
 _DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -231,6 +235,28 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
             return False
         seen.add(key)
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedExecutionStrategy:
+    """Effect-bearing prompt/tool strategy restored without live config reads."""
+
+    tools: tuple[str, ...]
+    system_prompt_fragment: str
+    task_prompt_suffix: str
+    activity_map: tuple[tuple[str, ActivityType], ...]
+
+    def get_tools(self) -> list[str]:
+        return list(self.tools)
+
+    def get_system_prompt_fragment(self) -> str:
+        return self.system_prompt_fragment
+
+    def get_task_prompt_suffix(self) -> str:
+        return self.task_prompt_suffix
+
+    def get_activity_map(self) -> dict[str, ActivityType]:
+        return dict(self.activity_map)
 
 
 # =============================================================================
@@ -682,10 +708,11 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 5
+EXECUTION_CONTRACT_VERSION = 6
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
+PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -2900,6 +2927,7 @@ class OrchestratorRunner:
         runtime_handle: RuntimeHandle | None,
         *,
         tool_catalog: SessionToolCatalog | None = None,
+        preserve_existing_tool_catalog: bool = False,
     ) -> RuntimeHandle | None:
         """Seed a runtime handle with startup metadata before execution begins."""
         backend = (
@@ -2910,7 +2938,34 @@ class OrchestratorRunner:
 
         metadata = dict(runtime_handle.metadata) if runtime_handle is not None else {}
         if tool_catalog is not None:
-            metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
+            serialized_catalog = serialize_tool_catalog(tool_catalog)
+            existing_catalog = metadata.get("tool_catalog")
+            if preserve_existing_tool_catalog and existing_catalog is not None:
+                try:
+                    existing_json = json.dumps(
+                        existing_catalog,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                    current_json = json.dumps(
+                        serialized_catalog,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise OrchestratorError(
+                        message="Cannot resume with an invalid runtime tool catalog",
+                        details={"cause": type(exc).__name__},
+                    ) from exc
+                if existing_json != current_json:
+                    raise OrchestratorError(
+                        message="Cannot overwrite changed runtime tool authority on resume",
+                        details={"resume_blocked": "runtime_tool_catalog_drift"},
+                    )
+            else:
+                metadata["tool_catalog"] = serialized_catalog
             policy_result = self._evaluate_tool_catalog_policy(
                 tool_catalog,
                 runtime_backend=backend,
@@ -3065,6 +3120,303 @@ class OrchestratorRunner:
             ensure_ascii=True,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _execution_inputs_fingerprint(inputs_contract: Mapping[str, Any]) -> str:
+        """Hash the resolved prompt and complete provider tool authority."""
+        encoded = json.dumps(
+            dict(inputs_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _build_execution_inputs_contract(self, seed: Seed | None) -> dict[str, object]:
+        """Freeze strategy outputs before a durable session becomes observable."""
+        strategy = (
+            _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
+            if seed is not None
+            else get_strategy("code")
+        )
+        tools = strategy.get_tools()
+        system_fragment = strategy.get_system_prompt_fragment()
+        task_suffix = strategy.get_task_prompt_suffix()
+        activity_map = strategy.get_activity_map()
+        resolver = "profile_backed" if isinstance(strategy, ProfileBackedStrategy) else "registry"
+        raw_contract: dict[str, object] = {
+            "schema_version": 1,
+            "strategy": {
+                "schema_version": 1,
+                "resolver": resolver,
+                "tools": list(tools),
+                "system_prompt_fragment": system_fragment,
+                "task_prompt_suffix": task_suffix,
+                "activity_map": [
+                    [tool, activity.value] for tool, activity in sorted(activity_map.items())
+                ],
+            },
+            # MCP discovery is asynchronous and session-scoped, so the complete
+            # catalog is sealed immediately after discovery and before the first
+            # provider effect. A paused current-format session must always have
+            # these fields bound.
+            "allowed_tools": None,
+            "tool_catalog_json": None,
+            "tool_catalog_fingerprint": None,
+        }
+        if self._mcp_manager is None:
+            _, _, static_catalog = self._assemble_strategy_base_catalog(strategy)
+            policy_result = self._evaluate_tool_catalog_policy(static_catalog)
+            serialized_catalog = serialize_tool_catalog(static_catalog)
+            catalog_json = json.dumps(
+                serialized_catalog,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            raw_contract["allowed_tools"] = list(policy_result.allowed_tools)
+            raw_contract["tool_catalog_json"] = catalog_json
+            raw_contract["tool_catalog_fingerprint"] = hashlib.sha256(
+                catalog_json.encode("utf-8")
+            ).hexdigest()
+        if self._normalize_execution_inputs_contract(raw_contract, require_bound=False) is None:
+            raise OrchestratorError(
+                message="Cannot create an invalid execution prompt/tool contract",
+                details={"invalid": "execution_inputs"},
+            )
+        return raw_contract
+
+    @staticmethod
+    def _normalize_execution_inputs_contract(
+        value: object,
+        *,
+        require_bound: bool,
+    ) -> dict[str, object] | None:
+        """Return a bounded plain copy of the exact durable input schema."""
+        input_keys = frozenset(
+            {
+                "schema_version",
+                "strategy",
+                "allowed_tools",
+                "tool_catalog_json",
+                "tool_catalog_fingerprint",
+            }
+        )
+        strategy_keys = frozenset(
+            {
+                "schema_version",
+                "resolver",
+                "tools",
+                "system_prompt_fragment",
+                "task_prompt_suffix",
+                "activity_map",
+            }
+        )
+        try:
+            if not _mapping_has_exact_keys(value, input_keys):
+                return None
+            assert isinstance(value, Mapping)
+            if value.get("schema_version") != 1:
+                return None
+            raw_strategy = value.get("strategy")
+            if not _mapping_has_exact_keys(raw_strategy, strategy_keys):
+                return None
+            assert isinstance(raw_strategy, Mapping)
+            if raw_strategy.get("schema_version") != 1:
+                return None
+            resolver = raw_strategy.get("resolver")
+            tools = raw_strategy.get("tools")
+            system_fragment = raw_strategy.get("system_prompt_fragment")
+            task_suffix = raw_strategy.get("task_prompt_suffix")
+            raw_activity_map = raw_strategy.get("activity_map")
+            if (
+                resolver not in {"registry", "profile_backed"}
+                or type(tools) is not list
+                or not tools
+                or len(tools) > _MAX_EXECUTION_STRATEGY_TOOLS
+                or any(type(tool) is not str or not tool or len(tool) > 256 for tool in tools)
+                or len(set(tools)) != len(tools)
+                or type(system_fragment) is not str
+                or not system_fragment
+                or len(system_fragment) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
+                or type(task_suffix) is not str
+                or not task_suffix
+                or len(task_suffix) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
+                or type(raw_activity_map) is not list
+                or len(raw_activity_map) > _MAX_EXECUTION_STRATEGY_TOOLS
+            ):
+                return None
+            normalized_activity: list[list[str]] = []
+            activity_tools: set[str] = set()
+            allowed_activity_values = {activity.value for activity in ActivityType}
+            for row in raw_activity_map:
+                if (
+                    type(row) is not list
+                    or len(row) != 2
+                    or type(row[0]) is not str
+                    or not row[0]
+                    or len(row[0]) > 256
+                    or row[0] in activity_tools
+                    or row[0] not in tools
+                    or type(row[1]) is not str
+                    or row[1] not in allowed_activity_values
+                ):
+                    return None
+                activity_tools.add(row[0])
+                normalized_activity.append([row[0], row[1]])
+
+            allowed_tools = value.get("allowed_tools")
+            catalog_json = value.get("tool_catalog_json")
+            catalog_fingerprint = value.get("tool_catalog_fingerprint")
+            unbound = allowed_tools is None and catalog_json is None and catalog_fingerprint is None
+            if unbound:
+                if require_bound:
+                    return None
+                normalized_allowed_tools: list[str] | None = None
+            else:
+                if (
+                    type(allowed_tools) is not list
+                    or len(allowed_tools) > _MAX_EXECUTION_ALLOWED_TOOLS
+                    or any(
+                        type(tool) is not str or not tool or len(tool) > 256
+                        for tool in allowed_tools
+                    )
+                    or len(set(allowed_tools)) != len(allowed_tools)
+                    or type(catalog_json) is not str
+                    or len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS
+                    or type(catalog_fingerprint) is not str
+                    or len(catalog_fingerprint) != 64
+                    or any(char not in "0123456789abcdef" for char in catalog_fingerprint)
+                    or hashlib.sha256(catalog_json.encode("utf-8")).hexdigest()
+                    != catalog_fingerprint
+                ):
+                    return None
+                decoded_catalog = json.loads(catalog_json)
+                if not isinstance(decoded_catalog, list | dict):
+                    return None
+                canonical_catalog = json.dumps(
+                    decoded_catalog,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                if canonical_catalog != catalog_json:
+                    return None
+                normalized_allowed_tools = list(allowed_tools)
+
+            return {
+                "schema_version": 1,
+                "strategy": {
+                    "schema_version": 1,
+                    "resolver": resolver,
+                    "tools": list(tools),
+                    "system_prompt_fragment": system_fragment,
+                    "task_prompt_suffix": task_suffix,
+                    "activity_map": normalized_activity,
+                },
+                "allowed_tools": normalized_allowed_tools,
+                "tool_catalog_json": catalog_json,
+                "tool_catalog_fingerprint": catalog_fingerprint,
+            }
+        except Exception:
+            return None
+
+    def _execution_strategy_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> _PersistedExecutionStrategy:
+        raw_inputs = (
+            execution_contract.get("execution_inputs")
+            if isinstance(execution_contract, Mapping)
+            else None
+        )
+        normalized = self._normalize_execution_inputs_contract(
+            raw_inputs,
+            require_bound=require_bound,
+        )
+        if normalized is None:
+            raise OrchestratorError(
+                message="Cannot execute with an invalid prompt/tool input snapshot",
+                details={"invalid": "execution_inputs"},
+            )
+        strategy = normalized["strategy"]
+        assert isinstance(strategy, dict)
+        raw_activity = strategy["activity_map"]
+        assert isinstance(raw_activity, list)
+        return _PersistedExecutionStrategy(
+            tools=tuple(strategy["tools"]),
+            system_prompt_fragment=strategy["system_prompt_fragment"],
+            task_prompt_suffix=strategy["task_prompt_suffix"],
+            activity_map=tuple((row[0], ActivityType(row[1])) for row in raw_activity),
+        )
+
+    def _bind_execution_tool_authority(
+        self,
+        execution_contract: Mapping[str, Any],
+        *,
+        merged_tools: list[str],
+        tool_catalog: SessionToolCatalog,
+    ) -> tuple[dict[str, Any], bool]:
+        """Seal or validate the exact allowed tools and complete catalog."""
+        normalized = self._normalize_execution_inputs_contract(
+            execution_contract.get("execution_inputs"),
+            require_bound=False,
+        )
+        if normalized is None:
+            raise OrchestratorError(
+                message="Cannot bind an invalid prompt/tool input snapshot",
+                details={"invalid": "execution_inputs"},
+            )
+        serialized_catalog = serialize_tool_catalog(tool_catalog)
+        try:
+            catalog_json = json.dumps(
+                serialized_catalog,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot persist a non-canonical tool catalog",
+                details={"cause": type(exc).__name__},
+            ) from exc
+        if len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS:
+            raise OrchestratorError(message="Cannot persist an oversized tool catalog")
+        current_allowed = list(merged_tools)
+        if (
+            len(current_allowed) > _MAX_EXECUTION_ALLOWED_TOOLS
+            or any(type(tool) is not str or not tool or len(tool) > 256 for tool in current_allowed)
+            or len(set(current_allowed)) != len(current_allowed)
+        ):
+            raise OrchestratorError(message="Cannot persist an invalid allowed-tool catalog")
+
+        persisted_catalog = normalized["tool_catalog_json"]
+        persisted_allowed = normalized["allowed_tools"]
+        if persisted_catalog is not None:
+            if persisted_catalog != catalog_json or persisted_allowed != current_allowed:
+                raise OrchestratorError(
+                    message="Cannot resume with changed prompt/tool authority",
+                    details={
+                        "resume_blocked": "execution_tool_authority_drift",
+                        "hint": "Restore the original tool catalog or start a new session.",
+                    },
+                )
+            return dict(execution_contract), False
+
+        normalized["allowed_tools"] = current_allowed
+        normalized["tool_catalog_json"] = catalog_json
+        normalized["tool_catalog_fingerprint"] = hashlib.sha256(
+            catalog_json.encode("utf-8")
+        ).hexdigest()
+        bound_contract = deepcopy(dict(execution_contract))
+        bound_contract["execution_inputs"] = normalized
+        proof = bound_contract.get("frugality_proof")
+        if not isinstance(proof, dict):
+            raise OrchestratorError(message="Cannot bind an invalid proof contract")
+        proof["execution_inputs_fingerprint"] = self._execution_inputs_fingerprint(normalized)
+        return bound_contract, True
 
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
@@ -4592,6 +4944,7 @@ class OrchestratorRunner:
         seed: Seed | None = None,
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        execution_inputs_contract: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -4602,6 +4955,19 @@ class OrchestratorRunner:
 
         guidance_bundle = self._ensure_new_run_guidance()
         execution_semantics = self._execution_semantics_contract()
+        if execution_inputs_contract is None:
+            execution_inputs = self._build_execution_inputs_contract(seed)
+        else:
+            normalized_inputs = self._normalize_execution_inputs_contract(
+                execution_inputs_contract,
+                require_bound=True,
+            )
+            if normalized_inputs is None:
+                raise OrchestratorError(
+                    message="Cannot preserve an invalid execution input contract",
+                    details={"invalid": "execution_inputs"},
+                )
+            execution_inputs = normalized_inputs
         routing_contract = serialize_model_router(self._model_router)
         routing_contract["requested_model_tier"] = self._requested_model_tier
         # Effort routing is independent of model-tier routing. Persist it even
@@ -4626,6 +4992,7 @@ class OrchestratorRunner:
             "execution_semantics_fingerprint": self._execution_semantics_fingerprint(
                 execution_semantics
             ),
+            "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
         workspace_identity = self._proof_workspace_identity()
         if workspace_identity is not None:
@@ -4653,6 +5020,7 @@ class OrchestratorRunner:
             "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
             "execution_semantics": execution_semantics,
+            "execution_inputs": execution_inputs,
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
             "guidance": self._guidance_contract(guidance_bundle),
@@ -5151,12 +5519,27 @@ class OrchestratorRunner:
                 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
                 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
                 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
+                PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
                 details={"contract_version": raw_version},
+            )
+
+        if raw_version == PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION:
+            # Version 5 could already have dispatched provider effects, but did
+            # not persist the resolved prompt strategy or complete tool
+            # authority. Reconstructing either from current files/config would
+            # silently change the resumed effect boundary.
+            raise OrchestratorError(
+                message="Cannot resume a session without durable prompt/tool authority",
+                details={
+                    "contract_version": raw_version,
+                    "resume_blocked": "execution_inputs_unavailable",
+                    "hint": "Start a new session under the current execution contract.",
+                },
             )
 
         migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
@@ -5168,6 +5551,7 @@ class OrchestratorRunner:
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
         raw_execution_semantics = raw_contract.get("execution_semantics")
+        raw_execution_inputs = raw_contract.get("execution_inputs")
         raw_authority = raw_contract.get("foundation_a_authority")
         if (
             not isinstance(raw_proof, Mapping)
@@ -5187,7 +5571,10 @@ class OrchestratorRunner:
         # executor-semantics snapshot. Only those exact shapes migrate.
         # A malformed current contract must never fall through either path.
         if migrate_legacy_contract and (
-            "execution_semantics" in raw_contract or "execution_semantics_fingerprint" in raw_proof
+            "execution_semantics" in raw_contract
+            or "execution_semantics_fingerprint" in raw_proof
+            or "execution_inputs" in raw_contract
+            or "execution_inputs_fingerprint" in raw_proof
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -5215,6 +5602,7 @@ class OrchestratorRunner:
         persisted_workspace_path = raw_proof.get("workspace_path")
         persisted_routing_fingerprint = raw_proof.get("routing_fingerprint")
         persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+        persisted_execution_inputs_fingerprint = raw_proof.get("execution_inputs_fingerprint")
         persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
         persisted_constructor_model = raw_routing.get("constructor_model")
         persisted_runtime_execution = raw_routing.get("runtime_execution")
@@ -5230,6 +5618,14 @@ class OrchestratorRunner:
             isinstance(persisted_seed_fingerprint, str)
             and len(persisted_seed_fingerprint) == 64
             and all(char in "0123456789abcdef" for char in persisted_seed_fingerprint)
+        )
+        normalized_execution_inputs = (
+            None
+            if migrate_legacy_contract
+            else self._normalize_execution_inputs_contract(
+                raw_execution_inputs,
+                require_bound=True,
+            )
         )
         if (
             isinstance(protocol_version, bool)
@@ -5248,6 +5644,15 @@ class OrchestratorRunner:
                     or not isinstance(persisted_execution_semantics_fingerprint, str)
                     or persisted_execution_semantics_fingerprint
                     != self._execution_semantics_fingerprint(raw_execution_semantics)
+                )
+            )
+            or (
+                not migrate_legacy_contract
+                and (
+                    normalized_execution_inputs is None
+                    or not isinstance(persisted_execution_inputs_fingerprint, str)
+                    or persisted_execution_inputs_fingerprint
+                    != self._execution_inputs_fingerprint(normalized_execution_inputs)
                 )
             )
             or (seed is not None and not valid_seed_fingerprint)
@@ -5563,6 +5968,7 @@ class OrchestratorRunner:
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
+                execution_inputs_contract=normalized_execution_inputs,
             )
             # Only the public resume path reaches this branch with a live,
             # registry-issued generation.  Preserve the persisted diagnostics
@@ -6664,6 +7070,33 @@ class OrchestratorRunner:
             }
         )
 
+    def _assemble_strategy_base_catalog(
+        self,
+        strategy: ExecutionStrategy | None,
+    ) -> tuple[list[str], set[str], SessionToolCatalog]:
+        """Build the deterministic pre-MCP catalog used by prepare and execute."""
+        base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        inherited_mcp: set[str] = set()
+        if self._inherited_tools:
+            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
+            for tool_name in self._inherited_tools:
+                if tool_name in known_builtins and tool_name not in base_tools:
+                    base_tools.append(tool_name)
+                elif tool_name not in known_builtins:
+                    inherited_mcp.add(tool_name)
+                    log.info(
+                        "orchestrator.runner.inherited_mcp_capability_preserved",
+                        tool=tool_name,
+                        has_mcp_manager=self._mcp_manager is not None,
+                    )
+        session_catalog = assemble_session_tool_catalog(base_tools)
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
+        return base_tools, inherited_mcp, session_catalog
+
     async def _get_merged_tools(
         self,
         session_id: str,
@@ -6684,40 +7117,7 @@ class OrchestratorRunner:
         Returns:
             Tuple of (merged tool names list, MCPToolProvider or None, session catalog).
         """
-        # Start with strategy tools (or DEFAULT_TOOLS as fallback)
-        base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
-        inherited_mcp: set[str] = set()
-        if self._inherited_tools:
-            # Separate inherited tools into two buckets:
-            #
-            # 1. **Builtins** (Read, Edit, Bash, …) → added to ``base_tools``
-            #    so they receive real catalog entries with handlers.
-            #
-            # 2. **Bridge / MCP tools** → stored as ``inherited_capabilities``
-            #    on the session catalog.  They are *not* added to
-            #    ``base_tools`` because that would synthesize phantom catalog
-            #    entries (definitions with no backing handler).  When
-            #    ``self._mcp_manager`` is set, ``MCPToolProvider.get_tools()``
-            #    below discovers them with real server connections.  When the
-            #    manager is absent the names are still preserved so the
-            #    delegated-session capability contract is not silently lost.
-            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
-            for tool_name in self._inherited_tools:
-                if tool_name in known_builtins and tool_name not in base_tools:
-                    base_tools.append(tool_name)
-                elif tool_name not in known_builtins:
-                    inherited_mcp.add(tool_name)
-                    log.info(
-                        "orchestrator.runner.inherited_mcp_capability_preserved",
-                        tool=tool_name,
-                        has_mcp_manager=self._mcp_manager is not None,
-                    )
-        session_catalog = assemble_session_tool_catalog(base_tools)
-        if inherited_mcp:
-            session_catalog = replace(
-                session_catalog,
-                inherited_capabilities=frozenset(inherited_mcp),
-            )
+        base_tools, inherited_mcp, session_catalog = self._assemble_strategy_base_catalog(strategy)
 
         # Defer the pre-discovery policy evaluation.  Previously we computed
         # it unconditionally and threw it away whenever MCP discovery
@@ -7808,11 +8208,14 @@ class OrchestratorRunner:
                     expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
 
-            # Build prompts with strategy. The fat-harness default path must use
-            # the profile-backed prompt contract so leaf agents are told to emit
-            # schema-valid evidence before the acceptance gate parses it.
+            # Build prompts from the strategy frozen during preparation. The
+            # fat-harness profile and legacy registry are effect-bearing inputs;
+            # neither may be reread after the durable session is published.
             execution_semantics = self._execution_semantics_snapshot(execution_contract)
-            strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
+            strategy = self._execution_strategy_snapshot(
+                execution_contract,
+                require_bound=False,
+            )
             system_prompt = build_system_prompt(
                 seed,
                 strategy=strategy,
@@ -7833,6 +8236,32 @@ class OrchestratorRunner:
                 tool_prefix=self._mcp_tool_prefix,
                 strategy=strategy,
             )
+            if execution_contract is None:
+                raise OrchestratorError(message="Cannot bind missing execution inputs")
+            execution_contract, inputs_changed = self._bind_execution_tool_authority(
+                execution_contract,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+            )
+            if inputs_changed:
+                bound_progress = {
+                    EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
+                    "messages_processed": tracker.messages_processed,
+                }
+                persisted_inputs = await self._session_repo.track_progress(
+                    tracker.session_id,
+                    bound_progress,
+                )
+                if persisted_inputs.is_err:
+                    raise OrchestratorError(
+                        message="Failed to persist resolved prompt/tool authority",
+                        details={
+                            "session_id": tracker.session_id,
+                            "cause": str(persisted_inputs.error),
+                        },
+                    )
+                tracker = tracker.with_progress(bound_progress)
+                self._execution_contract = execution_contract
             await self._emit_run_configuration_resolved(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
@@ -9677,9 +10106,16 @@ class OrchestratorRunner:
                 f"[dim]Previously processed: {tracker.messages_processed} messages[/dim]"
             )
 
-            # Build resume prompt
+            # Reuse the exact strategy that produced the original prompt/tool
+            # boundary. Profile files and the task-type registry are mutable
+            # current configuration and therefore are not resume authority.
+            strategy = self._execution_strategy_snapshot(
+                execution_contract,
+                require_bound=not execution_contract_changed,
+            )
             system_prompt = build_system_prompt(
                 seed,
+                strategy=strategy,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
                 context_pack_enabled=execution_semantics["context_pack_enabled"],
@@ -9691,7 +10127,7 @@ class OrchestratorRunner:
             )
             resume_prompt = f"""Continue executing the task from where you left off.
 
-{build_task_prompt(seed)}
+{build_task_prompt(seed, strategy=strategy)}
 
 Note: This is a resumed session. Please continue from where execution was interrupted.
 """
@@ -9707,12 +10143,40 @@ Note: This is a resumed session. Please continue from where execution was interr
                     {"workspace": self._task_workspace.to_progress_dict()},
                 )
 
-            # Get merged tools (DEFAULT_TOOLS + MCP tools if configured)
+            # Discover handlers for the persisted base strategy, then require
+            # exact equality with the complete original catalog before any
+            # provider resume effect.
             merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
                 session_id=session_id,
                 tool_prefix=self._mcp_tool_prefix,
+                strategy=strategy,
             )
-            runtime_handle = self._seed_runtime_handle(runtime_handle, tool_catalog=tool_catalog)
+            execution_contract, inputs_changed = self._bind_execution_tool_authority(
+                execution_contract,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+            )
+            if inputs_changed:
+                bound_progress = {
+                    EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
+                    "messages_processed": tracker.messages_processed,
+                }
+                persisted_inputs = await self._session_repo.track_progress(
+                    session_id,
+                    bound_progress,
+                )
+                if persisted_inputs.is_err:
+                    raise OrchestratorError(
+                        message="Failed to persist migrated prompt/tool authority",
+                        details={"session_id": session_id, "cause": str(persisted_inputs.error)},
+                    )
+                tracker = tracker.with_progress(bound_progress)
+                self._execution_contract = execution_contract
+            runtime_handle = self._seed_runtime_handle(
+                runtime_handle,
+                tool_catalog=tool_catalog,
+                preserve_existing_tool_catalog=True,
+            )
 
             start_time = datetime.now(UTC)
             messages_processed = tracker.messages_processed
@@ -9723,12 +10187,11 @@ Note: This is a resumed session. Please continue from where execution was interr
             # Create workflow state tracker for progress display
             from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
-            resume_strategy = get_strategy(seed.task_type)
             state_tracker = WorkflowStateTracker(
                 acceptance_criteria=list(seed.acceptance_criteria),
                 goal=seed.goal,
                 session_id=session_id,
-                activity_map=resume_strategy.get_activity_map(),
+                activity_map=strategy.get_activity_map(),
             )
             await self._replay_workflow_state(session_id, state_tracker)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 
 import pytest
@@ -186,6 +187,34 @@ def test_metadata_population_overflow_fails_closed_as_pause() -> None:
         type="result",
         content="Provider request failed.",
         data=data,
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
+
+class _ExplodingNestedMapping(Mapping[str, object]):
+    """Legal Mapping whose fixed-key protocol fails on access."""
+
+    def __getitem__(self, key: str) -> object:
+        raise RuntimeError(f"provider mapping rejected {key}")
+
+    def __iter__(self) -> Iterator[str]:
+        yield "status_code"
+
+    def __len__(self) -> int:
+        return 1
+
+
+@pytest.mark.parametrize("container_field", ("error", "details", "metadata", "recovery"))
+def test_hostile_nested_mapping_protocol_fails_closed_without_throwing(
+    container_field: str,
+) -> None:
+    """A completed provider failure cannot escape pause handling via Mapping.get."""
+
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={"subtype": "error", container_field: _ExplodingNestedMapping()},
     )
 
     assert is_usage_limit_pause_message(message) is True

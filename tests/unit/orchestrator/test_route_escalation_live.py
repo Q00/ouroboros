@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -722,6 +723,67 @@ async def test_supported_quota_metadata_never_authorizes_a_route_successor(
                             "reason": "quota window",
                             **retry_metadata,
                         },
+                    ),
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert not any(
+        event.type in {"execution.ac.attempt_judged", "execution.ac.route_observed"}
+        for event in events
+    )
+    assert [event.type for event in events].count("execution.ac.route_paused") == 1
+
+
+@pytest.mark.asyncio
+async def test_hostile_quota_mapping_protocol_stops_after_one_route() -> None:
+    """Mapping.get failures pause before judgment, observation, or successor effects."""
+
+    class ExplodingMapping(Mapping[str, object]):
+        def __getitem__(self, key: str) -> object:
+            raise RuntimeError(f"provider mapping rejected {key}")
+
+        def __iter__(self) -> Iterator[str]:
+            yield "status_code"
+
+        def __len__(self) -> int:
+            return 1
+
+    executor, _store, events = _executor()
+    calls = 0
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Provider request failed.",
+                outcome=ACExecutionOutcome.FAILED,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Provider request failed.",
+                        data={"subtype": "error", "details": ExplodingMapping()},
                     ),
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),

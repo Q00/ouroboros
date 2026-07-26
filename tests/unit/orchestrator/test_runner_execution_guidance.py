@@ -13,7 +13,6 @@ from ouroboros.config import get_default_config
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, ParamSupport
-from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -328,7 +327,6 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         )
 
     runner._adapter.execute_task = execute_task
-    tool_catalog = assemble_session_tool_catalog(["Read"])
     with (
         patch.object(
             runner._session_repo,
@@ -349,7 +347,7 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         patch.object(
             runner,
             "_get_merged_tools",
-            AsyncMock(return_value=(["Read"], None, tool_catalog)),
+            AsyncMock(wraps=runner._get_merged_tools),
         ),
         patch.object(runner, "_evaluate_frugality_proof", AsyncMock()),
     ):
@@ -397,15 +395,13 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
             execution_id=tracker.execution_id,
         )
     )
-    tool_catalog = assemble_session_tool_catalog(["Read"])
-
     try:
         with (
             patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -520,7 +516,6 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
         )
 
     resumed._adapter.execute_task = execute_task
-    tool_catalog = assemble_session_tool_catalog(["Read"])
     try:
         with (
             patch.object(
@@ -541,7 +536,7 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
             patch.object(
                 resumed,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+                AsyncMock(wraps=resumed._get_merged_tools),
             ),
             patch.object(resumed, "_evaluate_frugality_proof", AsyncMock()),
         ):

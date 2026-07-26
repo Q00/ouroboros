@@ -77,6 +77,9 @@ _HARD_PRECONDITION_PATTERNS = tuple(
     )
 )
 _MAX_HARD_PRECONDITION_METADATA_MAPPINGS = 32
+_MAX_HARD_PRECONDITION_KEYS_PER_MAPPING = 32
+_MAX_HARD_PRECONDITION_KEY_CHARS = 128
+_MAX_HARD_PRECONDITION_TEXT_CHARS = 4096
 
 
 def _normalize_machine_identifier(value: str) -> str:
@@ -100,6 +103,9 @@ def classify_hard_precondition(
     authorize a more expensive successor.
     """
 
+    if len(content) > _MAX_HARD_PRECONDITION_TEXT_CHARS:
+        return FailureClass.BLOCKED
+
     pending: list[object] = [metadata]
     seen: set[int] = set()
     metadata_text: list[str] = []
@@ -110,9 +116,26 @@ def classify_hard_precondition(
         if len(seen) >= _MAX_HARD_PRECONDITION_METADATA_MAPPINGS:
             return FailureClass.BLOCKED
         seen.add(id(value))
-        for key, raw in value.items():
+        try:
+            iterator = iter(value.items())
+        except Exception:
+            return FailureClass.BLOCKED
+        for index in range(_MAX_HARD_PRECONDITION_KEYS_PER_MAPPING + 1):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            except Exception:
+                return FailureClass.BLOCKED
+            if index >= _MAX_HARD_PRECONDITION_KEYS_PER_MAPPING:
+                return FailureClass.BLOCKED
+            if not isinstance(item, tuple) or len(item) != 2:
+                return FailureClass.BLOCKED
+            key, raw = item
             if not isinstance(key, str):
                 continue
+            if len(key) > _MAX_HARD_PRECONDITION_KEY_CHARS:
+                return FailureClass.BLOCKED
             key_label = _normalize_machine_identifier(key)
             key_tokens = frozenset(key_label.split())
             if key_tokens & _HARD_PRECONDITION_CHILD_KEY_TOKENS:
@@ -133,6 +156,8 @@ def classify_hard_precondition(
                     return FailureClass.BLOCKED
             if not isinstance(raw, str):
                 continue
+            if len(raw) > _MAX_HARD_PRECONDITION_TEXT_CHARS:
+                return FailureClass.BLOCKED
             normalized = _normalize_machine_identifier(raw)
             if normalized == FailureClass.BLOCKED.value.lower():
                 return FailureClass.BLOCKED

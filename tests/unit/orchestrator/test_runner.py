@@ -43,7 +43,6 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionResult,
     ParallelExecutionResult,
 )
-from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -5065,6 +5064,55 @@ class TestOrchestratorRunner:
         assert result.value.success is True
         mark_completed.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_resume_session_reuses_research_prompt_and_tool_authority(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Research resume cannot fall back to default tools or gain Edit."""
+        research_seed = sample_seed.model_copy(update={"task_type": "research"})
+        paused_tracker = SessionTracker.create(
+            "exec_resume_research",
+            research_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            research_seed,
+            session_id="sess_resume_research",
+        )
+        captured: dict[str, Any] = {}
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args
+            captured.update(kwargs)
+            yield AgentMessage(
+                type="result",
+                content="Research resumed successfully",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("sess_resume_research", research_seed)
+
+        assert result.is_ok
+        assert "Edit" not in captured["tools"]
+        assert "research" in captured["system_prompt"].lower()
+
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
         runner: OrchestratorRunner,
@@ -5630,8 +5678,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Default fat-harness leaves must be prompted to emit typed JSON evidence."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
@@ -5654,10 +5700,12 @@ class TestOrchestratorRunner:
         )
         captured_strategy: Any = None
 
-        async def _capture_tools(**kwargs: Any) -> tuple[list[str], None, tuple[Any, ...]]:
+        original_get_merged_tools = runner._get_merged_tools
+
+        async def _capture_tools(**kwargs: Any) -> Any:
             nonlocal captured_strategy
             captured_strategy = kwargs["strategy"]
-            return ["Read"], None, assemble_session_tool_catalog(["Read"])
+            return await original_get_merged_tools(**kwargs)
 
         with (
             patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
@@ -5671,7 +5719,7 @@ class TestOrchestratorRunner:
             )
 
         assert result is expected
-        assert isinstance(captured_strategy, ProfileBackedStrategy)
+        assert "consolidated evidence contract" in (captured_strategy.get_system_prompt_fragment())
         system_prompt = execute.await_args.kwargs["system_prompt"]
         assert "consolidated evidence contract" in system_prompt
         assert "files_touched" in system_prompt
@@ -5689,8 +5737,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Single-AC fat-harness runs must not bypass the typed-evidence gate."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         single_ac_seed = sample_seed.model_copy(
             update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
         )
@@ -5720,7 +5766,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -5743,8 +5789,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Structured investment authority must not be lost on direct dispatch."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -5781,7 +5825,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -5804,8 +5848,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Any explicit metadata uses per-AC routing, even without lowering authority."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -5840,7 +5882,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -5862,8 +5904,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Investment-bearing legacy sequential runs retain sequential semantics."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -5904,7 +5944,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -5927,8 +5967,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """--sequential plus fat-harness should preserve ordering and enforce AC gates."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         tracker = SessionTracker.create("exec_sequential", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(
             mock_adapter,
@@ -5955,7 +5993,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -5973,8 +6011,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Direct runner callers can request one-AC-per-stage executor routing."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         tracker = SessionTracker.create("exec_forced", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         tracker = _attach_live_process_local_contract(
@@ -5996,7 +6032,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):

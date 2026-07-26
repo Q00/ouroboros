@@ -17,6 +17,16 @@ from ouroboros.orchestrator.adapter import AgentMessage
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _MAX_METADATA_MAPS = 32
+_MISSING_METADATA_VALUE = object()
+_METADATA_CHILD_FIELDS = (
+    "meta",
+    "mcp_meta",
+    "metadata",
+    "error",
+    "details",
+    "response",
+    "recovery",
+)
 _HTTP_STATUS_FIELDS = (
     "http_status",
     "httpStatus",
@@ -42,6 +52,42 @@ _RECOVERY_KINDS = frozenset(
         "usage_limit_pause",
     }
 )
+_METADATA_FIELDS = tuple(
+    dict.fromkeys(
+        (
+            *_METADATA_CHILD_FIELDS,
+            *_HTTP_STATUS_FIELDS,
+            "pause_seconds",
+            "retry_after_seconds",
+            "retryAfterSeconds",
+            "reset_after_seconds",
+            "resetAfterSeconds",
+            "retry_after_ms",
+            "retryAfterMs",
+            "reset_after_ms",
+            "resetAfterMs",
+            "retry_after",
+            "retryAfter",
+            "reset_after",
+            "resetAfter",
+            "resume_after",
+            "resumeAfter",
+            "reset_at",
+            "resetAt",
+            "error_type",
+            "type",
+            "reason",
+            "message",
+            "provider",
+            "recoverable",
+            "is_retriable",
+            "retriable",
+            "usage_limit",
+            "quota_exhausted",
+            "kind",
+        )
+    )
+)
 _DURATION_PATTERN = re.compile(
     r"\b(?P<value>\d+(?:\.\d+)?)\s*"
     r"(?P<unit>days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
@@ -63,10 +109,16 @@ _LIMIT_PATTERN = re.compile(
 
 def _metadata_candidates(
     message: AgentMessage,
-) -> tuple[tuple[Mapping[str, object], ...], bool]:
-    """Return bounded metadata rows and whether another row exceeded the budget."""
+) -> tuple[tuple[dict[str, object], ...], bool]:
+    """Return bounded closed-vocabulary rows plus an ambiguity sentinel.
 
-    candidates: list[Mapping[str, object]] = []
+    Provider metadata is an untrusted protocol boundary.  Never iterate it and
+    never retain a live nested ``Mapping`` for later consumers: either a fixed
+    vocabulary can be projected into plain dictionaries or the final failure
+    is conservatively treated as a pause.
+    """
+
+    candidates: list[dict[str, object]] = []
     seen: set[int] = set()
     pending: list[object] = [message.data]
     while pending:
@@ -76,10 +128,26 @@ def _metadata_candidates(
         if len(candidates) >= _MAX_METADATA_MAPS:
             return tuple(candidates), True
         seen.add(id(value))
-        candidates.append(value)
-        for key in ("meta", "mcp_meta", "metadata", "error", "details", "response"):
-            pending.append(value.get(key))
+        projected: dict[str, object] = {}
+        for key in _METADATA_FIELDS:
+            try:
+                raw = value.get(key, _MISSING_METADATA_VALUE)
+            except Exception:
+                return tuple(candidates), True
+            if raw is not _MISSING_METADATA_VALUE:
+                projected[key] = raw
+        candidates.append(projected)
+        pending.extend(projected.get(key) for key in _METADATA_CHILD_FIELDS)
     return tuple(candidates), False
+
+
+def _metadata_value(metadata: Mapping[str, object], key: str) -> object:
+    """Read one admitted key without propagating a hostile Mapping failure."""
+
+    try:
+        return metadata.get(key, _MISSING_METADATA_VALUE)
+    except Exception:
+        return _MISSING_METADATA_VALUE
 
 
 def _duration_text_to_seconds(text: str) -> int | None:
@@ -149,17 +217,17 @@ def retry_duration_seconds_from_metadata(
         "reset_after_seconds",
         "resetAfterSeconds",
     ):
-        parsed = _duration_value_to_seconds(metadata.get(key))
+        parsed = _duration_value_to_seconds(_metadata_value(metadata, key))
         if parsed is not None:
             return parsed
 
     for key in ("retry_after_ms", "retryAfterMs", "reset_after_ms", "resetAfterMs"):
-        parsed = _duration_value_to_seconds(metadata.get(key))
+        parsed = _duration_value_to_seconds(_metadata_value(metadata, key))
         if parsed is not None:
             return max(1, (parsed + 999) // 1000)
 
     for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
-        value = metadata.get(key)
+        value = _metadata_value(metadata, key)
         parsed_datetime = _parse_datetime(value)
         if parsed_datetime is not None:
             seconds = math.ceil((parsed_datetime - now).total_seconds())
@@ -170,7 +238,7 @@ def retry_duration_seconds_from_metadata(
             return parsed_duration
 
     for key in ("resume_after", "resumeAfter", "reset_at", "resetAt"):
-        parsed_datetime = _parse_datetime(metadata.get(key))
+        parsed_datetime = _parse_datetime(_metadata_value(metadata, key))
         if parsed_datetime is not None:
             seconds = math.ceil((parsed_datetime - now).total_seconds())
             if seconds > 0:
@@ -201,7 +269,7 @@ def _metadata_text(metadata: Mapping[str, object]) -> str:
         "status",
         "provider",
     ):
-        value = metadata.get(key)
+        value = _metadata_value(metadata, key)
         if isinstance(value, str):
             # Normalize RuntimeError-style CamelCase and machine separators so
             # typed values and prose pass through one vocabulary.
@@ -215,7 +283,7 @@ def _duration_from_metadata(metadata: Mapping[str, object], *, now: datetime) ->
 
 def _has_runtime_shape(metadata: Mapping[str, object]) -> bool:
     return any(
-        key in metadata
+        _metadata_value(metadata, key) is not _MISSING_METADATA_VALUE
         for key in (
             "error_type",
             *_HTTP_STATUS_FIELDS,
@@ -251,7 +319,7 @@ def _metadata_has_http_429(metadata: Mapping[str, object]) -> bool:
     """
 
     for key in _HTTP_STATUS_FIELDS:
-        value = metadata.get(key)
+        value = _metadata_value(metadata, key)
         if type(value) is int and value == 429:
             return True
         if type(value) is str and value.strip() == "429":
@@ -289,12 +357,13 @@ def is_usage_limit_pause_message(
         return True
 
     for metadata in metadata_rows:
-        recovery = metadata.get("recovery")
-        if isinstance(recovery, Mapping):
-            kind = str(recovery.get("kind", "")).strip().lower()
-            if kind in _RECOVERY_KINDS:
-                return True
-        if metadata.get("usage_limit") is True or metadata.get("quota_exhausted") is True:
+        kind = _metadata_value(metadata, "kind")
+        if isinstance(kind, str) and kind.strip().lower() in _RECOVERY_KINDS:
+            return True
+        if (
+            _metadata_value(metadata, "usage_limit") is True
+            or _metadata_value(metadata, "quota_exhausted") is True
+        ):
             return True
         text = _metadata_text(metadata)
         duration = _duration_from_metadata(metadata, now=resolved_now)
