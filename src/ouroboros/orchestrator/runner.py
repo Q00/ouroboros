@@ -5985,7 +5985,16 @@ class OrchestratorRunner:
 
         pause_seconds = self._duration_from_message(message, now=now) or default_pause_seconds
         pause_seconds = max(1, pause_seconds)
-        resume_after = now + timedelta(seconds=pause_seconds)
+        try:
+            resume_after = now + timedelta(seconds=pause_seconds)
+        except OverflowError:
+            # Retry metadata is provider-controlled. An otherwise recognizable
+            # quota boundary must remain PAUSED even when its numeric hint is
+            # outside Python's datetime envelope; fall back to the validated
+            # operator-configured window instead of turning pause construction
+            # into exception cleanup.
+            pause_seconds = default_pause_seconds
+            resume_after = now + timedelta(seconds=pause_seconds)
         duration_display = self._format_pause_duration(pause_seconds)
         return RecoverableFailurePause(
             pause_kind="usage_limit",
@@ -5997,6 +6006,19 @@ class OrchestratorRunner:
                 f"Resume after {resume_after.isoformat()} "
                 f"(wait at least {duration_display})."
             ),
+        )
+
+    def _bounded_route_runtime_active(self) -> bool:
+        """Return whether this runner can authorize a Routing D provider effect."""
+        return bool(
+            self._model_router is not None
+            and self._route_economics is not None
+            and getattr(
+                getattr(self._adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            is ParamSupport.NATIVE
         )
 
     @classmethod
@@ -7799,16 +7821,7 @@ class OrchestratorRunner:
             recoverable_failure_pause: RecoverableFailurePause | None = None
             last_direct_final_message: AgentMessage | None = None
             direct_route_candidate: Any | None = None
-            direct_bounded_routing = (
-                self._model_router is not None
-                and self._route_economics is not None
-                and getattr(
-                    getattr(self._adapter, "capabilities", None),
-                    "model_override_support",
-                    ParamSupport.IGNORED,
-                )
-                is ParamSupport.NATIVE
-            )
+            direct_bounded_routing = self._bounded_route_runtime_active()
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -8615,37 +8628,38 @@ class OrchestratorRunner:
                 expected_root_indices=range(len(seed.acceptance_criteria)),
             )
 
-        # Publish the parallel effect owner before the executor can append a
-        # route judgment, observation, pause, or enter a provider boundary.
-        # A crash after any of those effects must reconstruct through this
-        # exact plan instead of falling into the direct resume path.
-        resume_owner_progress = {
-            "routing_resume_owner": "parallel",
-            "routing_parallel_force_sequential": force_sequential_levels,
-            "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
-            "routing_parallel_externally_satisfied_acs": (
-                self._serialize_parallel_external_satisfaction(
-                    seed,
-                    externally_satisfied_acs,
-                )
-            ),
-        }
-        owner_result = await self._session_repo.track_progress(
-            tracker.session_id,
-            resume_owner_progress,
-        )
-        if owner_result.is_err:
-            return Result.err(
-                OrchestratorError(
-                    message="Failed to persist the parallel Routing D resume owner",
-                    details={
-                        "session_id": tracker.session_id,
-                        "execution_id": exec_id,
-                        "cause": str(owner_result.error),
-                    },
-                )
+        if self._bounded_route_runtime_active():
+            # Publish the parallel effect owner before Routing D can append a
+            # route judgment, observation, pause, or enter a provider boundary.
+            # Legacy parallel execution has no complete durable stage replay
+            # owner, so it must not publish this stronger resume claim.
+            resume_owner_progress = {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": force_sequential_levels,
+                "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
+                "routing_parallel_externally_satisfied_acs": (
+                    self._serialize_parallel_external_satisfaction(
+                        seed,
+                        externally_satisfied_acs,
+                    )
+                ),
+            }
+            owner_result = await self._session_repo.track_progress(
+                tracker.session_id,
+                resume_owner_progress,
             )
-        tracker = tracker.with_progress(resume_owner_progress)
+            if owner_result.is_err:
+                return Result.err(
+                    OrchestratorError(
+                        message="Failed to persist the parallel Routing D resume owner",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": exec_id,
+                            "cause": str(owner_result.error),
+                        },
+                    )
+                )
+            tracker = tracker.with_progress(resume_owner_progress)
 
         try:
             parallel_result = await parallel_executor.execute_parallel(

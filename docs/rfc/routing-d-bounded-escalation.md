@@ -170,6 +170,13 @@ queued SessionSignal follow-up. A quota-ending turn therefore performs no later
 provider effect, retains its exact resumable handle, and leaves queued signals to
 be rejected at target teardown. Non-finite retry hints are ignored by both direct
 and shared pause classifiers rather than being passed into integer rounding.
+Finite but unrepresentably large provider retry hints fall back to the validated
+operator pause window before constructing the durable resume timestamp.
+
+The durable parallel resume-owner marker is published only when Routing D is
+actually effect-capable for the run. Legacy parallel execution does not have
+complete completed-stage replay without a checkpoint, so it cannot advertise the
+stronger Routing D owner contract or redirect resume through that state machine.
 
 Live decomposition depth is admitted only in the inclusive range 0-2. At the
 maximum five-way branching factor this yields at most 30 persisted child nodes

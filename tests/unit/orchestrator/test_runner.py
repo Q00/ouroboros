@@ -3776,7 +3776,10 @@ class TestOrchestratorRunner:
             is None
         )
 
-    def test_recoverable_failure_handles_huge_integer_retry_metadata(self) -> None:
+    def test_recoverable_failure_handles_huge_integer_retry_metadata(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
         huge_retry = 10**1000
         now = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -3794,6 +3797,22 @@ class TestOrchestratorRunner:
             )
             == (huge_retry + 999) // 1000
         )
+
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached.",
+            data={
+                "subtype": "error",
+                "error_type": "UsageLimitError",
+                "retry_after_seconds": huge_retry,
+            },
+        )
+        with patch("ouroboros.config.get_usage_limit_pause_seconds", return_value=18000):
+            pause = runner._recoverable_failure_pause(message, now=now)
+
+        assert pause is not None
+        assert pause.pause_seconds == 18000
+        assert pause.resume_after == now + timedelta(hours=5)
 
     def test_recoverable_failure_propagates_invalid_usage_limit_config(
         self,
@@ -4133,6 +4152,7 @@ class TestOrchestratorRunner:
             sample_seed.metadata.seed_id,
             session_id="sess_parallel_owner_first",
         )
+        _enable_direct_bounded_routes(runner, runner._adapter)
         execute_parallel = AsyncMock(
             side_effect=AssertionError("parallel executor entered before owner publication")
         )
@@ -4162,6 +4182,80 @@ class TestOrchestratorRunner:
         assert result.is_err
         assert result.error.message == "Failed to persist the parallel Routing D resume owner"
         execute_parallel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_legacy_parallel_pause_does_not_publish_routing_d_resume_owner(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Dormant Routing D cannot claim replay authority for legacy stages."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        runner._model_router = None
+        tracker = SessionTracker.create(
+            "exec_legacy_parallel_pause",
+            sample_seed.metadata.seed_id,
+            session_id="sess_legacy_parallel_pause",
+        )
+        graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=criterion)
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=tuple(
+                (index,) for index in range(len(sample_seed.acceptance_criteria))
+            ),
+        )
+        quota_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Retry after 2 hours.",
+            data={"subtype": "error", "error_type": "UsageLimitError"},
+        )
+        legacy_pause = ParallelExecutionResult(
+            results=tuple(
+                ACExecutionResult(
+                    ac_index=index,
+                    ac_content=criterion,
+                    success=False,
+                    messages=(quota_message,),
+                    final_message=quota_message.content,
+                )
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            success_count=0,
+            failure_count=len(sample_seed.acceptance_criteria),
+            total_messages=len(sample_seed.acceptance_criteria),
+        )
+        track_progress = AsyncMock(return_value=Result.ok(None))
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=legacy_pause),
+            ),
+            patch.object(runner._session_repo, "track_progress", track_progress),
+            patch.object(
+                runner._session_repo,
+                "mark_paused",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+            patch.object(runner, "_project_execution_outcome", AsyncMock()),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                force_sequential_levels=True,
+                resume_execution_plan=graph.to_execution_plan(),
+            )
+
+        assert result.is_ok and result.value.success is False
+        track_progress.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_parallel_paused_projection_failure_preserves_owner(
