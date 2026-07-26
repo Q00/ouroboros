@@ -61,6 +61,10 @@ def _wrap(variant: str, payload: str) -> str:
         return _wrap_long_supported_fence(payload, 5, "json")
     if variant == "longer_bare_fence":
         return _wrap_long_supported_fence(payload, 5, "")
+    if variant == "inline_before_prose_json":
+        return f"Use ``` as prose before the answer: {payload}"
+    if variant == "inline_before_indented_crlf_fence":
+        return f"Use ``` inline\r\n  ````json\r\n{payload}\r\n  ````"
     if variant == "no_fence":
         return payload
     raise AssertionError(f"unknown variant: {variant}")
@@ -133,6 +137,8 @@ FENCE_VARIANTS = [
     "long_bare_fence",
     "longer_json_fence",
     "longer_bare_fence",
+    "inline_before_prose_json",
+    "inline_before_indented_crlf_fence",
     "no_fence",
 ]
 

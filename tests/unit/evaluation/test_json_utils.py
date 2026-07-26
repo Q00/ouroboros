@@ -60,6 +60,16 @@ class TestExtractJsonPayload:
         text = '````json\n{"actual": true}\n```` trailing\nLater: {"stale": true}'
         assert extract_json_payload(text) is None
 
+    def test_inline_backticks_do_not_suppress_prose_json_fallback(self) -> None:
+        text = 'Use ``` as prose, then {"actual": true}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_inline_backticks_do_not_hide_later_indented_crlf_fence(self) -> None:
+        text = (
+            'Use ``` inline\r\n  ````json\r\n{"actual": true}\r\n  ````\r\nLater: {"stale": true}'
+        )
+        assert extract_json_payload(text) == '{"actual": true}'
+
     def test_prose_before_json(self):
         """The classic Anthropic prefill failure: prose with braces before JSON."""
         text = (

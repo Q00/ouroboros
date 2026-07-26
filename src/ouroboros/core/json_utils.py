@@ -47,12 +47,12 @@ def _extract_fenced_json_payload(
     fence_start = 0
     fallback_parts: list[str] = []
     while True:
-        opener = text.find("```", fence_start)
-        if opener == -1:
+        opening = _find_opening_fence(text, fence_start)
+        if opening is None:
             fallback_parts.append(text[fence_start:])
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
-        opener_length = _backtick_run_length(text, opener)
+        opener, opener_length = opening
         info_start = opener + opener_length
         line_end = text.find("\n", info_start)
         if line_end == -1:
@@ -92,6 +92,23 @@ def _backtick_run_length(text: str, start: int) -> int:
     while end < len(text) and text[end] == "`":
         end += 1
     return end - start
+
+
+def _find_opening_fence(text: str, start: int) -> tuple[int, int] | None:
+    """Return the next start-of-line fence, ignoring inline backtick runs."""
+    pos = start
+    while True:
+        candidate = text.find("```", pos)
+        if candidate == -1:
+            return None
+
+        candidate_length = _backtick_run_length(text, candidate)
+        line_start = text.rfind("\n", 0, candidate) + 1
+        prefix = text[line_start:candidate]
+        if prefix.strip() == "":
+            return candidate, candidate_length
+
+        pos = candidate + candidate_length
 
 
 def _find_closing_fence(text: str, start: int, opener_length: int) -> tuple[int, int] | None:
