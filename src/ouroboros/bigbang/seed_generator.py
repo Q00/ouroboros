@@ -55,10 +55,8 @@ log = structlog.get_logger()
 
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
-_AC_CONTRACT_FIELD_RE = re.compile(r"\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
-_AC_RESERVED_FIELD_FRAGMENT_RE = re.compile(
-    r"\|\s*(verify|artifacts|expect)\b(?!\s*:)", re.IGNORECASE
-)
+_AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
+_AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -69,8 +67,72 @@ class _ACFieldMarker:
     end: int
 
 
+@dataclass(frozen=True)
+class _ACReservedFieldFragment:
+    name: str
+    end: int
+    has_colon: bool
+    canonical: bool
+
+
 def _is_description_word_apostrophe(value: str, index: int) -> bool:
     return value[index] == "'" and index > 0 and value[index - 1].isalnum()
+
+
+def _scan_pipe_led_ac_field_fragment(
+    value: str,
+    pipe_index: int,
+) -> _ACReservedFieldFragment | None:
+    """Recognize reserved AC fields after normalizing token obfuscators."""
+    if pipe_index < 0 or pipe_index >= len(value) or value[pipe_index] != "|":
+        return None
+
+    index = pipe_index + 1
+    normalized = ""
+    obfuscated = False
+    while index < len(value):
+        char = value[index]
+        if char.isascii() and char.isalpha():
+            normalized += char.lower()
+            if not any(name.startswith(normalized) for name in _AC_RESERVED_FIELD_NAMES):
+                return None
+            index += 1
+            if normalized not in _AC_RESERVED_FIELD_NAMES:
+                continue
+            if index < len(value) and (value[index].isalnum() or value[index] == "_"):
+                return None
+
+            field_end = index
+            while field_end < len(value) and (
+                value[field_end].isspace() or value[field_end] in _AC_FIELD_NAME_OBFUSCATORS
+            ):
+                if value[field_end] in _AC_FIELD_NAME_OBFUSCATORS:
+                    obfuscated = True
+                field_end += 1
+            has_colon = field_end < len(value) and value[field_end] == ":"
+            return _ACReservedFieldFragment(
+                name=normalized,
+                end=field_end + 1 if has_colon else index,
+                has_colon=has_colon,
+                canonical=not obfuscated,
+            )
+        if char.isspace() or char in _AC_FIELD_NAME_OBFUSCATORS:
+            if char in _AC_FIELD_NAME_OBFUSCATORS or normalized:
+                obfuscated = True
+            index += 1
+            continue
+        return None
+    return None
+
+
+def _find_pipe_led_ac_field_fragment(value: str) -> _ACReservedFieldFragment | None:
+    pipe_index = value.find("|")
+    while pipe_index >= 0:
+        fragment = _scan_pipe_led_ac_field_fragment(value, pipe_index)
+        if fragment is not None:
+            return fragment
+        pipe_index = value.find("|", pipe_index + 1)
+    return None
 
 
 def _parse_string_array_values(
@@ -149,12 +211,9 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if char == "\\":
             if not structured_payload_started:
                 escaped_remainder = body[index + 1 :]
-                escaped_marker = _AC_CONTRACT_FIELD_RE.match(escaped_remainder)
-                if escaped_marker is None:
-                    escaped_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.match(escaped_remainder)
+                escaped_marker = _scan_pipe_led_ac_field_fragment(escaped_remainder, 0)
                 if escaped_marker is not None:
-                    field_name = escaped_marker.group(1).lower()
-                    raise ValueError(f"Escaped {field_name} field in acceptance criterion")
+                    raise ValueError(f"Escaped {escaped_marker.name} field in acceptance criterion")
             escaped = True
             index += 1
             continue
@@ -162,12 +221,11 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             if char == quote:
                 if not structured_payload_started and quote_start is not None:
                     quoted_payload = body[quote_start:index]
-                    quoted_marker = _AC_CONTRACT_FIELD_RE.search(quoted_payload)
-                    if quoted_marker is None:
-                        quoted_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.search(quoted_payload)
+                    quoted_marker = _find_pipe_led_ac_field_fragment(quoted_payload)
                     if quoted_marker is not None:
-                        field_name = quoted_marker.group(1).lower()
-                        raise ValueError(f"Quoted {field_name} field in acceptance criterion")
+                        raise ValueError(
+                            f"Quoted {quoted_marker.name} field in acceptance criterion"
+                        )
                 quote = None
                 quote_start = None
             index += 1
@@ -185,27 +243,22 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             index += 1
             continue
 
-        remainder = body[index:]
-        match = _AC_CONTRACT_FIELD_RE.match(remainder)
-        if match is not None:
+        fragment = _scan_pipe_led_ac_field_fragment(body, index)
+        if fragment is not None and fragment.has_colon and fragment.canonical:
             structured_payload_started = True
             markers.append(
                 _ACFieldMarker(
-                    name=match.group(1).lower(),
+                    name=fragment.name,
                     start=index,
-                    end=index + match.end(),
+                    end=fragment.end,
                 )
             )
-            index += match.end()
+            index = fragment.end
             continue
-        malformed = _AC_RESERVED_FIELD_FRAGMENT_RE.match(remainder)
-        if malformed is not None:
-            field_name = malformed.group(1).lower()
-            raise ValueError(f"Malformed {field_name} field in acceptance criterion")
+        if fragment is not None and (not structured_payload_started or fragment.canonical):
+            raise ValueError(f"Malformed {fragment.name} field in acceptance criterion")
         index += 1
-    if (quote is not None or escaped) and (
-        _AC_CONTRACT_FIELD_RE.search(body) or _AC_RESERVED_FIELD_FRAGMENT_RE.search(body)
-    ):
+    if (quote is not None or escaped) and _find_pipe_led_ac_field_fragment(body):
         raise ValueError("Unterminated quoted or escaped acceptance criterion contract")
     return tuple(markers)
 
@@ -919,9 +972,15 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
                     value = line[len(prefix) :].strip()
-                    if key == "acceptance_criteria" and not value:
-                        current_multiline_key = key
-                        multiline_values.setdefault(key, [])
+                    if key == "acceptance_criteria":
+                        if not value or value.startswith("AC:"):
+                            current_multiline_key = key
+                            multiline_values.setdefault(key, [])
+                            if value:
+                                multiline_values[key].append(value)
+                        else:
+                            requirements[key] = value
+                            current_multiline_key = None
                     else:
                         requirements[key] = value
                         current_multiline_key = None
@@ -933,14 +992,11 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 if line.startswith("AC:"):
                     multiline_values.setdefault(current_multiline_key, []).append(line)
                     continue
-                continuation_marker = _AC_CONTRACT_FIELD_RE.search(line)
-                if continuation_marker is None:
-                    continuation_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.search(line)
+                continuation_marker = _find_pipe_led_ac_field_fragment(line)
                 if continuation_marker is not None:
-                    field_name = continuation_marker.group(1).lower()
                     raise ValueError(
                         "Acceptance criterion continuation contains reserved "
-                        f"{field_name} field; every nonempty line must start with AC:"
+                        f"{continuation_marker.name} field; every nonempty line must start with AC:"
                     )
                 raise ValueError("Every nonempty ACCEPTANCE_CRITERIA line must start with AC:")
 

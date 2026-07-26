@@ -568,6 +568,57 @@ class TestSeedGeneratorExtraction:
         with pytest.raises(ValueError, match=rf"Quoted {field_name} field"):
             _parse_acceptance_criterion_contract(line)
 
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            ("AC: Output file exists | arti facts: schema v2 outputs.json", "artifacts"),
+            ('AC: Output file exists | arti"facts: schema v2 outputs.json', "artifacts"),
+            (r"AC: Output file exists | arti\facts: schema v2 outputs.json", "artifacts"),
+            ("AC: Command status is enforced | ver ify: exit 1", "verify"),
+            ("AC: Command output is checked | ex pect: READY", "expect"),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_split_pre_marker_reserved_fields(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    def test_acceptance_contract_parser_allows_unrelated_pipe_led_prose(self) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Report preserves terminology | art facts: explanatory prose"
+        )
+
+        assert criterion is not None
+        assert criterion.description == (
+            "Report preserves terminology | art facts: explanatory prose"
+        )
+        assert criterion.has_success_contract is False
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            "printf READY | arti facts: literal",
+            'printf READY | arti"facts": literal',
+            r"printf READY | arti\facts: literal",
+            "printf READY | ver ify: literal",
+        ),
+    )
+    def test_acceptance_contract_parser_preserves_split_markers_after_real_field(
+        self,
+        verify_command: str,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Command payload is preserved | "
+            f"verify: {verify_command} | artifacts: output.txt | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("output.txt",)
+
     def test_acceptance_contract_parser_allows_closed_quote_without_reserved_marker(
         self,
     ) -> None:
@@ -591,6 +642,7 @@ class TestSeedGeneratorExtraction:
         assert criterion.verify_command is None
         assert criterion.expected_artifacts == ()
 
+    @pytest.mark.parametrize("representation", ("block", "inline"))
     @pytest.mark.parametrize(
         "ac_line,continuation,field_name",
         (
@@ -598,18 +650,25 @@ class TestSeedGeneratorExtraction:
             ('AC: Output file exists "', "| artifacts schema v2 outputs.json", "artifacts"),
             ("AC: Command status is enforced \\", "| verify: exit 1", "verify"),
             ('AC: Command output is checked "', "| expect: READY", "expect"),
+            ('AC: Output file exists "', "| arti facts: schema v2 outputs.json", "artifacts"),
+            ('AC: Output file exists "', '| arti"facts: schema v2 outputs.json', "artifacts"),
+            ('AC: Output file exists "', r"| arti\facts: schema v2 outputs.json", "artifacts"),
+            ("AC: Command status is enforced \\", "| ver ify: exit 1", "verify"),
+            ('AC: Command output is checked "', "| ex pect: READY", "expect"),
         ),
     )
     def test_extraction_rejects_reserved_non_ac_continuation_lines(
         self,
+        representation: str,
         ac_line: str,
         continuation: str,
         field_name: str,
     ) -> None:
         generator = SeedGenerator(llm_adapter=AsyncMock())
-        response = create_valid_extraction_response(
-            acceptance_criteria=f"\n{ac_line}\n{continuation}\n"
-        )
+        acceptance_criteria = f"{ac_line}\n{continuation}"
+        if representation == "block":
+            acceptance_criteria = f"\n{acceptance_criteria}\n"
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
         with pytest.raises(
             ValueError,
@@ -617,11 +676,16 @@ class TestSeedGeneratorExtraction:
         ):
             generator._parse_extraction_response(response)
 
-    def test_extraction_rejects_any_non_ac_acceptance_continuation(self) -> None:
+    @pytest.mark.parametrize("representation", ("block", "inline"))
+    def test_extraction_rejects_any_non_ac_acceptance_continuation(
+        self,
+        representation: str,
+    ) -> None:
         generator = SeedGenerator(llm_adapter=AsyncMock())
-        response = create_valid_extraction_response(
-            acceptance_criteria="\nAC: Output file exists\nwrapped prose continuation\n"
-        )
+        acceptance_criteria = "AC: Output file exists\nwrapped prose continuation"
+        if representation == "block":
+            acceptance_criteria = f"\n{acceptance_criteria}\n"
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
         with pytest.raises(
             ValueError,
@@ -639,6 +703,22 @@ class TestSeedGeneratorExtraction:
         requirements = generator._parse_extraction_response(response)
 
         assert requirements["ontology_description"] == "Domain prose with | verify: text"
+
+    def test_extraction_collects_inline_and_continued_ac_records(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "AC: First output exists | verify: NONE | artifacts: first.txt | expect: NONE\n"
+                "AC: Second output exists | verify: NONE | artifacts: second.txt | expect: NONE"
+            )
+        )
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["acceptance_criteria"] == [
+            "AC: First output exists | verify: NONE | artifacts: first.txt | expect: NONE",
+            "AC: Second output exists | verify: NONE | artifacts: second.txt | expect: NONE",
+        ]
 
     @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
     def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
@@ -1364,6 +1444,7 @@ class TestSeedGeneratorExtraction:
         assert grade.may_run is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("block", "inline"))
     @pytest.mark.parametrize(
         "bypass_attempt,repaired_contract,expected_gate_error",
         (
@@ -1404,10 +1485,37 @@ class TestSeedGeneratorExtraction:
                 "artifacts: NONE | expect: READY",
                 "output_assertion",
             ),
+            (
+                "AC: Output file exists | arti facts: schema v2 outputs.json",
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Output file exists | arti"facts: schema v2 outputs.json',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                r"AC: Output file exists | arti\facts: schema v2 outputs.json",
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                "AC: Command status is enforced | ver ify: exit 1",
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+            (
+                "AC: Command output is checked | ex pect: READY",
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
         ),
     )
     async def test_generate_retries_pre_field_contract_bypasses_before_runtime_gate(
         self,
+        representation: str,
         bypass_attempt: str,
         repaired_contract: str,
         expected_gate_error: str,
@@ -1415,9 +1523,14 @@ class TestSeedGeneratorExtraction:
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
-        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bypass_attempt}\n")
+        bad_acceptance_criteria = bypass_attempt
+        repaired_acceptance_criteria = repaired_contract
+        if representation == "block":
+            bad_acceptance_criteria = f"\n{bypass_attempt}\n"
+            repaired_acceptance_criteria = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_acceptance_criteria)
         repaired_response = create_valid_extraction_response(
-            acceptance_criteria=f"\n{repaired_contract}\n"
+            acceptance_criteria=repaired_acceptance_criteria
         )
         mock_adapter.complete = AsyncMock(
             side_effect=[
