@@ -1,5 +1,7 @@
 """Tests for extract_json_payload — the shared JSON extractor."""
 
+import pytest
+
 from ouroboros.evaluation.json_utils import extract_json_payload
 
 
@@ -116,6 +118,16 @@ class TestExtractJsonPayload:
 
     def test_invalid_supported_fence_fails_closed_instead_of_later_prose_json(self):
         text = '```json\n{not json}\n```\n{"actual": true}'
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize(
+        ("fence_info", "nested_payload"),
+        [("json", '{"stale": true}'), ("", '[{"stale": true}]')],
+    )
+    def test_supported_fence_rejects_invalid_body_with_nested_json(
+        self, fence_info: str, nested_payload: str
+    ) -> None:
+        text = f"```{fence_info}\ninvalid wrapper {nested_payload}\n```"
         assert extract_json_payload(text) is None
 
     def test_supported_fallback_excludes_well_formed_unsupported_fence_body(self):

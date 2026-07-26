@@ -71,10 +71,13 @@ def _extract_fenced_json_payload(
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
 
-        body = text[body_start:closing]
-        payload = _extract_first_json_from_text(body)
-        if payload is not None:
-            return (_FenceScanState.PAYLOAD, payload, ())
+        body = text[body_start:closing].strip()
+        try:
+            parsed = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict | list):
+            return (_FenceScanState.PAYLOAD, body, ())
 
         # A supported fence is an explicit JSON answer boundary. If it cannot
         # be parsed, do not let stale examples elsewhere in the response win.
