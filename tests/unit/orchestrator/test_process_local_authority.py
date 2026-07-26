@@ -49,6 +49,7 @@ from ouroboros.orchestrator.runner import (
     OrchestratorError,
     OrchestratorResult,
     OrchestratorRunner,
+    _PendingLifecycleIntent,
     clear_cancellation,
     get_cancellation_request,
     get_pending_cancellations,
@@ -744,6 +745,60 @@ async def test_precreated_retry_repeated_pause_failure_stays_pending_without_pro
         assert second.error.details["resume_blocked"] == "pause_persistence_pending"
         assert mark_paused.await_count == 2
         assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
+        assert tracker.session_id in runner._pending_lifecycle_intents
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_precreated_retry_missing_pending_pause_payload_is_not_retryable(
+    tmp_path: Path,
+) -> None:
+    """A corrupted PAUSED replay intent surfaces its exact invariant failure."""
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / 'precreated-pause-missing-payload.db'}"
+    )
+    await event_store.initialize()
+    runtime = _RecoverablePauseRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-precreated-pause-missing-payload",
+        session_id="session-precreated-pause-missing-payload",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    runner._pending_lifecycle_intents[tracker.session_id] = _PendingLifecycleIntent(
+        execution_id=tracker.execution_id,
+        status=SessionStatus.PAUSED,
+        error_message="missing pause payload",
+    )
+    mark_paused = AsyncMock(side_effect=AssertionError("mark_paused must not run"))
+
+    try:
+        with patch.object(runner._session_repo, "mark_paused", mark_paused):
+            result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "pending_lifecycle_payload_missing"
+        assert result.error.details["session_id"] == tracker.session_id
+        assert result.error.details["execution_id"] == tracker.execution_id
+        assert runtime.execute_calls == 0
+        mark_paused.assert_not_awaited()
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
         assert tracker.session_id in runner._pending_lifecycle_intents

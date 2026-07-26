@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from uuid import uuid4
 
 from rich.console import Console
@@ -4961,18 +4961,21 @@ class OrchestratorRunner:
             )
 
         resolved_status: SessionStatus
+        if intent.status is SessionStatus.PAUSED and intent.pause is None:
+            return Result.err(
+                OrchestratorError(
+                    message="Pending PAUSED intent is missing its replay payload",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": "pending_lifecycle_payload_missing",
+                    },
+                )
+            )
+
         try:
             if intent.status is SessionStatus.PAUSED:
-                pause = intent.pause
-                if pause is None:
-                    raise OrchestratorError(
-                        message="Pending PAUSED intent is missing its replay payload",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                            "resume_blocked": "pending_lifecycle_payload_missing",
-                        },
-                    )
+                pause = cast(RecoverableFailurePause, intent.pause)
                 pause_result = await self._session_repo.mark_paused(
                     tracker.session_id,
                     reason=pause.reason,
