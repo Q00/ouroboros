@@ -73,22 +73,70 @@ def _test_command_invocation_allowing_output_plumbing(command: str) -> str | Non
 
 def _shell_command_body(command: str) -> str | None:
     """Return the ``-c`` body when the command starts with a shell wrapper."""
+    if _has_unquoted_status_masking_control(command):
+        return None
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
-    if len(parts) < 3:
+    return _shell_command_body_from_argv(tuple(parts))
+
+
+_SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"})
+_SHELL_NON_EXECUTING_OPTIONS = frozenset(
+    {
+        "-n",
+        "--noexec",
+        "--version",
+        "--help",
+        "-D",
+        "--dump-strings",
+        "--dump-po-strings",
+        "--pretty-print",
+    }
+)
+
+
+def _shell_command_body_from_argv(argv: tuple[str, ...]) -> str | None:
+    """Return a shell ``-c`` body only while parsing the option prefix.
+
+    Once a script operand is encountered, later values are positional
+    arguments even when they happen to be spelled ``-c``. Options that consume
+    a following value remain within the prefix but cannot expose that value as
+    a command body.
+    """
+    if len(argv) < 3:
         return None
-    shell_name = Path(parts[0]).name
+    shell_name = Path(argv[0]).name
     if shell_name not in {"bash", "zsh", "sh"}:
         return None
-    option_index = next(
-        (index for index, part in enumerate(parts[1:], start=1) if part in {"-c", "-lc", "-cl"}),
-        None,
-    )
-    if option_index is None or option_index + 1 >= len(parts):
-        return None
-    return parts[option_index + 1].strip()
+    index = 1
+    while index < len(argv):
+        option = argv[index]
+        if option in _SHELL_NON_EXECUTING_OPTIONS or (
+            option.startswith("-") and not option.startswith("--") and "n" in option[1:]
+        ):
+            return None
+        if option in {"-c", "-lc", "-cl"}:
+            if index + 1 >= len(argv) or index + 2 != len(argv):
+                return None
+            return argv[index + 1].strip()
+        if option in _SHELL_OPTIONS_WITH_ARGUMENT:
+            if index + 1 >= len(argv):
+                return None
+            option_value = argv[index + 1].strip().lower().replace("_", "").replace("-", "")
+            if option == "-o" and option_value == "noexec":
+                return None
+            index += 2
+            continue
+        if option.startswith("-o"):
+            option_value = option[2:].strip().lower().replace("_", "").replace("-", "")
+            if option_value == "noexec":
+                return None
+        if option == "--" or option == "-" or not option.startswith(("-", "+")):
+            return None
+        index += 1
+    return None
 
 
 def _test_invocation_from_shell_body(body: str) -> str | None:
@@ -243,6 +291,40 @@ def _has_gradle_or_maven_test_skip(parts: list[str]) -> bool:
     return False
 
 
+def _has_unquoted_status_masking_control(command: str) -> bool:
+    """Return whether shell control syntax can hide a test command's status."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in {"|", ";", "\n", "\r"}:
+            return True
+        if char == "&":
+            previous = command[index - 1] if index > 0 else ""
+            following = command[index + 1] if index + 1 < len(command) else ""
+            if previous == "&" or following == "&":
+                continue
+            if previous not in {">", "<"} and following != ">":
+                return True
+    return False
+
+
 def _test_invocation_from_prefix(command: str) -> str | None:
     """Return a normalized test invocation only when it starts the command text.
 
@@ -254,6 +336,8 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     silently back a clean ``tests_passed`` / ``commands_run`` claim via the
     ``startswith`` widening in ``_runtime_message_supports_command_claim``.
     """
+    if _has_unquoted_status_masking_control(command):
+        return None
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -261,7 +345,9 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     parts = _strip_env_prefix(parts)
     if not parts:
         return None
-    if "|" in parts:
+    if any(part in {"|", "||", ";", "&"} for part in parts):
+        return None
+    if _has_non_executing_test_mode(parts):
         return None
 
     if parts[0] in {"pytest", "py.test", "tox", "nox"}:
@@ -285,6 +371,55 @@ def _test_invocation_from_prefix(command: str) -> str | None:
     ):
         return _normalized_evidence_text(" ".join(parts))
     return None
+
+
+_GENERIC_NON_EXECUTING_TEST_OPTIONS = frozenset({"-h", "--help", "-V", "--version", "--dry-run"})
+_PYTEST_NON_EXECUTING_OPTIONS = frozenset(
+    {
+        "--collect-only",
+        "--collectonly",
+        "--co",
+        "--fixtures",
+        "--fixtures-per-test",
+        "--funcargs",
+        "--markers",
+        "--setup-only",
+        "--setup-plan",
+        "--setuponly",
+        "--setupplan",
+    }
+)
+
+
+def _has_non_executing_test_mode(parts: list[str]) -> bool:
+    """Return whether a recognized test runner is configured not to run tests."""
+    if any(part in _GENERIC_NON_EXECUTING_TEST_OPTIONS for part in parts[1:]):
+        return True
+
+    runner_parts = parts
+    if len(parts) >= 3 and (
+        parts[:3] == ["uv", "run", "pytest"]
+        or (
+            _is_python_executable(parts[0])
+            and parts[1] == "-m"
+            and parts[2] in {"pytest", "unittest"}
+        )
+    ):
+        runner_parts = parts[2:]
+
+    runner = Path(runner_parts[0]).name if runner_parts else ""
+    options = runner_parts[1:]
+    if runner in {"pytest", "py.test"} and any(
+        option in _PYTEST_NON_EXECUTING_OPTIONS for option in options
+    ):
+        return True
+    if runner == "tox" and any(
+        option in {"-l", "--listenvs", "--showconfig"} for option in options
+    ):
+        return True
+    if runner == "nox" and any(option in {"-l", "--list"} for option in options):
+        return True
+    return runner in {"gradle", "gradlew"} and "-m" in options
 
 
 def _unittest_command_invocation(command: str) -> str | None:
@@ -319,6 +454,38 @@ _OUTPUT_FILTER_COMMANDS = frozenset({"tail", "head", "cat", "less", "more"})
 _TRAILING_REDIRECT_RE = re.compile(
     r"\s*(?:[0-9]*>{1,2}\s*(?:&[0-9]+|[^\s|]+)|&>{1,2}\s*[^\s|]+)\s*$"
 )
+
+
+def _top_level_shell_character_positions(command: str, character: str) -> tuple[int, ...]:
+    """Return unquoted occurrences outside shell grouping and substitutions."""
+    positions: list[int] = []
+    quote: str | None = None
+    escaped = False
+    nesting: list[str] = []
+    closing = {"(": ")", "{": "}"}
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if char in closing:
+            nesting.append(closing[char])
+            continue
+        if nesting and char == nesting[-1]:
+            nesting.pop()
+            continue
+        if not nesting and char == character:
+            positions.append(index)
+    return tuple(positions)
 
 
 def _normalized_shell_words_text(command: str) -> str | None:
@@ -367,8 +534,18 @@ def _strip_command_output_plumbing(command: str) -> str:
     if not text:
         return text
     # Peel output-only filter pipes from the tail (``... | tail -n 20``).
-    while "|" in text:
-        head, _, tail_segment = text.rpartition("|")
+    while True:
+        pipe_positions = tuple(
+            position
+            for position in _top_level_shell_character_positions(text, "|")
+            if (position == 0 or text[position - 1] != "|")
+            and (position + 1 >= len(text) or text[position + 1] != "|")
+        )
+        if not pipe_positions:
+            break
+        pipe_position = pipe_positions[-1]
+        head = text[:pipe_position]
+        tail_segment = text[pipe_position + 1 :]
         tail_tokens = tail_segment.split()
         if tail_tokens and tail_tokens[0].lower() in _OUTPUT_FILTER_COMMANDS:
             text = head.strip()
@@ -378,7 +555,13 @@ def _strip_command_output_plumbing(command: str) -> str:
     prev: str | None = None
     while prev != text:
         prev = text
-        text = _TRAILING_REDIRECT_RE.sub("", text).strip()
+        match = _TRAILING_REDIRECT_RE.search(text)
+        if match is None:
+            break
+        redirect_positions = _top_level_shell_character_positions(text, ">")
+        if not any(match.start() <= position < match.end() for position in redirect_positions):
+            break
+        text = text[: match.start()].strip()
     return text
 
 

@@ -34,6 +34,11 @@ from ouroboros.orchestrator.codex_cli_runtime import (
     SkillDispatchHandler,
     _CodexItemCorrelationScope,
 )
+from ouroboros.orchestrator.mcp_tools import (
+    normalize_runtime_tool_definition,
+    normalize_runtime_tool_result,
+    serialize_tool_result,
+)
 from ouroboros.providers.gemini_event_normalizer import GeminiEventNormalizer
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -67,6 +72,54 @@ _MAX_OUROBOROS_DEPTH = 5
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
 _CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
+
+_GEMINI_TOOL_NAME_ALIASES = {
+    "runshell": "Bash",
+    "runshellcommand": "Bash",
+}
+
+
+def _normalize_gemini_tool_name(value: object) -> str:
+    """Map Gemini built-ins into the shared runtime tool vocabulary."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    raw_name = value.strip()
+    alias_key = "".join(character for character in raw_name if character.isalnum()).lower()
+    if alias_key in _GEMINI_TOOL_NAME_ALIASES:
+        return _GEMINI_TOOL_NAME_ALIASES[alias_key]
+    return normalize_runtime_tool_definition(raw_name).name
+
+
+def _gemini_tool_result_error_state(event: dict[str, Any]) -> tuple[bool, bool]:
+    """Return normalized error state and whether raw status is untrustworthy."""
+    normalized = event.get("is_error")
+    if not isinstance(normalized, bool):
+        return False, True
+
+    observed: list[bool] = []
+    invalid = False
+    for payload in (event.get("raw"), event.get("metadata")):
+        if not isinstance(payload, dict):
+            continue
+        if "is_error" in payload:
+            raw_is_error = payload["is_error"]
+            if isinstance(raw_is_error, bool):
+                observed.append(raw_is_error)
+            else:
+                invalid = True
+        if "status" in payload:
+            raw_status = payload["status"]
+            if not isinstance(raw_status, str):
+                invalid = True
+            else:
+                status = raw_status.strip().lower()
+                if status in {"error", "failed"}:
+                    observed.append(True)
+                elif status in {"completed", "success", "succeeded"}:
+                    observed.append(False)
+    if any(value != normalized for value in observed):
+        invalid = True
+    return normalized, invalid
 
 
 class GeminiCLIRuntime(CodexCliRuntime):
@@ -356,7 +409,6 @@ class GeminiCLIRuntime(CodexCliRuntime):
         event_type = event.get("type")
         content = event.get("content", "")
         metadata = event.get("metadata", {})
-        is_error = event.get("is_error", False)
 
         # Truncate content using InputValidator for text-bearing events
         # (including the terminal `result` payload, since `response` may be long).
@@ -395,7 +447,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
             ]
 
         if event_type == "tool_use":
-            tool_name = metadata.get("name", "")
+            tool_name = _normalize_gemini_tool_name(metadata.get("name"))
             tool_args = metadata.get("input", {})
             return [
                 AgentMessage(
@@ -408,13 +460,28 @@ class GeminiCLIRuntime(CodexCliRuntime):
             ]
 
         if event_type == "tool_result":
-            tool_name = metadata.get("name", "")
+            tool_name = _normalize_gemini_tool_name(metadata.get("name"))
+            result_is_error, invalid_error_state = _gemini_tool_result_error_state(event)
+            serialized_result = serialize_tool_result(
+                normalize_runtime_tool_result(
+                    content,
+                    is_error=result_is_error,
+                )
+            )
+            message_error_state: bool | str = result_is_error
+            if invalid_error_state:
+                message_error_state = "invalid"
+                serialized_result["is_error"] = "invalid"
             return [
                 AgentMessage(
-                    type="tool",
+                    type="tool_result",
                     content=content,
                     tool_name=tool_name,
-                    data={"is_error": is_error},
+                    data={
+                        "subtype": "tool_result",
+                        "is_error": message_error_state,
+                        "tool_result": serialized_result,
+                    },
                     resume_handle=current_handle,
                 )
             ]

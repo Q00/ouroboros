@@ -204,9 +204,10 @@ async def load_ac_evidence_manifest(
             before TraceGuard sees it.
         admit_accepted_tool_starts: Add AC-scoped ``execution.tool.started``
             events as journal entries after the caller has established accepted
-            leaf + exact typed-evidence match + verifier PASS. Mutation tools are
-            admitted only when the start itself records explicit completion or a
-            correlated ``execution.tool.completed`` event proves success.
+            leaf + exact typed-evidence match + verifier PASS. Mutation tools and
+            Bash commands are admitted only when explicit success is not vetoed
+            by any correlated failure or ambiguity; otherwise an exact successful
+            ``execution.tool.completed`` event is required.
         accepted_retry_attempt: Optional accepted leaf retry attempt. When set,
             tool starts from failed/older attempts are excluded.
         accepted_session_attempt_id: Optional exact implementation-attempt id,
@@ -291,10 +292,11 @@ def _accepted_tool_start_entries(
     """Project accepted-leaf tool dispatches into claim-independent entries.
 
     The accepted-leaf + exact-match + verifier-PASS preconditions are necessary
-    but not sufficient for file mutation: a failed Edit/Write can still be
-    followed by an overall successful assistant result. Mutation starts therefore
-    require their own explicit success signal or one exact successful completion.
-    Missing, failed, or ambiguous correlation is omitted fail-closed.
+    but not sufficient for file mutation or command success: a failed Edit/Write
+    or Bash call can still be followed by an overall successful assistant result.
+    Mutation and command starts therefore require their own explicit success
+    signal or one exact successful completion. Missing, failed, or ambiguous
+    correlation is omitted fail-closed.
     """
     chronological = tuple(events)
     entries: list[EvidenceEntry] = []
@@ -312,7 +314,8 @@ def _accepted_tool_start_entries(
             continue
         normalized_tool_name = tool_name.strip()
         completion: BaseEvent | None = None
-        if normalized_tool_name in {"Edit", "Write", "NotebookEdit"}:
+        if normalized_tool_name in {"Bash", "Edit", "Write", "NotebookEdit"}:
+            require_command_verdict = normalized_tool_name == "Bash"
             call_id = _event_tool_call_id(event)
             if call_id is not None:
                 matching_starts = tuple(
@@ -329,16 +332,20 @@ def _accepted_tool_start_entries(
                 )
                 if len(matching_starts) != 1:
                     continue
-            if not _event_has_explicit_tool_success(event):
-                completion = _correlated_successful_tool_completion(
-                    chronological,
-                    start_index=index,
-                    scope_id=scope_id,
-                    retry_attempt=retry_attempt,
-                    session_attempt_id=session_attempt_id,
-                )
-                if completion is None:
-                    continue
+            start_success = _event_has_explicit_tool_success(
+                event,
+                require_command_verdict=require_command_verdict,
+            )
+            completion, completion_veto = _correlated_tool_completion(
+                chronological,
+                start_index=index,
+                scope_id=scope_id,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+                require_command_verdict=require_command_verdict,
+            )
+            if completion_veto or (completion is None and not start_success):
+                continue
         normalized_input = dict(tool_input) if isinstance(tool_input, Mapping) else {}
         payload: dict[str, Any] = {
             "tool_name": normalized_tool_name,
@@ -367,6 +374,9 @@ def _accepted_tool_start_entries(
             relative_path = _event_workspace_relative_path(raw_path, data)
             if relative_path is not None:
                 payload["workspace_relative_path"] = relative_path
+        result_preview = _event_result_preview(event, completion)
+        if result_preview is not None:
+            payload["result_preview"] = result_preview
         entries.append(
             EvidenceEntry(
                 kind=EvidenceKind.TOOL_INVOCATION,
@@ -406,8 +416,17 @@ def _event_tool_call_id(event: BaseEvent) -> str | None:
     return None
 
 
-def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
-    """Return True only for machine-readable non-error completion evidence."""
+def _event_has_explicit_tool_success(
+    event: BaseEvent,
+    *,
+    require_command_verdict: bool = False,
+) -> bool:
+    """Return True only for machine-readable non-error completion evidence.
+
+    Command execution additionally requires a command-specific result bit or
+    zero exit status. Generic lifecycle completion is sufficient for mutation
+    tools, but cannot prove that a Bash body ran successfully.
+    """
     data = event.data
     if not isinstance(data, Mapping):
         return False
@@ -428,16 +447,18 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
         if tool_result.get("is_error") is True:
             return False
     is_completion_event = event.type == "execution.tool.completed"
-    success_signal = is_completion_event and (
+    command_success_signal = is_completion_event and (
         data.get("is_error") is False
         or (isinstance(tool_result, Mapping) and tool_result.get("is_error") is False)
     )
+    success_signal = command_success_signal
     if "exit_code" in data:
         exit_code = data["exit_code"]
         if isinstance(exit_code, bool) or not isinstance(exit_code, int):
             return False
         if exit_code != 0:
             return False
+        command_success_signal = True
         success_signal = True
     if isinstance(tool_result, Mapping):
         meta = tool_result.get("meta")
@@ -448,6 +469,7 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
                     return False
                 if exit_status != 0:
                     return False
+                command_success_signal = True
                 success_signal = True
     subtype = data.get("subtype")
     if isinstance(subtype, str) and subtype.strip().lower() == "success":
@@ -466,7 +488,7 @@ def _event_has_explicit_tool_success(event: BaseEvent) -> bool:
             return False
         if normalized.endswith((".completed", ".succeeded")):
             success_signal = True
-    return success_signal
+    return command_success_signal if require_command_verdict else success_signal
 
 
 def _event_matches_accepted_attempt(
@@ -488,22 +510,23 @@ def _event_matches_accepted_attempt(
     )
 
 
-def _correlated_successful_tool_completion(
+def _correlated_tool_completion(
     events: tuple[BaseEvent, ...],
     *,
     start_index: int,
     scope_id: str,
     retry_attempt: int | None,
     session_attempt_id: str | None,
-) -> BaseEvent | None:
-    """Return one exact successful completion for a mutation start, else None."""
+    require_command_verdict: bool,
+) -> tuple[BaseEvent | None, bool]:
+    """Return an exact completion and whether failure/ambiguity vetoes the start."""
     start = events[start_index]
     start_data = start.data
     if not isinstance(start_data, Mapping):
-        return None
+        return None, True
     start_tool = start_data.get("tool_name")
     if not isinstance(start_tool, str):
-        return None
+        return None, True
     start_call_id = _event_tool_call_id(start)
 
     if start_call_id is not None:
@@ -520,7 +543,7 @@ def _correlated_successful_tool_completion(
             and _event_tool_call_id(candidate) == start_call_id
         )
         if len(matching_starts) != 1:
-            return None
+            return None, True
         matches = tuple(
             candidate
             for candidate in events[start_index + 1 :]
@@ -532,12 +555,23 @@ def _correlated_successful_tool_completion(
                 session_attempt_id=session_attempt_id,
             )
             and _event_tool_call_id(candidate) == start_call_id
-            and isinstance(candidate.data, Mapping)
-            and candidate.data.get("tool_name") == start_tool
         )
-        if len(matches) != 1 or not _event_has_explicit_tool_success(matches[0]):
-            return None
-        return matches[0]
+        if not matches:
+            return None, False
+        if len(matches) != 1:
+            return None, True
+        completion = matches[0]
+        if (
+            not isinstance(completion.data, Mapping)
+            or completion.data.get("tool_name") != start_tool
+        ):
+            return None, True
+        if not _event_has_explicit_tool_success(
+            completion,
+            require_command_verdict=require_command_verdict,
+        ):
+            return None, True
+        return completion, False
 
     # Legacy id-less streams: only the next same-attempt tool event may close
     # the start. Any intervening start or id-bearing completion is ambiguous.
@@ -552,16 +586,43 @@ def _correlated_successful_tool_completion(
         ):
             continue
         if candidate.type == "execution.tool.started":
-            return None
+            return None, True
         if _event_tool_call_id(candidate) is not None:
-            return None
+            return None, True
         candidate_tool = (
             candidate.data.get("tool_name") if isinstance(candidate.data, Mapping) else None
         )
         if candidate_tool != start_tool:
-            return None
-        return candidate if _event_has_explicit_tool_success(candidate) else None
-    return None
+            return None, True
+        if not _event_has_explicit_tool_success(
+            candidate,
+            require_command_verdict=require_command_verdict,
+        ):
+            return None, True
+        return candidate, False
+    return None, False
+
+
+def _event_result_preview(start: BaseEvent, completion: BaseEvent | None) -> str | None:
+    """Return bounded runtime-produced output for an admitted tool call."""
+    parts: list[str] = []
+    for event in (start, completion):
+        if event is None or not isinstance(event.data, Mapping):
+            continue
+        data = event.data
+        for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+        tool_result = data.get("tool_result")
+        if isinstance(tool_result, Mapping):
+            for key in ("text_content", "content", "output", "stdout", "stderr"):
+                value = tool_result.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+    if not parts:
+        return None
+    return "\n".join(dict.fromkeys(parts))[-16_000:]
 
 
 def _event_matches_scope(event: BaseEvent, scope_id: str) -> bool:
@@ -1200,9 +1261,17 @@ def _event_chronology_key(event: BaseEvent) -> tuple[object, int]:
 
 
 def _event_phase_order(event_type: str) -> int:
-    if event_type in {"tool.call.started", "llm.call.requested"}:
+    if event_type in {
+        "tool.call.started",
+        "llm.call.requested",
+        "execution.tool.started",
+    }:
         return 0
-    if event_type in {"tool.call.returned", "llm.call.returned"}:
+    if event_type in {
+        "tool.call.returned",
+        "llm.call.returned",
+        "execution.tool.completed",
+    }:
         return 1
     return 2
 

@@ -39,6 +39,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
@@ -210,6 +211,7 @@ from ouroboros.orchestrator.evidence.shell_parsing import (  # noqa: F401
     _segments_after_safe_shell_preamble,
     _segments_after_safe_shell_preamble_with_pipefail,
     _shell_command_body,
+    _shell_command_body_from_argv,
     _single_command_after_safe_shell_preamble,
     _single_exact_command_after_safe_shell_preamble,
     _strip_command_output_plumbing,
@@ -240,6 +242,7 @@ from ouroboros.orchestrator.evidence.test_detection import (  # noqa: F401
     _test_command_targets_claim,
     _text_contains_test_success,
     _text_contains_unittest_success,
+    _text_proves_test_execution_success,
 )
 from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
     _add_runtime_command_evidence,
@@ -1254,7 +1257,12 @@ def _standard_deliver_facts(
                 if eligible
                 else ()
             )
-            handle = matches[0].handle if len(matches) == 1 else f"missing:{field}:{index}"
+            if len(matches) == 1:
+                handle = matches[0].handle
+            elif len(matches) > 1:
+                handle = f"ambiguous:{field}:{index}"
+            else:
+                handle = f"missing:{field}:{index}"
             statement_value = _structured_literal(match_value)
             if statement_value is None:
                 handle = f"missing:{field}:{index}"
@@ -1311,12 +1319,218 @@ def _matching_journal_entries(
         else:
             if tool_name != "Bash":
                 continue
-            observed = payload.get("command")
-            if not isinstance(observed, str):
-                observed = payload.get("args_preview")
+            if field == "tests_passed":
+                if not _looks_like_test_command(value):
+                    continue
+                result_text = _journal_result_text(payload)
+                if not _text_proves_test_execution_success(result_text):
+                    continue
+            observed_commands = _journal_command_values(payload)
+            if any(_commands_are_strictly_equivalent(value, item) for item in observed_commands):
+                matches.append(entry)
+            continue
         if isinstance(observed, str) and observed.strip() == value:
             matches.append(entry)
     return tuple(matches)
+
+
+_JOURNAL_COMMAND_KEYS: tuple[str, ...] = ("command", "cmd", "command_line")
+
+
+def _journal_result_text(payload: Mapping[str, object]) -> str:
+    """Return runtime-produced result text attached to one journal entry."""
+    parts: list[str] = []
+    for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    tool_result = payload.get("tool_result")
+    if isinstance(tool_result, Mapping):
+        for key in ("text_content", "content", "output", "stdout", "stderr"):
+            value = tool_result.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return "\n".join(dict.fromkeys(parts))
+
+
+def _journal_command_values(payload: Mapping[str, object]) -> tuple[object, ...]:
+    """Extract structured command values from one journal manifest payload.
+
+    Accepted-tool projection keeps the original ``tool_input`` only as bounded
+    JSON in ``args_preview`` for adapters that use ``cmd`` / ``command_line`` or
+    argv-list values. Preserve those structures until signature generation so
+    argument boundaries cannot be flattened into an unsafe string comparison.
+    """
+    values: list[object] = []
+
+    def append_from(container: Mapping[str, object]) -> None:
+        for key in _JOURNAL_COMMAND_KEYS:
+            candidate = container.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                values.append(candidate.strip())
+            elif isinstance(candidate, (list, tuple)) and candidate:
+                values.append(tuple(str(part) for part in candidate))
+
+    append_from(payload)
+    preview = payload.get("args_preview")
+    if isinstance(preview, str) and preview.strip():
+        try:
+            decoded = json.loads(preview)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Legacy normalizer rows store the raw command directly.
+            values.append(preview.strip())
+        else:
+            if isinstance(decoded, Mapping):
+                append_from(decoded)
+            elif isinstance(decoded, str) and decoded.strip():
+                values.append(decoded.strip())
+            else:
+                # JSON scalars and unsupported containers may be legacy raw
+                # command spellings (for example ``true``). Preserve the
+                # preview rather than silently dropping exact evidence.
+                values.append(preview.strip())
+    if len(values) > 1:
+        anchor = values[0]
+        if any(
+            not _commands_are_strictly_equivalent(anchor, candidate) for candidate in values[1:]
+        ):
+            return ()
+    return tuple(values)
+
+
+def _commands_are_strictly_equivalent(claim: str, observed: object) -> bool:
+    """Compare command evidence using case-sensitive argv signatures.
+
+    Quoting differences that preserve one argv token are equivalent, while case
+    changes and flattened token boundaries are not. Safe shell wrappers and
+    setup-only preambles may expose their single inner command. Output-only
+    plumbing follows the verifier's existing masking guard.
+    """
+    claim_signatures = set(_strict_command_signatures(claim))
+    observed_signatures = set(_strict_command_signatures(observed))
+    return bool(claim_signatures.intersection(observed_signatures))
+
+
+def _strict_command_signatures(command: object) -> tuple[tuple[str, ...], ...]:
+    if isinstance(command, (list, tuple)):
+        signature = tuple(str(part) for part in command)
+        if not signature:
+            return ()
+        argv_signatures = [("argv", *signature)]
+        body = _shell_command_body_from_argv(signature)
+        if body is not None:
+            argv_signatures.extend(_strict_command_signatures(body))
+        return tuple(dict.fromkeys(argv_signatures))
+    if not isinstance(command, str) or not command.strip():
+        return ()
+
+    raw = command.strip()
+    candidates: list[tuple[str, bool]] = [(raw, False)]
+    body = _shell_command_body(raw)
+    if body is not None:
+        candidates.append((body, _output_filter_pipeline_is_pipefail_protected(body)))
+        inner = tuple(_segments_after_safe_shell_preamble(body))
+        if len(inner) == 1:
+            candidates.append((inner[0], _output_filter_pipeline_is_pipefail_protected(body)))
+
+    signatures: list[tuple[str, ...]] = []
+    for candidate, pipefail_protected in candidates:
+        variants = [candidate.strip()]
+        stripped = _strip_command_output_plumbing(candidate)
+        if stripped and stripped != candidate.strip():
+            unsafe_test_filter = (
+                _has_trailing_output_filter_pipeline(candidate)
+                and _looks_like_test_command(stripped)
+                and not pipefail_protected
+            )
+            try:
+                stripped_parts = shlex.split(stripped)
+            except ValueError:
+                stripped_parts = []
+            if not unsafe_test_filter and stripped_parts:
+                variants.append(stripped)
+        for variant in variants:
+            raw_signature = ("raw", variant)
+            if raw_signature not in signatures:
+                signatures.append(raw_signature)
+            if not _shell_text_is_argv_safe(variant):
+                continue
+            try:
+                signature = ("argv", *shlex.split(variant))
+            except ValueError:
+                continue
+            if len(signature) > 1 and signature not in signatures:
+                signatures.append(signature)
+    return tuple(signatures)
+
+
+_SHELL_ACTIVE_UNQUOTED = frozenset("$*?[]><;|&`(){}~#!^\n\r")
+_SHELL_ACTIVE_DOUBLE_QUOTED = frozenset("$`")
+_SHELL_RESERVED_WORDS = frozenset(
+    {
+        "case",
+        "coproc",
+        "do",
+        "done",
+        "elif",
+        "else",
+        "esac",
+        "fi",
+        "for",
+        "function",
+        "if",
+        "in",
+        "select",
+        "then",
+        "time",
+        "until",
+        "while",
+    }
+)
+
+
+def _shell_text_is_argv_safe(command: str) -> bool:
+    """Return whether quote removal cannot change this command's shell effects.
+
+    ``shlex.split`` is an argv oracle only when every shell-active token is
+    inert. Single quotes make those tokens literal; double quotes still permit
+    parameter and command substitution. Unsafe strings retain only their exact
+    raw signature, so ``echo $HOME`` cannot equal ``echo '$HOME'`` and quoted
+    redirections/globs cannot equal active ones.
+    """
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            elif char in _SHELL_ACTIVE_DOUBLE_QUOTED:
+                return False
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in _SHELL_ACTIVE_UNQUOTED:
+            return False
+    if quote is not None or escaped:
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    return parts[0] not in _SHELL_RESERVED_WORDS and not _is_env_assignment(parts[0])
 
 
 def _structured_literal(value: str) -> str | None:
