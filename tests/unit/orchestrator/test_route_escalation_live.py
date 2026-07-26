@@ -38,7 +38,11 @@ from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.level_context import LevelContext, extract_level_context
 from ouroboros.orchestrator.model_routing import build_model_router
-from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _VerifyGateOutcome
+from ouroboros.orchestrator.parallel_executor import (
+    ParallelACExecutor,
+    ParallelExecutionCancelled,
+    _VerifyGateOutcome,
+)
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -493,6 +497,63 @@ async def test_route_exhaustion_is_durable_blocked_human_handoff() -> None:
     assert last_route.data["human_handoff_required"] is True
     recovery = [event for event in events if event.type == "execution.ac.recovery_exhausted"][-1]
     assert recovery.data["human_handoff_required"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_at", ("provider_result", "route_observed"))
+async def test_parallel_cancellation_population_never_dispatches_route_successor(
+    cancel_at: str,
+) -> None:
+    """Cancellation on either side of persistence closes the successor boundary."""
+
+    from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
+
+    session_id = f"session-cancel-{cancel_at}"
+    executor, store, events = _executor()
+    calls = 0
+
+    async def append(event: BaseEvent) -> None:
+        events.append(event)
+        if cancel_at == "route_observed" and event.type == "execution.ac.route_observed":
+            await request_cancellation(session_id, reason=cancel_at, cancelled_by="test")
+
+    async def fake_batch(**kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        expected = kwargs.get("route_overrides", {}).get(0)
+        route_id = expected.route_id if expected is not None else "compat:claude:frugal"
+        if cancel_at == "provider_result":
+            await request_cancellation(session_id, reason=cancel_at, cancelled_by="test")
+        return [_failed(executor, route_id)]
+
+    store.append.side_effect = append
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ParallelExecutionCancelled):
+            await executor._run_batch_with_bounded_route_escalation(
+                seed=_seed(),
+                batch_executable=[0],
+                session_id=session_id,
+                execution_id="execution-1",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="sys",
+                level_contexts=[],
+                ac_retry_attempts={0: 0},
+                execution_counters={"messages_count": 1, "tool_calls_count": 0},
+            )
+    finally:
+        await clear_cancellation(session_id)
+
+    assert calls == 1
+    judgments = [event for event in events if event.type == "execution.ac.attempt_judged"]
+    observations = [event for event in events if event.type == "execution.ac.route_observed"]
+    if cancel_at == "provider_result":
+        assert judgments == []
+        assert observations == []
+    else:
+        assert len(judgments) == 1
+        assert len(observations) == 1
 
 
 @pytest.mark.asyncio

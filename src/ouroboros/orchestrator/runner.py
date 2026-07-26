@@ -6874,6 +6874,27 @@ class OrchestratorRunner:
             )
             return False
 
+    async def _handle_requested_cancellation(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        messages_processed: int,
+        start_time: datetime,
+        expected_root_indices: Iterable[int] | None = None,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Apply the terminal cancellation transition at an effect choke point."""
+
+        if not await self._check_cancellation(session_id):
+            return None
+        return await self._handle_cancellation(
+            session_id=session_id,
+            execution_id=execution_id,
+            messages_processed=messages_processed,
+            start_time=start_time,
+            expected_root_indices=expected_root_indices,
+        )
+
     def _cancellation_persistence_pending_result(
         self,
         *,
@@ -7999,6 +8020,16 @@ class OrchestratorRunner:
                     selected_route_sink=selected_routes,
                 )
                 direct_route_candidate = selected_routes[0] if selected_routes else None
+                if direct_bounded_routing:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        return active_runtime_handle
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
@@ -8014,14 +8045,14 @@ class OrchestratorRunner:
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                            if await self._check_cancellation(tracker.session_id):
-                                cancelled_result = await self._handle_cancellation(
-                                    session_id=tracker.session_id,
-                                    execution_id=exec_id,
-                                    messages_processed=messages_processed,
-                                    start_time=start_time,
-                                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                                )
+                            cancelled_result = await self._handle_requested_cancellation(
+                                session_id=tracker.session_id,
+                                execution_id=exec_id,
+                                messages_processed=messages_processed,
+                                start_time=start_time,
+                                expected_root_indices=range(len(seed.acceptance_criteria)),
+                            )
+                            if cancelled_result is not None:
                                 break
 
                         tracker = await self._update_and_persist_progress(
@@ -8140,6 +8171,15 @@ class OrchestratorRunner:
                                 now=datetime.now(UTC),
                             )
 
+                if direct_bounded_routing and cancelled_result is None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+
                 return active_runtime_handle
 
             def _build_recovery_snapshot() -> RecoverySnapshot:
@@ -8227,6 +8267,15 @@ class OrchestratorRunner:
                     if not direct_bounded_routing or direct_route_candidate is None:
                         break
 
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
                     episode_digest = hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
                     decision, direct_route_history = await self._persist_direct_route_outcome(
                         execution_id=exec_id,
@@ -8239,6 +8288,15 @@ class OrchestratorRunner:
                             last_direct_final_message
                         ),
                     )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
                     if success or decision is None or decision.blocked:
                         if decision is not None and decision.blocked:
                             final_message = (
@@ -8633,6 +8691,7 @@ class OrchestratorRunner:
         from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
         from ouroboros.orchestrator.parallel_executor import (
             ParallelACExecutor,
+            ParallelExecutionCancelled,
             render_parallel_completion_message,
             render_parallel_verification_report,
         )
@@ -8870,16 +8929,25 @@ class OrchestratorRunner:
             tracker = tracker.with_progress(resume_owner_progress)
 
         try:
-            parallel_result = await parallel_executor.execute_parallel(
-                seed=seed,
-                execution_plan=execution_plan,
-                session_id=tracker.session_id,
-                execution_id=exec_id,
-                tools=merged_tools,
-                tool_catalog=tool_catalog.tools,
-                system_prompt=system_prompt,
-                externally_satisfied_acs=externally_satisfied_acs,
-            )
+            try:
+                parallel_result = await parallel_executor.execute_parallel(
+                    seed=seed,
+                    execution_plan=execution_plan,
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    tools=merged_tools,
+                    tool_catalog=tool_catalog.tools,
+                    system_prompt=system_prompt,
+                    externally_satisfied_acs=externally_satisfied_acs,
+                )
+            except ParallelExecutionCancelled as cancelled:
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=cancelled.messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
         finally:
             # Release any warm worker-pool sessions the runtime holds (e.g. the
             # codex-mcp persistent connection pool). The non-parallel path closes
@@ -9793,6 +9861,16 @@ Note: This is a resumed session. Please continue from where execution was interr
                         resume_route_state.candidate if resume_route_state is not None else None
                     ),
                 )
+                if resume_route_state is not None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        return cancelled_result
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=resume_prompt,
@@ -9808,14 +9886,14 @@ Note: This is a resumed session. Please continue from where execution was interr
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                            if await self._check_cancellation(session_id):
-                                cancelled_result = await self._handle_cancellation(
-                                    session_id=session_id,
-                                    execution_id=tracker.execution_id,
-                                    messages_processed=messages_processed,
-                                    start_time=start_time,
-                                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                                )
+                            cancelled_result = await self._handle_requested_cancellation(
+                                session_id=session_id,
+                                execution_id=tracker.execution_id,
+                                messages_processed=messages_processed,
+                                start_time=start_time,
+                                expected_root_indices=range(len(seed.acceptance_criteria)),
+                            )
+                            if cancelled_result is not None:
                                 break
 
                         tracker = await self._update_and_persist_progress(
@@ -9912,6 +9990,27 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 now=datetime.now(UTC),
                             )
 
+                if resume_route_state is not None and cancelled_result is None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+
+            if (
+                resume_route_state is not None
+                and cancelled_result is None
+                and recoverable_resume_failure is None
+            ):
+                cancelled_result = await self._handle_requested_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
             if (
                 resume_route_state is not None
                 and cancelled_result is None
@@ -9926,7 +10025,16 @@ Note: This is a resumed session. Please continue from where execution was interr
                     success=success,
                     failure_class=self._classify_direct_route_failure(last_resume_final_message),
                 )
+                cancelled_result = await self._handle_requested_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
                 while not success and decision is not None and not decision.blocked:
+                    if cancelled_result is not None:
+                        break
                     assert decision.selected is not None
                     await self._terminate_runtime_handle(
                         live_runtime_handle,
@@ -9942,6 +10050,15 @@ Note: This is a resumed session. Please continue from where execution was interr
                         route_id_override=successor.route_id,
                         expected_route_candidate=successor,
                     )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
                     final_message = ""
                     last_resume_final_message = None
                     recoverable_resume_failure = None
@@ -9962,18 +10079,16 @@ Note: This is a resumed session. Please continue from where execution was interr
                     ):
                         async for message in successor_stream:
                             messages_processed += 1
-                            if (
-                                messages_processed % CANCELLATION_CHECK_INTERVAL == 0
-                                and await self._check_cancellation(session_id)
-                            ):
-                                cancelled_result = await self._handle_cancellation(
+                            if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
+                                cancelled_result = await self._handle_requested_cancellation(
                                     session_id=session_id,
                                     execution_id=tracker.execution_id,
                                     messages_processed=messages_processed,
                                     start_time=start_time,
                                     expected_root_indices=range(len(seed.acceptance_criteria)),
                                 )
-                                break
+                                if cancelled_result is not None:
+                                    break
                             tracker = await self._update_and_persist_progress(
                                 tracker,
                                 message,
@@ -9991,6 +10106,14 @@ Note: This is a resumed session. Please continue from where execution was interr
                                     message,
                                     now=datetime.now(UTC),
                                 )
+                    if cancelled_result is None:
+                        cancelled_result = await self._handle_requested_cancellation(
+                            session_id=session_id,
+                            execution_id=tracker.execution_id,
+                            messages_processed=messages_processed,
+                            start_time=start_time,
+                            expected_root_indices=range(len(seed.acceptance_criteria)),
+                        )
                     if cancelled_result is not None:
                         break
                     if recoverable_resume_failure is not None:
@@ -10017,6 +10140,15 @@ Note: This is a resumed session. Please continue from where execution was interr
                             )
                         )
                         break
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
                     decision, route_history = await self._persist_direct_route_outcome(
                         execution_id=tracker.execution_id,
                         session_id=session_id,
@@ -10027,6 +10159,13 @@ Note: This is a resumed session. Please continue from where execution was interr
                         failure_class=self._classify_direct_route_failure(
                             last_resume_final_message
                         ),
+                    )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
                     )
                 if not success and decision is not None and decision.blocked:
                     final_message = (

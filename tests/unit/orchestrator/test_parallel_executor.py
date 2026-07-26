@@ -687,6 +687,7 @@ def _make_executor() -> ParallelACExecutor:
         enable_decomposition=False,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._event_store.query_events = AsyncMock(return_value=[])
     executor._emit_workflow_progress = AsyncMock()
     executor._emit_level_started = AsyncMock()
     executor._emit_level_completed = AsyncMock()
@@ -11722,6 +11723,138 @@ class TestParallelACExecutor:
             coordinator_events[-1].data["artifact"]
             == '{"review_summary":"Resolved shared.py conflict","fixes_applied":["Merged overlapping import edits"],"warnings_for_next_level":["Verify shared.py integration paths"],"conflicts_resolved":["src/shared.py"]}'
         )
+
+    @pytest.mark.asyncio
+    async def test_completed_coordinator_event_restores_without_repeating_provider_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The full started/completed population is the no-checkpoint replay owner."""
+
+        from ouroboros.orchestrator.execution_runtime_scope import (
+            build_level_coordinator_runtime_scope,
+        )
+
+        seed = _make_seed("Update shared.py", "Integrate shared.py")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        execution_id = "exec_coord_replay"
+        session_id = "sess_coord_replay"
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, 1)
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        completed_review = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=(
+                replace(
+                    conflict,
+                    resolved=True,
+                    resolution_description="Resolved by Coordinator",
+                ),
+            ),
+            review_summary="Reconciled shared.py once",
+            fixes_applied=("Merged overlapping edits",),
+            warnings_for_next_level=("Keep the merged interface",),
+            duration_seconds=1.25,
+            session_id="coordinator-native-session",
+            session_scope_id=runtime_scope.aggregate_id,
+            session_state_path=runtime_scope.state_path,
+            final_output="coordinator final output",
+        )
+        review_provider = AsyncMock(return_value=completed_review)
+        monkeypatch.setattr(LevelCoordinator, "run_review", review_provider)
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                conflict_files=("src/shared.py",),
+                final_message=f"AC {ac_index} complete",
+            )
+
+        first = _make_executor()
+        first._event_store.query_events = AsyncMock(return_value=[])
+        first._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        first._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        await first.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+        first_events = [call.args[0] for call in first._event_store.append.await_args_list]
+
+        async def replay_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            return [event for event in first_events if event.type == event_type]
+
+        resumed = _make_executor()
+        resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
+        resumed._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        resumed._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        replayed = await resumed.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert review_provider.await_count == 1
+        assert replayed.stages[0].coordinator_review is not None
+        assert replayed.stages[0].coordinator_review.review_summary == "Reconciled shared.py once"
+        replayed_coordinator_writes = [
+            call.args[0]
+            for call in resumed._event_store.append.await_args_list
+            if getattr(call.args[0], "type", "").startswith("execution.coordinator.")
+        ]
+        assert replayed_coordinator_writes == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("started_count", "completed_count"),
+        ((1, 0), (0, 1), (2, 1), (1, 2)),
+    )
+    async def test_incomplete_or_ambiguous_coordinator_population_fails_closed(
+        self,
+        started_count: int,
+        completed_count: int,
+    ) -> None:
+        executor = _make_executor()
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+
+        async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs["event_type"]
+            count = (
+                started_count if event_type == "execution.coordinator.started" else completed_count
+            )
+            return [
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="execution-1:l0:coord",
+                    data={},
+                )
+                for _ in range(count)
+            ]
+
+        executor._event_store.query_events = AsyncMock(side_effect=query)
+        with pytest.raises(RuntimeError, match="incomplete or ambiguous"):
+            await executor._restore_completed_coordinator_review(
+                execution_id="execution-1",
+                session_id="session-1",
+                level=1,
+                conflicts=[conflict],
+            )
 
     @pytest.mark.asyncio
     async def test_returns_reconciled_level_contexts_for_retry_handoff(

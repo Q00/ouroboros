@@ -101,7 +101,7 @@ from ouroboros.orchestrator.backend_limits import (
     resolve_backend_limits,
 )
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
-from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
+from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
     MAX_DECOMPOSITION_CHILDREN,
@@ -289,6 +289,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
+    build_level_coordinator_runtime_scope,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
@@ -503,6 +504,15 @@ if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+
+
+class ParallelExecutionCancelled(RuntimeError):
+    """Signal a cooperative cancellation before another parallel effect."""
+
+    def __init__(self, session_id: str, messages_processed: int) -> None:
+        self.session_id = session_id
+        self.messages_processed = messages_processed
+        super().__init__(f"Parallel execution cancelled for session {session_id}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -4454,54 +4464,75 @@ class ParallelACExecutor:
                     # Coordinator: detect and resolve file conflicts (Approach A)
                     level_ac_results = [r for r in stage_ac_results if r.ac_index in executable]
                     conflicts = self._coordinator.detect_file_conflicts(level_ac_results)
-
-                    if conflicts:
-                        self._console.print(
-                            f"  [yellow]Coordinator: {len(conflicts)} file conflict(s) detected, "
-                            f"starting review...[/yellow]"
-                        )
-                        await self._emit_coordinator_started(
+                    restored_review = (
+                        await self._restore_completed_coordinator_review(
                             execution_id=execution_id,
                             session_id=session_id,
                             level=level_num,
                             conflicts=conflicts,
                         )
-                        _invoke_execution_authority_guard(self)
-                        workspace_root = (
-                            self._task_cwd or self._adapter.working_directory or os.getcwd()
-                        )
-                        workspace_before = self._workspace_content_digest(workspace_root)
-                        review = await self._authority_coordinator_review(
-                            execution_id=execution_id,
-                            conflicts=conflicts,
-                            level_context=level_ctx,
-                            level_number=level_num,
-                        )
-                        workspace_after = self._workspace_content_digest(workspace_root)
-                        workspace_changed = (
-                            workspace_before is None
-                            or workspace_after is None
-                            or workspace_before != workspace_after
-                        )
-                        coordinator_mutated_workspace = (
-                            coordinator_mutated_workspace
-                            or workspace_changed
-                            or self._coordinator_review_may_mutate_workspace(review)
-                        )
+                        if conflicts
+                        else None
+                    )
+
+                    if conflicts:
+                        if restored_review is None:
+                            self._console.print(
+                                f"  [yellow]Coordinator: {len(conflicts)} file conflict(s) "
+                                f"detected, starting review...[/yellow]"
+                            )
+                            await self._emit_coordinator_started(
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                level=level_num,
+                                conflicts=conflicts,
+                            )
+                            _invoke_execution_authority_guard(self)
+                            workspace_root = (
+                                self._task_cwd or self._adapter.working_directory or os.getcwd()
+                            )
+                            workspace_before = self._workspace_content_digest(workspace_root)
+                            review = await self._authority_coordinator_review(
+                                execution_id=execution_id,
+                                conflicts=conflicts,
+                                level_context=level_ctx,
+                                level_number=level_num,
+                            )
+                            workspace_after = self._workspace_content_digest(workspace_root)
+                            workspace_changed = (
+                                workspace_before is None
+                                or workspace_after is None
+                                or workspace_before != workspace_after
+                            )
+                            coordinator_mutated_workspace = (
+                                coordinator_mutated_workspace
+                                or workspace_changed
+                                or self._coordinator_review_may_mutate_workspace(review)
+                            )
+                            await self._emit_coordinator_runtime_events(
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                review=review,
+                            )
+                            await self._emit_coordinator_completed(
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                review=review,
+                            )
+                        else:
+                            review = restored_review
+                            # The completed provider had Edit/Bash authority and
+                            # its pre-effect workspace digest is not replayable.
+                            # Conservatively revalidate the settled workspace.
+                            coordinator_mutated_workspace = True
+                            self._console.print(
+                                f"  [cyan]Coordinator review restored for level "
+                                f"{level_num}; provider effect not repeated.[/cyan]"
+                            )
                         if coordinator_mutated_workspace:
                             post_coordinator_revalidation_required = True
                             post_coordinator_revalidated = False
                             post_coordinator_revalidation_workspace_digest = None
-                        await self._emit_coordinator_runtime_events(
-                            execution_id=execution_id,
-                            session_id=session_id,
-                            review=review,
-                        )
-                        await self._emit_coordinator_completed(
-                            execution_id=execution_id,
-                            session_id=session_id,
-                            review=review,
-                        )
                         # Attach review to the level context
                         level_ctx = LevelContext(
                             level_number=level_ctx.level_number,
@@ -7151,6 +7182,146 @@ Respond with either ATOMIC or the structured JSON object only.
     def _coordinator_aggregate_id(execution_id: str, level: int) -> str:
         """Build a deterministic level-scoped aggregate ID for coordinator work."""
         return ExecutionEventEmitter.coordinator_aggregate_id(execution_id, level)
+
+    async def _restore_completed_coordinator_review(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        level: int,
+        conflicts: list[FileConflict],
+    ) -> CoordinatorReview | None:
+        """Restore one completed coordinator effect or fail closed.
+
+        The started/completed pair is the durable authority boundary when no
+        optional checkpoint store exists.  An unmatched, duplicated, drifted,
+        or malformed pair cannot authorize another coordinator provider call:
+        the prior call may already have used Edit or Bash.
+        """
+
+        query_events = getattr(self._event_store, "query_events", None)
+        if not callable(query_events):
+            raise RuntimeError("coordinator replay requires durable event queries")
+        aggregate_id = self._coordinator_aggregate_id(execution_id, level)
+        try:
+            started_events = await query_events(
+                aggregate_id=aggregate_id,
+                event_type="execution.coordinator.started",
+                limit=2,
+            )
+            completed_events = await query_events(
+                aggregate_id=aggregate_id,
+                event_type="execution.coordinator.completed",
+                limit=2,
+            )
+        except Exception as exc:
+            raise RuntimeError("coordinator replay state is unreadable") from exc
+        if not isinstance(started_events, list | tuple) or not isinstance(
+            completed_events, list | tuple
+        ):
+            raise RuntimeError("coordinator replay query returned an invalid population")
+        if not started_events and not completed_events:
+            return None
+        if not conflicts:
+            raise RuntimeError("coordinator replay exists without current conflicts")
+        if len(started_events) != 1 or len(completed_events) != 1:
+            raise RuntimeError("coordinator replay state is incomplete or ambiguous")
+
+        started = started_events[0]
+        completed = completed_events[0]
+        for event, expected_type in (
+            (started, "execution.coordinator.started"),
+            (completed, "execution.coordinator.completed"),
+        ):
+            if (
+                getattr(event, "type", None) != expected_type
+                or getattr(event, "aggregate_type", None) != "execution"
+                or getattr(event, "aggregate_id", None) != aggregate_id
+                or not isinstance(getattr(event, "data", None), Mapping)
+            ):
+                raise RuntimeError("coordinator replay event identity is invalid")
+
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, level)
+        expected_conflicts = tuple(conflicts)
+        expected_started_conflicts = [
+            {
+                "file_path": conflict.file_path,
+                "ac_indices": list(conflict.ac_indices),
+            }
+            for conflict in expected_conflicts
+        ]
+        started_data = started.data
+        started_keys_valid = set(started_data) == {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "scope",
+            "session_role",
+            "stage_index",
+            "level_number",
+            "session_scope_id",
+            "session_state_path",
+            "conflict_count",
+            "conflicts",
+        }
+        raw_started_conflicts = started_data.get("conflicts")
+        started_conflicts_valid = (
+            isinstance(raw_started_conflicts, list)
+            and len(raw_started_conflicts) == len(expected_conflicts)
+            and all(
+                isinstance(raw_conflict, Mapping)
+                and set(raw_conflict) == {"file_path", "ac_indices"}
+                and raw_conflict.get("file_path") == expected.file_path
+                and isinstance(raw_conflict.get("ac_indices"), list)
+                and all(
+                    isinstance(index, int) and not isinstance(index, bool) and index >= 0
+                    for index in raw_conflict["ac_indices"]
+                )
+                and tuple(raw_conflict["ac_indices"]) == expected.ac_indices
+                for raw_conflict, expected in zip(
+                    raw_started_conflicts,
+                    expected_conflicts,
+                    strict=True,
+                )
+            )
+        )
+        if (
+            not started_keys_valid
+            or type(started_data.get("schema_version")) is not int
+            or started_data.get("schema_version") != 1
+            or started_data.get("execution_id") != execution_id
+            or started_data.get("session_id") != session_id
+            or started_data.get("scope") != "level"
+            or started_data.get("session_role") != "coordinator"
+            or type(started_data.get("stage_index")) is not int
+            or started_data.get("stage_index") != level - 1
+            or type(started_data.get("level_number")) is not int
+            or started_data.get("level_number") != level
+            or started_data.get("session_scope_id") != runtime_scope.aggregate_id
+            or started_data.get("session_state_path") != runtime_scope.state_path
+            or type(started_data.get("conflict_count")) is not int
+            or started_data.get("conflict_count") != len(expected_conflicts)
+            or not started_conflicts_valid
+            or raw_started_conflicts != expected_started_conflicts
+        ):
+            raise RuntimeError("coordinator started event drifted from the current stage")
+
+        completed_data = completed.data
+        if (
+            completed_data.get("execution_id") != execution_id
+            or completed_data.get("session_id") != session_id
+        ):
+            raise RuntimeError("coordinator completed event drifted from its execution")
+        try:
+            return CoordinatorReview.from_artifact_payload(
+                completed_data,
+                level_number=level,
+                expected_conflicts=expected_conflicts,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+            )
+        except ValueError as exc:
+            raise RuntimeError("coordinator completed artifact is invalid") from exc
 
     async def _emit_coordinator_started(
         self,
@@ -10137,6 +10308,43 @@ Respond with either ATOMIC or the structured JSON object only.
                 return True
         return False
 
+    async def _raise_if_parallel_cancellation_requested(
+        self,
+        *,
+        session_id: str,
+        execution_counters: Mapping[str, int] | None,
+    ) -> None:
+        """Stop at the shared route-transition gate when cancellation exists."""
+
+        from ouroboros.orchestrator.runner import is_cancellation_requested
+
+        requested = await is_cancellation_requested(session_id)
+        if not requested:
+            try:
+                events = await self._event_store.query_events(
+                    aggregate_id=session_id,
+                    event_type="orchestrator.session.cancelled",
+                    limit=1,
+                )
+                requested = isinstance(events, list | tuple) and bool(events)
+            except Exception:
+                log.warning(
+                    "parallel_executor.cancellation_check_failed",
+                    session_id=session_id,
+                )
+        if requested:
+            raw_messages_processed = (
+                execution_counters.get("messages_count", 0) if execution_counters is not None else 0
+            )
+            messages_processed = (
+                raw_messages_processed
+                if isinstance(raw_messages_processed, int)
+                and not isinstance(raw_messages_processed, bool)
+                and raw_messages_processed >= 0
+                else 0
+            )
+            raise ParallelExecutionCancelled(session_id, messages_processed)
+
     async def _run_batch_with_bounded_route_escalation(
         self,
         *,
@@ -10201,6 +10409,10 @@ Respond with either ATOMIC or the structured JSON object only.
         retry_prompts: dict[int, str] = {}
 
         while pending:
+            await self._raise_if_parallel_cancellation_requested(
+                session_id=session_id,
+                execution_counters=execution_counters,
+            )
             round_indices = [ac_idx for ac_idx in batch_executable if ac_idx in pending]
             round_results = await self._execute_ac_batch(
                 seed=seed,
@@ -10219,11 +10431,19 @@ Respond with either ATOMIC or the structured JSON object only.
                 # retry-count paths cannot run ahead of the finite route set.
                 same_runtime_budget_exhausted=False,
             )
+            await self._raise_if_parallel_cancellation_requested(
+                session_id=session_id,
+                execution_counters=execution_counters,
+            )
             next_pending: set[int] = set()
             next_overrides: dict[int, RouteCandidate] = {}
             next_prompts: dict[int, str] = {}
             recoverable_pause_seen = False
             for round_position, ac_idx in enumerate(round_indices):
+                await self._raise_if_parallel_cancellation_requested(
+                    session_id=session_id,
+                    execution_counters=execution_counters,
+                )
                 value = round_results[round_position]
                 results[positions[ac_idx]] = value
                 if not isinstance(value, ACExecutionResult):
@@ -10290,6 +10510,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     session_id=session_id,
                     execution_id=execution_id,
                 )
+                await self._raise_if_parallel_cancellation_requested(
+                    session_id=session_id,
+                    execution_counters=execution_counters,
+                )
                 results[positions[ac_idx]] = gated
                 candidate = gated.route_candidate
                 route_attempt_index = len(histories[ac_idx])
@@ -10311,6 +10535,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     ),
                     route_attempt_index=(route_attempt_index if candidate is not None else None),
                 )
+                await self._raise_if_parallel_cancellation_requested(
+                    session_id=session_id,
+                    execution_counters=execution_counters,
+                )
                 if candidate is None:
                     continue
                 history = (*histories[ac_idx], candidate.route_id)
@@ -10328,6 +10556,10 @@ Respond with either ATOMIC or the structured JSON object only.
                         attempted_route_ids=history,
                         failure_class=None,
                         decision=None,
+                    )
+                    await self._raise_if_parallel_cancellation_requested(
+                        session_id=session_id,
+                        execution_counters=execution_counters,
                     )
                     continue
 
@@ -10397,6 +10629,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     attempted_route_ids=history,
                     failure_class=failure,
                     decision=decision,
+                )
+                await self._raise_if_parallel_cancellation_requested(
+                    session_id=session_id,
+                    execution_counters=execution_counters,
                 )
                 if decision.action is EscalationAction.ESCALATE_ROUTE:
                     assert decision.selected is not None
@@ -11825,4 +12061,5 @@ __all__ = [
     "StageExecutionOutcome",
     "ParallelExecutionResult",
     "ParallelACExecutor",
+    "ParallelExecutionCancelled",
 ]

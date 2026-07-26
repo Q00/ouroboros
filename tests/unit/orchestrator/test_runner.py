@@ -1033,7 +1033,9 @@ class TestOrchestratorRunner:
 
         mock_adapter.execute_task = mock_execute
         cancel_event = create_session_cancelled_event("session-1", "User requested")
-        mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event], [], [], [], []])
+        mock_event_store.query_events = AsyncMock(
+            side_effect=[[], [], [cancel_event], [], [], [], []]
+        )
 
         async def create_session(*_args: Any, **kwargs: Any):
             return Result.ok(
@@ -1067,6 +1069,74 @@ class TestOrchestratorRunner:
             if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
         ]
         assert route_events == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("assistant_messages", range(4))
+    async def test_direct_short_final_turn_cancellation_population_stops_before_observation(
+        self,
+        assistant_messages: int,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Every final turn below the five-message poll interval uses the choke-point check."""
+
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        assert assistant_messages + 1 < CANCELLATION_CHECK_INTERVAL
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        session_id = f"session-short-cancel-{assistant_messages}"
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            for index in range(assistant_messages):
+                yield AgentMessage(type="assistant", content=f"Message {index}")
+            await request_cancellation(session_id, reason="short final turn", cancelled_by="test")
+            yield AgentMessage(
+                type="result",
+                content="failed after short-turn cancellation",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.query_events = AsyncMock(return_value=[])
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-short-cancel",
+                session_id=session_id,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+        assert not await is_cancellation_requested(session_id)
 
     @pytest.mark.asyncio
     async def test_direct_bounded_usage_limit_pause_remains_resume_eligible(
@@ -1235,6 +1305,93 @@ class TestOrchestratorRunner:
         }
         assert "execution.ac.route_observed" not in emitted_types
         assert "execution.ac.attempt_judged" not in emitted_types
+
+    @pytest.mark.asyncio
+    async def test_parallel_route_cancellation_is_terminalized_by_runner_owner(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """The executor signal enters cancellation lifecycle, never failure routing."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionCancelled
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-parallel-cancel",
+            seed.metadata.seed_id,
+            session_id="session-parallel-cancel",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        cancellation_result = Result.ok(
+            OrchestratorResult(
+                success=False,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                summary={"cancelled": True},
+                messages_processed=7,
+                final_message="cancelled",
+                duration_seconds=0.0,
+            )
+        )
+        handle_cancellation = AsyncMock(return_value=cancellation_result)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "track_progress",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(
+                    side_effect=ParallelExecutionCancelled(
+                        tracker.session_id,
+                        messages_processed=7,
+                    )
+                ),
+            ),
+            patch.object(runner, "_handle_cancellation", handle_cancellation),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result is cancellation_result
+        handle_cancellation.assert_awaited_once()
+        assert handle_cancellation.await_args.kwargs["messages_processed"] == 7
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_before_pause", [False, True])
@@ -1556,6 +1713,117 @@ class TestOrchestratorRunner:
         assert (
             resumed_observations[0].data["observation"]["verifier_outcome"] == "attempt_succeeded"
         )
+
+    @pytest.mark.asyncio
+    async def test_direct_resumed_short_turn_cancellation_never_dispatches_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """The resumed-route stream shares the same post-stream cancellation gate."""
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="route-resumed-cancel",
+        )
+        paused_tracker = SessionTracker.create(
+            "execution-route-resume-cancel",
+            sample_seed.metadata.seed_id,
+            session_id="session-route-resume-cancel",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = paused_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id=paused_tracker.session_id,
+        )
+        models: list[str] = []
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            await request_cancellation(
+                paused_tracker.session_id,
+                reason="cancel resumed short turn",
+                cancelled_by="test",
+            )
+            yield AgentMessage(
+                type="result",
+                content="resumed route failed after cancellation",
+                data={"subtype": "error"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = execute_task
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        paused_candidate = next(
+            candidate
+            for candidate in projection.registry.candidates
+            if candidate.route_id == "compat:claude:standard"
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id=paused_tracker.execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": paused_tracker.execution_id,
+                "session_id": paused_tracker.session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": (
+                    "route:"
+                    + hashlib.sha256(f"{paused_tracker.execution_id}\0direct".encode()).hexdigest()
+                ),
+                "attempt_index": 0,
+                "prior_route_ids": [],
+                "route": paused_candidate.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [pause_event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        mock_event_store.query_events = AsyncMock(return_value=[])
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(paused_tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_cancelled",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+            ):
+                result = await runner.resume_session(paused_tracker.session_id, sample_seed)
+        finally:
+            await clear_cancellation(paused_tracker.session_id)
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        observations = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert observations == []
 
     @pytest.mark.asyncio
     async def test_direct_bounded_resumed_failure_escalates_then_seals_success(

@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import json
+import math
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -189,6 +190,151 @@ class CoordinatorReview:
             "artifact": self.final_output,
             "artifact_type": self.artifact_type,
         }
+
+    @classmethod
+    def from_artifact_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        level_number: int,
+        expected_conflicts: tuple[FileConflict, ...],
+        session_scope_id: str,
+        session_state_path: str,
+    ) -> CoordinatorReview:
+        """Restore one exact completed coordinator effect from durable data.
+
+        Coordinator reconciliation can mutate the workspace, so replay cannot
+        reinterpret a partial or loosely-shaped artifact.  This parser admits
+        only the closed producer schema and binds the artifact to the current
+        level, conflict population, and deterministic runtime scope.
+        """
+
+        expected_keys = {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "coordinator_session_id",
+            "scope",
+            "session_role",
+            "stage_index",
+            "level_number",
+            "session_scope_id",
+            "session_state_path",
+            "artifact_scope",
+            "artifact_owner",
+            "artifact_owner_id",
+            "artifact",
+            "artifact_type",
+            "conflicts_detected",
+            "review_summary",
+            "fixes_applied",
+            "warnings_for_next_level",
+            "duration_seconds",
+        }
+        if set(payload) != expected_keys:
+            raise ValueError("coordinator artifact fields do not match schema v1")
+
+        def require_exact(key: str, expected: object) -> None:
+            value = payload.get(key)
+            if type(value) is not type(expected) or value != expected:
+                raise ValueError(f"coordinator artifact {key} does not match its owner")
+
+        def require_string(key: str, *, optional: bool = False) -> str | None:
+            value = payload.get(key)
+            if optional and value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f"coordinator artifact {key} must be a string")
+            return value
+
+        def require_string_tuple(key: str) -> tuple[str, ...]:
+            value = payload.get(key)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValueError(f"coordinator artifact {key} must be a string list")
+            return tuple(value)
+
+        require_exact("schema_version", 1)
+        require_exact("scope", "level")
+        require_exact("session_role", "coordinator")
+        require_exact("stage_index", level_number - 1)
+        require_exact("level_number", level_number)
+        require_exact("session_scope_id", session_scope_id)
+        require_exact("session_state_path", session_state_path)
+        require_exact("artifact_scope", "level")
+        require_exact("artifact_owner", "coordinator")
+        require_exact("artifact_owner_id", session_scope_id)
+        require_exact("artifact_type", "coordinator_review")
+
+        raw_conflicts = payload.get("conflicts_detected")
+        if not isinstance(raw_conflicts, list):
+            raise ValueError("coordinator artifact conflicts_detected must be a list")
+        restored_conflicts: list[FileConflict] = []
+        for raw_conflict in raw_conflicts:
+            if not isinstance(raw_conflict, Mapping):
+                raise ValueError("coordinator artifact conflict must be an object")
+            if set(raw_conflict) != {
+                "file_path",
+                "ac_indices",
+                "resolved",
+                "resolution_description",
+            }:
+                raise ValueError("coordinator artifact conflict fields are invalid")
+            file_path = raw_conflict.get("file_path")
+            raw_indices = raw_conflict.get("ac_indices")
+            resolved = raw_conflict.get("resolved")
+            resolution = raw_conflict.get("resolution_description")
+            if not isinstance(file_path, str) or not file_path:
+                raise ValueError("coordinator artifact conflict path is invalid")
+            if (
+                not isinstance(raw_indices, list)
+                or any(
+                    not isinstance(index, int) or isinstance(index, bool) or index < 0
+                    for index in raw_indices
+                )
+                or raw_indices != sorted(set(raw_indices))
+            ):
+                raise ValueError("coordinator artifact conflict indices are invalid")
+            if not isinstance(resolved, bool) or not isinstance(resolution, str):
+                raise ValueError("coordinator artifact conflict result is invalid")
+            restored_conflicts.append(
+                FileConflict(
+                    file_path=file_path,
+                    ac_indices=tuple(raw_indices),
+                    resolved=resolved,
+                    resolution_description=resolution,
+                )
+            )
+
+        expected_identity = tuple(
+            (conflict.file_path, conflict.ac_indices) for conflict in expected_conflicts
+        )
+        restored_identity = tuple(
+            (conflict.file_path, conflict.ac_indices) for conflict in restored_conflicts
+        )
+        if restored_identity != expected_identity:
+            raise ValueError("coordinator artifact conflict population drifted")
+
+        duration = payload.get("duration_seconds")
+        if (
+            not isinstance(duration, int | float)
+            or isinstance(duration, bool)
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
+            raise ValueError("coordinator artifact duration_seconds is invalid")
+
+        return cls(
+            level_number=level_number,
+            conflicts_detected=tuple(restored_conflicts),
+            review_summary=require_string("review_summary") or "",
+            fixes_applied=require_string_tuple("fixes_applied"),
+            warnings_for_next_level=require_string_tuple("warnings_for_next_level"),
+            duration_seconds=float(duration),
+            session_id=require_string("coordinator_session_id", optional=True),
+            session_scope_id=session_scope_id,
+            session_state_path=session_state_path,
+            final_output=require_string("artifact") or "",
+        )
 
 
 class LevelCoordinator:

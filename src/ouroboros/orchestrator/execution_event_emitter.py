@@ -420,6 +420,7 @@ class ExecutionEventEmitter:
             aggregate_type="execution",
             aggregate_id=self.coordinator_aggregate_id(execution_id, level),
             data={
+                "schema_version": 1,
                 "execution_id": execution_id,
                 "session_id": session_id,
                 "scope": "level",
@@ -520,6 +521,7 @@ class ExecutionEventEmitter:
             aggregate_type="execution",
             aggregate_id=self.coordinator_aggregate_id(execution_id, review.level_number),
             data={
+                "schema_version": 1,
                 "execution_id": execution_id,
                 "session_id": session_id,
                 "coordinator_session_id": review.session_id,
