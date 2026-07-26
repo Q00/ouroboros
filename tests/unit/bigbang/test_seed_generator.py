@@ -22,6 +22,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _iter_outer_ac_field_markers,
     _parse_string_array_values,
     load_seed,
     save_seed_sync,
@@ -425,6 +426,55 @@ class TestSeedGeneratorAmbiguityGating:
 
 class TestSeedGeneratorExtraction:
     """Test SeedGenerator requirement extraction."""
+
+    @pytest.mark.parametrize("description", ("Users' files exist", "James' file exists"))
+    def test_ac_field_marker_scanner_treats_word_final_possessives_as_prose(
+        self,
+        description: str,
+    ) -> None:
+        body = f"{description} | verify: test -f output.txt | artifacts: output.txt | expect: NONE"
+
+        markers = _iter_outer_ac_field_markers(body)
+
+        assert tuple(marker.name for marker in markers) == ("verify", "artifacts", "expect")
+
+    @pytest.mark.parametrize(
+        "body",
+        (
+            (
+                'Command works | verify: sh -c \'printf "%s\\n" '
+                '"| artifacts: literal"\' | artifacts: out.log | expect: NONE'
+            ),
+            (
+                "Command works | verify: bash -lc \"printf '%s\\n' "
+                "'| verify: literal'"
+                '" | artifacts: out.log | expect: NONE'
+            ),
+            (
+                r"Command works | verify: printf \|\ artifacts:literal > out.log | "
+                "artifacts: out.log | expect: NONE"
+            ),
+            (
+                "Command works | verify: sh -c 'printf \"| artifacts literal\"' | "
+                "artifacts: out.log | expect: NONE"
+            ),
+        ),
+    )
+    def test_ac_field_marker_scanner_preserves_quoted_and_escaped_pipe_payloads(
+        self,
+        body: str,
+    ) -> None:
+        markers = _iter_outer_ac_field_markers(body)
+
+        assert tuple(marker.name for marker in markers) == ("verify", "artifacts", "expect")
+
+    def test_ac_field_marker_scanner_rejects_unquoted_malformed_field_fragment(
+        self,
+    ) -> None:
+        with pytest.raises(ValueError, match="Malformed artifacts field"):
+            _iter_outer_ac_field_markers(
+                "Files exist | verify: test -f output.txt | artifacts output.txt"
+            )
 
     @pytest.mark.asyncio
     async def test_generate_extracts_goal(self) -> None:
@@ -946,6 +996,55 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "User's file exists"
         assert criterion.verify_command == "test -f user.txt"
         assert criterion.expected_artifacts == ("user.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    async def test_generate_does_not_treat_word_final_possessive_as_quote_bypass(
+        self,
+    ) -> None:
+        """A word-final possessive cannot hide malformed structured AC fields."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bypass_attempt = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Users' files exist | verify: test -f users.txt | "
+                "artifacts: schema v2 outputs.json | expect: NONE\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Users' files exist | verify: test -f users.txt | "
+                "artifacts: users.txt | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bypass_attempt)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "Users' files exist"
+        assert criterion.verify_command == "test -f users.txt"
+        assert criterion.expected_artifacts == ("users.txt",)
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True
