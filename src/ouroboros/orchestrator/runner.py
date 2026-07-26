@@ -1845,11 +1845,22 @@ class OrchestratorRunner:
                 details={"execution_id": execution_id, "session_id": session_id},
             )
 
+        from ouroboros.orchestrator.effort_routing import (
+            assess_investment,
+            resolve_execute_effort,
+        )
+
+        expected_effort, _expected_effort_kwargs = resolve_execute_effort(
+            self._adapter,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=False,
+            investment_assessment=assess_investment(None),
+        )
         live_paused_projection = build_route_compat_projection(
             self._route_economics,
             model_router=self._model_router,
             runtime_backend=getattr(self._adapter, "runtime_backend", None),
-            effort=paused_candidate.effort,
+            effort=expected_effort.level,
         )
         if live_paused_projection is None:
             raise OrchestratorError(
@@ -1939,17 +1950,36 @@ class OrchestratorRunner:
                         message="Refusing to replay invalid direct route escalation state",
                         details={"execution_id": execution_id, "session_id": session_id},
                     ) from exc
-                expected_successor = (
-                    parsed_rows[row_index + 1][0]
-                    if row_index + 1 < len(parsed_rows)
-                    else paused_candidate
+                next_observation = (
+                    parsed_rows[row_index + 1][0] if row_index + 1 < len(parsed_rows) else None
+                )
+                successor_matches = (
+                    decision.selected == paused_candidate
+                    if next_observation is None
+                    else decision.selected is not None
+                    and (
+                        decision.selected.route_id,
+                        decision.selected.model,
+                        decision.selected.harness,
+                        decision.selected.effort,
+                        decision.selected.cost_units,
+                        decision.selected.capabilities,
+                    )
+                    == (
+                        next_observation.route_id,
+                        next_observation.model,
+                        next_observation.harness,
+                        next_observation.effort,
+                        next_observation.cost_units,
+                        next_observation.capabilities,
+                    )
                 )
                 if (
                     expected_observation != observation
                     or decision != recomputed
                     or decision.action is not EscalationAction.ESCALATE_ROUTE
                     or decision.selected is None
-                    or decision.selected.route_id != expected_successor.route_id
+                    or not successor_matches
                     or handoff_claim is not False
                 ):
                     raise OrchestratorError(
@@ -1961,7 +1991,7 @@ class OrchestratorRunner:
 
             initial = admit_compat_escalation_route(
                 live_paused_projection,
-                effort=paused_candidate.effort,
+                effort=expected_effort.level,
             )
             if initial.selected != paused_candidate:
                 raise OrchestratorError(

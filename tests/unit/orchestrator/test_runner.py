@@ -1730,6 +1730,111 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    async def test_direct_pause_rejects_effort_drift_from_durable_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        from dataclasses import replace
+        import hashlib
+
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationReason,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        execution_id = "execution-direct-effort-drift"
+        session_id = "session-direct-effort-drift"
+        episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+            effort="low",
+        )
+        assert projection is not None
+        requirements = build_compat_escalation_requirements(projection, effort="low")
+        assert requirements is not None
+        current = projection.registry.candidates[0]
+        observation = RouteObservation.from_candidate(
+            current,
+            RouteRequirements(required_capabilities=requirements.required_capabilities),
+            episode_id=episode_id,
+            attempt_index=0,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.CLASSIFIED_FAILURE,
+        )
+        decision = advance_route(
+            projection.registry,
+            requirements,
+            current_route_id=current.route_id,
+            attempted_route_ids=(current.route_id,),
+            failure_class=FailureClass.EVIDENCE_MISSING,
+        )
+        assert decision.selected is not None
+        drifted_pause = replace(decision.selected, effort="high")
+        observation_event = BaseEvent(
+            type="execution.ac.route_observed",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "observation": observation.to_contract_data(),
+                "decision": decision.to_contract_data(),
+                "human_handoff_required": False,
+                "final_acceptance_declared": False,
+            },
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": episode_id,
+                "attempt_index": 1,
+                "prior_route_ids": [current.route_id],
+                "route": drifted_pause.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            if kwargs.get("event_type") == "execution.ac.route_observed":
+                return [observation_event]
+            if kwargs.get("event_type") == "execution.ac.route_paused":
+                return [pause_event]
+            return []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query)
+        with pytest.raises(OrchestratorError, match="drifted direct route pause"):
+            await runner._direct_resume_route_id(
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+    @pytest.mark.asyncio
     async def test_direct_resume_refuses_blocked_route_replay(
         self,
         runner: OrchestratorRunner,

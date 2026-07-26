@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import hashlib
 from typing import Any
@@ -26,6 +27,8 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
     DecompositionSource,
     legacy_unverified_split_decision,
 )
@@ -239,15 +242,16 @@ def _split_decision(
     *,
     execution_id: str = "execution-1",
     root_ac_index: int = 0,
+    node_identity: ExecutionNodeIdentity | None = None,
+    child_descriptions: tuple[str, str] = ("first child", "second child"),
 ):
-    identity = ExecutionNodeIdentity.root(
-        execution_context_id=execution_id,
-        ac_index=root_ac_index,
+    identity = node_identity or ExecutionNodeIdentity.root(
+        execution_context_id=execution_id, ac_index=root_ac_index
     )
     return legacy_unverified_split_decision(
         node_id=identity.node_id,
         source=DecompositionSource.PREFLIGHT,
-        child_descriptions=("first child", "second child"),
+        child_descriptions=child_descriptions,
     )
 
 
@@ -725,8 +729,8 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
     )
     assert has_pause
     partial = next(event for event in events if event.type == "execution.ac.composite_paused")
-    assert partial.data["paused_child_index"] == 1
-    assert len(partial.data["completed_children"]) == 1
+    assert partial.data["frames"][0]["paused_child_index"] == 1
+    assert len(partial.data["frames"][0]["completed_children"]) == 1
     assert not any(
         event.type == "execution.session.failed"
         and event.data.get("node_id") == root_identity.child(1).node_id
@@ -786,6 +790,146 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
         ),
     )
     assert any(event.type == "execution.ac.composite_completed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_nested_partial_composite_resume_reuses_exact_depth_two_leaf_boundary(
+    tmp_path: Any,
+) -> None:
+    provider_resume_handles: list[RuntimeHandle | None] = []
+
+    async def execute_task(**kwargs: Any):
+        provider_resume_handles.append(kwargs.get("resume_handle"))
+        call_number = len(provider_resume_handles)
+        if call_number < 3:
+            yield AgentMessage(
+                type="result",
+                content=f"completed leaf {call_number} once",
+                data={"subtype": "success"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id=f"completed-leaf-{call_number}",
+                    cwd=str(tmp_path),
+                ),
+            )
+        elif call_number == 3:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="nested-paused-leaf",
+                    cwd=str(tmp_path),
+                ),
+            )
+        elif call_number == 4:
+            handle = kwargs.get("resume_handle")
+            assert isinstance(handle, RuntimeHandle)
+            assert handle.native_session_id == "nested-paused-leaf"
+            yield AgentMessage(
+                type="result",
+                content="nested paused leaf resumed",
+                data={"subtype": "success"},
+                resume_handle=handle,
+            )
+        else:  # pragma: no cover - the call count below is the primary guard
+            raise AssertionError("a completed nested leaf was redispatched")
+
+    executor, store, events = _executor(
+        enable_decomposition=True,
+        execute_task=execute_task,
+        working_directory=str(tmp_path),
+        max_decomposition_depth=2,
+    )
+    seed = _seed()
+    root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    root_decision = _split_decision(
+        node_identity=root,
+        child_descriptions=("outer completed", "nested composite"),
+    )
+    nested_decision = _split_decision(
+        node_identity=root.child(1),
+        child_descriptions=("nested completed", "nested paused"),
+    )
+    executor._decomposition_decisions.update(
+        {
+            root.node_id: root_decision,
+            root.child(0).node_id: DecompositionDecisionRecord(
+                node_id=root.child(0).node_id,
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.ATOMIC,
+            ),
+            root.child(1).node_id: nested_decision,
+        }
+    )
+
+    first = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+    assert len(provider_resume_handles) == 3, repr(first)
+    partial = next(event for event in events if event.type == "execution.ac.composite_paused")
+    assert [frame["paused_child_index"] for frame in partial.data["frames"]] == [1, 1]
+    assert partial.data["paused_leaf"]["node_id"] == root.child(1).child(1).node_id
+
+    async def append_batch(batch: list[BaseEvent]) -> None:
+        events.extend(batch)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in reversed(events) if event.type == kwargs.get("event_type")]
+
+    async def replay(aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+        return [
+            event
+            for event in events
+            if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+        ]
+
+    store.append_batch.side_effect = append_batch
+    store.query_execution_related_events.side_effect = query
+    store.replay.side_effect = replay
+    resumed_executor, _same_store, _same_events = _executor(
+        enable_decomposition=True,
+        execute_task=execute_task,
+        working_directory=str(tmp_path),
+        max_decomposition_depth=2,
+        process_local_resume_nonce=executor._process_local_resume_nonce,
+        event_store=store,
+        event_log=events,
+        adapter_override=executor._adapter,
+    )
+    resumed = await resumed_executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert len(provider_resume_handles) == 4
+    restored = resumed[0]
+    assert isinstance(restored, ACExecutionResult)
+    assert restored.success and restored.is_decomposed
+    nested = restored.sub_results[1]
+    assert nested.success and nested.is_decomposed
+    assert tuple(child.final_message for child in nested.sub_results) == (
+        "completed leaf 2 once",
+        "nested paused leaf resumed",
+    )
 
 
 @pytest.mark.asyncio
@@ -1309,23 +1453,29 @@ async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
     if mutation == "unknown_envelope":
         partial.data["acceptance_authority"] = "final_gate"
     elif mutation == "fingerprint_drift":
-        partial.data["decomposition_fingerprint"] = "0" * 64
+        partial.data["frames"][0]["decomposition_fingerprint"] = "0" * 64
     elif mutation == "child_node_drift":
-        partial.data["paused_child_node_id"] = root.child(0).node_id
+        partial.data["frames"][0]["paused_child_node_id"] = root.child(0).node_id
     elif mutation == "unknown_completed_child":
-        partial.data["completed_children"][0]["provider_transcript"] = []
+        partial.data["frames"][0]["completed_children"][0]["provider_transcript"] = []
     elif mutation == "capsule_malformed":
-        partial.data["paused_capsule_fingerprint"] = "b" * 64
+        partial.data["paused_leaf"]["capsule_fingerprint"] = "b" * 64
     else:
+        conflicting_data = deepcopy(partial.data)
+        conflicting_data["frames"][0]["paused_child_index"] = 0
+        conflicting_data["frames"][0]["completed_children"] = []
+        conflicting_data["frames"][0]["paused_child_node_id"] = root.child(0).node_id
+        conflicting_data["frames"][0]["paused_child_ac_index"] = 0
+        conflicting_data["frames"][0]["paused_child_content"] = "first child"
+        conflicting_data["paused_leaf"]["node_id"] = root.child(0).node_id
+        conflicting_data["paused_leaf"]["ac_index"] = 0
+        conflicting_data["paused_leaf"]["ac_content"] = "first child"
         conflicting = BaseEvent(
             type=partial.type,
             aggregate_type=partial.aggregate_type,
             aggregate_id=partial.aggregate_id,
-            data={**partial.data, "paused_child_index": 0, "completed_children": []},
+            data=conflicting_data,
         )
-        conflicting.data["paused_child_node_id"] = root.child(0).node_id
-        conflicting.data["paused_child_ac_index"] = 0
-        conflicting.data["paused_child_content"] = "first child"
         replay_events = [partial, conflicting]
 
     async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
@@ -1341,6 +1491,87 @@ async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
             session_id="session-1",
             root_ac_indices=(0,),
         )
+
+
+@pytest.mark.asyncio
+async def test_partial_composite_replay_folds_newest_first_advancing_history() -> None:
+    executor, store, events = _executor(enable_decomposition=True)
+    seed = _seed()
+    decision = _split_decision()
+    root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    paused_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+
+    def paused_child(index: int, marker: str) -> ACExecutionResult:
+        return ACExecutionResult(
+            ac_index=index,
+            ac_content=("first child" if index == 0 else "second child"),
+            success=False,
+            messages=(paused_message,),
+            final_message=paused_message.content,
+            runtime_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id=f"paused-child-{marker}",
+                cwd="/tmp/project",
+                metadata={
+                    "node_id": root.child(index).node_id,
+                    "session_scope_id": f"execution-1-paused-{marker}",
+                    "ac_dispatch_id": marker * 32,
+                    "ac_capsule_fingerprint": "sha256:" + marker * 64,
+                },
+            ),
+            depth=1,
+        )
+
+    async def persist(sub_results: tuple[ACExecutionResult, ...]) -> None:
+        await executor._persist_partial_composite_pause(
+            seed=seed,
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                is_decomposed=True,
+                sub_results=sub_results,
+                decomposition_decision=decision,
+            ),
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+
+    await persist((paused_child(0, "a"),))
+    completed = ACExecutionResult(
+        ac_index=0,
+        ac_content="first child",
+        success=True,
+        final_message="completed once",
+        depth=1,
+    )
+    await persist((completed, paused_child(1, "b")))
+    await persist((completed, paused_child(1, "c")))
+    partial_events = [event for event in events if event.type == "execution.ac.composite_paused"]
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.composite_paused":
+            return list(reversed(partial_events))
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+
+    state = executor._partial_composite_resumes[root.node_id]
+    assert state.paused_child_index == 1
+    assert len(state.completed_children) == 1
+    assert state.paused_dispatch_id == "c" * 32
+    assert state.paused_capsule_fingerprint == "sha256:" + "c" * 64
 
 
 @pytest.mark.asyncio
@@ -1388,6 +1619,50 @@ async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> 
             execution_counters=None,
         )
     provider.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> None:
+    executor, store, events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    assert decision.selected is not None
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    drifted = replace(decision.selected, effort="high")
+    await executor._persist_parallel_route_pause(
+        seed=seed,
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            route_candidate=drifted,
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        prior_route_ids=(observation.route_id,),
+    )
+    pause_event = next(event for event in events if event.type == "execution.ac.route_paused")
+    judgment = _judgment_for_route_event(route_event)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        event_type = kwargs.get("event_type")
+        if event_type == "execution.ac.route_observed":
+            return [route_event]
+        if event_type == "execution.ac.attempt_judged":
+            return [judgment]
+        if event_type == "execution.ac.route_paused":
+            return [pause_event]
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="durable successor snapshot"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
 
 
 @pytest.mark.asyncio
@@ -1520,6 +1795,33 @@ async def test_parallel_pause_history_is_bounded_before_envelope_traversal() -> 
             session_id="session-1",
             root_ac_indices=(0,),
         )
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_route_state_detector_uses_overflow_sentinels() -> None:
+    executor, store, _events = _executor()
+    observed_limits: list[int | None] = []
+    event = BaseEvent(
+        type="execution.ac.route_observed",
+        aggregate_type="execution",
+        aggregate_id="execution-1",
+        data={},
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        limit = kwargs.get("limit")
+        observed_limits.append(limit)
+        assert isinstance(limit, int)
+        return [event] * limit
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="pre-dispatch scan exceeds"):
+        await executor._has_persisted_bounded_route_state(
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+    assert observed_limits and all(limit is not None for limit in observed_limits)
 
 
 @pytest.mark.asyncio

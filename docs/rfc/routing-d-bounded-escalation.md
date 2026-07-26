@@ -152,6 +152,16 @@ excludes it from dispatch. Duplicate, conflicting, drifted, oversized, or
 non-canonical composite evidence fails closed instead of repeating decomposition,
 child provider calls, or tool effects.
 
+A quota pause inside a legacy composite is sealed separately as an exact-schema
+`execution.ac.composite_paused` event. Its versioned frame list records every
+composite on the root-to-leaf path, each completed sibling prefix, and each
+immutable decomposition decision/fingerprint; one leaf record binds the final
+node, retry index, runtime scope, dispatch ID, and capsule fingerprint. Replay
+folds these events chronologically even though the store returns newest-first,
+restores every frame, and resumes only the newest exact leaf boundary. Advancing
+or repeated pauses therefore preserve already completed effects, while regressed,
+conflicting, oversized, or malformed frame histories fail before provider entry.
+
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is
 sealed against session replay; an old or exhausted route cannot be executed
@@ -169,6 +179,13 @@ the live registry and either the cheapest initial admission or the exact last
 escalation decision, then resumes the same provider handle with that exact
 route. Any same-session route evidence with a missing or non-runner call site
 blocks direct replay.
+
+Both owners compare a paused candidate with the complete predecessor
+`selected_route` snapshot, or with the exact live initial admission when no
+observation exists. A same-ID change to effort or any other candidate semantic
+is configuration drift, not a resumable pause. Pre-dispatch detection and the
+full replay loaders use finite max-plus-one stream sentinels; no Routing D
+history scan uses an unbounded query.
 
 ## Parallel and direct scope
 

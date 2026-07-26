@@ -414,19 +414,33 @@ _PARALLEL_COMPOSITE_PAUSE_KEYS = frozenset(
         "root_ac_index",
         "semantic_ac_key",
         "call_site",
+        "frames",
+        "paused_leaf",
+        "recoverable_pause",
+        "final_acceptance_declared",
+    }
+)
+_PARALLEL_COMPOSITE_PAUSE_FRAME_KEYS = frozenset(
+    {
         "completed_children",
         "paused_child_index",
         "paused_child_node_id",
         "paused_child_ac_index",
         "paused_child_content",
         "paused_child_retry_attempt",
-        "paused_runtime_scope_id",
-        "paused_dispatch_id",
-        "paused_capsule_fingerprint",
         "decomposition_decision",
         "decomposition_fingerprint",
-        "recoverable_pause",
-        "final_acceptance_declared",
+    }
+)
+_PARALLEL_COMPOSITE_PAUSE_LEAF_KEYS = frozenset(
+    {
+        "node_id",
+        "ac_index",
+        "ac_content",
+        "retry_attempt",
+        "runtime_scope_id",
+        "dispatch_id",
+        "capsule_fingerprint",
     }
 )
 _PARALLEL_ROUTE_JUDGMENT_KEYS = frozenset(
@@ -460,9 +474,9 @@ class _PartialCompositeResumeState:
     paused_child_ac_index: int
     paused_child_content: str
     paused_child_retry_attempt: int
-    paused_runtime_scope_id: str
-    paused_dispatch_id: str
-    paused_capsule_fingerprint: str
+    paused_runtime_scope_id: str | None
+    paused_dispatch_id: str | None
+    paused_capsule_fingerprint: str | None
 
 
 if TYPE_CHECKING:
@@ -9444,51 +9458,74 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         )
 
-    async def _persist_partial_composite_pause(
+    def _partial_composite_pause_projection(
         self,
         *,
-        seed: Seed,
         result: ACExecutionResult,
-        root_ac_index: int,
-        session_id: str,
-        execution_id: str,
-    ) -> None:
-        """Seal a completed child prefix and the exact paused child boundary."""
-
-        from ouroboros.events.base import BaseEvent
+        node_identity: ExecutionNodeIdentity,
+        workspace_root: str,
+        node_budget: list[int],
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
+        """Project every composite frame down to one exact paused leaf."""
 
         decision = result.decomposition_decision
         if not result.is_decomposed or decision is None or not result.sub_results:
             raise RuntimeError("partial composite pause lost its split result tree")
         parsed, decision_data, fingerprint = _canonical_decomposition_decision(decision.to_dict())
-        if parsed.disposition is not DecompositionDisposition.SPLIT:
-            raise RuntimeError("partial composite pause requires a split decision")
+        if (
+            parsed.disposition is not DecompositionDisposition.SPLIT
+            or parsed.node_id != node_identity.node_id
+            or result.depth != node_identity.depth
+        ):
+            raise RuntimeError("partial composite pause crossed decomposition node identity")
+
         paused_child_index = len(result.sub_results) - 1
         paused_child = result.sub_results[paused_child_index]
+        completed_prefix = result.sub_results[:paused_child_index]
         if (
             paused_child_index >= len(parsed.children)
             or tuple(child.description for child in parsed.children[:paused_child_index])
-            != tuple(child.ac_content for child in result.sub_results[:paused_child_index])
+            != tuple(child.ac_content for child in completed_prefix)
             or any(
-                child.ac_index != root_ac_index * 100 + child_index or child.depth != 1
-                for child_index, child in enumerate(result.sub_results[:paused_child_index])
+                child.ac_index != result.ac_index * 100 + child_index
+                or child.depth != result.depth + 1
+                for child_index, child in enumerate(completed_prefix)
             )
             or parsed.children[paused_child_index].description != paused_child.ac_content
-            or paused_child.ac_index != root_ac_index * 100 + paused_child_index
-            or paused_child.depth != 1
+            or paused_child.ac_index != result.ac_index * 100 + paused_child_index
+            or paused_child.depth != result.depth + 1
             or not _has_usage_limit_pause(paused_child)
-            or any(
-                _has_usage_limit_pause(child) for child in result.sub_results[:paused_child_index]
-            )
+            or any(_has_usage_limit_pause(child) for child in completed_prefix)
         ):
             raise RuntimeError("partial composite pause has an invalid child prefix")
-        expected_node = ExecutionNodeIdentity.root(
-            execution_context_id=execution_id or session_id,
-            ac_index=root_ac_index,
-        )
-        if parsed.node_id != expected_node.node_id:
-            raise RuntimeError("partial composite pause crossed decomposition node identity")
-        expected_child = expected_node.child(paused_child_index)
+
+        expected_child = node_identity.child(paused_child_index)
+        frame: dict[str, object] = {
+            "completed_children": [
+                _serialize_composite_result_tree(
+                    child,
+                    node_budget=node_budget,
+                    workspace_root=workspace_root,
+                )
+                for child in completed_prefix
+            ],
+            "paused_child_index": paused_child_index,
+            "paused_child_node_id": expected_child.node_id,
+            "paused_child_ac_index": paused_child.ac_index,
+            "paused_child_content": paused_child.ac_content,
+            "paused_child_retry_attempt": paused_child.retry_attempt,
+            "decomposition_decision": decision_data,
+            "decomposition_fingerprint": fingerprint,
+        }
+        if paused_child.is_decomposed:
+            nested_frames, paused_leaf = self._partial_composite_pause_projection(
+                result=paused_child,
+                node_identity=expected_child,
+                workspace_root=workspace_root,
+                node_budget=node_budget,
+            )
+            return [frame, *nested_frames], paused_leaf
+
         runtime_handle = paused_child.runtime_handle
         runtime_metadata = runtime_handle.metadata if runtime_handle is not None else {}
         runtime_scope_id = runtime_metadata.get("session_scope_id")
@@ -9510,18 +9547,43 @@ Respond with either ATOMIC or the structured JSON object only.
             or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
         ):
             raise RuntimeError(
-                "partial composite pause has no exact resumable child provider boundary"
+                "partial composite pause has no exact resumable leaf provider boundary"
             )
+        return [frame], {
+            "node_id": expected_child.node_id,
+            "ac_index": paused_child.ac_index,
+            "ac_content": paused_child.ac_content,
+            "retry_attempt": paused_child.retry_attempt,
+            "runtime_scope_id": runtime_scope_id,
+            "dispatch_id": dispatch_id,
+            "capsule_fingerprint": capsule_fingerprint,
+        }
+
+    async def _persist_partial_composite_pause(
+        self,
+        *,
+        seed: Seed,
+        result: ACExecutionResult,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Seal recursive completed prefixes and the exact paused leaf boundary."""
+
+        from ouroboros.events.base import BaseEvent
+
+        expected_node = ExecutionNodeIdentity.root(
+            execution_context_id=execution_id or session_id,
+            ac_index=root_ac_index,
+        )
         workspace_root = self._task_cwd or self._adapter.working_directory or os.getcwd()
         node_budget = [_COMPOSITE_RESULT_MAX_NODES]
-        completed_children = [
-            _serialize_composite_result_tree(
-                child,
-                node_budget=node_budget,
-                workspace_root=workspace_root,
-            )
-            for child in result.sub_results[:paused_child_index]
-        ]
+        frames, paused_leaf = self._partial_composite_pause_projection(
+            result=result,
+            node_identity=expected_node,
+            workspace_root=workspace_root,
+            node_budget=node_budget,
+        )
         criterion = seed.acceptance_criteria[root_ac_index]
         semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
         await self._event_store.append(
@@ -9530,23 +9592,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": root_ac_index,
                     "semantic_ac_key": semantic_ac_key,
                     "call_site": "parallel",
-                    "completed_children": completed_children,
-                    "paused_child_index": paused_child_index,
-                    "paused_child_node_id": expected_child.node_id,
-                    "paused_child_ac_index": paused_child.ac_index,
-                    "paused_child_content": paused_child.ac_content,
-                    "paused_child_retry_attempt": paused_child.retry_attempt,
-                    "paused_runtime_scope_id": runtime_scope_id,
-                    "paused_dispatch_id": dispatch_id,
-                    "paused_capsule_fingerprint": capsule_fingerprint,
-                    "decomposition_decision": decision_data,
-                    "decomposition_fingerprint": fingerprint,
+                    "frames": frames,
+                    "paused_leaf": paused_leaf,
                     "recoverable_pause": True,
                     "final_acceptance_declared": False,
                 },
@@ -10038,20 +10091,25 @@ Respond with either ATOMIC or the structured JSON object only.
         """Detect any same-session Routing D evidence before choosing a dispatch path."""
 
         relevant = set(root_ac_indices)
-        for event_type in (
-            "execution.ac.route_observed",
-            "execution.ac.attempt_judged",
-            "execution.ac.route_paused",
-            "execution.ac.composite_completed",
-            "execution.ac.composite_paused",
-        ):
+        bounded_streams = {
+            "execution.ac.route_observed": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
+            "execution.ac.attempt_judged": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
+            "execution.ac.route_paused": _MAX_PARALLEL_ROUTE_JUDGMENT_EVENTS + 1,
+            "execution.ac.composite_completed": (_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1),
+            "execution.ac.composite_paused": _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1,
+        }
+        for event_type, event_limit in bounded_streams.items():
             events = await self._event_store.query_execution_related_events(
                 execution_id,
                 event_type=event_type,
-                limit=None,
+                limit=event_limit,
             )
             if not isinstance(events, list | tuple):
                 continue
+            if len(events) >= event_limit:
+                raise RuntimeError(
+                    f"{event_type} pre-dispatch scan exceeds its execution-wide bound"
+                )
             for event in events:
                 if getattr(event, "type", None) != event_type:
                     continue
@@ -10633,8 +10691,12 @@ Respond with either ATOMIC or the structured JSON object only.
         )
         if len(partial_events) >= partial_event_limit:
             raise RuntimeError("partial composite replay exceeds the execution-wide bound")
-        partial_states: dict[int, _PartialCompositeResumeState] = {}
-        for event in partial_events:
+        partial_states: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
+        prior_frame_states: dict[tuple[int, str], _PartialCompositeResumeState] = {}
+        # The production query is newest-first.  Replay the state machine in
+        # chronological order so advancing prefixes cannot be mistaken for
+        # regressions and repeated pauses retain the newest provider boundary.
+        for event in sorted(partial_events, key=lambda item: (item.timestamp, item.id)):
             if event.type != "execution.ac.composite_paused":
                 continue
             data = event.data
@@ -10645,7 +10707,7 @@ Respond with either ATOMIC or the structured JSON object only.
             root_ac_index = data.get("root_ac_index")
             if (
                 type(data.get("schema_version")) is not int
-                or data.get("schema_version") != 1
+                or data.get("schema_version") != 2
                 or data.get("execution_id") != execution_id
                 or data.get("call_site") != "parallel"
                 or type(root_ac_index) is not int
@@ -10660,96 +10722,129 @@ Respond with either ATOMIC or the structured JSON object only.
             semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
             if data.get("semantic_ac_key") != semantic_ac_key:
                 raise RuntimeError("partial composite replay crossed AC identity")
-            decision, _decision_data, fingerprint = _canonical_decomposition_decision(
-                data.get("decomposition_decision")
-            )
             expected_root = ExecutionNodeIdentity.root(
                 execution_context_id=execution_id or session_id,
                 ac_index=root_ac_index,
             )
+            raw_frames = data.get("frames")
+            raw_leaf = data.get("paused_leaf")
             if (
-                decision.disposition is not DecompositionDisposition.SPLIT
-                or data.get("decomposition_fingerprint") != fingerprint
-                or decision.node_id != expected_root.node_id
+                not isinstance(raw_frames, list)
+                or not 1 <= len(raw_frames) <= _COMPOSITE_RESULT_MAX_DEPTH
+                or not _mapping_has_exact_keys(raw_leaf, _PARALLEL_COMPOSITE_PAUSE_LEAF_KEYS)
             ):
-                raise RuntimeError("partial composite replay crossed decomposition identity")
-            paused_child_index = data.get("paused_child_index")
-            paused_child_ac_index = data.get("paused_child_ac_index")
-            paused_child_content = data.get("paused_child_content")
-            paused_retry_attempt = data.get("paused_child_retry_attempt")
-            runtime_scope_id = data.get("paused_runtime_scope_id")
-            dispatch_id = data.get("paused_dispatch_id")
-            capsule_fingerprint = data.get("paused_capsule_fingerprint")
-            raw_completed = data.get("completed_children")
+                raise RuntimeError("partial composite replay has malformed recursive state")
+            assert isinstance(raw_leaf, Mapping)
+            leaf_scope_id = raw_leaf.get("runtime_scope_id")
+            leaf_dispatch_id = raw_leaf.get("dispatch_id")
+            leaf_capsule_fingerprint = raw_leaf.get("capsule_fingerprint")
             if (
-                type(paused_child_index) is not int
-                or not 0 <= paused_child_index < len(decision.children)
-                or type(paused_child_ac_index) is not int
-                or paused_child_ac_index != root_ac_index * 100 + paused_child_index
-                or not isinstance(paused_child_content, str)
-                or len(paused_child_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
-                or paused_child_content != decision.children[paused_child_index].description
-                or type(paused_retry_attempt) is not int
-                or paused_retry_attempt < 0
-                or not isinstance(runtime_scope_id, str)
-                or not runtime_scope_id
-                or len(runtime_scope_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-                or not isinstance(dispatch_id, str)
-                or len(dispatch_id) != 32
-                or any(char not in "0123456789abcdef" for char in dispatch_id)
-                or not isinstance(capsule_fingerprint, str)
-                or len(capsule_fingerprint) != 71
-                or not capsule_fingerprint.startswith("sha256:")
-                or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
-                or not isinstance(raw_completed, list)
-                or len(raw_completed) != paused_child_index
+                not isinstance(leaf_scope_id, str)
+                or not leaf_scope_id
+                or len(leaf_scope_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+                or not isinstance(leaf_dispatch_id, str)
+                or len(leaf_dispatch_id) != 32
+                or any(char not in "0123456789abcdef" for char in leaf_dispatch_id)
+                or not isinstance(leaf_capsule_fingerprint, str)
+                or len(leaf_capsule_fingerprint) != 71
+                or not leaf_capsule_fingerprint.startswith("sha256:")
+                or any(char not in "0123456789abcdef" for char in leaf_capsule_fingerprint[7:])
             ):
-                raise RuntimeError("partial composite replay has malformed paused child state")
-            expected_child = expected_root.child(paused_child_index)
-            if data.get("paused_child_node_id") != expected_child.node_id:
-                raise RuntimeError("partial composite replay crossed child node identity")
+                raise RuntimeError("partial composite replay has malformed leaf boundary")
+
             node_budget = [_COMPOSITE_RESULT_MAX_NODES]
-            completed_children = tuple(
-                _deserialize_composite_result_tree(child, node_budget=node_budget)
-                for child in raw_completed
-            )
-            if tuple(child.ac_content for child in completed_children) != tuple(
-                child.description for child in decision.children[:paused_child_index]
-            ) or any(
-                child.ac_index != root_ac_index * 100 + child_index or child.depth != 1
-                for child_index, child in enumerate(completed_children)
-            ):
-                raise RuntimeError("partial composite replay drifted from its child prefix")
-            state = _PartialCompositeResumeState(
-                decision=decision,
-                completed_children=completed_children,
-                paused_child_index=paused_child_index,
-                paused_child_ac_index=paused_child_ac_index,
-                paused_child_content=paused_child_content,
-                paused_child_retry_attempt=paused_retry_attempt,
-                paused_runtime_scope_id=runtime_scope_id,
-                paused_dispatch_id=dispatch_id,
-                paused_capsule_fingerprint=capsule_fingerprint,
-            )
-            previous = partial_states.get(root_ac_index)
-            if previous is not None and (
-                state.paused_child_index < previous.paused_child_index
-                or state.completed_children[: len(previous.completed_children)]
-                != previous.completed_children
-                or state.decision != previous.decision
-            ):
-                raise RuntimeError("partial composite replay has a conflicting state sequence")
-            partial_states[root_ac_index] = state
+            frame_states: list[_PartialCompositeResumeState] = []
+            expected_node = expected_root
+            parent_ac_index = root_ac_index
+            for frame_index, raw_frame in enumerate(raw_frames):
+                if not _mapping_has_exact_keys(raw_frame, _PARALLEL_COMPOSITE_PAUSE_FRAME_KEYS):
+                    raise RuntimeError("partial composite replay has malformed frame")
+                assert isinstance(raw_frame, Mapping)
+                decision, _decision_data, fingerprint = _canonical_decomposition_decision(
+                    raw_frame.get("decomposition_decision")
+                )
+                paused_child_index = raw_frame.get("paused_child_index")
+                paused_child_ac_index = raw_frame.get("paused_child_ac_index")
+                paused_child_content = raw_frame.get("paused_child_content")
+                paused_retry_attempt = raw_frame.get("paused_child_retry_attempt")
+                raw_completed = raw_frame.get("completed_children")
+                if (
+                    decision.disposition is not DecompositionDisposition.SPLIT
+                    or raw_frame.get("decomposition_fingerprint") != fingerprint
+                    or decision.node_id != expected_node.node_id
+                    or type(paused_child_index) is not int
+                    or not 0 <= paused_child_index < len(decision.children)
+                    or type(paused_child_ac_index) is not int
+                    or paused_child_ac_index != parent_ac_index * 100 + paused_child_index
+                    or not isinstance(paused_child_content, str)
+                    or len(paused_child_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
+                    or paused_child_content != decision.children[paused_child_index].description
+                    or type(paused_retry_attempt) is not int
+                    or paused_retry_attempt < 0
+                    or not isinstance(raw_completed, list)
+                    or len(raw_completed) != paused_child_index
+                ):
+                    raise RuntimeError("partial composite replay has malformed frame state")
+                expected_child = expected_node.child(paused_child_index)
+                if raw_frame.get("paused_child_node_id") != expected_child.node_id:
+                    raise RuntimeError("partial composite replay crossed child node identity")
+                completed_children = tuple(
+                    _deserialize_composite_result_tree(child, node_budget=node_budget)
+                    for child in raw_completed
+                )
+                if tuple(child.ac_content for child in completed_children) != tuple(
+                    child.description for child in decision.children[:paused_child_index]
+                ) or any(
+                    child.ac_index != parent_ac_index * 100 + child_index
+                    or child.depth != expected_node.depth + 1
+                    for child_index, child in enumerate(completed_children)
+                ):
+                    raise RuntimeError("partial composite replay drifted from its child prefix")
+                is_leaf_frame = frame_index == len(raw_frames) - 1
+                if is_leaf_frame and (
+                    raw_leaf.get("node_id") != expected_child.node_id
+                    or raw_leaf.get("ac_index") != paused_child_ac_index
+                    or raw_leaf.get("ac_content") != paused_child_content
+                    or raw_leaf.get("retry_attempt") != paused_retry_attempt
+                ):
+                    raise RuntimeError("partial composite replay crossed paused leaf identity")
+                state = _PartialCompositeResumeState(
+                    decision=decision,
+                    completed_children=completed_children,
+                    paused_child_index=paused_child_index,
+                    paused_child_ac_index=paused_child_ac_index,
+                    paused_child_content=paused_child_content,
+                    paused_child_retry_attempt=paused_retry_attempt,
+                    paused_runtime_scope_id=(leaf_scope_id if is_leaf_frame else None),
+                    paused_dispatch_id=(leaf_dispatch_id if is_leaf_frame else None),
+                    paused_capsule_fingerprint=(
+                        leaf_capsule_fingerprint if is_leaf_frame else None
+                    ),
+                )
+                previous = prior_frame_states.get((root_ac_index, decision.node_id))
+                if previous is not None and (
+                    state.paused_child_index < previous.paused_child_index
+                    or state.completed_children[: len(previous.completed_children)]
+                    != previous.completed_children
+                    or state.decision != previous.decision
+                ):
+                    raise RuntimeError("partial composite replay has a conflicting state sequence")
+                prior_frame_states[(root_ac_index, decision.node_id)] = state
+                frame_states.append(state)
+                expected_node = expected_child
+                parent_ac_index = paused_child_ac_index
+            partial_states[root_ac_index] = tuple(frame_states)
         active_partial_roots = set(partial_states) - set(composite_results)
-        for root_ac_index, state in partial_states.items():
+        for root_ac_index, states in partial_states.items():
             if root_ac_index in composite_results:
                 # A later terminal composite safely consumes every earlier
                 # pause projection for the same immutable split.
-                if composite_results[root_ac_index].decomposition_decision != state.decision:
+                if composite_results[root_ac_index].decomposition_decision != states[0].decision:
                     raise RuntimeError("partial composite replay conflicts with completion")
                 continue
-            self._decomposition_decisions[state.decision.node_id] = state.decision
-            self._partial_composite_resumes[state.decision.node_id] = state
+            for state in states:
+                self._decomposition_decisions[state.decision.node_id] = state.decision
+                self._partial_composite_resumes[state.decision.node_id] = state
         grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices
         }
@@ -11160,10 +11255,25 @@ Respond with either ATOMIC or the structured JSON object only.
                 or root_ac_index in active_partial_roots
             ):
                 raise RuntimeError("parallel route pause contradicts a terminal route state")
+            expected_paused_candidate = overrides.get(root_ac_index)
+            if history and expected_paused_candidate != paused_candidate:
+                raise RuntimeError(
+                    "parallel route pause drifted from its durable successor snapshot"
+                )
 
+            investment_spec = (
+                criterion.investment if isinstance(criterion, AcceptanceCriterionSpec) else None
+            )
+            expected_effort, _expected_effort_kwargs = resolve_execute_effort(
+                self._adapter,
+                base_effort=self._reasoning_effort,
+                is_decomposed_child=False,
+                retry_attempt=0,
+                investment_assessment=assess_investment(investment_spec),
+            )
             live_projection = self._build_route_compat_projection(
                 model_router=self._model_router,
-                effort=paused_candidate.effort,
+                effort=expected_effort.level,
             )
             live_registry = build_compat_escalation_registry(live_projection)
             live_candidate = (
@@ -11180,6 +11290,13 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             if live_candidate != paused_candidate:
                 raise RuntimeError("parallel route pause detected route configuration drift")
+            if not history:
+                initial = admit_compat_escalation_route(
+                    live_projection,
+                    effort=expected_effort.level,
+                )
+                if initial.selected != paused_candidate:
+                    raise RuntimeError("parallel route pause drifted from exact initial admission")
             prior_unresolved = unresolved_pauses.get(root_ac_index)
             if prior_unresolved is not None and prior_unresolved != paused_candidate:
                 raise RuntimeError("parallel route pause has conflicting unconsumed snapshots")
