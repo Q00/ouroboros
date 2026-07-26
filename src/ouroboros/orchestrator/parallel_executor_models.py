@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
-    from ouroboros.orchestrator.level_context import LevelContext
+    from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
     from ouroboros.orchestrator.route_policy import RouteCandidate
     from ouroboros.orchestrator.verifier import VerifierVerdict
 
@@ -96,6 +96,12 @@ class ACExecutionResult:
     # future effect and says nothing about Final Gate acceptance; the outer
     # bounded-escalation owner uses it to durably observe the attempt.
     route_candidate: RouteCandidate | None = None
+    # Canonical bounded context sealed before an interrupted stage returns.
+    # When present, downstream prompt construction and conflict detection must
+    # consume this projection instead of attempting to reconstruct provider
+    # messages that are intentionally not persisted.
+    context_summary: ACContextSummary | None = None
+    conflict_files: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""

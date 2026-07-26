@@ -134,10 +134,23 @@ Legacy judgments without the Routing D marker remain unrelated telemetry.
 
 A provisional success observed before interruption is not promoted to
 acceptance and its provider effect is not replayed. The durable observation
-also seals the bounded final-message/tool context and structured verify-gate
-outcome required to re-enter the interrupted stage. Resume restores that
-provisional result and submits it to the normal Final Gate; malformed or
+also seals the canonical bounded `ACContextSummary`, recursive file-conflict
+projection, and structured verify-gate outcome required to re-enter the
+interrupted stage. Resume consumes that projection directly rather than
+reconstructing synthetic provider messages, so file ordering, total file count,
+public-API context, and coordinator conflict inputs remain identical. The
+restored provisional result still enters the normal Final Gate; malformed or
 missing cached evidence fails closed before another provider effect.
+
+A terminal legacy composite that shares an interrupted stage is sealed in an
+exact-schema `execution.ac.composite_completed` event before the stage can
+return paused. The event binds execution/session/semantic AC identity, the
+canonical context and conflict projections, verify evidence, terminal outcome,
+the bounded child-result tree used by reporting, and the canonical decomposition
+decision plus its fingerprint. Resume restores the completed composite and
+excludes it from dispatch. Duplicate, conflicting, drifted, oversized, or
+non-canonical composite evidence fails closed instead of repeating decomposition,
+child provider calls, or tool effects.
 
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is

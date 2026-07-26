@@ -20,8 +20,14 @@ from ouroboros.core.seed import (
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionSource,
+    legacy_unverified_split_decision,
+)
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
+from ouroboros.orchestrator.level_context import LevelContext, extract_level_context
 from ouroboros.orchestrator.model_routing import build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _VerifyGateOutcome
 from ouroboros.orchestrator.parallel_executor_models import (
@@ -206,6 +212,22 @@ def _episode_id(
     return f"route:{digest}"
 
 
+def _split_decision(
+    *,
+    execution_id: str = "execution-1",
+    root_ac_index: int = 0,
+):
+    identity = ExecutionNodeIdentity.root(
+        execution_context_id=execution_id,
+        ac_index=root_ac_index,
+    )
+    return legacy_unverified_split_decision(
+        node_id=identity.node_id,
+        source=DecompositionSource.PREFLIGHT,
+        child_descriptions=("first child", "second child"),
+    )
+
+
 def _route_event(
     seed: Seed,
     *,
@@ -236,9 +258,17 @@ def _route_event(
             "decision": decision_data,
             "provisional_result": (
                 {
-                    "schema_version": 1,
-                    "final_message_tail": "restored success",
-                    "context_tools": [],
+                    "schema_version": 2,
+                    "context_summary": {
+                        "ac_index": 0,
+                        "ac_content": "ship it",
+                        "success": True,
+                        "tools_used": [],
+                        "files_modified": [],
+                        "key_output": "restored success",
+                        "public_api": "",
+                    },
+                    "conflict_files": [],
                     "duration_seconds": 0.0,
                     "session_id": None,
                     "retry_attempt": observation.attempt_index,
@@ -595,14 +625,17 @@ async def test_decomposed_root_uses_legacy_retry_without_route_observation() -> 
         calls += 1
         forced_legacy.append(bool(kwargs.get("force_legacy_routing", False)))
         success = calls == 2
-        child = ACExecutionResult(
-            ac_index=100,
-            ac_content="legacy child",
-            success=success,
-            final_message="child complete" if success else "child failed",
-            error=None if success else "evidence missing",
-            outcome=(ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED),
-            depth=1,
+        children = tuple(
+            ACExecutionResult(
+                ac_index=100 + index,
+                ac_content=content,
+                success=success,
+                final_message="child complete" if success else "child failed",
+                error=None if success else "evidence missing",
+                outcome=(ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED),
+                depth=1,
+            )
+            for index, content in enumerate(("first child", "second child"))
         )
         return [
             ACExecutionResult(
@@ -612,8 +645,9 @@ async def test_decomposed_root_uses_legacy_retry_without_route_observation() -> 
                 final_message="composite complete" if success else "composite failed",
                 error=None if success else "evidence missing",
                 is_decomposed=True,
-                sub_results=(child,),
+                sub_results=children,
                 outcome=(ACExecutionOutcome.SUCCEEDED if success else ACExecutionOutcome.FAILED),
+                decomposition_decision=_split_decision(),
             )
         ]
 
@@ -719,6 +753,313 @@ async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_rout
 
     assert resumed_indices == [[1]]
     assert all(isinstance(result, ACExecutionResult) and result.success for result in resumed)
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_resume_preserves_completed_composite_without_effect_replay(
+    tmp_path: Any,
+) -> None:
+    executor, store, events = _executor()
+    executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
+    seed = _multi_seed()
+    cheap = _candidate(executor, "compat:claude:frugal")
+    touched = tmp_path / "composite.py"
+    touched.write_text("def completed_effect():\n    return True\n")
+    child_message = AgentMessage(
+        type="tool",
+        content="wrote composite",
+        tool_name="Write",
+        data={"tool_input": {"file_path": str(touched)}},
+    )
+
+    async def first_round(**_kwargs: Any) -> list[ACExecutionResult]:
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship first",
+                success=True,
+                final_message="composite complete",
+                is_decomposed=True,
+                sub_results=(
+                    ACExecutionResult(
+                        ac_index=100,
+                        ac_content="first child",
+                        success=True,
+                        messages=(child_message,),
+                        final_message="first child complete",
+                        depth=1,
+                    ),
+                    ACExecutionResult(
+                        ac_index=101,
+                        ac_content="second child",
+                        success=True,
+                        final_message="second child complete",
+                        depth=1,
+                    ),
+                ),
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                decomposition_decision=_split_decision(),
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="ship second",
+                success=False,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Quota window exhausted. Retry after 2 hours.",
+                        data={"subtype": "error", "error_type": "OpenCodeError"},
+                    ),
+                ),
+                outcome=ACExecutionOutcome.FAILED,
+                route_candidate=cheap,
+            ),
+        ]
+
+    executor._execute_ac_batch = first_round  # type: ignore[method-assign]
+    first = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0, 1],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0, 1: 0},
+        execution_counters=None,
+    )
+    assert isinstance(first[0], ACExecutionResult) and first[0].success
+    completion = next(event for event in events if event.type == "execution.ac.composite_completed")
+    assert completion.data["root_ac_index"] == 0
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    resumed_indices: list[list[int]] = []
+
+    async def resumed_round(**kwargs: Any) -> list[ACExecutionResult]:
+        indices = kwargs["batch_indices"]
+        resumed_indices.append(indices)
+        assert indices == [1]
+        return [
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="ship second",
+                success=True,
+                final_message="atomic resumed",
+                outcome=ACExecutionOutcome.SUCCEEDED,
+                route_candidate=cheap,
+            )
+        ]
+
+    executor._execute_ac_batch = resumed_round  # type: ignore[method-assign]
+    executor._try_decompose_ac = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("completed composite decomposition replayed")
+    )
+    resumed = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0, 1],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0, 1: 0},
+        execution_counters=None,
+    )
+
+    assert resumed_indices == [[1]]
+    restored = resumed[0]
+    assert isinstance(restored, ACExecutionResult)
+    assert restored.is_decomposed and restored.success
+    assert restored.final_message == "composite complete"
+    assert tuple(child.ac_content for child in restored.sub_results) == (
+        "first child",
+        "second child",
+    )
+    assert tuple(child.final_message for child in restored.sub_results) == (
+        "first child complete",
+        "second child complete",
+    )
+    assert restored.conflict_files == (str(touched),)
+    executor._try_decompose_ac.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_provisional_success_replay_preserves_canonical_21_file_projection(
+    tmp_path: Any,
+) -> None:
+    executor, store, events = _executor()
+    executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
+    seed = _seed()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    ordered_paths = [tmp_path / f"z{index:02d}.py" for index in range(20)]
+    ordered_paths.append(tmp_path / "a.py")
+    for path in ordered_paths:
+        path.write_text(
+            "def canonical_first():\n    return True\n" if path.name == "a.py" else "value = 1\n"
+        )
+    messages = tuple(
+        AgentMessage(
+            type="tool",
+            content=f"wrote {path.name}",
+            tool_name="Write",
+            data={"tool_input": {"file_path": str(path)}},
+        )
+        for path in ordered_paths
+    )
+    original = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        messages=messages,
+        final_message="all twenty-one files completed",
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        route_candidate=candidate,
+    )
+    live_summary = extract_level_context(
+        [(0, "ship it", True, messages, original.final_message)],
+        0,
+        workspace_root=str(tmp_path),
+    ).completed_acs[0]
+    await executor._emit_ac_attempt_judged(
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        required=True,
+        route_episode_id=_episode_id(seed),
+        route_attempt_index=0,
+    )
+    await executor._persist_route_observation(
+        seed=seed,
+        result=original,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        attempted_route_ids=(candidate.route_id,),
+        failure_class=None,
+        decision=None,
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    (
+        _histories,
+        _overrides,
+        _terminals,
+        restored_results,
+    ) = await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+    restored = restored_results[0]
+    assert restored.context_summary == live_summary
+    assert len(restored.context_summary.files_modified) == 21
+    assert restored.context_summary.files_modified[0] == str(tmp_path / "a.py")
+    assert "canonical_first" in restored.context_summary.public_api
+    assert restored.conflict_files == tuple(sorted(str(path) for path in ordered_paths))
+    assert (
+        LevelContext(
+            level_number=0,
+            completed_acs=(restored.context_summary,),
+        ).to_prompt_text()
+        == LevelContext(
+            level_number=0,
+            completed_acs=(live_summary,),
+        ).to_prompt_text()
+    )
+    other_writer = ACExecutionResult(
+        ac_index=1,
+        ac_content="also writes a",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="edited a",
+                tool_name="Edit",
+                data={"tool_input": {"file_path": str(tmp_path / "a.py")}},
+            ),
+        ),
+    )
+    conflicts = executor._coordinator.detect_file_conflicts([restored, other_writer])
+    assert [(item.file_path, item.ac_indices) for item in conflicts] == [
+        (str(tmp_path / "a.py"), (0, 1))
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown_envelope",
+        "unknown_decision",
+        "fingerprint_drift",
+        "unknown_result",
+        "unknown_child_result",
+        "duplicate",
+    ],
+)
+async def test_composite_completion_replay_rejects_non_strict_or_conflicting_state(
+    mutation: str,
+) -> None:
+    executor, store, events = _executor()
+    seed = _seed()
+    completed = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        final_message="composite complete",
+        is_decomposed=True,
+        sub_results=(
+            ACExecutionResult(ac_index=100, ac_content="first child", success=True, depth=1),
+            ACExecutionResult(ac_index=101, ac_content="second child", success=True, depth=1),
+        ),
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        decomposition_decision=_split_decision(),
+    )
+    await executor._persist_composite_completion(
+        seed=seed,
+        result=completed,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+    )
+    completion = next(event for event in events if event.type == "execution.ac.composite_completed")
+    replay_events = [completion]
+    if mutation == "unknown_envelope":
+        completion.data["acceptance_authority"] = "gate"
+    elif mutation == "unknown_decision":
+        completion.data["decomposition_decision"]["unbounded_children"] = []
+    elif mutation == "fingerprint_drift":
+        completion.data["decomposition_fingerprint"] = "0" * 64
+    elif mutation == "unknown_result":
+        completion.data["result"]["provider_transcript"] = []
+    elif mutation == "unknown_child_result":
+        completion.data["result"]["sub_results"][0]["accepted"] = True
+    else:
+        replay_events = [completion, completion]
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.composite_completed":
+            return replay_events
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="composite completion"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
 
 
 @pytest.mark.asyncio
@@ -1626,8 +1967,11 @@ async def test_provisional_success_resume_restores_verify_evidence_and_level_con
     restored = replayed[0]
     assert isinstance(restored, ACExecutionResult)
     assert restored.final_message == original.final_message
-    assert restored.messages[0].tool_name == "Write"
-    assert restored.messages[0].data["tool_input"]["file_path"] == str(artifact)
+    assert restored.messages == ()
+    assert restored.context_summary is not None
+    assert restored.context_summary.tools_used == ("Write",)
+    assert restored.context_summary.files_modified == (str(artifact),)
+    assert restored.conflict_files == (str(artifact),)
     assert restored.verify_gate_outcome == original.verify_gate_outcome
     settled = await executor._settle_verify_gate_results(
         seed=seed,

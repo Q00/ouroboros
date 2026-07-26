@@ -283,6 +283,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatchState,
 )
 from ouroboros.orchestrator.level_context import (
+    ACContextSummary,
     LevelContext,
     build_context_prompt,
     deserialize_level_contexts,
@@ -356,6 +357,7 @@ from ouroboros.orchestrator.verifier import (
 )
 
 _MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
+_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS = 256
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -384,6 +386,20 @@ _PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
         "prior_route_ids",
         "route",
         "recoverable_pause",
+        "final_acceptance_declared",
+    }
+)
+_PARALLEL_COMPOSITE_COMPLETION_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "semantic_ac_key",
+        "call_site",
+        "result",
+        "decomposition_decision",
+        "decomposition_fingerprint",
         "final_acceptance_declared",
     }
 )
@@ -1553,10 +1569,17 @@ DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
-_ROUTE_SUCCESS_CONTEXT_TOOLS = 20
+_ROUTE_SUCCESS_CONTEXT_TOOLS = 128
+_ROUTE_SUCCESS_CONTEXT_FILES = 512
 _ROUTE_SUCCESS_TOOL_NAME_CHARS = 128
 _ROUTE_SUCCESS_FILE_PATH_CHARS = 2048
+_ROUTE_SUCCESS_AC_CONTENT_CHARS = 65_536
+_ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
+_ROUTE_SUCCESS_ERROR_CHARS = 4_000
 _ROUTE_SUCCESS_SESSION_ID_CHARS = 512
+_COMPOSITE_RESULT_TEXT_CHARS = 4_000
+_COMPOSITE_RESULT_MAX_NODES = 64
+_COMPOSITE_RESULT_MAX_DEPTH = 8
 _VERIFY_REASON_CHARS = 2000
 _VERIFY_MISSING_ARTIFACTS = 128
 _VERIFY_ARTIFACT_CHARS = 2048
@@ -1717,16 +1740,201 @@ def _has_usage_limit_pause(result: ACExecutionResult) -> bool:
     return any(_has_usage_limit_pause(child) for child in result.sub_results)
 
 
-def _serialize_provisional_route_success(result: ACExecutionResult) -> dict[str, object]:
-    """Persist the bounded context required to settle a resumed success.
+def _canonical_result_context(
+    result: ACExecutionResult,
+    *,
+    workspace_root: str,
+) -> ACContextSummary:
+    """Build the exact bounded projection consumed by downstream levels."""
 
-    Provider transcripts can be unbounded and may contain runtime-private
-    values.  The next-stage context projection only consumes the final-message
-    tail plus tool names and modified file paths, so seal exactly that bounded
-    projection together with the structured verify-gate outcome.
-    """
-    context_tools: list[dict[str, str]] = []
-    seen_tools: set[tuple[str, str]] = set()
+    if result.context_summary is not None:
+        summary = result.context_summary
+    else:
+        projected = extract_level_context(
+            [
+                (
+                    result.ac_index,
+                    result.ac_content,
+                    result.success,
+                    result.messages,
+                    result.final_message,
+                )
+            ],
+            0,
+            workspace_root=workspace_root,
+        )
+        summary = projected.completed_acs[0]
+    if (
+        summary.ac_index != result.ac_index
+        or summary.ac_content != result.ac_content
+        or summary.success is not result.success
+    ):
+        raise RuntimeError("durable context projection contradicts its AC result")
+    return summary
+
+
+def _serialize_context_summary(summary: ACContextSummary) -> dict[str, object]:
+    """Serialize one canonical level-context projection with finite bounds."""
+
+    tools = summary.tools_used
+    files = summary.files_modified
+    if (
+        type(summary.ac_index) is not int
+        or summary.ac_index < 0
+        or not isinstance(summary.ac_content, str)
+        or len(summary.ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
+        or type(summary.success) is not bool
+        or not isinstance(tools, tuple)
+        or len(tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
+        or tuple(sorted(set(tools))) != tools
+        or any(
+            not isinstance(tool, str) or not tool or len(tool) > _ROUTE_SUCCESS_TOOL_NAME_CHARS
+            for tool in tools
+        )
+        or not isinstance(files, tuple)
+        or len(files) > _ROUTE_SUCCESS_CONTEXT_FILES
+        or tuple(sorted(set(files))) != files
+        or any(
+            not isinstance(path, str) or not path or len(path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
+            for path in files
+        )
+        or not isinstance(summary.key_output, str)
+        or len(summary.key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
+        or not isinstance(summary.public_api, str)
+        or len(summary.public_api) > _ROUTE_SUCCESS_PUBLIC_API_CHARS
+    ):
+        raise RuntimeError("canonical route context exceeds its durable bounds")
+    return {
+        "ac_index": summary.ac_index,
+        "ac_content": summary.ac_content,
+        "success": summary.success,
+        "tools_used": list(tools),
+        "files_modified": list(files),
+        "key_output": summary.key_output,
+        "public_api": summary.public_api,
+    }
+
+
+def _deserialize_context_summary(
+    value: object,
+    *,
+    ac_index: int,
+    ac_content: str,
+    success: bool,
+) -> ACContextSummary:
+    """Strictly restore a canonical context projection."""
+
+    expected = frozenset(
+        {
+            "ac_index",
+            "ac_content",
+            "success",
+            "tools_used",
+            "files_modified",
+            "key_output",
+            "public_api",
+        }
+    )
+    if not _mapping_has_exact_keys(value, expected):
+        raise RuntimeError("durable route context has an invalid schema")
+    assert isinstance(value, Mapping)
+    raw_tools = value.get("tools_used")
+    raw_files = value.get("files_modified")
+    key_output = value.get("key_output")
+    public_api = value.get("public_api")
+    if (
+        value.get("ac_index") != ac_index
+        or type(value.get("ac_index")) is not int
+        or value.get("ac_content") != ac_content
+        or value.get("success") is not success
+        or not isinstance(raw_tools, list)
+        or len(raw_tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
+        or not all(
+            isinstance(tool, str) and bool(tool) and len(tool) <= _ROUTE_SUCCESS_TOOL_NAME_CHARS
+            for tool in raw_tools
+        )
+        or raw_tools != sorted(set(raw_tools))
+        or not isinstance(raw_files, list)
+        or len(raw_files) > _ROUTE_SUCCESS_CONTEXT_FILES
+        or not all(
+            isinstance(path, str) and bool(path) and len(path) <= _ROUTE_SUCCESS_FILE_PATH_CHARS
+            for path in raw_files
+        )
+        or raw_files != sorted(set(raw_files))
+        or not isinstance(key_output, str)
+        or len(key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
+        or not isinstance(public_api, str)
+        or len(public_api) > _ROUTE_SUCCESS_PUBLIC_API_CHARS
+    ):
+        raise RuntimeError("durable route context is malformed or crossed AC identity")
+    return ACContextSummary(
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=success,
+        tools_used=tuple(raw_tools),
+        files_modified=tuple(raw_files),
+        key_output=key_output,
+        public_api=public_api,
+    )
+
+
+def _collect_result_conflict_files(result: ACExecutionResult) -> tuple[str, ...]:
+    """Project the exact recursive file set consumed by the coordinator."""
+
+    if result.conflict_files is not None:
+        files = result.conflict_files
+    else:
+        collected: set[str] = set()
+
+        def visit(current: ACExecutionResult) -> None:
+            for message in current.messages:
+                if message.tool_name not in {"Write", "Edit"}:
+                    continue
+                tool_input = message.data.get("tool_input")
+                if not isinstance(tool_input, Mapping):
+                    continue
+                file_path = tool_input.get("file_path")
+                if isinstance(file_path, str) and file_path:
+                    collected.add(file_path)
+            for child in current.sub_results:
+                visit(child)
+
+        visit(result)
+        files = tuple(sorted(collected))
+    if (
+        not isinstance(files, tuple)
+        or len(files) > _ROUTE_SUCCESS_CONTEXT_FILES
+        or tuple(sorted(set(files))) != files
+        or any(
+            not isinstance(path, str) or not path or len(path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
+            for path in files
+        )
+    ):
+        raise RuntimeError("durable conflict projection exceeds its bounds")
+    return files
+
+
+def _deserialize_conflict_files(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or len(value) > _ROUTE_SUCCESS_CONTEXT_FILES
+        or not all(
+            isinstance(path, str) and bool(path) and len(path) <= _ROUTE_SUCCESS_FILE_PATH_CHARS
+            for path in value
+        )
+        or value != sorted(set(value))
+    ):
+        raise RuntimeError("durable conflict projection is malformed")
+    return tuple(value)
+
+
+def _serialize_provisional_route_success(
+    result: ACExecutionResult,
+    *,
+    workspace_root: str,
+) -> dict[str, object]:
+    """Persist the canonical context required to settle a resumed success."""
+
     if (
         not math.isfinite(result.duration_seconds)
         or result.duration_seconds < 0
@@ -1741,31 +1949,11 @@ def _serialize_provisional_route_success(result: ACExecutionResult) -> dict[str,
         )
     ):
         raise RuntimeError("provisional route success cannot seal malformed result context")
-    for message in result.messages:
-        tool_name = message.tool_name
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        if len(tool_name) > _ROUTE_SUCCESS_TOOL_NAME_CHARS:
-            raise RuntimeError("provisional route success tool context exceeds its bound")
-        file_path = ""
-        tool_input = message.data.get("tool_input")
-        if isinstance(tool_input, Mapping):
-            raw_path = tool_input.get("file_path")
-            if isinstance(raw_path, str):
-                file_path = raw_path
-        if len(file_path) > _ROUTE_SUCCESS_FILE_PATH_CHARS:
-            raise RuntimeError("provisional route success file context exceeds its bound")
-        identity = (tool_name, file_path)
-        if identity in seen_tools:
-            continue
-        seen_tools.add(identity)
-        context_tools.append({"tool_name": tool_name, "file_path": file_path})
-        if len(context_tools) >= _ROUTE_SUCCESS_CONTEXT_TOOLS:
-            break
+    summary = _canonical_result_context(result, workspace_root=workspace_root)
     return {
-        "schema_version": 1,
-        "final_message_tail": result.final_message[-_ROUTE_SUCCESS_CONTEXT_CHARS:],
-        "context_tools": context_tools,
+        "schema_version": 2,
+        "context_summary": _serialize_context_summary(summary),
+        "conflict_files": list(_collect_result_conflict_files(result)),
         "duration_seconds": result.duration_seconds,
         "session_id": result.session_id,
         "retry_attempt": result.retry_attempt,
@@ -1781,13 +1969,11 @@ def _deserialize_provisional_route_success(
     route_candidate: RouteCandidate,
 ) -> ACExecutionResult:
     """Restore a sealed provisional success or fail closed on malformed state."""
-    from ouroboros.orchestrator.adapter import AgentMessage
-
     expected_keys = frozenset(
         {
             "schema_version",
-            "final_message_tail",
-            "context_tools",
+            "context_summary",
+            "conflict_files",
             "duration_seconds",
             "session_id",
             "retry_attempt",
@@ -1798,20 +1984,14 @@ def _deserialize_provisional_route_success(
         not _mapping_has_exact_keys(value, expected_keys)
         or not isinstance(value, Mapping)
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != 2
     ):
         raise RuntimeError("provisional route success has invalid durable context")
-    final_message = value.get("final_message_tail")
-    raw_tools = value.get("context_tools")
     duration_seconds = value.get("duration_seconds")
     session_id = value.get("session_id")
     retry_attempt = value.get("retry_attempt")
     if (
-        not isinstance(final_message, str)
-        or len(final_message) > _ROUTE_SUCCESS_CONTEXT_CHARS
-        or not isinstance(raw_tools, list)
-        or len(raw_tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
-        or not isinstance(duration_seconds, int | float)
+        not isinstance(duration_seconds, int | float)
         or isinstance(duration_seconds, bool)
         or not math.isfinite(duration_seconds)
         or duration_seconds < 0
@@ -1825,32 +2005,13 @@ def _deserialize_provisional_route_success(
         or retry_attempt < 0
     ):
         raise RuntimeError("provisional route success has malformed bounded context")
-    messages: list[AgentMessage] = []
-    for raw_tool in raw_tools:
-        if not _mapping_has_exact_keys(raw_tool, frozenset({"tool_name", "file_path"})):
-            raise RuntimeError("provisional route success has malformed tool context")
-        assert isinstance(raw_tool, Mapping)
-        tool_name = raw_tool.get("tool_name")
-        file_path = raw_tool.get("file_path")
-        if (
-            not isinstance(tool_name, str)
-            or not tool_name
-            or len(tool_name) > _ROUTE_SUCCESS_TOOL_NAME_CHARS
-            or not isinstance(file_path, str)
-            or len(file_path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
-        ):
-            raise RuntimeError("provisional route success has malformed tool context")
-        data: dict[str, object] = {}
-        if file_path:
-            data["tool_input"] = {"file_path": file_path}
-        messages.append(
-            AgentMessage(
-                type="tool",
-                content="[Restored bounded route context]",
-                tool_name=tool_name,
-                data=data,
-            )
-        )
+    summary = _deserialize_context_summary(
+        value.get("context_summary"),
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=True,
+    )
+    conflict_files = _deserialize_conflict_files(value.get("conflict_files"))
     raw_verify = value.get("verify_gate_outcome")
     verify_outcome = _deserialize_verify_gate_outcome(raw_verify)
     if raw_verify is not None and verify_outcome is None:
@@ -1859,14 +2020,429 @@ def _deserialize_provisional_route_success(
         ac_index=ac_index,
         ac_content=ac_content,
         success=True,
-        messages=tuple(messages),
-        final_message=final_message,
+        final_message=summary.key_output,
         duration_seconds=float(duration_seconds),
         session_id=session_id,
         retry_attempt=retry_attempt,
         outcome=ACExecutionOutcome.SUCCEEDED,
         verify_gate_outcome=verify_outcome,
+        context_summary=summary,
+        conflict_files=conflict_files,
         route_candidate=route_candidate,
+    )
+
+
+def _canonical_decomposition_decision(
+    value: object,
+) -> tuple[DecompositionDecisionRecord, dict[str, object], str]:
+    """Strictly parse and fingerprint a bounded decomposition decision."""
+
+    parsed = DecompositionDecisionRecord.from_dict(value)
+    if parsed is None:
+        raise RuntimeError("composite completion has an invalid decomposition decision")
+    canonical = parsed.to_dict()
+    if value != canonical:
+        raise RuntimeError("composite completion has a non-canonical decomposition decision")
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > 20_000:
+        raise RuntimeError("composite completion decomposition decision exceeds its bound")
+    return parsed, canonical, hashlib.sha256(encoded).hexdigest()
+
+
+def _serialize_composite_result_tree(
+    result: ACExecutionResult,
+    *,
+    node_budget: list[int],
+) -> dict[str, object]:
+    """Seal the bounded child-result tree used by reports and depth warnings."""
+
+    node_budget[0] -= 1
+    if node_budget[0] < 0:
+        raise RuntimeError("composite completion result tree exceeds its node bound")
+    if (
+        type(result.ac_index) is not int
+        or result.ac_index < 0
+        or not isinstance(result.ac_content, str)
+        or len(result.ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
+        or type(result.success) is not bool
+        or not math.isfinite(result.duration_seconds)
+        or result.duration_seconds < 0
+        or type(result.retry_attempt) is not int
+        or result.retry_attempt < 0
+        or type(result.depth) is not int
+        or not 0 <= result.depth <= _COMPOSITE_RESULT_MAX_DEPTH
+        or type(result.decomposition_depth_warning) is not bool
+        or (
+            result.session_id is not None
+            and (
+                not isinstance(result.session_id, str)
+                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
+        or (
+            result.error is not None
+            and (
+                not isinstance(result.error, str) or len(result.error) > _ROUTE_SUCCESS_ERROR_CHARS
+            )
+        )
+        or not isinstance(result.final_message, str)
+    ):
+        raise RuntimeError("composite completion result tree is malformed")
+    outcome = result.outcome
+    if outcome not in {
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.BLOCKED,
+    } or result.success is not (outcome is ACExecutionOutcome.SUCCEEDED):
+        raise RuntimeError("composite completion result tree has contradictory semantics")
+    if result.is_decomposed is not bool(result.sub_results):
+        raise RuntimeError("composite completion result tree lost its child structure")
+    decision_data: dict[str, object] | None = None
+    if result.decomposition_decision is not None:
+        decision, decision_data, _fingerprint = _canonical_decomposition_decision(
+            result.decomposition_decision.to_dict()
+        )
+        if result.is_decomposed and decision.disposition is not DecompositionDisposition.SPLIT:
+            raise RuntimeError("composite child result has a non-split decomposition decision")
+        if result.is_decomposed and (
+            len(decision.children) != len(result.sub_results)
+            or tuple(child.description for child in decision.children)
+            != tuple(child.ac_content for child in result.sub_results)
+        ):
+            raise RuntimeError("composite child result drifted from its decomposition decision")
+    elif result.is_decomposed:
+        raise RuntimeError("composite child result lost its decomposition decision")
+    return {
+        "schema_version": 1,
+        "ac_index": result.ac_index,
+        "ac_content": result.ac_content,
+        "success": result.success,
+        "final_message_tail": result.final_message[-_COMPOSITE_RESULT_TEXT_CHARS:],
+        "error": result.error,
+        "duration_seconds": result.duration_seconds,
+        "session_id": result.session_id,
+        "retry_attempt": result.retry_attempt,
+        "is_decomposed": result.is_decomposed,
+        "depth": result.depth,
+        "decomposition_depth_warning": result.decomposition_depth_warning,
+        "outcome": outcome.value,
+        "decomposition_decision": decision_data,
+        "sub_results": [
+            _serialize_composite_result_tree(child, node_budget=node_budget)
+            for child in result.sub_results
+        ],
+    }
+
+
+def _deserialize_composite_result_tree(
+    value: object,
+    *,
+    node_budget: list[int],
+) -> ACExecutionResult:
+    """Strictly restore a bounded child-result tree."""
+
+    node_budget[0] -= 1
+    if node_budget[0] < 0:
+        raise RuntimeError("composite completion result tree exceeds its node bound")
+    expected = frozenset(
+        {
+            "schema_version",
+            "ac_index",
+            "ac_content",
+            "success",
+            "final_message_tail",
+            "error",
+            "duration_seconds",
+            "session_id",
+            "retry_attempt",
+            "is_decomposed",
+            "depth",
+            "decomposition_depth_warning",
+            "outcome",
+            "decomposition_decision",
+            "sub_results",
+        }
+    )
+    if (
+        not _mapping_has_exact_keys(value, expected)
+        or not isinstance(value, Mapping)
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+    ):
+        raise RuntimeError("composite completion result tree has an invalid schema")
+    ac_index = value.get("ac_index")
+    ac_content = value.get("ac_content")
+    success = value.get("success")
+    final_message = value.get("final_message_tail")
+    error = value.get("error")
+    duration_seconds = value.get("duration_seconds")
+    session_id = value.get("session_id")
+    retry_attempt = value.get("retry_attempt")
+    is_decomposed = value.get("is_decomposed")
+    depth = value.get("depth")
+    depth_warning = value.get("decomposition_depth_warning")
+    raw_children = value.get("sub_results")
+    try:
+        outcome = ACExecutionOutcome(value.get("outcome"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("composite completion result tree has an invalid outcome") from exc
+    if (
+        type(ac_index) is not int
+        or ac_index < 0
+        or not isinstance(ac_content, str)
+        or len(ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
+        or type(success) is not bool
+        or not isinstance(final_message, str)
+        or len(final_message) > _COMPOSITE_RESULT_TEXT_CHARS
+        or (
+            error is not None
+            and (not isinstance(error, str) or len(error) > _ROUTE_SUCCESS_ERROR_CHARS)
+        )
+        or not isinstance(duration_seconds, int | float)
+        or isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < 0
+        or (
+            session_id is not None
+            and (
+                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
+        or type(retry_attempt) is not int
+        or retry_attempt < 0
+        or type(is_decomposed) is not bool
+        or type(depth) is not int
+        or not 0 <= depth <= _COMPOSITE_RESULT_MAX_DEPTH
+        or type(depth_warning) is not bool
+        or not isinstance(raw_children, list)
+        or len(raw_children) > _COMPOSITE_RESULT_MAX_NODES
+        or outcome
+        not in {
+            ACExecutionOutcome.SUCCEEDED,
+            ACExecutionOutcome.FAILED,
+            ACExecutionOutcome.BLOCKED,
+        }
+        or success is not (outcome is ACExecutionOutcome.SUCCEEDED)
+        or is_decomposed is not bool(raw_children)
+    ):
+        raise RuntimeError("composite completion result tree is malformed")
+    raw_decision = value.get("decomposition_decision")
+    decision: DecompositionDecisionRecord | None = None
+    if raw_decision is not None:
+        decision, _decision_data, _fingerprint = _canonical_decomposition_decision(raw_decision)
+        if is_decomposed and decision.disposition is not DecompositionDisposition.SPLIT:
+            raise RuntimeError("composite child result has a non-split decomposition decision")
+    elif is_decomposed:
+        raise RuntimeError("composite child result lost its decomposition decision")
+    children = tuple(
+        _deserialize_composite_result_tree(child, node_budget=node_budget) for child in raw_children
+    )
+    if (
+        is_decomposed
+        and decision is not None
+        and (
+            len(decision.children) != len(children)
+            or tuple(child.description for child in decision.children)
+            != tuple(child.ac_content for child in children)
+        )
+    ):
+        raise RuntimeError("composite child result drifted from its decomposition decision")
+    return ACExecutionResult(
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=success,
+        final_message=final_message,
+        error=error,
+        duration_seconds=float(duration_seconds),
+        session_id=session_id,
+        retry_attempt=retry_attempt,
+        is_decomposed=is_decomposed,
+        sub_results=children,
+        depth=depth,
+        decomposition_depth_warning=depth_warning,
+        outcome=outcome,
+        decomposition_decision=decision,
+    )
+
+
+def _serialize_composite_completion_result(
+    result: ACExecutionResult,
+    *,
+    workspace_root: str,
+) -> tuple[dict[str, object], dict[str, object], str]:
+    """Seal a completed legacy composite without retaining child transcripts."""
+
+    decision = result.decomposition_decision
+    if not result.is_decomposed or decision is None:
+        raise RuntimeError("composite completion requires its decomposition decision")
+    parsed, decision_data, fingerprint = _canonical_decomposition_decision(decision.to_dict())
+    if parsed.disposition is not DecompositionDisposition.SPLIT:
+        raise RuntimeError("composite completion requires a split decomposition decision")
+    if len(parsed.children) != len(result.sub_results) or tuple(
+        child.description for child in parsed.children
+    ) != tuple(child.ac_content for child in result.sub_results):
+        raise RuntimeError("composite completion drifted from its decomposition decision")
+    outcome = result.outcome
+    if outcome not in {
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+        ACExecutionOutcome.BLOCKED,
+    }:
+        raise RuntimeError("composite completion has an invalid terminal outcome")
+    if result.success is not (outcome is ACExecutionOutcome.SUCCEEDED):
+        raise RuntimeError("composite completion has contradictory success semantics")
+    if (
+        not math.isfinite(result.duration_seconds)
+        or result.duration_seconds < 0
+        or type(result.retry_attempt) is not int
+        or result.retry_attempt < 0
+        or (
+            result.session_id is not None
+            and (
+                not isinstance(result.session_id, str)
+                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
+        or (
+            result.error is not None
+            and (
+                not isinstance(result.error, str) or len(result.error) > _ROUTE_SUCCESS_ERROR_CHARS
+            )
+        )
+    ):
+        raise RuntimeError("composite completion cannot seal malformed result context")
+    summary = _canonical_result_context(result, workspace_root=workspace_root)
+    node_budget = [_COMPOSITE_RESULT_MAX_NODES]
+    sub_results = [
+        _serialize_composite_result_tree(child, node_budget=node_budget)
+        for child in result.sub_results
+    ]
+    return (
+        {
+            "schema_version": 1,
+            "success": result.success,
+            "outcome": outcome.value,
+            "error": result.error,
+            "duration_seconds": result.duration_seconds,
+            "session_id": result.session_id,
+            "retry_attempt": result.retry_attempt,
+            "verify_gate_outcome": _serialize_verify_gate_outcome(result.verify_gate_outcome),
+            "context_summary": _serialize_context_summary(summary),
+            "conflict_files": list(_collect_result_conflict_files(result)),
+            "sub_results": sub_results,
+        },
+        decision_data,
+        fingerprint,
+    )
+
+
+def _deserialize_composite_completion_result(
+    value: object,
+    *,
+    ac_index: int,
+    ac_content: str,
+    decomposition_decision: DecompositionDecisionRecord,
+) -> ACExecutionResult:
+    """Restore a terminal composite projection without replaying child effects."""
+
+    expected = frozenset(
+        {
+            "schema_version",
+            "success",
+            "outcome",
+            "error",
+            "duration_seconds",
+            "session_id",
+            "retry_attempt",
+            "verify_gate_outcome",
+            "context_summary",
+            "conflict_files",
+            "sub_results",
+        }
+    )
+    if (
+        not _mapping_has_exact_keys(value, expected)
+        or not isinstance(value, Mapping)
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+    ):
+        raise RuntimeError("composite completion has an invalid result schema")
+    success = value.get("success")
+    raw_outcome = value.get("outcome")
+    error = value.get("error")
+    duration_seconds = value.get("duration_seconds")
+    session_id = value.get("session_id")
+    retry_attempt = value.get("retry_attempt")
+    try:
+        outcome = ACExecutionOutcome(raw_outcome)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("composite completion has an invalid outcome") from exc
+    if (
+        type(success) is not bool
+        or outcome
+        not in {
+            ACExecutionOutcome.SUCCEEDED,
+            ACExecutionOutcome.FAILED,
+            ACExecutionOutcome.BLOCKED,
+        }
+        or success is not (outcome is ACExecutionOutcome.SUCCEEDED)
+        or (
+            error is not None
+            and (not isinstance(error, str) or len(error) > _ROUTE_SUCCESS_ERROR_CHARS)
+        )
+        or not isinstance(duration_seconds, int | float)
+        or isinstance(duration_seconds, bool)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < 0
+        or (
+            session_id is not None
+            and (
+                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
+        or type(retry_attempt) is not int
+        or retry_attempt < 0
+    ):
+        raise RuntimeError("composite completion has malformed result semantics")
+    summary = _deserialize_context_summary(
+        value.get("context_summary"),
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=success,
+    )
+    conflict_files = _deserialize_conflict_files(value.get("conflict_files"))
+    raw_sub_results = value.get("sub_results")
+    if not isinstance(raw_sub_results, list) or not raw_sub_results:
+        raise RuntimeError("composite completion lost its child result projection")
+    node_budget = [_COMPOSITE_RESULT_MAX_NODES]
+    sub_results = tuple(
+        _deserialize_composite_result_tree(child, node_budget=node_budget)
+        for child in raw_sub_results
+    )
+    if len(decomposition_decision.children) != len(sub_results) or tuple(
+        child.description for child in decomposition_decision.children
+    ) != tuple(child.ac_content for child in sub_results):
+        raise RuntimeError("composite completion drifted from its decomposition decision")
+    raw_verify = value.get("verify_gate_outcome")
+    verify_outcome = _deserialize_verify_gate_outcome(raw_verify)
+    if raw_verify is not None and verify_outcome is None:
+        raise RuntimeError("composite completion has malformed verify evidence")
+    return ACExecutionResult(
+        ac_index=ac_index,
+        ac_content=ac_content,
+        success=success,
+        final_message=summary.key_output,
+        error=error,
+        duration_seconds=float(duration_seconds),
+        session_id=session_id,
+        retry_attempt=retry_attempt,
+        is_decomposed=True,
+        sub_results=sub_results,
+        outcome=outcome,
+        verify_gate_outcome=verify_outcome,
+        decomposition_decision=decomposition_decision,
+        context_summary=summary,
+        conflict_files=conflict_files,
     )
 
 
@@ -3808,6 +4384,19 @@ class ParallelACExecutor:
                         level_num,
                         workspace_root=workspace_root,
                     )
+                    sealed_contexts = {
+                        result.ac_index: result.context_summary
+                        for result in stage_ac_results
+                        if result.ac_index in executable and result.context_summary is not None
+                    }
+                    if sealed_contexts:
+                        level_ctx = replace(
+                            level_ctx,
+                            completed_acs=tuple(
+                                sealed_contexts.get(summary.ac_index, summary)
+                                for summary in level_ctx.completed_acs
+                            ),
+                        )
 
                     # Coordinator: detect and resolve file conflicts (Approach A)
                     level_ac_results = [r for r in stage_ac_results if r.ac_index in executable]
@@ -8559,7 +9148,14 @@ Respond with either ATOMIC or the structured JSON object only.
                     "observation": observation.to_contract_data(),
                     "decision": decision.to_contract_data() if decision is not None else None,
                     "provisional_result": (
-                        _serialize_provisional_route_success(result) if result.success else None
+                        _serialize_provisional_route_success(
+                            result,
+                            workspace_root=(
+                                self._task_cwd or self._adapter.working_directory or os.getcwd()
+                            ),
+                        )
+                        if result.success
+                        else None
                     ),
                     "human_handoff_required": bool(decision is not None and decision.blocked),
                     "final_acceptance_declared": False,
@@ -8567,6 +9163,53 @@ Respond with either ATOMIC or the structured JSON object only.
             )
         )
         return observation
+
+    async def _persist_composite_completion(
+        self,
+        *,
+        seed: Seed,
+        result: ACExecutionResult,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Commit a terminal composite projection before an interrupted return."""
+
+        from ouroboros.events.base import BaseEvent
+
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        result_data, decision_data, fingerprint = _serialize_composite_completion_result(
+            result,
+            workspace_root=(self._task_cwd or self._adapter.working_directory or os.getcwd()),
+        )
+        decision = result.decomposition_decision
+        assert decision is not None
+        expected_node_id = ExecutionNodeIdentity.root(
+            execution_context_id=execution_id or session_id,
+            ac_index=root_ac_index,
+        ).node_id
+        if decision.node_id != expected_node_id:
+            raise RuntimeError("composite completion crossed decomposition node identity")
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.composite_completed",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": root_ac_index,
+                    "semantic_ac_key": semantic_ac_key,
+                    "call_site": "parallel",
+                    "result": result_data,
+                    "decomposition_decision": decision_data,
+                    "decomposition_fingerprint": fingerprint,
+                    "final_acceptance_declared": False,
+                },
+            )
+        )
 
     async def _persist_parallel_route_pause(
         self,
@@ -9103,6 +9746,7 @@ Respond with either ATOMIC or the structured JSON object only.
             "execution.ac.route_observed",
             "execution.ac.attempt_judged",
             "execution.ac.route_paused",
+            "execution.ac.composite_completed",
         ):
             events = await self._event_store.query_execution_related_events(
                 execution_id,
@@ -9121,6 +9765,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 if event_type in {
                     "execution.ac.route_observed",
                     "execution.ac.route_paused",
+                    "execution.ac.composite_completed",
                 }:
                     if root_ac_index in relevant or type(root_ac_index) is not int:
                         return True
@@ -9232,10 +9877,17 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_counters=execution_counters,
                     )
                     results[positions[ac_idx]] = legacy_result
-                    if isinstance(legacy_result, ACExecutionResult) and _has_usage_limit_pause(
-                        legacy_result
-                    ):
-                        recoverable_pause_seen = True
+                    if isinstance(legacy_result, ACExecutionResult):
+                        if _has_usage_limit_pause(legacy_result):
+                            recoverable_pause_seen = True
+                        else:
+                            await self._persist_composite_completion(
+                                seed=seed,
+                                result=legacy_result,
+                                root_ac_index=ac_idx,
+                                session_id=session_id,
+                                execution_id=execution_id,
+                            )
                     continue
                 if _has_usage_limit_pause(value):
                     # Quota windows are nonterminal session pauses, not evidence
@@ -9599,6 +10251,65 @@ Respond with either ATOMIC or the structured JSON object only.
         from ouroboros.orchestrator.route_policy import RouteRequirements
 
         relevant = set(root_ac_indices)
+        if len(seed.acceptance_criteria) > _MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS:
+            raise RuntimeError("composite completion replay exceeds the execution-wide bound")
+        composite_results: dict[int, ACExecutionResult] = {}
+        composite_event_limit = len(seed.acceptance_criteria) + 1
+        composite_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.composite_completed",
+            limit=composite_event_limit,
+        )
+        if len(composite_events) >= composite_event_limit:
+            raise RuntimeError("composite completion replay exceeds the execution-wide bound")
+        for event in composite_events:
+            if event.type != "execution.ac.composite_completed":
+                continue
+            data = event.data
+            if not _mapping_has_exact_keys(data, _PARALLEL_COMPOSITE_COMPLETION_KEYS):
+                raise RuntimeError("composite completion replay has an invalid event envelope")
+            if data.get("session_id") != session_id:
+                continue
+            root_ac_index = data.get("root_ac_index")
+            if (
+                type(data.get("schema_version")) is not int
+                or data.get("schema_version") != 1
+                or data.get("execution_id") != execution_id
+                or data.get("call_site") != "parallel"
+                or type(root_ac_index) is not int
+                or data.get("final_acceptance_declared") is not False
+            ):
+                raise RuntimeError("composite completion replay has invalid correlation metadata")
+            assert isinstance(root_ac_index, int)
+            if root_ac_index not in relevant:
+                continue
+            if root_ac_index in composite_results:
+                raise RuntimeError("composite completion replay is duplicated")
+            criterion = seed.acceptance_criteria[root_ac_index]
+            semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+            if data.get("semantic_ac_key") != semantic_ac_key:
+                raise RuntimeError("composite completion replay crossed AC identity")
+            decision, _decision_data, fingerprint = _canonical_decomposition_decision(
+                data.get("decomposition_decision")
+            )
+            if (
+                decision.disposition is not DecompositionDisposition.SPLIT
+                or data.get("decomposition_fingerprint") != fingerprint
+                or decision.node_id
+                != ExecutionNodeIdentity.root(
+                    execution_context_id=execution_id or session_id,
+                    ac_index=root_ac_index,
+                ).node_id
+            ):
+                raise RuntimeError("composite completion replay crossed decomposition identity")
+            restored = _deserialize_composite_completion_result(
+                data.get("result"),
+                ac_index=root_ac_index,
+                ac_content=ac_text(criterion),
+                decomposition_decision=decision,
+            )
+            composite_results[root_ac_index] = restored
+            self._decomposition_decisions[decision.node_id] = decision
         grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices
         }
@@ -9748,8 +10459,12 @@ Respond with either ATOMIC or the structured JSON object only.
         histories: dict[int, tuple[str, ...]] = {}
         overrides: dict[int, RouteCandidate] = {}
         terminals: dict[int, str] = {}
-        provisional_successes: dict[int, ACExecutionResult] = {}
+        provisional_successes: dict[int, ACExecutionResult] = dict(composite_results)
         for ac_idx, rows in grouped.items():
+            if rows and ac_idx in composite_results:
+                raise RuntimeError(
+                    "composite completion conflicts with atomic route replay evidence"
+                )
             rows.sort(key=lambda row: row[0].attempt_index)
             if [row[0].attempt_index for row in rows] != list(range(len(rows))):
                 raise RuntimeError("route observation replay has a gap or duplicate")

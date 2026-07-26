@@ -492,6 +492,14 @@ def _collect_file_modifications(
         result: AC execution result to scan.
         file_to_acs: Accumulator mapping file_path → ac_indices.
     """
+    # Interrupted-stage replay carries an exact canonical file projection
+    # rather than a synthetic provider transcript.  Prefer it whenever it is
+    # present so conflict detection is identical before and after resume.
+    if result.conflict_files is not None:
+        for file_path in result.conflict_files:
+            file_to_acs.setdefault(file_path, set()).add(result.ac_index)
+        return
+
     # Check direct messages for Write/Edit tool calls
     for msg in result.messages:
         if msg.tool_name in ("Write", "Edit"):
