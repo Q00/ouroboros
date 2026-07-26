@@ -158,7 +158,10 @@ class AssertionExtractor:
                 if not isinstance(item, dict):
                     logger.warning("Expected assertion object, got: %s", type(item))
                     continue
-                ac_idx = item.get("ac_index", 0)
+                if "ac_index" not in item:
+                    logger.warning("Ignoring assertion without explicit ac_index: %r", item)
+                    continue
+                ac_idx = item["ac_index"]
                 if (
                     not isinstance(ac_idx, int)
                     or isinstance(ac_idx, bool)
@@ -168,17 +171,35 @@ class AssertionExtractor:
                     logger.warning("Ignoring assertion with invalid ac_index: %r", ac_idx)
                     continue
                 ac_text = acceptance_criteria[ac_idx]
-                raw_tier = item.get("tier", "t4_unverifiable")
+                if "tier" not in item:
+                    logger.warning("Ignoring assertion without explicit tier: %r", item)
+                    continue
+                raw_tier = item["tier"]
                 try:
                     tier = VerificationTier(raw_tier)
                 except (TypeError, ValueError):
-                    tier = VerificationTier.T4_UNVERIFIABLE
+                    logger.warning("Ignoring assertion with invalid tier: %r", raw_tier)
+                    continue
                 text_fields = {
                     name: item.get(name, "")
                     for name in ("pattern", "expected_value", "file_hint", "description")
                 }
                 if not all(isinstance(value, str) for value in text_fields.values()):
                     logger.warning("Ignoring assertion with invalid text fields: %r", item)
+                    continue
+                if (
+                    tier
+                    in (
+                        VerificationTier.T1_CONSTANT,
+                        VerificationTier.T2_STRUCTURAL,
+                    )
+                    and not text_fields["pattern"].strip()
+                ):
+                    logger.warning(
+                        "Ignoring %s assertion without verification pattern: %r",
+                        tier.value,
+                        item,
+                    )
                     continue
 
                 try:

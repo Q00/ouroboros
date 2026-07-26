@@ -411,6 +411,8 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             if not isinstance(data, dict):
                 raise TypeError(f"Expected JSON object, got {type(data).__name__}")
             raw_questions = data.get("questions", [])
+            if "questions" in data and not isinstance(raw_questions, list):
+                raise TypeError("Expected questions to be a list when present")
             grounded = self._parse_grounded_questions(raw_questions, total_acs)
             if raw_questions and not grounded:
                 raise TypeError("Expected questions to contain strings or question objects")

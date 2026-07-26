@@ -435,8 +435,8 @@ class TestAssertionExtractor:
         assert result.value == ()
 
     @pytest.mark.asyncio
-    async def test_invalid_tier_defaults_to_t4(self) -> None:
-        """Unknown tier string → defaults to T4_UNVERIFIABLE."""
+    async def test_invalid_tier_is_rejected(self) -> None:
+        """Unknown tier string is rejected instead of defaulting to unverifiable."""
         extractor = self._make_extractor(
             [
                 {
@@ -451,4 +451,4 @@ class TestAssertionExtractor:
         )
         result = await extractor.extract("seed_tier", ("test",))
         assert result.is_ok
-        assert result.value[0].tier == VerificationTier.T4_UNVERIFIABLE
+        assert result.value == ()

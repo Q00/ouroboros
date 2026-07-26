@@ -96,6 +96,8 @@ class TestWonderFenceRobustness:
         "content",
         [
             '["incidental", "array"]',
+            '{"questions": null, "should_continue": false, "reasoning": "done"}',
+            '{"questions": {"question": "not a list"}, "should_continue": false}',
             '{"questions": [[["not a question object"]]], "ontology_tensions": [], "reasoning": 7}',
             '{"questions": [{"question": ["not", "text"]}], "should_continue": true}',
         ],
@@ -111,7 +113,10 @@ class TestWonderFenceRobustness:
 
 class TestReflectFenceRobustness:
     @pytest.mark.asyncio
-    async def test_successful_fenced_json_variants_parse_through_public_reflect(self) -> None:
+    @pytest.mark.parametrize("variant", FENCE_VARIANTS)
+    async def test_successful_fenced_json_variants_parse_through_public_reflect(
+        self, variant: str
+    ) -> None:
         payload = json.dumps(
             {
                 "refined_goal": "Build a login system with refresh-token clarity",
@@ -132,7 +137,7 @@ class TestReflectFenceRobustness:
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             CompletionResponse(
-                content=_wrap("prose_prefix_fence", payload),
+                content=_wrap(variant, payload),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
@@ -188,10 +193,17 @@ class TestReflectFenceRobustness:
         "content",
         [
             '["incidental", "array"]',
-            '{"ontology_mutations": [[["not a mutation object"]]], "reasoning": 7}',
+            '{"ontology_mutations": [[["not a mutation object"]]], "reasoning": "r"}',
+            '{"ontology_mutations": {"field_name": "token"}, "reasoning": "r"}',
+            '{"ontology_mutations": [{"action": "add"}], "reasoning": "r"}',
+            '{"ontology_mutations": [{"action": "add", "field_name": ""}], "reasoning": "r"}',
             '{"ontology_mutations": [{"action": "add", "field_name": ["not", "text"]}]}',
             '{"refined_goal": ["not", "text"], "ontology_mutations": []}',
             '{"refined_constraints": "not-a-list", "ontology_mutations": []}',
+            '{"refined_acs": "single string is not a list", "ontology_mutations": []}',
+            '{"refined_acs": {"0": "mapping is not a list"}, "ontology_mutations": []}',
+            '{"refined_acs": [{"description": "object member"}], "ontology_mutations": []}',
+            '{"refined_acs": ["valid", 7], "ontology_mutations": []}',
         ],
     )
     async def test_bad_typed_shapes_return_result_error(self, content: str) -> None:
@@ -256,9 +268,13 @@ class TestAssertionExtractorFenceRobustness:
         "payload",
         [
             [[{"ac_index": 0, "description": "nested object"}]],
+            [{"tier": "t4_unverifiable", "description": "missing explicit index"}],
             [{"ac_index": 0, "description": ["not", "text"]}],
             [{"ac_index": 0, "pattern": ["not", "regex"], "expected_value": 10}],
             [{"ac_index": True, "description": "bool is not an index"}],
+            [{"ac_index": 0, "tier": "not_a_tier", "description": "invalid tier"}],
+            [{"ac_index": 0, "tier": "t1_constant", "expected_value": "10"}],
+            [{"ac_index": 0, "tier": "t2_structural", "expected_value": "Widget"}],
         ],
     )
     def test_bad_assertion_shapes_do_not_escape(self, payload: object) -> None:
