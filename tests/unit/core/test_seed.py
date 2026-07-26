@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_texts,
+    expected_artifact_path_error,
 )
 
 
@@ -407,6 +408,103 @@ class TestSeed:
         assert first.output_assertion == "No tasks"
         assert second.description == "Tasks can be created"
         assert second.verify_command is None
+
+    def test_expected_artifacts_schema_documents_literal_workspace_paths(self) -> None:
+        field = AcceptanceCriterionSpec.model_fields["expected_artifacts"]
+
+        assert field.description is not None
+        assert "Exact file or directory paths" in field.description
+        assert "relative to the run workspace" in field.description
+        assert "resolved literally" in field.description
+        assert "prefix top-level paths containing spaces with ./" in field.description
+
+    def test_expected_artifact_path_grammar_is_portable(self) -> None:
+        for artifact in (
+            ".",
+            "./",
+            "././",
+            ".//",
+            r".\.",
+            ".\\",
+            "bad\x00path",
+            "../outside",
+            r"D:outside",
+            r"\outside.txt",
+            r"\\server\share\outside.txt",
+            "schema v2 outputs.json",
+            "NUL",
+            "nul.txt",
+            "dir/CON",
+            "COM1.log",
+            "foo.",
+            "docs/a:b",
+            "docs/a?.txt",
+        ):
+            assert expected_artifact_path_error(artifact) is not None
+
+        for artifact in (
+            "README.md",
+            "docs",
+            "docs/User Guide.md",
+            "./Build Outputs",
+            r"docs\User Guide.md",
+        ):
+            assert expected_artifact_path_error(artifact) is None
+
+    @pytest.mark.parametrize(
+        "artifact",
+        (
+            ".",
+            "../outside",
+            r"D:outside",
+            r"\\server\share\outside.txt",
+            "schema v2 outputs.json",
+            "NUL",
+            "nul.txt",
+            "dir/CON",
+            "foo.",
+            "docs/a:b",
+        ),
+    )
+    def test_expected_artifacts_reject_nonportable_paths_at_schema_ingress(
+        self,
+        artifact: str,
+    ) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative paths"):
+            AcceptanceCriterionSpec(
+                description="artifact contract",
+                expected_artifacts=(artifact,),
+            )
+
+    @pytest.mark.parametrize(
+        "artifacts",
+        [
+            ("",),
+            ("report.txt\n",),
+            ("report.txt\t",),
+            ("report.txt\x7f",),
+            "report.txt\n",
+        ],
+    )
+    def test_expected_artifacts_reject_malformed_raw_entries(self, artifacts: object) -> None:
+        with pytest.raises(PydanticValidationError):
+            AcceptanceCriterionSpec(
+                description="artifact contract",
+                expected_artifacts=artifacts,  # type: ignore[arg-type]
+            )
+
+    def test_output_assertion_requires_verify_command_at_schema_ingress(self) -> None:
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command output contains READY",
+                output_assertion="READY",
+            )
+
+    def test_output_assertion_schema_documents_combined_command_output(self) -> None:
+        field = AcceptanceCriterionSpec.model_fields["output_assertion"]
+
+        assert field.description is not None
+        assert "combined stdout and stderr" in field.description
 
     def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
         """Exit-code success phrases are redundant with verify_command exit status."""

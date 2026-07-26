@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -5571,7 +5572,7 @@ class TestParallelACExecutor:
         tmp_path,
     ) -> None:
         """The verify gate owns artifact and command proof for contract ACs."""
-        command = "python -c \"print('OK')\""
+        command = f"{sys.executable} -c \"print('OK')\""
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
             encoding="utf-8",

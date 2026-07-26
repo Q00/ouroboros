@@ -155,19 +155,26 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
     if not description:
         return None
     fields: dict[str, object] = {"description": description}
+    seen_fields: set[str] = set()
     for index, match in enumerate(matches):
         normalized_key = match.group(1).lower()
+        if normalized_key in seen_fields:
+            raise ValueError(f"Duplicate {normalized_key} field in acceptance criterion")
+        seen_fields.add(normalized_key)
         value_start = match.end()
         value_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        normalized_value = body[value_start:value_end].strip()
+        normalized_value = body[value_start:value_end].strip(" ")
+        if normalized_key == "artifacts" and not normalized_value:
+            raise ValueError("Empty artifacts field; use artifacts: NONE")
         if not normalized_value or normalized_value.upper() == "NONE":
             continue
         if normalized_key == "verify":
             fields["verify_command"] = normalized_value
         elif normalized_key == "artifacts":
-            fields["expected_artifacts"] = tuple(
-                item.strip() for item in normalized_value.split(",") if item.strip()
-            )
+            artifact_entries = normalized_value.split(",")
+            if any(not item.strip(" ") for item in artifact_entries):
+                raise ValueError("Malformed artifacts field contains an empty path")
+            fields["expected_artifacts"] = tuple(item.strip(" ") for item in artifact_entries)
         elif normalized_key == "expect":
             fields["output_assertion"] = normalized_value
     return AcceptanceCriterionSpec.model_validate(fields)
@@ -181,17 +188,11 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
     return None
 
 
-def _validate_acceptance_criteria_contract_lines(lines: object) -> None:
-    if not isinstance(lines, list | tuple):
-        return
-    for index, raw_line in enumerate(lines, start=1):
-        line = str(raw_line).strip()
-        if not line.startswith("AC:"):
+def _validate_acceptance_criteria_contracts(raw_value: object) -> None:
+    for index, criterion in enumerate(_parse_acceptance_criteria_contracts(raw_value), start=1):
+        if not isinstance(criterion, AcceptanceCriterionSpec) or not criterion.verify_command:
             continue
-        spec = _parse_acceptance_criterion_contract(line)
-        if spec is None or not spec.verify_command:
-            continue
-        reason = _unsupported_verify_command_reason(spec.verify_command)
+        reason = _unsupported_verify_command_reason(criterion.verify_command)
         if reason:
             raise ValueError(
                 f"Unsupported verify_command in acceptance criterion {index}: {reason}. "
@@ -632,7 +633,8 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
@@ -739,7 +741,8 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
@@ -841,7 +844,9 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 
         if multiline_values.get("acceptance_criteria"):
             requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
-            _validate_acceptance_criteria_contract_lines(requirements["acceptance_criteria"])
+
+        if "acceptance_criteria" in requirements:
+            _validate_acceptance_criteria_contracts(requirements["acceptance_criteria"])
 
         # Validate required fields
         required_fields = [

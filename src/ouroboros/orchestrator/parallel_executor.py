@@ -53,6 +53,7 @@ from ouroboros.core.seed import (
     InvestmentSpec,
     ac_text,
     derive_semantic_ac_key,
+    expected_artifact_path_error,
 )
 from ouroboros.core.session_signal import (
     SessionSignalMode,
@@ -1594,7 +1595,15 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     root = Path(cwd).resolve()
     missing: list[str] = []
     for artifact in artifacts:
-        candidate = (root / artifact).resolve()
+        path_error = expected_artifact_path_error(artifact)
+        if path_error is not None:
+            missing.append(f"{artifact!r} ({path_error})")
+            continue
+        try:
+            candidate = (root / artifact).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            missing.append(f"{artifact!r} (invalid path: {exc})")
+            continue
         if not candidate.is_relative_to(root):
             missing.append(f"{artifact} (escapes workspace)")
             continue
@@ -3104,8 +3113,7 @@ class ParallelACExecutor:
                     commit = metadata.get("commit")
 
                     # PR-V V4: --skip-completed trusts working-tree state. When the
-                    # AC carries a success contract (verify_command OR expected
-                    # artifacts), prove it with the gate before skipping; on gate
+                    # AC carries a success contract, prove it with the gate before skipping; on gate
                     # failure, execute the AC normally instead.
                     spec = seed.acceptance_criteria[ac_idx]
                     verification_status = "assumed"
@@ -3113,7 +3121,7 @@ class ParallelACExecutor:
                     if (
                         self._run_verify_commands
                         and isinstance(spec, AcceptanceCriterionSpec)
-                        and (spec.verify_command or spec.expected_artifacts)
+                        and spec.has_success_contract
                     ):
                         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
                         gate = await _invoke_execution_authority_entry(
@@ -3905,9 +3913,7 @@ class ParallelACExecutor:
                 if 0 <= result.ac_index < len(seed.acceptance_criteria)
                 else None
             )
-            has_contract = isinstance(spec, AcceptanceCriterionSpec) and bool(
-                spec.verify_command or spec.expected_artifacts
-            )
+            has_contract = isinstance(spec, AcceptanceCriterionSpec) and spec.has_success_contract
             if not self._run_verify_commands or not has_contract:
                 reason = (
                     "Final workspace changed during coordinator reconciliation; "
@@ -4040,9 +4046,7 @@ class ParallelACExecutor:
             if not result.success or not (0 <= result.ac_index < len(seed.acceptance_criteria)):
                 continue
             spec = seed.acceptance_criteria[result.ac_index]
-            if isinstance(spec, AcceptanceCriterionSpec) and (
-                spec.verify_command or spec.expected_artifacts
-            ):
+            if isinstance(spec, AcceptanceCriterionSpec) and spec.has_success_contract:
                 successful_contracts[result.ac_index] = spec
 
         if not successful_contracts and not verify_mutated_workspace:
@@ -7058,14 +7062,13 @@ Respond with either ATOMIC or the structured JSON object only.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A contract-carrying AC (declares verify_command or expected
-            # artifacts) delegates commands_run and tests_passed to the
+            # A contract-carrying AC delegates commands_run and tests_passed to the
             # orchestrator's authoritative _run_ac_verify_gate. When it declares
             # expected_artifacts, files_touched is delegated to the same
             # filesystem oracle so artifact work does not require fabricated
             # transcript-shaped evidence.
-            has_success_contract = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
-                ac_spec.verify_command or ac_spec.expected_artifacts
+            has_success_contract = (
+                isinstance(ac_spec, AcceptanceCriterionSpec) and ac_spec.has_success_contract
             )
             has_expected_artifacts = isinstance(ac_spec, AcceptanceCriterionSpec) and bool(
                 ac_spec.expected_artifacts
@@ -7620,6 +7623,14 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         import contextlib
 
+        if spec.output_assertion and not spec.verify_command:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason="output_assertion requires verify_command",
+                output_tail="",
+                workspace_digest=self._workspace_content_digest(cwd),
+            )
+
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
         if missing_artifacts:
             return _VerifyGateOutcome(
@@ -7742,8 +7753,9 @@ Respond with either ATOMIC or the structured JSON object only.
     ) -> ACExecutionResult:
         """Gate a successful AC on its success contract (PR-V V1).
 
-        The contract gate applies when the spec carries a ``verify_command`` OR
-        non-empty ``expected_artifacts``. Contract-less ACs and ACs that already
+        The contract gate applies when the spec carries a ``verify_command``,
+        non-empty ``expected_artifacts``, or an assertion that must be rejected
+        when no command produces its output. Contract-less ACs and ACs that already
         failed are recovered only when the same contract passes independently,
         so contract-less behavior — and the single fat-harness failure event
         for an already-failed AC without a passing contract — is preserved
@@ -7754,9 +7766,7 @@ Respond with either ATOMIC or the structured JSON object only.
         if ac_index < 0 or ac_index >= len(seed.acceptance_criteria):
             return result
         spec = seed.acceptance_criteria[ac_index]
-        if not isinstance(spec, AcceptanceCriterionSpec) or not (
-            spec.verify_command or spec.expected_artifacts
-        ):
+        if not isinstance(spec, AcceptanceCriterionSpec) or not spec.has_success_contract:
             return result
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
@@ -7963,8 +7973,7 @@ Respond with either ATOMIC or the structured JSON object only.
     ) -> frozenset[int]:
         """Gate sibling-evidence flips for FAILED contract ACs (PR-V V4).
 
-        A FAILED AC whose spec carries a success contract (``verify_command``
-        OR non-empty ``expected_artifacts``) may only be flipped to satisfied by
+        A FAILED AC whose spec carries a success contract may only be flipped to satisfied by
         sibling evidence if its own contract passes the orchestrator gate now.
         ACs without a contract are never gated out.
         """
@@ -7978,9 +7987,7 @@ Respond with either ATOMIC or the structured JSON object only.
             if ac_idx < 0 or ac_idx >= len(seed.acceptance_criteria):
                 continue
             spec = seed.acceptance_criteria[ac_idx]
-            if not isinstance(spec, AcceptanceCriterionSpec) or not (
-                spec.verify_command or spec.expected_artifacts
-            ):
+            if not isinstance(spec, AcceptanceCriterionSpec) or not spec.has_success_contract:
                 continue
             cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
             cached_outcome = result.verify_gate_outcome

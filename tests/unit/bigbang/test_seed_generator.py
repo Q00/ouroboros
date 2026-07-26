@@ -503,6 +503,58 @@ class TestSeedGeneratorExtraction:
             assert result.value.constraints == ("--lang ko|en", "keep exact flag")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("multiline", "inline"))
+    @pytest.mark.parametrize(
+        "malformed_artifacts",
+        (
+            ",",
+            "safe.txt,,other.txt",
+            "safe.txt | artifacts: other.txt",
+            "schema v2 outputs.json",
+            "NUL",
+            "docs/a:b",
+        ),
+    )
+    async def test_generate_retries_on_malformed_artifact_fields(
+        self,
+        representation: str,
+        malformed_artifacts: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = (
+            f"AC: Files exist | verify: pytest -q | artifacts: {malformed_artifacts} | expect: NONE"
+        )
+        repaired_contract = (
+            "AC: Files exist | verify: pytest -q | artifacts: safe.txt, other.txt | expect: NONE"
+        )
+        if representation == "multiline":
+            bad_contract = f"\n{bad_contract}\n"
+            repaired_contract = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_contract)
+        repaired_response = create_valid_extraction_response(acceptance_criteria=repaired_contract)
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.expected_artifacts == ("safe.txt", "other.txt")
+
+    @pytest.mark.asyncio
     async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:
         """At extraction time bracket prose triggers retry; the reformatted array wins."""
         mock_adapter = AsyncMock()
@@ -1373,7 +1425,13 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "artifacts: <comma-list or NONE>" in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
+        assert "combined stdout and stderr" in prompt
+        assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
+
+        retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
+        assert "combined stdout and stderr" in retry_prompt
+        assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt
@@ -1383,3 +1441,9 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "sub-step of a sibling" in system_prompt.lower()
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+        assert (
+            "exact portable file or directory path relative to the run workspace" in system_prompt
+        )
+        assert "schema v2 outputs" in system_prompt
+        assert "artifacts: NONE" in system_prompt
+        assert "concrete `verify` command" in system_prompt
