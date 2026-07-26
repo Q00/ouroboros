@@ -3953,6 +3953,50 @@ class TestOrchestratorRunner:
             runner._unregister_session(tracker.execution_id, tracker.session_id)
 
     @pytest.mark.asyncio
+    async def test_parallel_owner_publication_failure_prevents_executor_effects(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """No parallel provider boundary may precede its durable resume owner."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_first",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_first",
+        )
+        execute_parallel = AsyncMock(
+            side_effect=AssertionError("parallel executor entered before owner publication")
+        )
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                execute_parallel,
+            ),
+            patch.object(
+                runner._session_repo,
+                "track_progress",
+                AsyncMock(return_value=Result.err(PersistenceError("owner store unavailable"))),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                force_sequential_levels=True,
+            )
+
+        assert result.is_err
+        assert result.error.message == "Failed to persist the parallel Routing D resume owner"
+        execute_parallel.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_parallel_paused_projection_failure_preserves_owner(
         self,
         runner: OrchestratorRunner,

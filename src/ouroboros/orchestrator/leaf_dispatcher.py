@@ -142,9 +142,14 @@ class LeafDispatcher:
                 # Reset stall deadline on every message (RC6 core)
                 stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
                 if message.resume_handle is not None:
+                    augmented_handle = executor._augment_ac_runtime_handle(
+                        message.resume_handle,
+                        runtime_identity=runtime_identity,
+                        previous_handle=state.runtime_handle,
+                    )
                     state.runtime_handle = executor._remember_ac_runtime_handle(
                         ac_index,
-                        message.resume_handle,
+                        augmented_handle,
                         execution_context_id=execution_context_id,
                         is_sub_ac=is_sub_ac,
                         parent_ac_index=parent_ac_index,

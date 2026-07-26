@@ -4606,6 +4606,33 @@ class OrchestratorRunner:
         }
 
     @staticmethod
+    def _parallel_process_local_resume_nonce(tracker: Any) -> str | None:
+        """Reuse the live Foundation A generation across parallel executors."""
+
+        progress = getattr(tracker, "progress", None)
+        raw_contract = (
+            progress.get(EXECUTION_CONTRACT_PROGRESS_KEY) if isinstance(progress, Mapping) else None
+        )
+        authority = (
+            raw_contract.get("foundation_a_authority")
+            if isinstance(raw_contract, Mapping)
+            else None
+        )
+        correlation_id = authority.get("correlation_id") if isinstance(authority, Mapping) else None
+        if correlation_id is None:
+            # Low-level unit callers may invoke _execute_parallel without the
+            # outer run lifecycle. Production new/resume paths always carry the
+            # Foundation A contract and therefore take the stable branch below.
+            return None
+        if (
+            not isinstance(correlation_id, str)
+            or len(correlation_id) != 32
+            or any(char not in "0123456789abcdef" for char in correlation_id)
+        ):
+            raise OrchestratorError(message="Invalid process-local authority for parallel resume")
+        return correlation_id
+
+    @staticmethod
     def _deserialize_parallel_resume_plan(seed: Seed, raw: object) -> Any:
         """Restore a bounded exact plan or fail before any analyzer/provider effect."""
 
@@ -8526,6 +8553,7 @@ class OrchestratorRunner:
             ac_retry_attempts=self._ac_retry_attempts,
             shadow_replay_enabled=self._shadow_replay_enabled,
             session_signal_hub=self._session_signal_hub,
+            process_local_resume_nonce=self._parallel_process_local_resume_nonce(tracker),
         )
 
         # Check for cancellation before starting parallel execution
@@ -8537,6 +8565,38 @@ class OrchestratorRunner:
                 start_time=start_time,
                 expected_root_indices=range(len(seed.acceptance_criteria)),
             )
+
+        # Publish the parallel effect owner before the executor can append a
+        # route judgment, observation, pause, or enter a provider boundary.
+        # A crash after any of those effects must reconstruct through this
+        # exact plan instead of falling into the direct resume path.
+        resume_owner_progress = {
+            "routing_resume_owner": "parallel",
+            "routing_parallel_force_sequential": force_sequential_levels,
+            "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
+            "routing_parallel_externally_satisfied_acs": (
+                self._serialize_parallel_external_satisfaction(
+                    seed,
+                    externally_satisfied_acs,
+                )
+            ),
+        }
+        owner_result = await self._session_repo.track_progress(
+            tracker.session_id,
+            resume_owner_progress,
+        )
+        if owner_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to persist the parallel Routing D resume owner",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": exec_id,
+                        "cause": str(owner_result.error),
+                    },
+                )
+            )
+        tracker = tracker.with_progress(resume_owner_progress)
 
         try:
             parallel_result = await parallel_executor.execute_parallel(
@@ -8654,33 +8714,6 @@ class OrchestratorRunner:
                 )
             )
         elif recoverable_failure_pause is not None:
-            resume_owner_progress = {
-                "routing_resume_owner": "parallel",
-                "routing_parallel_force_sequential": force_sequential_levels,
-                "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
-                "routing_parallel_externally_satisfied_acs": (
-                    self._serialize_parallel_external_satisfaction(
-                        seed,
-                        externally_satisfied_acs,
-                    )
-                ),
-            }
-            owner_result = await self._session_repo.track_progress(
-                tracker.session_id,
-                resume_owner_progress,
-            )
-            if owner_result.is_err:
-                return Result.err(
-                    OrchestratorError(
-                        message="Failed to persist the parallel Routing D resume owner",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": exec_id,
-                            "cause": str(owner_result.error),
-                        },
-                    )
-                )
-            tracker = tracker.with_progress(resume_owner_progress)
             pause_result = await self._session_repo.mark_paused(
                 tracker.session_id,
                 reason=recoverable_failure_pause.reason,

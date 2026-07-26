@@ -2623,6 +2623,7 @@ class ExecutionAuthorityLiveBinding:
         expected_coordinator_review_root: object | None = None,
         expected_coordinator_review_code: object | None = None,
         force_runtime_process_local: bool = False,
+        runtime_instance_nonce: str | None = None,
     ) -> ExecutionAuthorityLiveBinding:
         executor_attribute_resolution_observable = (
             executor is None or _uses_default_instance_attribute_resolution(executor)
@@ -2894,7 +2895,12 @@ class ExecutionAuthorityLiveBinding:
             )
             else uuid.uuid4().hex
         )
-        runtime_instance_nonce = uuid.uuid4().hex
+        if runtime_instance_nonce is not None and (
+            len(runtime_instance_nonce) != 32
+            or any(char not in "0123456789abcdef" for char in runtime_instance_nonce)
+        ):
+            raise ValueError("runtime instance nonce must be 32 lowercase hex characters")
+        runtime_instance_nonce = runtime_instance_nonce or uuid.uuid4().hex
         contract = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=verifier,

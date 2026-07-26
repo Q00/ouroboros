@@ -19,7 +19,12 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeCapabilities
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionSource,
     legacy_unverified_split_decision,
@@ -102,6 +107,14 @@ def _executor(
     model_support: ParamSupport = ParamSupport.NATIVE,
     base_tier: str = "frugal",
     enable_decomposition: bool = False,
+    execute_task: Any | None = None,
+    working_directory: str | None = None,
+    max_decomposition_depth: int = 2,
+    process_local_resume_nonce: str | None = None,
+    event_store: AsyncMock | None = None,
+    event_log: list[BaseEvent] | None = None,
+    adapter_override: Any | None = None,
+    ac_retry_attempts: int = 99,
 ) -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
     economics = _economics()
     router = build_model_router(
@@ -110,15 +123,19 @@ def _executor(
         base_tier_override=base_tier,
     )
     assert router is not None
-    store = AsyncMock()
-    events: list[BaseEvent] = []
+    store = event_store or AsyncMock()
+    events: list[BaseEvent] = event_log if event_log is not None else []
 
     async def append(event: BaseEvent) -> None:
         events.append(event)
 
     store.append.side_effect = append
     store.query_execution_related_events.return_value = []
-    adapter = _Adapter()
+    adapter = adapter_override or _Adapter()
+    if execute_task is not None:
+        adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    if working_directory is not None:
+        adapter.working_directory = working_directory
     adapter.capabilities = RuntimeCapabilities(
         skill_dispatch=True,
         targeted_resume=True,
@@ -130,10 +147,12 @@ def _executor(
         event_store=store,
         console=MagicMock(),
         enable_decomposition=enable_decomposition,
+        max_decomposition_depth=max_decomposition_depth,
         run_verify_commands=False,
         model_router=router,
         route_economics=economics,
-        ac_retry_attempts=99,
+        ac_retry_attempts=ac_retry_attempts,
+        process_local_resume_nonce=process_local_resume_nonce,
     )
     return executor, store, events
 
@@ -155,6 +174,10 @@ def _route_judgment(
             "session_id": "session-1",
             "root_ac_index": 0,
             "ac_index": 0,
+            "retry_attempt": attempt_index,
+            "attempt_number": attempt_index + 1,
+            "is_decomposed": False,
+            "is_decomposed_child": False,
             "route_contract_version": 1,
             "route_episode_id": _episode_id(seed),
             "route_attempt_index": attempt_index,
@@ -300,6 +323,10 @@ def _judgment_for_route_event(event: BaseEvent) -> BaseEvent:
             "session_id": event.data["session_id"],
             "root_ac_index": event.data["root_ac_index"],
             "ac_index": event.data["root_ac_index"],
+            "retry_attempt": observation.attempt_index,
+            "attempt_number": observation.attempt_index + 1,
+            "is_decomposed": False,
+            "is_decomposed_child": False,
             "route_contract_version": 1,
             "route_episode_id": observation.episode_id,
             "route_attempt_index": observation.attempt_index,
@@ -611,6 +638,154 @@ async def test_decomposed_leaf_pause_aborts_remaining_stages() -> None:
     assert calls == [[0]]
     assert result.recoverable_route_pause is True
     assert result.stages == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_succeeds", [True, False])
+async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
+    tmp_path: Any,
+    resume_succeeds: bool,
+) -> None:
+    provider_resume_handles: list[RuntimeHandle | None] = []
+
+    async def execute_task(**kwargs: Any):
+        provider_resume_handles.append(kwargs.get("resume_handle"))
+        call_number = len(provider_resume_handles)
+        if call_number == 1:
+            yield AgentMessage(
+                type="result",
+                content="first child completed once",
+                data={"subtype": "success"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="completed-child-session",
+                    cwd=str(tmp_path),
+                ),
+            )
+        elif call_number == 2:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="paused-child-session",
+                    cwd=str(tmp_path),
+                ),
+            )
+        elif call_number == 3:
+            handle = kwargs.get("resume_handle")
+            assert isinstance(handle, RuntimeHandle)
+            assert handle.native_session_id == "paused-child-session"
+            yield AgentMessage(
+                type="result",
+                content=(
+                    "paused child resumed successfully"
+                    if resume_succeeds
+                    else "paused child resumed with a classified failure"
+                ),
+                data={"subtype": "success" if resume_succeeds else "error"},
+                resume_handle=handle,
+            )
+        else:  # pragma: no cover - the assertion below is the primary guard
+            raise AssertionError("a completed child was redispatched")
+
+    executor, store, events = _executor(
+        enable_decomposition=True,
+        execute_task=execute_task,
+        working_directory=str(tmp_path),
+        max_decomposition_depth=1,
+    )
+    seed = _seed()
+    decision = _split_decision()
+    root_identity = ExecutionNodeIdentity.root(
+        execution_context_id="execution-1",
+        ac_index=0,
+    )
+    executor._decomposition_decisions[root_identity.node_id] = decision
+
+    first = await executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+    assert len(provider_resume_handles) == 2, repr(first)
+    assert isinstance(first[0], ACExecutionResult)
+    has_pause = any(
+        "Usage limit" in message.content
+        for child in first[0].sub_results
+        for message in child.messages
+    )
+    assert has_pause
+    partial = next(event for event in events if event.type == "execution.ac.composite_paused")
+    assert partial.data["paused_child_index"] == 1
+    assert len(partial.data["completed_children"]) == 1
+    assert not any(
+        event.type == "execution.session.failed"
+        and event.data.get("node_id") == root_identity.child(1).node_id
+        for event in events
+    )
+
+    async def append_batch(batch: list[BaseEvent]) -> None:
+        events.extend(batch)
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    async def replay(aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+        return [
+            event
+            for event in events
+            if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+        ]
+
+    store.append_batch.side_effect = append_batch
+    store.query_execution_related_events.side_effect = query
+    store.replay.side_effect = replay
+    resumed_executor, _same_store, _same_events = _executor(
+        enable_decomposition=True,
+        execute_task=execute_task,
+        working_directory=str(tmp_path),
+        max_decomposition_depth=1,
+        process_local_resume_nonce=executor._process_local_resume_nonce,
+        event_store=store,
+        event_log=events,
+        adapter_override=executor._adapter,
+    )
+    resumed = await resumed_executor._run_batch_with_bounded_route_escalation(
+        seed=seed,
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert len(provider_resume_handles) == 3
+    restored = resumed[0]
+    assert isinstance(restored, ACExecutionResult)
+    assert restored.success is resume_succeeds
+    assert restored.is_decomposed
+    assert tuple(child.final_message for child in restored.sub_results) == (
+        "first child completed once",
+        (
+            "paused child resumed successfully"
+            if resume_succeeds
+            else "paused child resumed with a classified failure"
+        ),
+    )
+    assert any(event.type == "execution.ac.composite_completed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -1063,6 +1238,112 @@ async def test_composite_completion_replay_rejects_non_strict_or_conflicting_sta
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown_envelope",
+        "fingerprint_drift",
+        "child_node_drift",
+        "unknown_completed_child",
+        "capsule_malformed",
+        "conflicting_sequence",
+    ],
+)
+async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
+    mutation: str,
+) -> None:
+    executor, store, events = _executor(enable_decomposition=True)
+    seed = _seed()
+    decision = _split_decision()
+    root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    paused_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+    paused_handle = RuntimeHandle(
+        backend="claude",
+        native_session_id="paused-child-session",
+        cwd="/tmp/project",
+        metadata={
+            "node_id": root.child(1).node_id,
+            "session_scope_id": "execution-1-paused-child",
+            "ac_dispatch_id": "a" * 32,
+            "ac_capsule_fingerprint": "sha256:" + "b" * 64,
+        },
+    )
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=False,
+        is_decomposed=True,
+        sub_results=(
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="first child",
+                success=True,
+                final_message="completed once",
+                depth=1,
+            ),
+            ACExecutionResult(
+                ac_index=1,
+                ac_content="second child",
+                success=False,
+                messages=(paused_message,),
+                final_message=paused_message.content,
+                runtime_handle=paused_handle,
+                depth=1,
+            ),
+        ),
+        decomposition_decision=decision,
+    )
+    await executor._persist_partial_composite_pause(
+        seed=seed,
+        result=result,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+    )
+    partial = next(event for event in events if event.type == "execution.ac.composite_paused")
+    replay_events = [partial]
+    if mutation == "unknown_envelope":
+        partial.data["acceptance_authority"] = "final_gate"
+    elif mutation == "fingerprint_drift":
+        partial.data["decomposition_fingerprint"] = "0" * 64
+    elif mutation == "child_node_drift":
+        partial.data["paused_child_node_id"] = root.child(0).node_id
+    elif mutation == "unknown_completed_child":
+        partial.data["completed_children"][0]["provider_transcript"] = []
+    elif mutation == "capsule_malformed":
+        partial.data["paused_capsule_fingerprint"] = "b" * 64
+    else:
+        conflicting = BaseEvent(
+            type=partial.type,
+            aggregate_type=partial.aggregate_type,
+            aggregate_id=partial.aggregate_id,
+            data={**partial.data, "paused_child_index": 0, "completed_children": []},
+        )
+        conflicting.data["paused_child_node_id"] = root.child(0).node_id
+        conflicting.data["paused_child_ac_index"] = 0
+        conflicting.data["paused_child_content"] = "first child"
+        replay_events = [partial, conflicting]
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.composite_paused":
+            return replay_events
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="partial composite|composite completion result tree"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
 async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> None:
     native, _native_store, events = _executor()
     cheap = _candidate(native, "compat:claude:frugal")
@@ -1492,6 +1773,92 @@ async def test_route_judgment_rejects_unknown_outcome() -> None:
             session_id="session-1",
             root_ac_indices=(0,),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["unknown_field", "oversized_episode", "oversized_route"])
+async def test_route_judgment_replay_rejects_non_exact_or_oversized_envelopes(
+    mutation: str,
+) -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    observation, decision = _durable_first_failure(executor, seed)
+    route_event = _route_event(seed, observation=observation, decision=decision)
+    judgment = _route_judgment(seed)
+    if mutation == "unknown_field":
+        judgment.data["acceptance_authority"] = "final_gate"
+    elif mutation == "oversized_episode":
+        judgment.data["route_episode_id"] = "r" * 161
+    else:
+        judgment.data["route_id"] = "r" * 161
+    _set_route_replay_events(store, [route_event], judgments=[judgment])
+
+    with pytest.raises(RuntimeError, match="event envelope|correlation metadata"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_route_judgment_replay_uses_finite_overflow_sentinel() -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    observed_limits: list[int] = []
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") != "execution.ac.attempt_judged":
+            return []
+        limit = kwargs.get("limit")
+        assert isinstance(limit, int) and limit > 1
+        observed_limits.append(limit)
+        return [_route_judgment(seed) for _ in range(limit)]
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="finite bound"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+    assert observed_limits
+
+
+@pytest.mark.asyncio
+async def test_fresh_valid_257_ac_seed_is_not_rejected_by_composite_replay_bound() -> None:
+    executor, store, _events = _executor()
+    seed = _seed().model_copy(
+        update={
+            "acceptance_criteria": tuple(
+                AcceptanceCriterionSpec(description=f"ship criterion {index}")
+                for index in range(257)
+            )
+        }
+    )
+    composite_limits: list[int] = []
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.composite_completed":
+            limit = kwargs.get("limit")
+            assert isinstance(limit, int)
+            composite_limits.append(limit)
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    histories, overrides, terminals, provisional = await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+    assert histories == {0: ()}
+    assert overrides == {}
+    assert terminals == {}
+    assert provisional == {}
+    assert composite_limits == [4097]
 
 
 @pytest.mark.asyncio
