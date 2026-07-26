@@ -153,8 +153,19 @@ class AssertionExtractor:
 
             assertions: list[SpecAssertion] = []
             for item in data:
+                if not isinstance(item, dict):
+                    logger.warning("Expected assertion object, got: %s", type(item))
+                    continue
                 ac_idx = item.get("ac_index", 0)
-                ac_text = acceptance_criteria[ac_idx] if ac_idx < len(acceptance_criteria) else ""
+                if (
+                    not isinstance(ac_idx, int)
+                    or isinstance(ac_idx, bool)
+                    or ac_idx < 0
+                    or ac_idx >= len(acceptance_criteria)
+                ):
+                    logger.warning("Ignoring assertion with invalid ac_index: %r", ac_idx)
+                    continue
+                ac_text = acceptance_criteria[ac_idx]
                 try:
                     tier = VerificationTier(item.get("tier", "t4_unverifiable"))
                 except ValueError:

@@ -637,9 +637,13 @@ Guidelines:
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
             json_str = extract_json_payload(content)
             data = json.loads(json_str if json_str is not None else content)
+            if not isinstance(data, dict):
+                raise TypeError(f"Expected JSON object, got {type(data).__name__}")
 
             mutations: list[OntologyMutation] = []
             for m in data.get("ontology_mutations", []):
+                if not isinstance(m, dict):
+                    continue
                 try:
                     action = MutationAction(m.get("action", "modify"))
                 except ValueError:

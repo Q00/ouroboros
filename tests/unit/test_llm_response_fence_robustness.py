@@ -18,8 +18,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
-from ouroboros.evolution.wonder import WonderEngine
+from ouroboros.core.types import Result
+from ouroboros.evolution.reflect import ReflectEngine
+from ouroboros.evolution.wonder import WonderEngine, WonderOutput
+from ouroboros.providers.base import CompletionResponse, UsageInfo
 from ouroboros.verification.extractor import AssertionExtractor
 
 _ONTOLOGY = OntologySchema(
@@ -78,6 +82,46 @@ class TestWonderFenceRobustness:
         assert out.should_continue is True
         assert any("token refresh" in q for q in out.questions)
 
+    def test_malformed_outer_object_with_nested_array_uses_fallback(self) -> None:
+        content = '{"questions": ["What remains unknown?"], }'
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(content, _seed())
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert out.questions == (
+            "What assumptions remain untested for goal: Build a login system?",
+        )
+
+
+class TestReflectFenceRobustness:
+    @pytest.mark.asyncio
+    async def test_malformed_outer_object_with_nested_array_returns_error(self) -> None:
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content='{"ontology_mutations": [], }',
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+        engine = ReflectEngine(llm_adapter=adapter, model="test")
+
+        result = await engine.reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
 
 class TestAssertionExtractorFenceRobustness:
     @pytest.mark.parametrize("variant", FENCE_VARIANTS)
@@ -101,3 +145,11 @@ class TestAssertionExtractorFenceRobustness:
         assert len(assertions) == 1
         assert assertions[0].ac_index == 0
         assert assertions[0].description == "build passes"
+
+    def test_incidental_non_object_array_is_ignored(self) -> None:
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            "I considered AC indices [0, 1] before answering.",
+            ("AC number 1", "AC number 2"),
+        )
+
+        assert assertions == ()

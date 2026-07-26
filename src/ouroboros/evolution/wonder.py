@@ -408,6 +408,8 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
             json_str = extract_json_payload(content)
             data = json.loads(json_str if json_str is not None else content)
+            if not isinstance(data, dict):
+                raise TypeError(f"Expected JSON object, got {type(data).__name__}")
             grounded = self._parse_grounded_questions(data.get("questions", []), total_acs)
             return WonderOutput(
                 # ``questions`` stays a flat string tuple for events, lineage, and
