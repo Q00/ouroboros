@@ -579,6 +579,51 @@ def test_atomic_write_rejects_target_changed_since_preflight(tmp_path: Path) -> 
     not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="atomic pathname exchange is unavailable on this platform",
 )
+def test_atomic_exchange_preserves_same_bytes_new_inode_replacement_at_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "target.json"
+    original = b'{"version":"1.2.3"}\n'
+    content = b'{"version":"1.2.4"}\n'
+    target.write_bytes(original)
+    expected_generation = sync_plugin_version._path_generation(target)
+    real_exchange = sync_plugin_version._exchange_paths
+    injected = False
+    replacement_generation = None
+
+    def inject_same_bytes_replacement(source: Path, destination: Path) -> bool:
+        nonlocal injected, replacement_generation
+        if not injected:
+            injected = True
+            replacement = tmp_path / "same-bytes-replacement"
+            replacement.write_bytes(original)
+            os.replace(replacement, destination)
+            replacement_generation = sync_plugin_version._path_generation(destination)
+        return real_exchange(source, destination)
+
+    monkeypatch.setattr(sync_plugin_version, "_exchange_paths", inject_same_bytes_replacement)
+
+    with pytest.raises(RuntimeError, match="write conflict") as raised:
+        sync_plugin_version._atomic_write_bytes(
+            target,
+            content,
+            expected_current=original,
+            expected_generation=expected_generation,
+        )
+
+    assert "preserved exchanged content at" in str(raised.value)
+    assert replacement_generation is not None
+    assert target.read_bytes() == original
+    assert sync_plugin_version._path_generation(target) == replacement_generation
+    reachable_bytes = [path.read_bytes() for path in tmp_path.iterdir()]
+    assert content in reachable_bytes
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="atomic pathname exchange is unavailable on this platform",
+)
 def test_atomic_exchange_restores_edit_arriving_at_commit(
     tmp_path: Path,
     monkeypatch,
@@ -888,6 +933,7 @@ def test_main_write_rolls_back_when_later_write_fails(
         *,
         nested_key=None,
         expected_current=None,
+        expected_generation=None,
     ) -> bool:
         nonlocal calls
         calls += 1
@@ -898,6 +944,7 @@ def test_main_write_rolls_back_when_later_write_fails(
             version,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
 
     monkeypatch.setattr(sync_plugin_version, "update_json", fail_second_json_write)
@@ -944,6 +991,7 @@ def test_main_write_does_not_clobber_external_edit_during_rollback(
         *,
         nested_key=None,
         expected_current=None,
+        expected_generation=None,
     ) -> bool:
         nonlocal calls
         calls += 1
@@ -955,6 +1003,7 @@ def test_main_write_does_not_clobber_external_edit_during_rollback(
             version,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
 
     monkeypatch.setattr(sync_plugin_version, "update_json", fail_after_external_edit)
@@ -1000,6 +1049,7 @@ def test_main_write_does_not_roll_back_same_bytes_new_inode_aba(
         *,
         nested_key=None,
         expected_current=None,
+        expected_generation=None,
     ):
         nonlocal calls
         calls += 1
@@ -1008,6 +1058,7 @@ def test_main_write_does_not_roll_back_same_bytes_new_inode_aba(
             version,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
         if calls == 1:
             same_bytes = plugin_json.read_bytes()
@@ -1195,6 +1246,7 @@ def test_main_write_rejects_external_edit_after_preflight(tmp_path: Path, monkey
         *,
         nested_key=None,
         expected_current=None,
+        expected_generation=None,
     ) -> bool:
         nonlocal edited
         if not edited:
@@ -1205,6 +1257,7 @@ def test_main_write_rejects_external_edit_after_preflight(tmp_path: Path, monkey
             version,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
 
     monkeypatch.setattr(sync_plugin_version, "update_json", edit_after_preflight)
@@ -1251,12 +1304,14 @@ def test_main_write_revalidates_targets_that_were_already_current(
         *,
         nested_key=None,
         expected_current=None,
+        expected_generation=None,
     ) -> bool:
         updated = original_update_json(
             path,
             version,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
         plugin_json.write_bytes(external_plugin)
         return updated
@@ -1451,7 +1506,14 @@ module.SETUP_SKILL_MD = root / "skills/setup/SKILL.md"
 module.BUNDLED_SETUP_SKILL_MD = root / ".claude-plugin/skills/setup/SKILL.md"
 if mode == "hold":
     original = module.update_json
-    def hold_first_write(path, value, *, nested_key=None, expected_current=None):
+    def hold_first_write(
+        path,
+        value,
+        *,
+        nested_key=None,
+        expected_current=None,
+        expected_generation=None,
+    ):
         if not (root / "ready").exists():
             (root / "ready").touch()
             while not (root / "release").exists():
@@ -1461,6 +1523,7 @@ if mode == "hold":
             value,
             nested_key=nested_key,
             expected_current=expected_current,
+            expected_generation=expected_generation,
         )
     module.update_json = hold_first_write
 module.sys.argv = ["sync-plugin-version.py", "--write", "--version", version]

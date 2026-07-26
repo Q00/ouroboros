@@ -345,6 +345,7 @@ def update_version_marker(
     version: str,
     *,
     expected_current: bytes | None = None,
+    expected_generation: _PathGeneration | None = None,
 ) -> _PathGeneration | None:
     """Update <!-- ooo:VERSION:X.Y.Z --> marker in a text file."""
     original = expected_current if expected_current is not None else path.read_bytes()
@@ -358,7 +359,12 @@ def update_version_marker(
     content = original.replace(old_marker_bytes, new_marker_bytes, 1)
     if original == content:
         return None
-    owned_generation = _atomic_write_bytes(path, content, expected_current=original)
+    owned_generation = _atomic_write_bytes(
+        path,
+        content,
+        expected_current=original,
+        expected_generation=expected_generation,
+    )
 
     try:
         updated = path.read_bytes()
@@ -378,6 +384,7 @@ def update_json(
     *,
     nested_key: str | None = None,
     expected_current: bytes | None = None,
+    expected_generation: _PathGeneration | None = None,
 ) -> _PathGeneration | None:
     """Update version in a JSON file. Returns the owned generation if changed."""
     original = expected_current if expected_current is not None else path.read_bytes()
@@ -403,7 +410,12 @@ def update_json(
         return None
 
     content = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    return _atomic_write_bytes(path, content, expected_current=original)
+    return _atomic_write_bytes(
+        path,
+        content,
+        expected_current=original,
+        expected_generation=expected_generation,
+    )
 
 
 def _run() -> None:
@@ -434,10 +446,12 @@ def _run() -> None:
         (MARKETPLACE_JSON, "plugins.0"),
     ]
     originals: dict[Path, bytes] = {}
+    original_generations: dict[Path, _PathGeneration] = {}
     setup_markers: dict[Path, tuple[str, str]] = {}
     for path in (SETUP_SKILL_MD, BUNDLED_SETUP_SKILL_MD):
         if not path.exists():
             sys.exit(f"Error: required setup skill not found: {path.relative_to(ROOT)}")
+        original_generations[path] = _path_generation(path)
         original = path.read_bytes()
         originals[path] = original
         text = original.decode("utf-8")
@@ -454,6 +468,7 @@ def _run() -> None:
             sys.exit(f"Error: required plugin metadata not found: {path.relative_to(ROOT)}")
 
         try:
+            original_generations[path] = _path_generation(path)
             original = path.read_bytes()
             originals[path] = original
             data = _parse_json_bytes(original)
@@ -505,6 +520,7 @@ def _run() -> None:
                     version,
                     nested_key=nested,
                     expected_current=originals[path],
+                    expected_generation=original_generations[path],
                 )
                 if owned_generation is None:
                     sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
@@ -524,6 +540,7 @@ def _run() -> None:
                     path,
                     version,
                     expected_current=originals[path],
+                    expected_generation=original_generations[path],
                 )
                 if owned_generation is None:
                     sys.exit(f"Error: failed to update {path.relative_to(ROOT)}")
