@@ -125,6 +125,9 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
     valid_runtime_execution_identity_contract,
 )
+from ouroboros.orchestrator.execution_event_replay import (
+    replay_execution_events_chronologically,
+)
 from ouroboros.orchestrator.execution_guidance import (
     ExecutionGuidanceBundle,
     resolve_execution_guidance,
@@ -202,7 +205,7 @@ if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
-_MAX_DIRECT_ROUTE_PAUSE_EVENTS = 64
+_DIRECT_ROUTE_PAUSE_REPLAY_PAGE_SIZE = 64
 _MAX_EXECUTION_STRATEGY_TOOLS = 256
 _MAX_EXECUTION_STRATEGY_TEXT_CHARS = 100_000
 _MAX_EXECUTION_TOOL_CATALOG_CHARS = 1_000_000
@@ -1781,19 +1784,9 @@ class OrchestratorRunner:
             event_type="execution.ac.route_observed",
             limit=MAX_ROUTE_ATTEMPTS + 1,
         )
-        pause_events = await self._event_store.query_execution_related_events(
-            execution_id,
-            event_type="execution.ac.route_paused",
-            limit=_MAX_DIRECT_ROUTE_PAUSE_EVENTS + 1,
-        )
         if len(observation_events) > MAX_ROUTE_ATTEMPTS:
             raise OrchestratorError(
                 message="Refusing to replay unbounded direct route observations",
-                details={"execution_id": execution_id, "session_id": session_id},
-            )
-        if len(pause_events) > _MAX_DIRECT_ROUTE_PAUSE_EVENTS:
-            raise OrchestratorError(
-                message="Refusing to replay unbounded direct route pauses",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         direct_events = [
@@ -1802,19 +1795,10 @@ class OrchestratorRunner:
             if event.type == "execution.ac.route_observed"
             if event.data.get("session_id") == session_id
         ]
-        direct_pauses = [
-            event
-            for event in pause_events
-            if event.type == "execution.ac.route_paused"
-            if event.data.get("session_id") == session_id
-        ]
-        session_events = [*direct_events, *direct_pauses]
-        if not session_events:
-            return None
         if any(
             event.data.get("call_site") != "runner"
             or event.data.get("execution_id") != execution_id
-            for event in session_events
+            for event in direct_events
         ):
             raise OrchestratorError(
                 message="Refusing to replay route evidence from another call site",
@@ -1829,28 +1813,6 @@ class OrchestratorRunner:
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
-        if not direct_pauses:
-            latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
-            data = latest.data
-            try:
-                observation = RouteObservation.from_contract_data(data.get("observation"))
-            except (TypeError, ValueError) as exc:
-                raise OrchestratorError(
-                    message="Refusing to replay an invalid direct route observation",
-                    details={"execution_id": execution_id, "session_id": session_id},
-                ) from exc
-            if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
-                raise OrchestratorError(
-                    message="Refusing to replay a successful direct route before Final Gate",
-                    details={"execution_id": execution_id, "session_id": session_id},
-                )
-            raise OrchestratorError(
-                message="Refusing to replay a completed direct route; human handoff is required",
-                details={"execution_id": execution_id, "session_id": session_id},
-            )
-
-        latest_pause = max(direct_pauses, key=lambda event: (event.timestamp, event.id))
-        pause_data = latest_pause.data
         expected_pause_keys = {
             "schema_version",
             "execution_id",
@@ -1864,28 +1826,6 @@ class OrchestratorRunner:
             "recoverable_pause",
             "final_acceptance_declared",
         }
-        if (
-            not _mapping_has_exact_keys(pause_data, frozenset(expected_pause_keys))
-            or type(pause_data.get("schema_version")) is not int
-            or pause_data.get("schema_version") != 1
-            or pause_data.get("root_ac_index") is not None
-            or pause_data.get("episode_id") != expected_episode
-            or pause_data.get("recoverable_pause") is not True
-            or pause_data.get("final_acceptance_declared") is not False
-            or type(pause_data.get("attempt_index")) is not int
-            or type(pause_data.get("prior_route_ids")) is not list
-        ):
-            raise OrchestratorError(
-                message="Refusing to replay invalid direct route pause state",
-                details={"execution_id": execution_id, "session_id": session_id},
-            )
-        try:
-            paused_candidate = RouteCandidate.from_contract_data(pause_data.get("route"))
-        except (TypeError, ValueError) as exc:
-            raise OrchestratorError(
-                message="Refusing to replay invalid direct route pause state",
-                details={"execution_id": execution_id, "session_id": session_id},
-            ) from exc
 
         parsed_rows: list[tuple[RouteObservation, object, object]] = []
         for event in direct_events:
@@ -1915,16 +1855,28 @@ class OrchestratorRunner:
                 (observation, data.get("decision"), data.get("human_handoff_required"))
             )
         parsed_rows.sort(key=lambda row: row[0].attempt_index)
-        if [row[0].attempt_index for row in parsed_rows] != list(range(len(parsed_rows))):
-            raise OrchestratorError(
-                message="Refusing to replay gapped direct route history",
-                details={"execution_id": execution_id, "session_id": session_id},
-            )
+        route_history_is_contiguous = [row[0].attempt_index for row in parsed_rows] == list(
+            range(len(parsed_rows))
+        )
         prior_route_ids = tuple(row[0].route_id for row in parsed_rows)
-        for superseded_pause in direct_pauses:
-            if superseded_pause is latest_pause:
+        pause_data: dict[str, Any] | None = None
+        paused_candidate: RouteCandidate | None = None
+        async for pause_event in replay_execution_events_chronologically(
+            self._event_store,
+            execution_id=execution_id,
+            event_type="execution.ac.route_paused",
+            page_size=_DIRECT_ROUTE_PAUSE_REPLAY_PAGE_SIZE,
+        ):
+            if pause_event.type != "execution.ac.route_paused":
                 continue
-            superseded = superseded_pause.data
+            superseded = pause_event.data
+            if superseded.get("session_id") != session_id:
+                continue
+            if not route_history_is_contiguous:
+                raise OrchestratorError(
+                    message="Refusing to replay gapped direct route history",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
             if (
                 not _mapping_has_exact_keys(superseded, frozenset(expected_pause_keys))
                 or superseded.get("schema_version") != 1
@@ -1950,23 +1902,55 @@ class OrchestratorRunner:
                     message="Refusing to replay invalid superseded direct route pause state",
                     details={"execution_id": execution_id, "session_id": session_id},
                 ) from exc
+            superseded_prior_route_ids = tuple(superseded["prior_route_ids"])
+            if superseded_index < len(parsed_rows):
+                if (
+                    superseded_index < 0
+                    or superseded_prior_route_ids != prior_route_ids[:superseded_index]
+                    or parsed_rows[superseded_index][0].route_id != superseded_candidate.route_id
+                ):
+                    raise OrchestratorError(
+                        message="Refusing to replay an invalid consumed direct route pause",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    )
+                continue
             if (
-                not 0 <= superseded_index < len(parsed_rows)
-                or tuple(superseded["prior_route_ids"])
-                != tuple(row[0].route_id for row in parsed_rows[:superseded_index])
-                or parsed_rows[superseded_index][0].route_id != superseded_candidate.route_id
+                superseded_index != len(parsed_rows)
+                or superseded_prior_route_ids != prior_route_ids
+                or len(set(prior_route_ids) | {superseded_candidate.route_id})
+                != len(prior_route_ids) + 1
+                or paused_candidate is not None
+                and paused_candidate != superseded_candidate
             ):
                 raise OrchestratorError(
-                    message="Refusing to replay an unconsumed superseded direct route pause",
+                    message="Refusing to replay inconsistent direct route pause history",
                     details={"execution_id": execution_id, "session_id": session_id},
                 )
-        if (
-            pause_data["attempt_index"] != len(parsed_rows)
-            or tuple(pause_data["prior_route_ids"]) != prior_route_ids
-            or len(set(prior_route_ids) | {paused_candidate.route_id}) != len(prior_route_ids) + 1
-        ):
+            # Repeated quota windows on the same unconsumed route replace only
+            # the external provider boundary. Keep the newest durable envelope
+            # while validating every superseded row in bounded-memory pages.
+            pause_data = superseded
+            paused_candidate = superseded_candidate
+
+        if pause_data is None or paused_candidate is None:
+            if not direct_events:
+                return None
+            latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
+            data = latest.data
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
+                raise OrchestratorError(
+                    message="Refusing to replay a successful direct route before Final Gate",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
             raise OrchestratorError(
-                message="Refusing to replay inconsistent direct route pause history",
+                message="Refusing to replay a completed direct route; human handoff is required",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
 

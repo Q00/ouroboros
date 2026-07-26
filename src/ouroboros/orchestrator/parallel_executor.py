@@ -293,6 +293,9 @@ from ouroboros.orchestrator.execution_authority import (
     valid_runtime_effect_capabilities_contract,
 )
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+from ouroboros.orchestrator.execution_event_replay import (
+    replay_execution_events_chronologically,
+)
 from ouroboros.orchestrator.execution_runtime_scope import (
     ACRuntimeIdentity,
     ExecutionNodeIdentity,
@@ -378,8 +381,7 @@ from ouroboros.orchestrator.verifier import (
     verifier_operational_failure_verdict,
 )
 
-_MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
-_MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS = 4096
+_PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -10482,10 +10484,8 @@ Respond with either ATOMIC or the structured JSON object only.
         relevant = set(root_ac_indices)
         bounded_streams = {
             "execution.ac.route_observed": root_ac_count * MAX_ROUTE_ATTEMPTS + 1,
-            "execution.ac.route_paused": root_ac_count * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1,
             "execution.ac.uncertain_handoff_required": root_ac_count + 1,
             "execution.ac.composite_completed": _composite_completion_event_sentinel(root_ac_count),
-            "execution.ac.composite_paused": _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1,
         }
         for event_type, event_limit in bounded_streams.items():
             events = await self._event_store.query_execution_related_events(
@@ -10515,6 +10515,21 @@ Respond with either ATOMIC or the structured JSON object only.
                 }:
                     if root_ac_index in relevant or type(root_ac_index) is not int:
                         return True
+        # Pause streams can grow on every recoverable provider window. Detect
+        # their presence with a one-row exact-scope query; the replay owner folds
+        # the complete stable population in bounded-memory pages.
+        for pause_event_type in (
+            "execution.ac.route_paused",
+            "execution.ac.composite_paused",
+        ):
+            pause_events = await self._event_store.query_execution_related_events(
+                execution_id,
+                event_type=pause_event_type,
+                limit=1,
+                payload_equals={"session_id": session_id, "call_site": "parallel"},
+            )
+            if isinstance(pause_events, list | tuple) and pause_events:
+                return True
         judgment_limit = root_ac_count * MAX_ROUTE_ATTEMPTS + 1
         judgment_events = await self._event_store.query_execution_related_events(
             execution_id,
@@ -11247,21 +11262,19 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             composite_results[root_ac_index] = restored
             self._decomposition_decisions[decision.node_id] = decision
-        partial_event_limit = _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1
-        partial_events = await self._event_store.query_execution_related_events(
-            execution_id,
-            event_type="execution.ac.composite_paused",
-            limit=partial_event_limit,
-        )
-        if len(partial_events) >= partial_event_limit:
-            raise RuntimeError("partial composite replay exceeds the execution-wide bound")
         partial_states: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
         prior_frame_states: dict[tuple[int, str], _PartialCompositeResumeState] = {}
         prior_paths: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
-        # The production query is newest-first.  Replay the state machine in
-        # chronological order so advancing prefixes cannot be mistaken for
-        # regressions and repeated pauses retain the newest provider boundary.
-        for event in sorted(partial_events, key=lambda item: (item.timestamp, item.id)):
+        # Fold a stable high-water snapshot oldest-to-newest. The page size is a
+        # memory bound, never a valid-history limit, so every producer-created
+        # pause remains replayable while advancing prefixes and provider handles
+        # retain their chronological semantics.
+        async for event in replay_execution_events_chronologically(
+            self._event_store,
+            execution_id=execution_id,
+            event_type="execution.ac.composite_paused",
+            page_size=_PARALLEL_PAUSE_REPLAY_PAGE_SIZE,
+        ):
             if event.type != "execution.ac.composite_paused":
                 continue
             data = event.data
@@ -11819,21 +11832,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 "the provider-effect boundary is uncertain and human handoff is required."
             )
 
-        pause_event_limit = len(seed.acceptance_criteria) * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1
-        pause_events = await self._event_store.query_execution_related_events(
-            execution_id,
-            event_type="execution.ac.route_paused",
-            limit=pause_event_limit,
-        )
-        if len(pause_events) >= pause_event_limit:
-            raise RuntimeError("parallel route pause replay exceeds the execution-wide bound")
         unresolved_pauses: dict[int, RouteCandidate] = {}
         unresolved_pause_states: dict[int, _ParallelRouteResumeState] = {}
-        pause_counts: dict[int, int] = {}
-        # Production queries are newest-first. Fold oldest-to-newest so a
-        # repeated quota on the same route replaces the prior provider handle
-        # with the latest unconsumed dispatch boundary.
-        for event in sorted(pause_events, key=lambda item: (item.timestamp, item.id)):
+        # Fold the complete stable population oldest-to-newest in bounded-memory
+        # pages. A repeated quota on one route replaces the prior provider handle
+        # with the latest unconsumed dispatch boundary without imposing a total
+        # event-count ceiling on otherwise valid durable history.
+        async for event in replay_execution_events_chronologically(
+            self._event_store,
+            execution_id=execution_id,
+            event_type="execution.ac.route_paused",
+            page_size=_PARALLEL_PAUSE_REPLAY_PAGE_SIZE,
+        ):
             if event.type != "execution.ac.route_paused":
                 continue
             data = event.data
@@ -11855,9 +11865,6 @@ Respond with either ATOMIC or the structured JSON object only.
                 or data.get("final_acceptance_declared") is not False
             ):
                 raise RuntimeError("parallel route pause has invalid authority metadata")
-            pause_counts[root_ac_index] = pause_counts.get(root_ac_index, 0) + 1
-            if pause_counts[root_ac_index] > _MAX_PARALLEL_ROUTE_PAUSE_EVENTS:
-                raise RuntimeError("parallel route pause replay exceeds the finite bound")
             criterion = seed.acceptance_criteria[root_ac_index]
             semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
             expected_episode = self._bounded_route_episode_id(

@@ -567,6 +567,7 @@ class TestOrchestratorRunner:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_execution_related_events = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture
@@ -2498,6 +2499,67 @@ class TestOrchestratorRunner:
             session_id="session-route-escalated-pause",
             execution_id="execution-route-escalated-pause",
         )
+
+    @pytest.mark.asyncio
+    async def test_valid_65_direct_pauses_replay_without_a_total_cap(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        from ouroboros.orchestrator.route_compat import (
+            admit_compat_escalation_route,
+            build_route_compat_projection,
+        )
+
+        execution_id = "execution-direct-pause-population"
+        session_id = "session-direct-pause-population"
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'direct-pause-population.db'}")
+        await store.initialize()
+        runner = OrchestratorRunner(mock_adapter, store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        initial = admit_compat_escalation_route(projection, effort=None)
+        assert initial.selected is not None
+        episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        pauses = [
+            BaseEvent(
+                type="execution.ac.route_paused",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "episode_id": episode_id,
+                    "attempt_index": 0,
+                    "prior_route_ids": [],
+                    "route": initial.selected.to_contract_data(),
+                    "recoverable_pause": True,
+                    "final_acceptance_declared": False,
+                },
+            )
+            for _pause_number in range(65)
+        ]
+        try:
+            await store.append_batch(pauses)
+            state = await runner._direct_resume_route_id(
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+            assert state is not None
+            assert state.candidate == initial.selected
+            assert state.attempt_index == 0
+        finally:
+            await store.close()
 
     @pytest.mark.asyncio
     async def test_direct_pause_rejects_effort_drift_from_durable_successor(

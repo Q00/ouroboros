@@ -2691,6 +2691,85 @@ async def test_partial_composite_replay_folds_newest_first_advancing_history() -
 
 
 @pytest.mark.asyncio
+async def test_valid_4097_composite_pauses_replay_without_a_total_cap(tmp_path: Any) -> None:
+    producer, _mock_store, events = _executor(enable_decomposition=True)
+    seed = _seed()
+    decision = _split_decision()
+    root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    paused_message = AgentMessage(
+        type="result",
+        content="Usage limit reached. Please try again in 5 hours.",
+        data={"subtype": "error", "error_type": "CodexCliError"},
+    )
+    paused_child = ACExecutionResult(
+        ac_index=0,
+        ac_content="first child",
+        success=False,
+        messages=(paused_message,),
+        final_message=paused_message.content,
+        runtime_handle=RuntimeHandle(
+            backend="claude",
+            native_session_id="paused-child-population",
+            cwd="/tmp/project",
+            metadata={
+                "node_id": root.child(0).node_id,
+                "session_scope_id": "execution-1-paused-population",
+                "ac_dispatch_id": "d" * 32,
+                "ac_capsule_fingerprint": "sha256:" + "d" * 64,
+            },
+        ),
+        depth=1,
+    )
+    await producer._persist_partial_composite_pause(
+        seed=seed,
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            is_decomposed=True,
+            sub_results=(paused_child,),
+            decomposition_decision=decision,
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+    )
+    template = next(event for event in events if event.type == "execution.ac.composite_paused")
+    pause_events = [
+        BaseEvent(
+            type=template.type,
+            aggregate_type=template.aggregate_type,
+            aggregate_id=template.aggregate_id,
+            data=deepcopy(template.data),
+        )
+        for _pause_number in range(4_097)
+    ]
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'composite-pause-population.db'}")
+    await store.initialize()
+    await store.append_batch(pause_events)
+    replay = _live_executor(
+        adapter=_Adapter(),
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="d" * 32,
+    )
+    try:
+        await replay._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+        state = replay._partial_composite_resumes[root.node_id]
+        assert state.paused_child_index == 0
+        assert state.paused_dispatch_id == "d" * 32
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_partial_composite_replay_rejects_newer_descendant_path_shortening() -> None:
     executor, store, events = _executor(enable_decomposition=True)
     seed = _seed()
@@ -2997,38 +3076,47 @@ async def test_parallel_route_replay_rejects_unknown_envelope_fields(
 
 
 @pytest.mark.asyncio
-async def test_parallel_pause_history_is_bounded_before_envelope_traversal() -> None:
-    executor, store, events = _executor()
-    candidate = _candidate(executor, "compat:claude:frugal")
-    await executor._persist_parallel_route_pause(
-        seed=_seed(),
-        result=ACExecutionResult(
-            ac_index=0,
-            ac_content="ship it",
-            success=False,
-            route_candidate=candidate,
-            runtime_handle=_paused_route_handle(),
-        ),
-        root_ac_index=0,
-        session_id="session-1",
-        execution_id="execution-1",
-        prior_route_ids=(),
+async def test_valid_65_parallel_pause_history_replays_without_a_total_cap(tmp_path: Any) -> None:
+    producer, _mock_store, events = _executor()
+    candidate = _candidate(producer, "compat:claude:frugal")
+    for _pause_number in range(65):
+        await producer._persist_parallel_route_pause(
+            seed=_seed(),
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                route_candidate=candidate,
+                runtime_handle=_paused_route_handle(),
+            ),
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+            prior_route_ids=(),
+        )
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'parallel-pause-population.db'}")
+    await store.initialize()
+    await store.append_batch(events)
+    replay = _live_executor(
+        adapter=_Adapter(),
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="b" * 32,
     )
-    pause = next(item for item in events if item.type == "execution.ac.route_paused")
-
-    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
-        if kwargs.get("event_type") == "execution.ac.route_paused":
-            return [pause] * 65
-        return []
-
-    store.query_execution_related_events.side_effect = query
-    with pytest.raises(RuntimeError, match="execution-wide bound"):
-        await executor._load_bounded_route_resume_state(
+    try:
+        await replay._load_bounded_route_resume_state(
             seed=_seed(),
             execution_id="execution-1",
             session_id="session-1",
             root_ac_indices=(0,),
         )
+
+        state = replay._parallel_route_resumes[0]
+        assert state.candidate == candidate
+        assert state.dispatch_id == "a" * 32
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

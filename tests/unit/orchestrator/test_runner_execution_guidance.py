@@ -51,6 +51,7 @@ def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[Orchestrato
     event_store = AsyncMock()
     event_store.append = AsyncMock()
     event_store.replay = AsyncMock(return_value=[])
+    event_store.query_execution_related_events = AsyncMock(return_value=[])
     config = get_default_config()
     execution = config.execution.model_copy(update={"project_guidance": guidance_ids})
     config = config.model_copy(update={"execution": execution})

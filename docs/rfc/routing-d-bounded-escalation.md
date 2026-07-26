@@ -172,6 +172,19 @@ A newer pause may shorten an established descendant path only when an ancestor
 has advanced to a later child and thereby consumed that subtree; simply dropping
 the nested frame is rejected as replay regression.
 
+Pause history has no producer-side event-count ceiling: every recoverable quota
+window can append a new direct, parallel, or composite snapshot. Replay therefore
+freezes the newest `(timestamp, event_id)` as a high-water boundary and folds the
+complete snapshot through a deterministic oldest-first keyset cursor. The fixed
+page size bounds memory only; it is never interpreted as a valid-history bound.
+Equal timestamps use the event ID tie-breaker, and appends beyond the frozen
+high-water key cannot move or extend the replay population. Direct and parallel
+repeated pauses on the same unconsumed route replace the provider boundary while
+every superseded envelope remains schema- and route-history-validated. Composite
+replay applies the same population-total paging before its monotonic frame/path
+checks. Thus a 65th route pause or 4,097th composite pause is as replayable as the
+first without permitting an unbounded in-memory query.
+
 Quota classification runs immediately after each provider turn and before any
 queued SessionSignal follow-up. A quota-ending turn therefore performs no later
 provider effect, retains its exact resumable handle, and leaves queued signals to
@@ -322,10 +335,11 @@ Both owners compare a paused candidate with the complete predecessor
 `selected_route` snapshot, or with the exact live initial admission when no
 observation exists. A same-ID change to effort or any other candidate semantic
 is configuration drift, not a resumable pause. Pre-dispatch detection and the
-full replay loaders use finite max-plus-one stream sentinels. Composite
-completion sentinels are derived from the admitted root population; no Routing
-D history scan uses an unbounded query or a fixed completion cap smaller than
-its producer domain.
+full replay loaders use population-matched bounds. Terminal and attempt streams
+use finite max-plus-one sentinels derived from their producer domains. Repeating
+pause streams use one-row presence probes plus the stable high-water/keyset
+replay above, so no Routing D history scan uses an unbounded query or a fixed
+total cap smaller than its producer domain.
 
 ## Parallel and direct scope
 
