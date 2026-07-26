@@ -105,14 +105,19 @@ def test_expected_artifact_runtime_uses_shared_portable_path_grammar(tmp_path: A
             "dir/CON",
             "foo.",
             "docs/a:b",
+            "a" * 256,
+            "docs/" + ("\u00e9" * 128),
+            "NONE",
         ),
         str(tmp_path),
     )
-    assert len(invalid) == 8
+    assert len(invalid) == 11
+    assert any("longer than 255 filesystem bytes" in artifact for artifact in invalid)
+    assert any("NONE mixed with artifact paths" in artifact for artifact in invalid)
     assert "control character" in invalid[0]
     assert "workspace root" in invalid[1]
     assert "escapes workspace" in invalid[2]
-    assert all("Windows" in item for item in invalid[3:])
+    assert all("Windows" in item for item in invalid[3:8])
 
 
 @pytest.mark.asyncio
@@ -1300,6 +1305,28 @@ async def test_artifacts_only_gate_rejects_nonportable_constructed_paths(
     assert len(outcome.missing_artifacts) == 2
     assert "contains a comma" in outcome.missing_artifacts[0]
     assert "contains a backslash" in outcome.missing_artifacts[1]
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_gate_rejects_overlong_constructed_path_component(
+    tmp_path: Any,
+) -> None:
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="artifact exists",
+        verify_command=None,
+        expected_artifacts=("a" * 256,),
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert outcome.missing_artifacts == (
+        f"{'a' * 256!r} (contains a path component longer than 255 filesystem bytes)",
+    )
 
 
 @pytest.mark.asyncio

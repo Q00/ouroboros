@@ -516,6 +516,10 @@ class TestSeedGeneratorExtraction:
             r"docs\guide.md",
             "NUL",
             "docs/a:b",
+            "a" * 256,
+            "docs/" + ("\u00e9" * 128),
+            "NONE, report.txt",
+            '["NONE", "report.txt"]',
         ),
     )
     async def test_generate_retries_on_malformed_artifact_fields(
@@ -593,6 +597,44 @@ class TestSeedGeneratorExtraction:
         (criterion,) = result.value.acceptance_criteria
         assert isinstance(criterion, AcceptanceCriterionSpec)
         assert criterion.expected_artifacts == ("reports/summary.json", "./Build Outputs")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expectation", ("success", "exit code 0"))
+    async def test_generate_retries_when_status_expectation_lacks_verify_command(
+        self,
+        expectation: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = f"AC: CLI succeeds | verify: NONE | artifacts: NONE | expect: {expectation}"
+        repaired_contract = (
+            "AC: CLI succeeds | verify: python -m app | artifacts: NONE | expect: NONE"
+        )
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bad_contract}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command == "python -m app"
+        assert criterion.output_assertion is None
 
     @pytest.mark.asyncio
     async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:

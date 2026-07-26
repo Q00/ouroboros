@@ -442,6 +442,10 @@ class TestSeed:
             "foo.",
             "docs/a:b",
             "docs/a?.txt",
+            "a" * 256,
+            "docs/" + ("\u00e9" * 128),
+            "NONE",
+            "none",
         ):
             assert expected_artifact_path_error(artifact) is not None
 
@@ -496,8 +500,12 @@ class TestSeed:
             ("report.txt\x7f",),
             ("reports/summary,v2.json",),
             (r"docs\User Guide.md",),
+            (None,),
+            ("NONE", "report.txt"),
             "report.txt\n",
             "reports/summary,v2.json",
+            "NONE, report.txt",
+            "report.txt, NONE",
         ],
     )
     def test_expected_artifacts_reject_malformed_raw_entries(self, artifacts: object) -> None:
@@ -512,6 +520,20 @@ class TestSeed:
             AcceptanceCriterionSpec(
                 description="Command output contains READY",
                 output_assertion="READY",
+            )
+
+    def test_output_assertion_condition_phrase_requires_raw_verify_command(self) -> None:
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command exits successfully",
+                output_assertion="success",
+            )
+
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command exits successfully",
+                verify_command="NONE",
+                output_assertion="exit code 0",
             )
 
     def test_output_assertion_schema_documents_combined_command_output(self) -> None:

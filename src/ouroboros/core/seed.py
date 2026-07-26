@@ -61,6 +61,11 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
     }
 )
 _EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
+_PORTABLE_PATH_COMPONENT_MAX_BYTES = 255
+
+
+def _is_none_sentinel(value: str) -> bool:
+    return value.strip(" ").upper() == "NONE"
 
 
 def _windows_component_error(component: str) -> str | None:
@@ -79,6 +84,8 @@ def expected_artifact_path_error(artifact: str) -> str | None:
 
     if not artifact or any(ord(character) < 32 or ord(character) == 127 for character in artifact):
         return "contains an empty value or control character"
+    if _is_none_sentinel(artifact):
+        return "contains NONE mixed with artifact paths; use NONE only as the entire field"
     if "\\" in artifact:
         return "contains a backslash; use POSIX '/' separators"
     if "," in artifact:
@@ -101,6 +108,9 @@ def expected_artifact_path_error(artifact: str) -> str | None:
         component_error = _windows_component_error(component)
         if component_error is not None:
             return component_error
+    for component in posix_path.parts:
+        if len(component.encode()) > _PORTABLE_PATH_COMPONENT_MAX_BYTES:
+            return "contains a path component longer than 255 filesystem bytes"
     if any(character.isspace() for character in artifact):
         has_explicit_relative_structure = "/" in artifact or "\\" in artifact
         if not has_explicit_relative_structure:
@@ -114,7 +124,7 @@ def parse_expected_artifact_list(value: str) -> tuple[str, ...]:
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError("expected_artifacts entries cannot contain control characters")
     stripped = value.strip(" ")
-    if not stripped or stripped.upper() == "NONE":
+    if not stripped or _is_none_sentinel(stripped):
         return ()
     artifacts = tuple(item.strip(" ") for item in _EXPECTED_ARTIFACT_DELIMITER_RE.split(value))
     if any(not artifact for artifact in artifacts):
@@ -343,6 +353,27 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     )
     investment: InvestmentSpec | None = Field(default=None)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw_success_contract(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw_assertion = data.get("output_assertion")
+        if (
+            not isinstance(raw_assertion, str)
+            or not raw_assertion.strip(" ")
+            or _is_none_sentinel(raw_assertion)
+        ):
+            return data
+        raw_verify = data.get("verify_command")
+        if (
+            not isinstance(raw_verify, str)
+            or not raw_verify.strip(" ")
+            or _is_none_sentinel(raw_verify)
+        ):
+            raise ValueError("output_assertion requires verify_command")
+        return data
+
     @field_validator("description", mode="before")
     @classmethod
     def _strip_description(cls, value: Any) -> Any:
@@ -355,7 +386,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
-            if not stripped or stripped.upper() == "NONE":
+            if not stripped or _is_none_sentinel(stripped):
                 return None
             return stripped
         return value
@@ -365,7 +396,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _normalize_output_assertion(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
-            if not stripped or stripped.upper() == "NONE":
+            if not stripped or _is_none_sentinel(stripped):
                 return None
             if _OUTPUT_ASSERTION_CONDITION_RE.fullmatch(stripped):
                 return None
@@ -380,7 +411,9 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if isinstance(value, str):
             return parse_expected_artifact_list(value)
         if isinstance(value, list | tuple | set):
-            artifacts = tuple(str(item) for item in value)
+            if any(not isinstance(item, str) for item in value):
+                raise ValueError("expected_artifacts entries must be strings")
+            artifacts = tuple(value)
             if any(
                 not artifact
                 or any(ord(character) < 32 or ord(character) == 127 for character in artifact)

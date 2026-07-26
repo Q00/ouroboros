@@ -444,6 +444,8 @@ def test_grade_gate_rejects_windows_reserved_and_impossible_paths() -> None:
         r"D:folder\outside.txt",
         r"D:\outside.txt",
         r"\\server\share\outside.txt",
+        "a" * 256,
+        "docs/" + ("\u00e9" * 128),
     )
     invalid_spec = AcceptanceCriterionSpec.model_construct(
         description="Artifact exists",
