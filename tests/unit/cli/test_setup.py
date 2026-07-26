@@ -1355,9 +1355,10 @@ class TestClaudeSetup:
 
         assert registered is True
         assert claude_config.stat().st_mtime == mtime_before
-        assert json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"][
-            "ouroboros"
-        ] == entry
+        assert (
+            json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["ouroboros"]
+            == entry
+        )
 
     def test_non_utf8_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / ".claude"

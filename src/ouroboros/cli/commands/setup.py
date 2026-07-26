@@ -2458,7 +2458,9 @@ def _setup_claude(claude_path: str) -> bool:
             try:
                 mcp_config_path.unlink()
             except OSError as rollback_exc:
-                print_warning(f"Could not remove rolled-back Claude MCP registration: {rollback_exc}")
+                print_warning(
+                    f"Could not remove rolled-back Claude MCP registration: {rollback_exc}"
+                )
         print_warning(f"Could not write {config_path} — Claude setup aborted: {exc}")
         return False
 
