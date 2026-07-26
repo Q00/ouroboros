@@ -58,6 +58,7 @@ from ouroboros.orchestrator.runner import (
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.persistence.event_store import EventStore
 
 _LONG_WINDOW_429_ENCODINGS = tuple(
     (field, value)
@@ -1263,6 +1264,10 @@ class TestOrchestratorRunner:
                 type="result",
                 content="Usage limit reached. Please try again later.",
                 data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="durable-pause-policy",
+                ),
             )
 
         mock_adapter.execute_task = mock_execute
@@ -1584,7 +1589,7 @@ class TestOrchestratorRunner:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_before_pause", [False, True])
-    async def test_parallel_bounded_pause_resumes_through_original_owner(
+    async def test_parallel_bounded_pause_resume_uses_original_owner(
         self,
         failure_before_pause: bool,
         mock_adapter: MagicMock,
@@ -1605,10 +1610,11 @@ class TestOrchestratorRunner:
         )
         runner._run_verify_commands = False
         _enable_direct_bounded_routes(runner, mock_adapter)
+        case_suffix = "successor" if failure_before_pause else "initial"
         tracker = SessionTracker.create(
-            "execution-parallel-resume",
+            f"execution-parallel-resume-{case_suffix}",
             seed.metadata.seed_id,
-            session_id="session-parallel-resume",
+            session_id=f"session-parallel-resume-{case_suffix}",
         )
         tracker = _attach_live_process_local_contract(
             runner,
@@ -1663,6 +1669,7 @@ class TestOrchestratorRunner:
         mark_paused = AsyncMock(return_value=Result.ok(True))
         mark_completed = AsyncMock(return_value=Result.ok(None))
         analyze = AsyncMock(return_value=Result.ok(graph))
+        tool_catalog = assemble_session_tool_catalog([])
         with (
             patch(
                 "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
@@ -1671,6 +1678,17 @@ class TestOrchestratorRunner:
             patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
             patch.object(runner._session_repo, "mark_paused", mark_paused),
             patch.object(runner._session_repo, "mark_completed", mark_completed),
+            patch("ouroboros.orchestrator.runner.build_system_prompt", return_value="system"),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=([], None, tool_catalog)),
+            ),
+            patch.object(
+                runner,
+                "_bind_execution_tool_authority",
+                return_value=(tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY], False),
+            ),
             patch.object(
                 runner,
                 "_report_frugality_retrospective",
@@ -1682,9 +1700,10 @@ class TestOrchestratorRunner:
                 exec_id=tracker.execution_id,
                 tracker=tracker,
                 merged_tools=[],
-                tool_catalog=assemble_session_tool_catalog([]),
+                tool_catalog=tool_catalog,
                 system_prompt="system",
                 start_time=tracker.start_time,
+                execution_contract=tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
             )
             assert first.is_ok and first.value.success is False
 
@@ -1699,6 +1718,19 @@ class TestOrchestratorRunner:
                 }
             )
             direct_resume = AsyncMock(side_effect=AssertionError("direct owner entered"))
+            parallel_resume = AsyncMock(
+                return_value=Result.ok(
+                    OrchestratorResult(
+                        success=True,
+                        session_id=paused_tracker.session_id,
+                        execution_id=paused_tracker.execution_id,
+                        summary={},
+                        messages_processed=0,
+                        final_message="parallel owner resumed",
+                        duration_seconds=0.0,
+                    )
+                )
+            )
             with (
                 patch.object(
                     runner._session_repo,
@@ -1706,15 +1738,22 @@ class TestOrchestratorRunner:
                     AsyncMock(return_value=Result.ok(paused_tracker)),
                 ),
                 patch.object(runner, "_direct_resume_route_id", direct_resume),
+                patch.object(runner, "_execute_parallel", parallel_resume),
             ):
                 resumed = await runner.resume_session(paused_tracker.session_id, seed)
 
         assert resumed.is_ok and resumed.value.success is True
-        assert models == (
-            ["sonnet-x", "opus-x", "opus-x"] if failure_before_pause else ["sonnet-x", "sonnet-x"]
-        )
+        assert models == (["sonnet-x", "opus-x"] if failure_before_pause else ["sonnet-x"])
         direct_resume.assert_not_awaited()
+        parallel_resume.assert_awaited_once()
+        restored_plan = parallel_resume.await_args.kwargs["resume_execution_plan"]
+        assert tuple(node.index for node in restored_plan.nodes) == (0,)
+        assert tuple(stage.ac_indices for stage in restored_plan.stages) == ((0,),)
         assert analyze.await_count == 1
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
     @pytest.mark.asyncio
     async def test_parallel_resume_restores_externally_satisfied_partial_stage_state(
@@ -1902,6 +1941,143 @@ class TestOrchestratorRunner:
         assert (
             resumed_observations[0].data["observation"]["verifier_outcome"] == "attempt_succeeded"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("scenario", "expected_calls"),
+        [
+            ("initial_handleless_pause", 1),
+            ("successor_handleless_pause", 2),
+            ("pause_handle_persistence_failure", 1),
+            ("hard_block", 1),
+        ],
+    )
+    async def test_live_direct_nonreplayable_boundaries_finalize_blocked_without_pause(
+        self,
+        scenario: str,
+        expected_calls: int,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Any,
+    ) -> None:
+        """Every non-replayable direct boundary converges to one durable handoff."""
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'{scenario}.db'}")
+        await store.initialize()
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        provider_calls: list[dict[str, Any]] = []
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            provider_calls.append(dict(kwargs))
+            if scenario == "successor_handleless_pause" and len(provider_calls) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="evidence missing",
+                    data={"subtype": "error"},
+                )
+                return
+            if scenario == "hard_block":
+                yield AgentMessage(
+                    type="result",
+                    content="Permission denied by the host runtime.",
+                    data={"subtype": "error", "error_type": "PermissionError"},
+                )
+                return
+            if scenario == "pause_handle_persistence_failure":
+                yield AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="unpersisted-direct-pause",
+                        cwd=str(tmp_path),
+                    ),
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+            )
+
+        mock_adapter.execute_task = execute_task
+        execution_id = f"execution-{scenario}"
+        session_id = f"session-{scenario}"
+        original_track_progress = runner._session_repo.track_progress
+
+        async def track_progress(
+            tracked_session_id: str,
+            progress: dict[str, Any],
+        ) -> Any:
+            runtime = progress.get("runtime")
+            if (
+                scenario == "pause_handle_persistence_failure"
+                and isinstance(runtime, dict)
+                and runtime.get("native_session_id") == "unpersisted-direct-pause"
+            ):
+                return Result.err(PersistenceError("runtime progress unavailable"))
+            return await original_track_progress(tracked_session_id, progress)
+
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "track_progress",
+                    side_effect=track_progress,
+                ),
+                patch.object(
+                    runner,
+                    "_report_frugality_retrospective",
+                    AsyncMock(return_value=False),
+                ),
+            ):
+                result = await runner.execute_seed(
+                    seed,
+                    parallel=False,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                )
+
+            assert result.is_ok and result.value.success is False
+            assert len(provider_calls) == expected_calls
+            pause_events = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.route_paused",
+                limit=4,
+            )
+            assert pause_events == []
+            session = await runner._session_repo.reconstruct_session(session_id)
+            assert session.is_ok and session.value.status is SessionStatus.FAILED
+
+            finalizations = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.acceptance_finalized",
+                limit=3,
+            )
+            assert len(finalizations) == 1
+            assert finalizations[0].data["outcome"] == "blocked"
+            assert finalizations[0].data["disposition"] == "blocked"
+            assert finalizations[0].data["accepted"] is False
+
+            resumed = await runner.resume_session(session_id, seed)
+            assert resumed.is_err
+            assert len(provider_calls) == expected_calls
+        finally:
+            await store.close()
 
     @pytest.mark.asyncio
     async def test_direct_resumed_short_turn_cancellation_never_dispatches_successor(

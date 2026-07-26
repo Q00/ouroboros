@@ -132,6 +132,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     build_ac_runtime_scope,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
@@ -1542,6 +1543,52 @@ class OrchestratorRunner:
             classify_hard_precondition(message.content, message.data)
             or FailureClass.EVIDENCE_MISSING
         )
+
+    @staticmethod
+    def _has_exact_resumable_runtime_handle(runtime_handle: RuntimeHandle | None) -> bool:
+        """Return whether a pause can reconnect to an existing provider session."""
+
+        return bool(
+            runtime_handle is not None
+            and runtime_handle.can_resume
+            and not runtime_handle.is_terminal
+        )
+
+    async def _persist_exact_direct_pause_runtime_handle(
+        self,
+        *,
+        session_id: str,
+        runtime_handle: RuntimeHandle | None,
+        messages_processed: int,
+    ) -> bool:
+        """Durably bind a direct PAUSED transition to provider continuity."""
+
+        if not self._has_exact_resumable_runtime_handle(runtime_handle):
+            return False
+        assert runtime_handle is not None
+        progress: dict[str, Any] = {
+            "messages_processed": messages_processed,
+            "runtime": runtime_handle.to_session_state_dict(),
+            "runtime_backend": runtime_handle.backend,
+        }
+        if runtime_handle.backend == "claude" and runtime_handle.native_session_id:
+            progress["agent_session_id"] = runtime_handle.native_session_id
+        try:
+            persisted = await self._session_repo.track_progress(session_id, progress)
+        except Exception:
+            log.exception(
+                "orchestrator.runner.direct_pause_handle_persist_failed",
+                session_id=session_id,
+            )
+            return False
+        if persisted.is_err:
+            log.warning(
+                "orchestrator.runner.direct_pause_handle_persist_failed",
+                session_id=session_id,
+                error=str(persisted.error),
+            )
+            return False
+        return True
 
     async def _persist_direct_route_outcome(
         self,
@@ -8599,6 +8646,7 @@ class OrchestratorRunner:
             last_direct_final_message: AgentMessage | None = None
             direct_route_candidate: Any | None = None
             direct_bounded_routing = self._bounded_route_runtime_active()
+            direct_terminal_blocked = False
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -8619,6 +8667,7 @@ class OrchestratorRunner:
                 nonlocal tracker
                 nonlocal direct_route_candidate
                 nonlocal last_direct_final_message
+                nonlocal direct_terminal_blocked
 
                 active_runtime_handle = resume_handle
                 self._announce_param_degradations(
@@ -8803,6 +8852,25 @@ class OrchestratorRunner:
                         expected_root_indices=range(len(seed.acceptance_criteria)),
                     )
 
+                if (
+                    recoverable_failure_pause is not None
+                    and direct_bounded_routing
+                    and not await self._persist_exact_direct_pause_runtime_handle(
+                        session_id=tracker.session_id,
+                        runtime_handle=active_runtime_handle,
+                        messages_processed=messages_processed,
+                    )
+                ):
+                    # A quota signal without provider continuity cannot authorize
+                    # PAUSED: retrying it would be a second fresh provider effect.
+                    recoverable_failure_pause = None
+                    direct_terminal_blocked = True
+                    success = False
+                    final_message = (
+                        f"{final_message}\nRecoverable provider pause rejected: no exact "
+                        "resumable handle is available; human handoff required."
+                    )
+
                 return active_runtime_handle
 
             def _build_recovery_snapshot() -> RecoverySnapshot:
@@ -8911,9 +8979,9 @@ class OrchestratorRunner:
                         prior_route_ids=direct_route_history,
                         candidate=direct_route_candidate,
                         success=success,
-                        failure_class=self._classify_direct_route_failure(
-                            last_direct_final_message
-                        ),
+                        failure_class=self._classify_direct_route_failure(last_direct_final_message)
+                        if not direct_terminal_blocked
+                        else FailureClass.BLOCKED,
                     )
                     cancelled_result = await self._handle_requested_cancellation(
                         session_id=tracker.session_id,
@@ -8926,6 +8994,7 @@ class OrchestratorRunner:
                         break
                     if success or decision is None or decision.blocked:
                         if decision is not None and decision.blocked:
+                            direct_terminal_blocked = True
                             final_message = (
                                 f"{final_message}\nRoute escalation stopped: "
                                 f"{decision.reason.value}; human handoff required."
@@ -9085,7 +9154,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     session_id=tracker.session_id,
                     terminal_status=SessionStatus.FAILED.value,
-                    default_outcome="failed",
+                    default_outcome="blocked" if direct_terminal_blocked else "failed",
                     execution_contract=execution_contract,
                 )
                 durable_terminal_status = await self._persist_session_terminal_status(
@@ -10513,6 +10582,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
             resume_route_state: _DirectRouteResumeState | None = None
             last_resume_final_message: AgentMessage | None = None
+            resume_terminal_blocked = False
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
@@ -10527,6 +10597,21 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     session_id=session_id,
                 )
+                if resume_route_state is not None and not self._has_exact_resumable_runtime_handle(
+                    runtime_handle
+                ):
+                    raise OrchestratorError(
+                        message=(
+                            "Refusing to replay a paused direct route without its exact "
+                            "resumable provider handle"
+                        ),
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                            "resume_blocked": "provider_handle_unavailable",
+                            "human_handoff_required": True,
+                        },
+                    )
                 effort_kwargs = await self._route_call_effort(
                     execution_id=tracker.execution_id,
                     session_id=session_id,
@@ -10672,6 +10757,23 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 ],
                             )
 
+                if (
+                    recoverable_resume_failure is not None
+                    and resume_route_state is not None
+                    and not await self._persist_exact_direct_pause_runtime_handle(
+                        session_id=session_id,
+                        runtime_handle=live_runtime_handle,
+                        messages_processed=messages_processed,
+                    )
+                ):
+                    recoverable_resume_failure = None
+                    resume_terminal_blocked = True
+                    success = False
+                    final_message = (
+                        f"{final_message}\nRecoverable provider pause rejected: no exact "
+                        "resumable handle is available; human handoff required."
+                    )
+
                 if resume_route_state is not None and cancelled_result is None:
                     cancelled_result = await self._handle_requested_cancellation(
                         session_id=session_id,
@@ -10705,7 +10807,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     prior_route_ids=resume_route_state.prior_route_ids,
                     candidate=resume_route_state.candidate,
                     success=success,
-                    failure_class=self._classify_direct_route_failure(last_resume_final_message),
+                    failure_class=(
+                        FailureClass.BLOCKED
+                        if resume_terminal_blocked
+                        else self._classify_direct_route_failure(last_resume_final_message)
+                    ),
                 )
                 cancelled_result = await self._handle_requested_cancellation(
                     session_id=session_id,
@@ -10802,6 +10908,19 @@ Note: This is a resumed session. Please continue from where execution was interr
                     if cancelled_result is not None:
                         break
                     if recoverable_resume_failure is not None:
+                        if not await self._persist_exact_direct_pause_runtime_handle(
+                            session_id=session_id,
+                            runtime_handle=live_runtime_handle,
+                            messages_processed=messages_processed,
+                        ):
+                            recoverable_resume_failure = None
+                            resume_terminal_blocked = True
+                            success = False
+                            final_message = (
+                                f"{final_message}\nRecoverable provider pause rejected: no exact "
+                                "resumable handle is available; human handoff required."
+                            )
+                    if recoverable_resume_failure is not None:
                         from ouroboros.events.base import BaseEvent
 
                         await self._event_store.append(
@@ -10853,6 +10972,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                         expected_root_indices=range(len(seed.acceptance_criteria)),
                     )
                 if not success and decision is not None and decision.blocked:
+                    resume_terminal_blocked = True
                     final_message = (
                         f"{final_message}\nRoute escalation stopped: "
                         f"{decision.reason.value}; human handoff required."
@@ -10945,7 +11065,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     session_id=session_id,
                     terminal_status=SessionStatus.FAILED.value,
-                    default_outcome="failed",
+                    default_outcome="blocked" if resume_terminal_blocked else "failed",
                     execution_contract=execution_contract,
                 )
                 durable_terminal_status = await self._persist_session_terminal_status(

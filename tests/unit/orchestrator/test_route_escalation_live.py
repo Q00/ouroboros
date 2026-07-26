@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -58,6 +59,7 @@ from ouroboros.orchestrator.route_escalation import (
 )
 from ouroboros.orchestrator.route_policy import RouteRequirements
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.event_store import EventStore
 
 
 def _economics() -> EconomicsConfig:
@@ -169,6 +171,40 @@ def _executor(
     return executor, store, events
 
 
+def _live_executor(
+    *,
+    adapter: Any,
+    event_store: EventStore,
+    working_directory: str,
+    process_local_resume_nonce: str,
+    max_concurrent: int = 3,
+) -> ParallelACExecutor:
+    """Build the production provider boundary against a real event store."""
+
+    economics = _economics()
+    router = build_model_router(
+        economics,
+        runtime_backend="claude",
+        base_tier_override="frugal",
+    )
+    assert router is not None
+    adapter.working_directory = working_directory
+    return ParallelACExecutor(
+        adapter=adapter,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_concurrent=max_concurrent,
+        task_cwd=working_directory,
+        run_verify_commands=False,
+        model_router=router,
+        route_economics=economics,
+        ac_retry_attempts=99,
+        cross_harness_redispatch=False,
+        process_local_resume_nonce=process_local_resume_nonce,
+    )
+
+
 def test_larger_legacy_depth_disables_bounded_routes_with_native_configuration() -> None:
     """Depth compatibility cannot accidentally publish Routing D replay authority."""
 
@@ -241,6 +277,19 @@ def _failed(executor: ParallelACExecutor, route_id: str) -> ACExecutionResult:
             failure_class=FailureClass.EVIDENCE_MISSING.value,
         ),
         route_candidate=_candidate(executor, route_id),
+    )
+
+
+def _paused_route_handle(marker: str = "a") -> RuntimeHandle:
+    return RuntimeHandle(
+        backend="claude",
+        native_session_id=f"paused-route-{marker}",
+        cwd="/tmp/project",
+        metadata={
+            "session_scope_id": f"execution-1-paused-route-{marker}",
+            "ac_dispatch_id": marker * 32,
+            "ac_capsule_fingerprint": "sha256:" + marker * 64,
+        },
     )
 
 
@@ -659,6 +708,7 @@ async def test_parallel_usage_limit_pauses_before_route_observation_or_escalatio
                     ),
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
+                runtime_handle=_paused_route_handle(),
             )
         ]
 
@@ -705,6 +755,11 @@ async def test_parallel_quota_cancels_waiting_sibling_before_provider_effect(
             type="result",
             content="Usage limit reached. Please try again later.",
             data={"subtype": "error", "error_type": "CodexCliError"},
+            resume_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id="batch-quota-owner",
+                cwd=str(tmp_path),
+            ),
         )
 
     executor, _store, events = _executor(
@@ -769,6 +824,7 @@ async def test_parallel_quota_preempts_completed_sibling_composite_recovery() ->
                 final_message=pause_message.content,
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
+                runtime_handle=_paused_route_handle(),
             ),
         ]
 
@@ -837,6 +893,7 @@ async def test_supported_quota_metadata_never_authorizes_a_route_successor(
                     ),
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
+                runtime_handle=_paused_route_handle(),
             )
         ]
 
@@ -898,6 +955,7 @@ async def test_hostile_quota_mapping_protocol_stops_after_one_route() -> None:
                     ),
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
+                runtime_handle=_paused_route_handle(),
             )
         ]
 
@@ -956,6 +1014,7 @@ async def test_quota_metadata_population_overflow_stops_after_one_route() -> Non
                     ),
                 ),
                 route_candidate=_candidate(executor, "compat:claude:frugal"),
+                runtime_handle=_paused_route_handle(),
             )
         ]
 
@@ -1465,6 +1524,7 @@ async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_rout
                 ),
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=cheap,
+                runtime_handle=_paused_route_handle(),
             ),
         ]
 
@@ -1492,7 +1552,9 @@ async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_rout
     async def resumed_round(**kwargs: Any) -> list[ACExecutionResult]:
         indices = kwargs["batch_indices"]
         resumed_indices.append(indices)
-        assert kwargs["route_overrides"][1] == cheap
+        resume_state = kwargs["route_resume_states"][1]
+        assert resume_state.candidate == cheap
+        assert resume_state.expected_route_candidate is None
         return [
             ACExecutionResult(
                 ac_index=1,
@@ -1519,6 +1581,468 @@ async def test_parallel_pause_resume_preserves_successful_sibling_and_exact_rout
 
     assert resumed_indices == [[1]]
     assert all(isinstance(result, ACExecutionResult) and result.success for result in resumed)
+
+
+@pytest.mark.asyncio
+async def test_live_first_route_pause_resumes_same_capsule_and_provider_handle(
+    tmp_path: Any,
+) -> None:
+    """The initial route is replayed without inventing successor authority."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'first-route-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[dict[str, Any]] = []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="first-route-provider",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            return
+        yield AgentMessage(
+            type="result",
+            content="resumed first route",
+            data={"subtype": "success"},
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "1" * 32
+    seed = _seed()
+    run_kwargs = {
+        "seed": seed,
+        "batch_executable": [0],
+        "session_id": "session-live-first-pause",
+        "execution_id": "execution-live-first-pause",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0},
+        "execution_counters": None,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        assert isinstance(first[0], ACExecutionResult) and not first[0].success
+
+        pauses = await store.query_execution_related_events(
+            "execution-live-first-pause",
+            event_type="execution.ac.route_paused",
+            limit=4,
+        )
+        assert len(pauses) == 1
+        resume_state = pauses[0].data["resume_state"]
+        assert resume_state["retry_attempt"] == 0
+        assert resume_state["retry_prompt_extra"] == ""
+        assert resume_state["route_id_override"] is None
+        assert resume_state["expected_route_candidate"] is None
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert isinstance(resumed[0], ACExecutionResult) and resumed[0].success
+        assert [call["model"] for call in calls] == ["haiku-x", "haiku-x"]
+        restored_handle = calls[1]["resume_handle"]
+        assert restored_handle.native_session_id == "first-route-provider"
+        assert (
+            restored_handle.metadata["ac_capsule_fingerprint"]
+            == resume_state["capsule_fingerprint"]
+        )
+        assert calls[1]["prompt"] == calls[0]["prompt"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_repeated_quota_restores_latest_unconsumed_provider_boundary(
+    tmp_path: Any,
+) -> None:
+    """Newest-first storage cannot roll a repeated pause back to an older dispatch."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'repeated-route-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[dict[str, Any]] = []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        calls.append(dict(kwargs))
+        if len(calls) <= 2:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="repeated-quota-provider",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            return
+        yield AgentMessage(
+            type="result",
+            content="resumed after the second quota window",
+            data={"subtype": "success"},
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "5" * 32
+    seed = _seed()
+    run_kwargs = {
+        "seed": seed,
+        "batch_executable": [0],
+        "session_id": "session-live-repeated-pause",
+        "execution_id": "execution-live-repeated-pause",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0},
+        "execution_counters": None,
+    }
+    try:
+        for _pause_number in range(2):
+            executor = _live_executor(
+                adapter=adapter,
+                event_store=store,
+                working_directory=str(tmp_path),
+                process_local_resume_nonce=nonce,
+            )
+            paused = await executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+            assert isinstance(paused[0], ACExecutionResult) and not paused[0].success
+
+        pauses = await store.query_execution_related_events(
+            "execution-live-repeated-pause",
+            event_type="execution.ac.route_paused",
+            limit=4,
+        )
+        assert len(pauses) == 2
+        latest_resume_state = pauses[0].data["resume_state"]
+        assert latest_resume_state["dispatch_id"] != pauses[1].data["resume_state"]["dispatch_id"]
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert isinstance(resumed[0], ACExecutionResult) and resumed[0].success
+        assert len(calls) == 3
+        assert calls[2]["resume_handle"].native_session_id == "repeated-quota-provider"
+        runtime_events = await store.replay(
+            "execution",
+            latest_resume_state["runtime_scope_id"],
+        )
+        resumed_dispatch = [
+            event for event in runtime_events if event.type == "execution.ac.attempt.dispatched"
+        ][-1]
+        assert (
+            resumed_dispatch.data["previous_ac_dispatch_id"] == latest_resume_state["dispatch_id"]
+        )
+        assert (
+            calls[2]["resume_handle"].metadata["ac_dispatch_id"]
+            == resumed_dispatch.data["ac_dispatch_id"]
+        )
+        assert calls[0]["prompt"] == calls[1]["prompt"] == calls[2]["prompt"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_successor_route_pause_restores_retry_prompt_and_provider_handle(
+    tmp_path: Any,
+) -> None:
+    """An escalated pause replays the exact successor capsule and provider turn."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'successor-route-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[dict[str, Any]] = []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            yield AgentMessage(
+                type="result",
+                content="evidence missing",
+                data={"subtype": "error"},
+            )
+            return
+        if len(calls) == 2:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="successor-route-provider",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            return
+        yield AgentMessage(
+            type="result",
+            content="resumed successor route",
+            data={"subtype": "success"},
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "2" * 32
+    seed = _seed()
+    run_kwargs = {
+        "seed": seed,
+        "batch_executable": [0],
+        "session_id": "session-live-successor-pause",
+        "execution_id": "execution-live-successor-pause",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0},
+        "execution_counters": None,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        assert isinstance(first[0], ACExecutionResult) and not first[0].success
+
+        pauses = await store.query_execution_related_events(
+            "execution-live-successor-pause",
+            event_type="execution.ac.route_paused",
+            limit=4,
+        )
+        assert len(pauses) == 1
+        resume_state = pauses[0].data["resume_state"]
+        assert resume_state["retry_attempt"] == 1
+        assert resume_state["retry_prompt_extra"]
+        assert resume_state["route_id_override"] == "compat:claude:standard"
+        assert resume_state["expected_route_candidate"]["route_id"] == ("compat:claude:standard")
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert isinstance(resumed[0], ACExecutionResult) and resumed[0].success
+        assert [call["model"] for call in calls] == ["haiku-x", "sonnet-x", "sonnet-x"]
+        restored_handle = calls[2]["resume_handle"]
+        assert restored_handle.native_session_id == "successor-route-provider"
+        assert (
+            restored_handle.metadata["ac_capsule_fingerprint"]
+            == resume_state["capsule_fingerprint"]
+        )
+        assert calls[2]["prompt"] == calls[1]["prompt"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_entered_sibling_becomes_durable_uncertain_handoff(
+    tmp_path: Any,
+) -> None:
+    """Only a sibling cancelled before authority entry may remain pending."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'entered-sibling-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    sibling_entered = asyncio.Event()
+    never_release_sibling = asyncio.Event()
+    calls: list[tuple[str, RuntimeHandle | None]] = []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        prompt = kwargs["prompt"]
+        runtime_handle = kwargs.get("resume_handle")
+        ac_name = "first" if "## Your Task (AC 1)\nship first" in prompt else "second"
+        calls.append((ac_name, runtime_handle))
+        if ac_name == "first":
+            if runtime_handle is not None and runtime_handle.resume_session_id is not None:
+                yield AgentMessage(
+                    type="result",
+                    content="quota owner resumed",
+                    data={"subtype": "success"},
+                )
+                return
+            await sibling_entered.wait()
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="parallel-quota-owner",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            return
+        sibling_entered.set()
+        await never_release_sibling.wait()
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "3" * 32
+    seed = _multi_seed()
+    run_kwargs = {
+        "seed": seed,
+        "batch_executable": [0, 1],
+        "session_id": "session-live-entered-sibling",
+        "execution_id": "execution-live-entered-sibling",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0, 1: 0},
+        "execution_counters": None,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=2,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+        assert isinstance(first[0], ACExecutionResult) and not first[0].success
+        assert isinstance(first[1], ACExecutionResult)
+        assert first[1].outcome is ACExecutionOutcome.BLOCKED
+
+        handoffs = await store.query_execution_related_events(
+            "execution-live-entered-sibling",
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=3,
+        )
+        assert [event.data["root_ac_index"] for event in handoffs] == [1]
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=2,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert isinstance(resumed[0], ACExecutionResult) and resumed[0].success
+        assert isinstance(resumed[1], ACExecutionResult)
+        assert resumed[1].outcome is ACExecutionOutcome.BLOCKED
+        assert [name for name, _handle in calls].count("second") == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
+    tmp_path: Any,
+) -> None:
+    """A sibling held behind the semaphore has no provider effect to hand off."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'pre-entry-sibling-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    calls: list[str] = []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        ac_name = "first" if "## Your Task (AC 1)\nship first" in kwargs["prompt"] else "second"
+        calls.append(ac_name)
+        runtime_handle = kwargs.get("resume_handle")
+        if ac_name == "first" and (
+            runtime_handle is None or runtime_handle.resume_session_id is None
+        ):
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="sequential-quota-owner",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            return
+        yield AgentMessage(
+            type="result",
+            content=f"{ac_name} completed",
+            data={"subtype": "success"},
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    nonce = "4" * 32
+    seed = _multi_seed()
+    run_kwargs = {
+        "seed": seed,
+        "batch_executable": [0, 1],
+        "session_id": "session-live-pre-entry-sibling",
+        "execution_id": "execution-live-pre-entry-sibling",
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0, 1: 0},
+        "execution_counters": None,
+    }
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=1,
+        )
+        await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        handoffs = await store.query_execution_related_events(
+            "execution-live-pre-entry-sibling",
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=3,
+        )
+        assert handoffs == []
+        assert calls == ["first"]
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=1,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert all(isinstance(result, ACExecutionResult) and result.success for result in resumed)
+        assert calls == ["first", "first", "second"]
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -1579,6 +2103,7 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
                 ),
                 outcome=ACExecutionOutcome.FAILED,
                 route_candidate=cheap,
+                runtime_handle=_paused_route_handle(),
             ),
         ]
 
@@ -2225,6 +2750,7 @@ async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> 
             success=False,
             outcome=ACExecutionOutcome.FAILED,
             route_candidate=cheap,
+            runtime_handle=_paused_route_handle(),
         ),
         root_ac_index=0,
         session_id="session-1",
@@ -2267,21 +2793,26 @@ async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> N
     observation, decision = _durable_first_failure(executor, seed)
     assert decision.selected is not None
     route_event = _route_event(seed, observation=observation, decision=decision)
-    drifted = replace(decision.selected, effort="high")
     await executor._persist_parallel_route_pause(
         seed=seed,
         result=ACExecutionResult(
             ac_index=0,
             ac_content="ship it",
             success=False,
-            route_candidate=drifted,
+            retry_attempt=1,
+            route_candidate=decision.selected,
+            runtime_handle=_paused_route_handle(),
         ),
         root_ac_index=0,
         session_id="session-1",
         execution_id="execution-1",
         prior_route_ids=(observation.route_id,),
+        retry_prompt_extra="durable retry context",
+        route_id_override=decision.selected.route_id,
+        expected_route_candidate=decision.selected,
     )
     pause_event = next(event for event in events if event.type == "execution.ac.route_paused")
+    pause_event.data["route"] = replace(decision.selected, effort="high").to_contract_data()
     judgment = _judgment_for_route_event(route_event)
 
     async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
@@ -2295,7 +2826,7 @@ async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> N
         return []
 
     store.query_execution_related_events.side_effect = query
-    with pytest.raises(RuntimeError, match="durable successor snapshot"):
+    with pytest.raises(RuntimeError, match="durable successor capsule inputs"):
         await executor._load_bounded_route_resume_state(
             seed=seed,
             execution_id="execution-1",
@@ -2379,6 +2910,7 @@ async def test_parallel_route_replay_rejects_unknown_envelope_fields(
                 ac_content="ship it",
                 success=False,
                 route_candidate=candidate,
+                runtime_handle=_paused_route_handle(),
             ),
             root_ac_index=0,
             session_id="session-1",
@@ -2413,6 +2945,7 @@ async def test_parallel_pause_history_is_bounded_before_envelope_traversal() -> 
             ac_content="ship it",
             success=False,
             route_candidate=candidate,
+            runtime_handle=_paused_route_handle(),
         ),
         root_ac_index=0,
         session_id="session-1",

@@ -603,6 +603,14 @@ The Foundation A implementation must demonstrate all of the following:
     lock before the retained runner can produce an effect, even when the
     caller passes `use_worktree=false`; that flag cannot bypass authoritative
     workspace exclusion, and missing restoration fails closed before claim.
+86. a direct Routing D quota boundary publishes `route_paused` and `PAUSED`
+    only after a nonterminal provider resume handle is durably stored; missing,
+    terminal, or unpersisted continuity becomes one `BLOCKED` Final Gate handoff
+    and cannot authorize a fresh provider call on resume.
+87. parallel quota cancellation leaves only pre-entry siblings pending; every
+    sibling cancelled after execution-authority entry seals its dispatch and
+    persists an uncertain-effect `BLOCKED` handoff that replay treats as
+    terminal human ownership.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

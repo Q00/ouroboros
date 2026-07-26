@@ -405,7 +405,33 @@ _PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
         "attempt_index",
         "prior_route_ids",
         "route",
+        "resume_state",
         "recoverable_pause",
+        "final_acceptance_declared",
+    }
+)
+_PARALLEL_ROUTE_PAUSE_RESUME_KEYS = frozenset(
+    {
+        "retry_attempt",
+        "retry_prompt_extra",
+        "sibling_acs",
+        "route_id_override",
+        "expected_route_candidate",
+        "runtime_scope_id",
+        "dispatch_id",
+        "capsule_fingerprint",
+    }
+)
+_PARALLEL_UNCERTAIN_HANDOFF_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "semantic_ac_key",
+        "call_site",
+        "reason",
+        "human_handoff_required",
         "final_acceptance_declared",
     }
 )
@@ -494,6 +520,21 @@ class _PartialCompositeResumeState:
     paused_runtime_scope_id: str | None
     paused_dispatch_id: str | None
     paused_capsule_fingerprint: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ParallelRouteResumeState:
+    """Exact capsule-bearing inputs for one paused top-level route attempt."""
+
+    candidate: RouteCandidate
+    retry_attempt: int
+    retry_prompt_extra: str
+    sibling_acs: tuple[_SiblingACRef, ...]
+    route_id_override: str | None
+    expected_route_candidate: RouteCandidate | None
+    runtime_scope_id: str
+    dispatch_id: str
+    capsule_fingerprint: str
 
 
 if TYPE_CHECKING:
@@ -1832,6 +1873,10 @@ class _BatchInterruptedForRecoverablePause(RuntimeError):
     """Internal marker for an AC stopped before a shared-quota provider effect."""
 
 
+class _BatchEnteredAtRecoverablePause(RuntimeError):
+    """Internal marker for an AC cancelled after entering execution authority."""
+
+
 def _canonical_result_context(
     result: ACExecutionResult,
     *,
@@ -2855,6 +2900,7 @@ class ParallelACExecutor:
         self._checkpoint_store = checkpoint_store
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
         self._partial_composite_resumes: dict[str, _PartialCompositeResumeState] = {}
+        self._parallel_route_resumes: dict[int, _ParallelRouteResumeState] = {}
         self._execution_counters_lock = asyncio.Lock()
         self._resolved_backend_limits = resolved_backend_limits or resolve_backend_limits(
             getattr(adapter, "runtime_backend", None)
@@ -3625,6 +3671,7 @@ class ParallelACExecutor:
         execution_counters: dict[str, int] | None = None,
         retry_prompts: dict[int, str] | None = None,
         route_overrides: dict[int, RouteCandidate] | None = None,
+        route_resume_states: Mapping[int, _ParallelRouteResumeState] | None = None,
         same_runtime_budget_exhausted: bool = True,
         force_legacy_routing: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
@@ -3650,6 +3697,7 @@ class ParallelACExecutor:
         async def _run_ac(idx: int, ac_idx: int) -> None:
             with anyio.CancelScope() as sibling_scope:
                 sibling_cancel_scopes[idx] = sibling_scope
+                execution_authority_entered = False
                 try:
                     if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
                         batch_results[idx] = _BatchInterruptedForRecoverablePause(
@@ -3667,7 +3715,25 @@ class ParallelACExecutor:
                             )
                             return
                         ac_criterion = seed.acceptance_criteria[ac_idx]
-                        expected_route = (route_overrides or {}).get(ac_idx)
+                        resume_state = (route_resume_states or {}).get(ac_idx)
+                        expected_route = (
+                            resume_state.expected_route_candidate
+                            if resume_state is not None
+                            else (route_overrides or {}).get(ac_idx)
+                        )
+                        route_id_override = (
+                            resume_state.route_id_override
+                            if resume_state is not None
+                            else expected_route.route_id
+                            if expected_route is not None
+                            else None
+                        )
+                        attempt_siblings = (
+                            list(resume_state.sibling_acs)
+                            if resume_state is not None
+                            else sibling_acs
+                        )
+                        execution_authority_entered = True
                         result = await _invoke_execution_authority_entry(
                             self,
                             _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
@@ -3681,16 +3747,29 @@ class ParallelACExecutor:
                             depth=0,
                             execution_id=execution_id,
                             level_contexts=level_contexts,
-                            sibling_acs=sibling_acs,
+                            sibling_acs=attempt_siblings,
                             retry_attempt=ac_retry_attempts[ac_idx],
                             execution_counters=execution_counters,
-                            retry_prompt_extra=(retry_prompts or {}).get(ac_idx, ""),
-                            route_id_override=(
-                                expected_route.route_id if expected_route is not None else None
+                            retry_prompt_extra=(
+                                resume_state.retry_prompt_extra
+                                if resume_state is not None
+                                else (retry_prompts or {}).get(ac_idx, "")
                             ),
+                            route_id_override=route_id_override,
                             expected_route_candidate=expected_route,
                             force_legacy_routing=force_legacy_routing,
                             same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                            expected_resume_dispatch_id=(
+                                resume_state.dispatch_id if resume_state is not None else None
+                            ),
+                            expected_resume_capsule_fingerprint=(
+                                resume_state.capsule_fingerprint
+                                if resume_state is not None
+                                else None
+                            ),
+                            expected_resume_runtime_scope_id=(
+                                resume_state.runtime_scope_id if resume_state is not None else None
+                            ),
                             ac_spec=(
                                 ac_criterion
                                 if isinstance(ac_criterion, AcceptanceCriterionSpec)
@@ -3718,7 +3797,12 @@ class ParallelACExecutor:
                             and sibling_scope.cancel_called
                             and recoverable_pause_detected.is_set()
                         ):
-                            batch_results[idx] = _BatchInterruptedForRecoverablePause(
+                            marker_type = (
+                                _BatchEnteredAtRecoverablePause
+                                if execution_authority_entered
+                                else _BatchInterruptedForRecoverablePause
+                            )
+                            batch_results[idx] = marker_type(
                                 "batch stopped at a recoverable provider quota boundary"
                             )
                             return
@@ -6020,7 +6104,9 @@ class ParallelACExecutor:
         )
 
         node_decision = self._decomposition_decisions.get(node_identity.node_id)
-        durable_route_proves_atomic = expected_route_candidate is not None and not is_sub_ac
+        durable_route_proves_atomic = (
+            expected_route_candidate is not None or expected_resume_dispatch_id is not None
+        ) and not is_sub_ac
         if durable_route_proves_atomic:
             if (
                 node_decision is not None
@@ -7531,7 +7617,7 @@ Respond with either ATOMIC or the structured JSON object only.
             expected_resume_capsule_fingerprint is not None
             and capsule.fingerprint != expected_resume_capsule_fingerprint
         ):
-            raise RuntimeError("paused composite child capsule fingerprint drifted")
+            raise RuntimeError("paused AC capsule fingerprint drifted")
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -7580,7 +7666,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 or persisted_metadata.get("ac_capsule_fingerprint")
                 != expected_resume_capsule_fingerprint
             ):
-                raise RuntimeError("paused composite child provider boundary drifted")
+                raise RuntimeError("paused AC provider boundary drifted")
         if persisted_runtime_handle is not None:
             self._remember_ac_runtime_handle(
                 ac_index,
@@ -9580,14 +9666,54 @@ Respond with either ATOMIC or the structured JSON object only.
         session_id: str,
         execution_id: str,
         prior_route_ids: tuple[str, ...],
+        retry_prompt_extra: str = "",
+        sibling_acs: tuple[_SiblingACRef, ...] = (),
+        route_id_override: str | None = None,
+        expected_route_candidate: RouteCandidate | None = None,
     ) -> None:
-        """Bind a recoverable quota pause to its exact unconsumed route."""
+        """Bind a quota pause to the exact capsule and resumable provider boundary."""
 
         from ouroboros.events.base import BaseEvent
 
         candidate = result.route_candidate
         if candidate is None:
             raise RuntimeError("bounded route pause lost its active route candidate")
+        runtime_handle = result.runtime_handle
+        runtime_metadata = runtime_handle.metadata if runtime_handle is not None else {}
+        runtime_scope_id = runtime_metadata.get("session_scope_id")
+        dispatch_id = runtime_metadata.get("ac_dispatch_id")
+        capsule_fingerprint = runtime_metadata.get("ac_capsule_fingerprint")
+        if (
+            runtime_handle is None
+            or not self._is_resumable_runtime_handle(runtime_handle)
+            or not isinstance(runtime_scope_id, str)
+            or not runtime_scope_id
+            or not isinstance(dispatch_id, str)
+            or len(dispatch_id) != 32
+            or any(char not in "0123456789abcdef" for char in dispatch_id)
+            or not isinstance(capsule_fingerprint, str)
+            or len(capsule_fingerprint) != 71
+            or not capsule_fingerprint.startswith("sha256:")
+            or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
+        ):
+            raise RuntimeError("parallel route pause has no exact resumable provider boundary")
+        if result.retry_attempt != len(prior_route_ids):
+            raise RuntimeError("parallel route pause retry attempt crossed route history")
+        if len(retry_prompt_extra) > 16_384:
+            raise RuntimeError("parallel route pause retry prompt exceeds its durable bound")
+        if len(sibling_acs) > len(seed.acceptance_criteria) or any(
+            type(index) is not int
+            or index < 0
+            or index >= len(seed.acceptance_criteria)
+            or content != ac_text(seed.acceptance_criteria[index])
+            for index, content in sibling_acs
+        ):
+            raise RuntimeError("parallel route pause has an invalid sibling population")
+        if prior_route_ids:
+            if route_id_override != candidate.route_id or expected_route_candidate != candidate:
+                raise RuntimeError("parallel successor pause lost its exact route override")
+        elif route_id_override is not None or expected_route_candidate is not None:
+            raise RuntimeError("parallel initial pause invented a route override")
         criterion = seed.acceptance_criteria[root_ac_index]
         semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
         await self._event_store.append(
@@ -9596,7 +9722,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 aggregate_type="execution",
                 aggregate_id=execution_id or session_id,
                 data={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": root_ac_index,
@@ -9611,7 +9737,57 @@ Respond with either ATOMIC or the structured JSON object only.
                     "attempt_index": len(prior_route_ids),
                     "prior_route_ids": list(prior_route_ids),
                     "route": candidate.to_contract_data(),
+                    "resume_state": {
+                        "retry_attempt": result.retry_attempt,
+                        "retry_prompt_extra": retry_prompt_extra,
+                        "sibling_acs": [
+                            {"ac_index": index, "content": content}
+                            for index, content in sibling_acs
+                        ],
+                        "route_id_override": route_id_override,
+                        "expected_route_candidate": (
+                            expected_route_candidate.to_contract_data()
+                            if expected_route_candidate is not None
+                            else None
+                        ),
+                        "runtime_scope_id": runtime_scope_id,
+                        "dispatch_id": dispatch_id,
+                        "capsule_fingerprint": capsule_fingerprint,
+                    },
                     "recoverable_pause": True,
+                    "final_acceptance_declared": False,
+                },
+            )
+        )
+
+    async def _persist_parallel_uncertain_handoff(
+        self,
+        *,
+        seed: Seed,
+        root_ac_index: int,
+        session_id: str,
+        execution_id: str,
+    ) -> None:
+        """Declare human ownership for a sibling cancelled after execution entry."""
+
+        from ouroboros.events.base import BaseEvent
+
+        criterion = seed.acceptance_criteria[root_ac_index]
+        semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.uncertain_handoff_required",
+                aggregate_type="execution",
+                aggregate_id=execution_id or session_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": root_ac_index,
+                    "semantic_ac_key": semantic_ac_key,
+                    "call_site": "parallel",
+                    "reason": "sibling_cancelled_after_execution_authority_entry",
+                    "human_handoff_required": True,
                     "final_acceptance_declared": False,
                 },
             )
@@ -10270,6 +10446,7 @@ Respond with either ATOMIC or the structured JSON object only.
         bounded_streams = {
             "execution.ac.route_observed": root_ac_count * MAX_ROUTE_ATTEMPTS + 1,
             "execution.ac.route_paused": root_ac_count * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1,
+            "execution.ac.uncertain_handoff_required": root_ac_count + 1,
             "execution.ac.composite_completed": (_MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1),
             "execution.ac.composite_paused": _MAX_PARALLEL_COMPOSITE_PAUSE_EVENTS + 1,
         }
@@ -10295,6 +10472,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 if event_type in {
                     "execution.ac.route_observed",
                     "execution.ac.route_paused",
+                    "execution.ac.uncertain_handoff_required",
                     "execution.ac.composite_completed",
                     "execution.ac.composite_paused",
                 }:
@@ -10422,7 +10600,11 @@ Respond with either ATOMIC or the structured JSON object only.
             results[positions[ac_idx]] = cached_result
         for ac_idx, history in histories.items():
             ac_retry_attempts[ac_idx] = len(history)
-        retry_prompts: dict[int, str] = {}
+        retry_prompts: dict[int, str] = {
+            ac_idx: state.retry_prompt_extra
+            for ac_idx, state in self._parallel_route_resumes.items()
+            if ac_idx in pending
+        }
 
         while pending:
             await self._raise_if_parallel_cancellation_requested(
@@ -10443,6 +10625,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 execution_counters=execution_counters,
                 retry_prompts=retry_prompts,
                 route_overrides=route_overrides,
+                route_resume_states=self._parallel_route_resumes,
                 # Route D owns recovery while active.  Legacy cross-harness and
                 # retry-count paths cannot run ahead of the finite route set.
                 same_runtime_budget_exhausted=False,
@@ -10459,7 +10642,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 for value in round_results
             )
             if not recoverable_pause_seen and any(
-                isinstance(value, _BatchInterruptedForRecoverablePause) for value in round_results
+                isinstance(
+                    value,
+                    _BatchInterruptedForRecoverablePause | _BatchEnteredAtRecoverablePause,
+                )
+                for value in round_results
             ):
                 raise RuntimeError(
                     "parallel route batch interruption has no recoverable pause owner"
@@ -10473,7 +10660,32 @@ Respond with either ATOMIC or the structured JSON object only.
                 results[positions[ac_idx]] = value
                 if isinstance(value, _BatchInterruptedForRecoverablePause):
                     continue
+                if isinstance(value, _BatchEnteredAtRecoverablePause):
+                    if not recoverable_pause_seen:
+                        raise RuntimeError(
+                            "entered parallel interruption has no recoverable pause owner"
+                        )
+                    self._parallel_route_resumes.pop(ac_idx, None)
+                    await self._persist_parallel_uncertain_handoff(
+                        seed=seed,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    results[positions[ac_idx]] = ACExecutionResult(
+                        ac_index=ac_idx,
+                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        success=False,
+                        error=(
+                            "A sibling quota cancelled this AC after execution authority entry; "
+                            "the provider-effect boundary is uncertain and human handoff is required."
+                        ),
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        outcome=ACExecutionOutcome.BLOCKED,
+                    )
+                    continue
                 if not isinstance(value, ACExecutionResult):
+                    self._parallel_route_resumes.pop(ac_idx, None)
                     continue
                 if value.is_decomposed:
                     if (
@@ -10534,6 +10746,22 @@ Respond with either ATOMIC or the structured JSON object only.
                     # that this route lacks capability.  Preserve the untouched
                     # provider result for the runner's pause owner and emit no
                     # judgment/observation that could authorize a successor.
+                    resume_state = self._parallel_route_resumes.get(ac_idx)
+                    round_siblings: tuple[_SiblingACRef, ...] = (
+                        resume_state.sibling_acs
+                        if resume_state is not None
+                        else tuple(
+                            (index, ac_text(seed.acceptance_criteria[index]))
+                            for index in round_indices
+                        )
+                        if len(round_indices) > 1
+                        else ()
+                    )
+                    expected_route = (
+                        resume_state.expected_route_candidate
+                        if resume_state is not None
+                        else route_overrides.get(ac_idx)
+                    )
                     await self._persist_parallel_route_pause(
                         seed=seed,
                         result=value,
@@ -10541,8 +10769,23 @@ Respond with either ATOMIC or the structured JSON object only.
                         session_id=session_id,
                         execution_id=execution_id,
                         prior_route_ids=histories[ac_idx],
+                        retry_prompt_extra=(
+                            resume_state.retry_prompt_extra
+                            if resume_state is not None
+                            else retry_prompts.get(ac_idx, "")
+                        ),
+                        sibling_acs=round_siblings,
+                        route_id_override=(
+                            resume_state.route_id_override
+                            if resume_state is not None
+                            else expected_route.route_id
+                            if expected_route is not None
+                            else None
+                        ),
+                        expected_route_candidate=expected_route,
                     )
                     continue
+                self._parallel_route_resumes.pop(ac_idx, None)
                 gated = await self._apply_verify_gate(
                     seed=seed,
                     ac_index=ac_idx,
@@ -10908,6 +11151,8 @@ Respond with either ATOMIC or the structured JSON object only.
         from ouroboros.orchestrator.route_policy import RouteRequirements
 
         relevant = set(root_ac_indices)
+        for root_ac_index in relevant:
+            self._parallel_route_resumes.pop(root_ac_index, None)
         composite_results: dict[int, ACExecutionResult] = {}
         composite_event_limit = _MAX_PARALLEL_COMPOSITE_COMPLETION_EVENTS + 1
         composite_events = await self._event_store.query_execution_related_events(
@@ -11495,6 +11740,48 @@ Respond with either ATOMIC or the structured JSON object only.
             else:
                 raise RuntimeError("route escalation replay contains an unknown action")
 
+        handoff_event_limit = len(seed.acceptance_criteria) + 1
+        handoff_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=handoff_event_limit,
+        )
+        if len(handoff_events) >= handoff_event_limit:
+            raise RuntimeError("parallel uncertain handoff replay exceeds its execution-wide bound")
+        uncertain_handoffs: set[int] = set()
+        for event in handoff_events:
+            if event.type != "execution.ac.uncertain_handoff_required":
+                continue
+            data = event.data
+            if not _mapping_has_exact_keys(data, _PARALLEL_UNCERTAIN_HANDOFF_KEYS):
+                raise RuntimeError("parallel uncertain handoff has an invalid event envelope")
+            if data.get("session_id") != session_id:
+                continue
+            root_ac_index = data.get("root_ac_index")
+            if type(root_ac_index) is not int:
+                raise RuntimeError("parallel uncertain handoff has an invalid root AC index")
+            if root_ac_index not in relevant:
+                continue
+            criterion = seed.acceptance_criteria[root_ac_index]
+            semantic_ac_key = criterion.semantic_ac_key or derive_semantic_ac_key(criterion)
+            if (
+                data.get("schema_version") != 1
+                or data.get("execution_id") != execution_id
+                or data.get("semantic_ac_key") != semantic_ac_key
+                or data.get("call_site") != "parallel"
+                or data.get("reason") != "sibling_cancelled_after_execution_authority_entry"
+                or data.get("human_handoff_required") is not True
+                or data.get("final_acceptance_declared") is not False
+            ):
+                raise RuntimeError("parallel uncertain handoff has invalid authority metadata")
+            if root_ac_index in uncertain_handoffs:
+                raise RuntimeError("parallel uncertain handoff is duplicated")
+            uncertain_handoffs.add(root_ac_index)
+            terminals[root_ac_index] = (
+                "A sibling quota cancelled this AC after execution authority entry; "
+                "the provider-effect boundary is uncertain and human handoff is required."
+            )
+
         pause_event_limit = len(seed.acceptance_criteria) * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1
         pause_events = await self._event_store.query_execution_related_events(
             execution_id,
@@ -11504,8 +11791,12 @@ Respond with either ATOMIC or the structured JSON object only.
         if len(pause_events) >= pause_event_limit:
             raise RuntimeError("parallel route pause replay exceeds the execution-wide bound")
         unresolved_pauses: dict[int, RouteCandidate] = {}
+        unresolved_pause_states: dict[int, _ParallelRouteResumeState] = {}
         pause_counts: dict[int, int] = {}
-        for event in pause_events:
+        # Production queries are newest-first. Fold oldest-to-newest so a
+        # repeated quota on the same route replaces the prior provider handle
+        # with the latest unconsumed dispatch boundary.
+        for event in sorted(pause_events, key=lambda item: (item.timestamp, item.id)):
             if event.type != "execution.ac.route_paused":
                 continue
             data = event.data
@@ -11520,7 +11811,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             if (
                 type(data.get("schema_version")) is not int
-                or data.get("schema_version") != 1
+                or data.get("schema_version") != 2
                 or data.get("execution_id") != execution_id
                 or data.get("call_site") != "parallel"
                 or data.get("recoverable_pause") is not True
@@ -11555,6 +11846,98 @@ Respond with either ATOMIC or the structured JSON object only.
                 paused_candidate = RouteCandidate.from_contract_data(data.get("route"))
             except (TypeError, ValueError) as exc:
                 raise RuntimeError("parallel route pause has an invalid route snapshot") from exc
+            raw_resume_state = data.get("resume_state")
+            if not _mapping_has_exact_keys(
+                raw_resume_state,
+                _PARALLEL_ROUTE_PAUSE_RESUME_KEYS,
+            ):
+                raise RuntimeError("parallel route pause has an invalid resume state")
+            assert isinstance(raw_resume_state, Mapping)
+            retry_attempt = raw_resume_state.get("retry_attempt")
+            retry_prompt_extra = raw_resume_state.get("retry_prompt_extra")
+            raw_siblings = raw_resume_state.get("sibling_acs")
+            route_id_override = raw_resume_state.get("route_id_override")
+            raw_expected_candidate = raw_resume_state.get("expected_route_candidate")
+            runtime_scope_id = raw_resume_state.get("runtime_scope_id")
+            dispatch_id = raw_resume_state.get("dispatch_id")
+            capsule_fingerprint = raw_resume_state.get("capsule_fingerprint")
+            if (
+                type(retry_attempt) is not int
+                or retry_attempt != attempt_index
+                or not isinstance(retry_prompt_extra, str)
+                or len(retry_prompt_extra) > 16_384
+                or not isinstance(raw_siblings, list)
+                or len(raw_siblings) > len(seed.acceptance_criteria)
+                or route_id_override is not None
+                and (not isinstance(route_id_override, str) or not route_id_override)
+                or not isinstance(runtime_scope_id, str)
+                or not runtime_scope_id
+                or not isinstance(dispatch_id, str)
+                or len(dispatch_id) != 32
+                or any(char not in "0123456789abcdef" for char in dispatch_id)
+                or not isinstance(capsule_fingerprint, str)
+                or len(capsule_fingerprint) != 71
+                or not capsule_fingerprint.startswith("sha256:")
+                or any(char not in "0123456789abcdef" for char in capsule_fingerprint[7:])
+            ):
+                raise RuntimeError("parallel route pause has malformed capsule-bearing state")
+            parsed_siblings: list[_SiblingACRef] = []
+            seen_sibling_indices: set[int] = set()
+            for raw_sibling in raw_siblings:
+                if not _mapping_has_exact_keys(
+                    raw_sibling,
+                    frozenset({"ac_index", "content"}),
+                ):
+                    raise RuntimeError("parallel route pause has malformed sibling state")
+                assert isinstance(raw_sibling, Mapping)
+                sibling_index = raw_sibling.get("ac_index")
+                sibling_content = raw_sibling.get("content")
+                if (
+                    type(sibling_index) is not int
+                    or sibling_index < 0
+                    or sibling_index >= len(seed.acceptance_criteria)
+                    or sibling_index in seen_sibling_indices
+                    or sibling_content != ac_text(seed.acceptance_criteria[sibling_index])
+                ):
+                    raise RuntimeError("parallel route pause crossed its sibling population")
+                seen_sibling_indices.add(sibling_index)
+                parsed_siblings.append((sibling_index, sibling_content))
+            try:
+                expected_route_candidate = (
+                    RouteCandidate.from_contract_data(raw_expected_candidate)
+                    if raw_expected_candidate is not None
+                    else None
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "parallel route pause has an invalid expected route snapshot"
+                ) from exc
+            if prior_route_ids:
+                if (
+                    route_id_override != paused_candidate.route_id
+                    or expected_route_candidate != paused_candidate
+                    or not retry_prompt_extra
+                ):
+                    raise RuntimeError(
+                        "parallel route pause lost its durable successor capsule inputs"
+                    )
+            elif (
+                route_id_override is not None
+                or expected_route_candidate is not None
+                or retry_prompt_extra
+            ):
+                raise RuntimeError("parallel initial route pause invented successor capsule inputs")
+            parsed_resume_state = _ParallelRouteResumeState(
+                candidate=paused_candidate,
+                retry_attempt=retry_attempt,
+                retry_prompt_extra=retry_prompt_extra,
+                sibling_acs=tuple(parsed_siblings),
+                route_id_override=route_id_override,
+                expected_route_candidate=expected_route_candidate,
+                runtime_scope_id=runtime_scope_id,
+                dispatch_id=dispatch_id,
+                capsule_fingerprint=capsule_fingerprint,
+            )
 
             history = histories[root_ac_index]
             if attempt_index < len(history):
@@ -11568,6 +11951,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 continue
             if attempt_index != len(history) or prior_route_ids != history:
                 raise RuntimeError("parallel route pause does not follow durable route history")
+            if root_ac_index in uncertain_handoffs:
+                # The later uncertain handoff deliberately consumes replay
+                # authority for this previously paused AC.
+                continue
             if (
                 root_ac_index in terminals
                 or root_ac_index in provisional_successes
@@ -11620,8 +12007,13 @@ Respond with either ATOMIC or the structured JSON object only.
             if prior_unresolved is not None and prior_unresolved != paused_candidate:
                 raise RuntimeError("parallel route pause has conflicting unconsumed snapshots")
             unresolved_pauses[root_ac_index] = paused_candidate
+            unresolved_pause_states[root_ac_index] = parsed_resume_state
 
-        overrides.update(unresolved_pauses)
+        for root_ac_index, paused_candidate in unresolved_pauses.items():
+            resume_state = unresolved_pause_states[root_ac_index]
+            if resume_state.expected_route_candidate is not None:
+                overrides[root_ac_index] = paused_candidate
+            self._parallel_route_resumes[root_ac_index] = resume_state
         return histories, overrides, terminals, provisional_successes
 
     async def _maybe_redispatch_alt_harness_for_batch_ac(

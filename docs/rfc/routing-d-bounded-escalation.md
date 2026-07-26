@@ -185,10 +185,21 @@ Within one Routing D batch, quota ownership propagates immediately through a
 shared pause signal. Semaphore-waiting siblings recheck the signal under their
 permit before provider entry, already-running sibling scopes are cancelled, and
 the completed result scan recognizes the real quota owner before any decomposed
-legacy recovery can dispatch. Interrupted siblings remain pending: they produce
-no failure judgment, terminal result, completed stage, checkpoint, coordinator
-effect, or successor route. An interruption without a matching quota result is
-an internal inconsistency and fails closed.
+legacy recovery can dispatch. Only a sibling stopped before execution-authority
+entry remains pending and produces no failure judgment, completed stage,
+checkpoint, coordinator effect, or successor route. A sibling cancelled after
+entry has crossed an uncertain provider-effect boundary: its dispatch is sealed
+and `execution.ac.uncertain_handoff_required` makes the root durably `BLOCKED`
+for human ownership. It is never relabeled pending or replayed. An interruption
+without a matching quota result is an internal inconsistency and fails closed.
+
+An atomic parallel `execution.ac.route_paused` envelope seals every input that
+can change its capsule: retry index and prompt, the original sibling population,
+route override, the original expected-route value (including `null` on the
+first route), runtime scope, dispatch ID, and capsule fingerprint. Replay folds
+repeated pauses chronologically despite newest-first storage and reconnects only
+through the latest unconsumed provider boundary. Missing, malformed, drifted, or
+configuration-only handles fail before provider entry.
 
 The durable parallel resume-owner marker is published only when Routing D is
 actually effect-capable for the run. Legacy parallel execution does not have
@@ -264,8 +275,14 @@ retains the current route and provider handle. Its
 attempt index, and prior route prefix. Resume validates that snapshot against
 the live registry and either the cheapest initial admission or the exact last
 escalation decision, then resumes the same provider handle with that exact
-route. Any same-session route evidence with a missing or non-runner call site
-blocks direct replay.
+route. The event and session `PAUSED` transition are published only after the
+provider exposes an exact nonterminal resume ID and that complete handle is
+durably stored in session progress. This rule also applies to a paused successor
+during resume. A handle-less, terminal, or unpersisted quota boundary emits no
+route-pause event, makes no second fresh provider call, and reaches the Final
+Gate as `outcome=blocked`, `disposition=blocked` with human handoff. Any
+same-session route evidence with a missing or non-runner call site blocks direct
+replay.
 
 Hard provider preconditions share one direct/parallel classifier. Typed error
 labels are canonicalized across prose, CamelCase, snake_case, kebab-case, and
