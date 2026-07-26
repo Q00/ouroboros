@@ -272,11 +272,18 @@ def apply_requirement_distillation(
         "ontology_description": "Only user-authorized interview requirements.",
         "ontology_fields": "",
         "evaluation_principles": (
-            "confirmed_requirements:Evaluate only promoted user-authorized requirements:1.0"
+            EvaluationPrinciple(
+                name="confirmed_requirements",
+                description="Evaluate only promoted user-authorized requirements",
+                weight=1.0,
+            ),
         ),
         "exit_conditions": (
-            "confirmed_requirements_met:All promoted requirements are satisfied:"
-            "Every promoted acceptance criterion passes"
+            ExitCondition(
+                name="confirmed_requirements_met",
+                description="All promoted requirements are satisfied",
+                evaluation_criteria="Every promoted acceptance criterion passes",
+            ),
         ),
         "project_type": "greenfield",
     }

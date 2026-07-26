@@ -56,11 +56,11 @@ Field types should be one of: string, number, boolean, array, object
 
 ### 5. EVALUATION_PRINCIPLES
 Principles for evaluating output quality.
-Format: name:description:weight (pipe-separated, weight 0.0-1.0)
+Format: single-line JSON array of objects with "name", "description", and "weight" (0.0-1.0) so colons and pipes inside the text survive as data
 
 ### 6. EXIT_CONDITIONS
 Conditions that indicate the workflow should terminate.
-Format: name:description:criteria (pipe-separated)
+Format: single-line JSON array of objects with "name", "description", and "criteria"
 
 ### 7. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
@@ -82,8 +82,8 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+EVALUATION_PRINCIPLES: [{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}, ...]
+EXIT_CONDITIONS: [{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}, ...]
 PROJECT_TYPE: greenfield|brownfield
 CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
 EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]

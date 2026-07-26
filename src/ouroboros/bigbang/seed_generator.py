@@ -81,6 +81,14 @@ def _parse_string_array_values(
             array of strings.
     """
     if isinstance(raw_value, list | tuple):
+        if strict:
+            non_strings = tuple(
+                type(entry).__name__ for entry in raw_value if not isinstance(entry, str)
+            )
+            if non_strings:
+                raise ValueError(
+                    f"{field_label} array must contain only strings; got {', '.join(non_strings)}."
+                )
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
     if not isinstance(raw_value, str):
         return ()
@@ -115,6 +123,216 @@ def _parse_string_array_values(
             if isinstance(decoded, list):
                 return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
+
+
+def _require_object_string(
+    entry: dict, key: str, *, field_label: str, aliases: tuple[str, ...] = ()
+) -> str:
+    """Return a required non-empty string value from an extraction object entry."""
+    for candidate in (key, *aliases):
+        if candidate in entry:
+            value = entry[candidate]
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            raise ValueError(
+                f"{field_label} entry field {candidate!r} must be a non-empty string; "
+                f"got {value!r}."
+            )
+    raise ValueError(f"{field_label} entry is missing required field {key!r}: {entry!r}")
+
+
+def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> float:
+    """Resolve an optional principle weight, clamped to [0.0, 1.0].
+
+    Strict mode requires a JSON number (bools rejected) so malformed weights
+    trigger the extraction retry; lenient mode keeps the historical behavior
+    of falling back to 1.0 on anything unparseable.
+    """
+    if raw_weight is None:
+        return 1.0
+    if isinstance(raw_weight, bool) or not isinstance(raw_weight, int | float):
+        if strict:
+            raise ValueError(
+                f"{field_label} entry field 'weight' must be a number; got {raw_weight!r}."
+            )
+        try:
+            return min(1.0, max(0.0, float(str(raw_weight).strip())))
+        except ValueError:
+            return 1.0
+    return min(1.0, max(0.0, float(raw_weight)))
+
+
+def _decode_object_array(text: str, *, field_label: str, strict: bool) -> list | None:
+    """Decode an extraction field into a JSON list, honoring the strict boundary.
+
+    Strict mode raises unless the text is a valid JSON array — the retry path
+    asks the LLM to reformat (#1729). Lenient mode returns the decoded list
+    only for valid bracket-led JSON arrays and ``None`` otherwise so callers
+    fall back to the historical colon/pipe split.
+    """
+    if strict:
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects: {e}. "
+                f"Value: {text[:200]}"
+            ) from e
+        if not isinstance(decoded, list):
+            raise ValueError(
+                f"{field_label} must be a JSON array of objects, got "
+                f"{type(decoded).__name__}. Value: {text[:200]}"
+            )
+        return decoded
+    if not text.startswith("["):
+        return None
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, list) else None
+
+
+def _parse_evaluation_principles(
+    raw_value: object, *, strict: bool = False
+) -> tuple[EvaluationPrinciple, ...]:
+    """Parse EVALUATION_PRINCIPLES from JSON object arrays or the legacy pipe list.
+
+    The extraction format requests a single-line JSON array of
+    ``{"name", "description", "weight"}`` objects so colons and pipes inside
+    the data survive (#1729 slice 2). Strict mode (extraction time) raises on
+    anything else so the retry path can reformat; lenient mode (stored legacy
+    requirements) keeps the historical ``name:description:weight`` pipe split
+    and never raises.
+    """
+    field_label = "EVALUATION_PRINCIPLES"
+
+    def _build(entry: object) -> EvaluationPrinciple | None:
+        if isinstance(entry, EvaluationPrinciple):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            return EvaluationPrinciple(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                weight=_clamp_weight(entry.get("weight"), field_label=field_label, strict=strict),
+            )
+        except ValueError:
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[EvaluationPrinciple, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    principles: list[EvaluationPrinciple] = []
+    for principle_str in text.split("|"):
+        principle_str = principle_str.strip()
+        if not principle_str:
+            continue
+        parts = principle_str.split(":")
+        if len(parts) < 2:
+            continue
+        weight = 1.0
+        if len(parts) >= 3:
+            try:
+                weight = float(parts[2].strip())
+            except ValueError:
+                weight = 1.0
+        principles.append(
+            EvaluationPrinciple(
+                name=parts[0].strip(),
+                description=parts[1].strip(),
+                weight=min(1.0, max(0.0, weight)),
+            )
+        )
+    return tuple(principles)
+
+
+def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[ExitCondition, ...]:
+    """Parse EXIT_CONDITIONS from JSON object arrays or the legacy pipe list.
+
+    Mirrors :func:`_parse_evaluation_principles`: strict extraction demands a
+    JSON array of ``{"name", "description", "criteria"}`` objects (the
+    ``evaluation_criteria`` spelling is accepted too); lenient parsing keeps
+    the historical ``name:description:criteria`` split where the criteria
+    segment absorbs any further colons, and never raises.
+    """
+    field_label = "EXIT_CONDITIONS"
+
+    def _build(entry: object) -> ExitCondition | None:
+        if isinstance(entry, ExitCondition):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            return ExitCondition(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                evaluation_criteria=_require_object_string(
+                    entry,
+                    "criteria",
+                    field_label=field_label,
+                    aliases=("evaluation_criteria",),
+                ),
+            )
+        except ValueError:
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[ExitCondition, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    conditions: list[ExitCondition] = []
+    for condition_str in text.split("|"):
+        condition_str = condition_str.strip()
+        if not condition_str:
+            continue
+        parts = condition_str.split(":")
+        if len(parts) < 3:
+            continue
+        conditions.append(
+            ExitCondition(
+                name=parts[0].strip(),
+                description=parts[1].strip(),
+                evaluation_criteria=":".join(parts[2:]).strip(),
+            )
+        )
+    return tuple(conditions)
 
 
 def _parse_acceptance_criteria_contracts(
@@ -644,8 +862,8 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
+EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
 
     @staticmethod
@@ -751,8 +969,8 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
+EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
 
     _KNOWN_PREFIXES = (
@@ -870,6 +1088,14 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 requirements[field_name] = _parse_string_array_values(
                     requirements[field_name], field_label=field_label, strict=True
                 )
+        if "evaluation_principles" in requirements:
+            requirements["evaluation_principles"] = _parse_evaluation_principles(
+                requirements["evaluation_principles"], strict=True
+            )
+        if "exit_conditions" in requirements:
+            requirements["exit_conditions"] = _parse_exit_conditions(
+                requirements["exit_conditions"], strict=True
+            )
 
         return requirements
 
@@ -919,45 +1145,12 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             fields=tuple(ontology_fields),
         )
 
-        # Parse evaluation principles
-        evaluation_principles: list[EvaluationPrinciple] = []
-        if "evaluation_principles" in requirements and requirements["evaluation_principles"]:
-            for principle_str in requirements["evaluation_principles"].split("|"):
-                principle_str = principle_str.strip()
-                if not principle_str:
-                    continue
-                parts = principle_str.split(":")
-                if len(parts) >= 2:
-                    weight = 1.0
-                    if len(parts) >= 3:
-                        try:
-                            weight = float(parts[2].strip())
-                        except ValueError:
-                            weight = 1.0
-                    evaluation_principles.append(
-                        EvaluationPrinciple(
-                            name=parts[0].strip(),
-                            description=parts[1].strip(),
-                            weight=min(1.0, max(0.0, weight)),
-                        )
-                    )
-
-        # Parse exit conditions
-        exit_conditions: list[ExitCondition] = []
-        if "exit_conditions" in requirements and requirements["exit_conditions"]:
-            for condition_str in requirements["exit_conditions"].split("|"):
-                condition_str = condition_str.strip()
-                if not condition_str:
-                    continue
-                parts = condition_str.split(":")
-                if len(parts) >= 3:
-                    exit_conditions.append(
-                        ExitCondition(
-                            name=parts[0].strip(),
-                            description=parts[1].strip(),
-                            evaluation_criteria=":".join(parts[2:]).strip(),
-                        )
-                    )
+        # Parse evaluation principles and exit conditions (JSON object arrays
+        # preferred; legacy colon/pipe lists supported for stored requirements)
+        evaluation_principles = _parse_evaluation_principles(
+            requirements.get("evaluation_principles")
+        )
+        exit_conditions = _parse_exit_conditions(requirements.get("exit_conditions"))
 
         # Parse brownfield context
         brownfield_context = BrownfieldContext()
