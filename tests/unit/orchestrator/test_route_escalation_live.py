@@ -95,6 +95,7 @@ def _executor(
     *,
     model_support: ParamSupport = ParamSupport.NATIVE,
     base_tier: str = "frugal",
+    enable_decomposition: bool = False,
 ) -> tuple[ParallelACExecutor, AsyncMock, list[BaseEvent]]:
     economics = _economics()
     router = build_model_router(
@@ -122,7 +123,7 @@ def _executor(
         adapter=adapter,  # type: ignore[arg-type]
         event_store=store,
         console=MagicMock(),
-        enable_decomposition=False,
+        enable_decomposition=enable_decomposition,
         run_verify_commands=False,
         model_router=router,
         route_economics=economics,
@@ -765,6 +766,138 @@ async def test_parallel_pause_capability_loss_fails_closed_before_provider() -> 
             execution_counters=None,
         )
     provider.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_durable_route_override_bypasses_preflight_decomposition_effect() -> None:
+    executor, _store, _events = _executor(enable_decomposition=True)
+    candidate = _candidate(executor, "compat:claude:frugal")
+
+    # The minimal adapter intentionally has no provider stream. Reaching that
+    # boundary proves preflight decomposition was bypassed without replacing a
+    # protected execution method and invalidating the authority binding.
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="ship it",
+        session_id="session-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        seed_goal="bounded routing",
+        execution_id="execution-1",
+        route_id_override=candidate.route_id,
+        expected_route_candidate=candidate,
+    )
+
+    assert result.success is False
+    assert "execute_task" in (result.error or "")
+    decision = next(iter(executor._decomposition_decisions.values()))
+    assert decision.disposition.value == "ATOMIC"
+    assert decision.reasons == ("durable_route_history_proves_atomic",)
+
+
+@pytest.mark.asyncio
+async def test_provisional_success_replay_rejects_starting_tier_floor_drift() -> None:
+    source, _source_store, _source_events = _executor(base_tier="frugal")
+    seed = _seed()
+    candidate = _candidate(source, "compat:claude:frugal")
+    observation = RouteObservation.from_candidate(
+        candidate,
+        RouteRequirements(),
+        episode_id=_episode_id(seed),
+        attempt_index=0,
+        verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
+    )
+    route_event = _route_event(seed, observation=observation, decision=None)
+
+    resumed, store, _events = _executor(base_tier="standard")
+    _set_route_replay_events(store, [route_event])
+
+    with pytest.raises(RuntimeError, match="starting-tier floor drift"):
+        await resumed._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_kind", ["observation", "pause"])
+async def test_parallel_route_replay_rejects_unknown_envelope_fields(
+    event_kind: str,
+) -> None:
+    executor, store, events = _executor()
+    seed = _seed()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    if event_kind == "observation":
+        observation, decision = _durable_first_failure(executor, seed)
+        event = _route_event(seed, observation=observation, decision=decision)
+        event.data["unknown_terminal_semantics"] = "accepted"
+        _set_route_replay_events(store, [event])
+    else:
+        await executor._persist_parallel_route_pause(
+            seed=seed,
+            result=ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                route_candidate=candidate,
+            ),
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+            prior_route_ids=(),
+        )
+        event = next(item for item in events if item.type == "execution.ac.route_paused")
+        event.data["unknown_terminal_semantics"] = "accepted"
+
+        async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        store.query_execution_related_events.side_effect = query
+
+    with pytest.raises(RuntimeError, match="invalid event envelope"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+
+@pytest.mark.asyncio
+async def test_parallel_pause_history_is_bounded_before_envelope_traversal() -> None:
+    executor, store, events = _executor()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    await executor._persist_parallel_route_pause(
+        seed=_seed(),
+        result=ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            route_candidate=candidate,
+        ),
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        prior_route_ids=(),
+    )
+    pause = next(item for item in events if item.type == "execution.ac.route_paused")
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        if kwargs.get("event_type") == "execution.ac.route_paused":
+            return [pause] * 65
+        return []
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match="execution-wide bound"):
+        await executor._load_bounded_route_resume_state(
+            seed=_seed(),
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
 
 
 @pytest.mark.asyncio
@@ -1503,6 +1636,56 @@ async def test_provisional_success_resume_restores_verify_evidence_and_level_con
         execution_id="execution-1",
     )
     assert settled[0].success is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["unknown_result_field", "oversized_session", "unknown_verify_field", "oversized_reason"],
+)
+async def test_provisional_success_replay_rejects_non_strict_cached_evidence(
+    mutation: str,
+) -> None:
+    executor, store, _events = _executor()
+    seed = _seed()
+    candidate = _candidate(executor, "compat:claude:frugal")
+    observation = RouteObservation.from_candidate(
+        candidate,
+        RouteRequirements(),
+        episode_id=_episode_id(seed),
+        attempt_index=0,
+        verifier_outcome=VerifierOutcome.ATTEMPT_SUCCEEDED,
+    )
+    event = _route_event(seed, observation=observation, decision=None)
+    cached = event.data["provisional_result"]
+    assert isinstance(cached, dict)
+    if mutation == "unknown_result_field":
+        cached["accepted"] = True
+    elif mutation == "oversized_session":
+        cached["session_id"] = "s" * 513
+    else:
+        verify = {
+            "passed": True,
+            "reason": None,
+            "output_tail": "ok",
+            "missing_artifacts": [],
+            "workspace_mutated": False,
+            "workspace_digest": None,
+        }
+        if mutation == "unknown_verify_field":
+            verify["acceptance_authority"] = "gate"
+        else:
+            verify["reason"] = "r" * 2001
+        cached["verify_gate_outcome"] = verify
+    _set_route_replay_events(store, [event])
+
+    with pytest.raises(RuntimeError, match="provisional route success"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
 
 
 @pytest.mark.asyncio

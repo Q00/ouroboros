@@ -1792,6 +1792,7 @@ class TestOrchestratorRunner:
                     "call_site": "runner",
                     "observation": observation.to_contract_data(),
                     "decision": decision.to_contract_data(),
+                    "human_handoff_required": True,
                     "final_acceptance_declared": False,
                 },
             )
@@ -1826,6 +1827,65 @@ class TestOrchestratorRunner:
         ]
 
         with pytest.raises(OrchestratorError, match="another call site"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_resume_rejects_unknown_observation_envelope_field(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationReason,
+            RouteObservation,
+            VerifierOutcome,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
+
+        candidate = RouteCandidate(
+            route_id="compat:claude:frugal",
+            model="haiku-x",
+            harness="claude",
+            effort=None,
+            cost_units=1,
+            persona="default",
+            tool_policy="default",
+            authority_identity="runtime:claude",
+        )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id=("route:" + hashlib.sha256(b"execution-1\0direct").hexdigest()),
+            attempt_index=0,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.CLASSIFIED_FAILURE,
+        )
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": None,
+                    "human_handoff_required": False,
+                    "final_acceptance_declared": False,
+                    "unknown_terminal_semantics": "accepted",
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="invalid direct route observation envelope"):
             await runner._direct_resume_route_id(
                 execution_id="execution-1",
                 session_id="session-1",

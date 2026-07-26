@@ -353,6 +353,37 @@ from ouroboros.orchestrator.verifier import (
 )
 
 _MAX_PARALLEL_ROUTE_PAUSE_EVENTS = 64
+_PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "semantic_ac_key",
+        "call_site",
+        "observation",
+        "decision",
+        "provisional_result",
+        "human_handoff_required",
+        "final_acceptance_declared",
+    }
+)
+_PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "semantic_ac_key",
+        "call_site",
+        "episode_id",
+        "attempt_index",
+        "prior_route_ids",
+        "route",
+        "recoverable_pause",
+        "final_acceptance_declared",
+    }
+)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -1311,6 +1342,34 @@ _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_CONTEXT_TOOLS = 20
 _ROUTE_SUCCESS_TOOL_NAME_CHARS = 128
 _ROUTE_SUCCESS_FILE_PATH_CHARS = 2048
+_ROUTE_SUCCESS_SESSION_ID_CHARS = 512
+_VERIFY_REASON_CHARS = 2000
+_VERIFY_MISSING_ARTIFACTS = 128
+_VERIFY_ARTIFACT_CHARS = 2048
+_WORKSPACE_DIGEST_CHARS = 64
+
+
+def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    """Inspect at most one key beyond a finite durable-contract schema."""
+
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    seen: set[str] = set()
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(seen) == len(expected)
+        except Exception:
+            return False
+        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
+            return False
+        seen.add(key)
+    return False
 
 
 @dataclass(frozen=True)
@@ -1329,6 +1388,20 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
     """Encode verify evidence into the JSON-safe checkpoint state."""
     if not isinstance(outcome, _VerifyGateOutcome):
         return None
+    if (
+        (outcome.reason is not None and len(outcome.reason) > _VERIFY_REASON_CHARS)
+        or len(outcome.output_tail) > _VERIFY_OUTPUT_TAIL_CHARS
+        or len(outcome.missing_artifacts) > _VERIFY_MISSING_ARTIFACTS
+        or any(len(item) > _VERIFY_ARTIFACT_CHARS for item in outcome.missing_artifacts)
+        or (
+            outcome.workspace_digest is not None
+            and (
+                len(outcome.workspace_digest) != _WORKSPACE_DIGEST_CHARS
+                or any(char not in "0123456789abcdef" for char in outcome.workspace_digest)
+            )
+        )
+    ):
+        raise RuntimeError("verify gate outcome exceeds its durable evidence bounds")
     return {
         "passed": outcome.passed,
         "reason": outcome.reason,
@@ -1341,26 +1414,48 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
 
 def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None:
     """Decode checkpointed verify evidence, rejecting malformed payloads."""
-    if not isinstance(value, Mapping):
+    expected_keys = frozenset(
+        {
+            "passed",
+            "reason",
+            "output_tail",
+            "missing_artifacts",
+            "workspace_mutated",
+            "workspace_digest",
+        }
+    )
+    if not _mapping_has_exact_keys(value, expected_keys):
         return None
+    assert isinstance(value, Mapping)
     passed = value.get("passed")
     reason = value.get("reason")
     output_tail = value.get("output_tail")
-    raw_missing = value.get("missing_artifacts", ())
-    workspace_mutated = value.get("workspace_mutated", False)
+    raw_missing = value.get("missing_artifacts")
+    workspace_mutated = value.get("workspace_mutated")
     workspace_digest = value.get("workspace_digest")
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
-    if reason is not None and not isinstance(reason, str):
+    if reason is not None and (not isinstance(reason, str) or len(reason) > _VERIFY_REASON_CHARS):
         return None
-    if not isinstance(raw_missing, (list, tuple)) or not all(
-        isinstance(item, str) for item in raw_missing
+    if len(output_tail) > _VERIFY_OUTPUT_TAIL_CHARS:
+        return None
+    if (
+        not isinstance(raw_missing, list)
+        or len(raw_missing) > _VERIFY_MISSING_ARTIFACTS
+        or not all(
+            isinstance(item, str) and len(item) <= _VERIFY_ARTIFACT_CHARS for item in raw_missing
+        )
     ):
         return None
     if not isinstance(workspace_mutated, bool):
         return None
-    if workspace_digest is not None and not isinstance(workspace_digest, str):
-        return None
+    if workspace_digest is not None:
+        if (
+            not isinstance(workspace_digest, str)
+            or len(workspace_digest) != _WORKSPACE_DIGEST_CHARS
+            or any(char not in "0123456789abcdef" for char in workspace_digest)
+        ):
+            return None
     return _VerifyGateOutcome(
         passed=passed,
         reason=reason,
@@ -1423,7 +1518,13 @@ def _serialize_provisional_route_success(result: ACExecutionResult) -> dict[str,
         or result.duration_seconds < 0
         or type(result.retry_attempt) is not int
         or result.retry_attempt < 0
-        or (result.session_id is not None and not isinstance(result.session_id, str))
+        or (
+            result.session_id is not None
+            and (
+                not isinstance(result.session_id, str)
+                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
     ):
         raise RuntimeError("provisional route success cannot seal malformed result context")
     for message in result.messages:
@@ -1468,7 +1569,23 @@ def _deserialize_provisional_route_success(
     """Restore a sealed provisional success or fail closed on malformed state."""
     from ouroboros.orchestrator.adapter import AgentMessage
 
-    if not isinstance(value, Mapping) or value.get("schema_version") != 1:
+    expected_keys = frozenset(
+        {
+            "schema_version",
+            "final_message_tail",
+            "context_tools",
+            "duration_seconds",
+            "session_id",
+            "retry_attempt",
+            "verify_gate_outcome",
+        }
+    )
+    if (
+        not _mapping_has_exact_keys(value, expected_keys)
+        or not isinstance(value, Mapping)
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+    ):
         raise RuntimeError("provisional route success has invalid durable context")
     final_message = value.get("final_message_tail")
     raw_tools = value.get("context_tools")
@@ -1484,15 +1601,21 @@ def _deserialize_provisional_route_success(
         or isinstance(duration_seconds, bool)
         or not math.isfinite(duration_seconds)
         or duration_seconds < 0
-        or (session_id is not None and not isinstance(session_id, str))
+        or (
+            session_id is not None
+            and (
+                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
+            )
+        )
         or type(retry_attempt) is not int
         or retry_attempt < 0
     ):
         raise RuntimeError("provisional route success has malformed bounded context")
     messages: list[AgentMessage] = []
     for raw_tool in raw_tools:
-        if not isinstance(raw_tool, Mapping):
+        if not _mapping_has_exact_keys(raw_tool, frozenset({"tool_name", "file_path"})):
             raise RuntimeError("provisional route success has malformed tool context")
+        assert isinstance(raw_tool, Mapping)
         tool_name = raw_tool.get("tool_name")
         file_path = raw_tool.get("file_path")
         if (
@@ -4900,10 +5023,34 @@ class ParallelACExecutor:
         )
 
         node_decision = self._decomposition_decisions.get(node_identity.node_id)
+        durable_route_proves_atomic = expected_route_candidate is not None and not is_sub_ac
+        if durable_route_proves_atomic:
+            if (
+                node_decision is not None
+                and node_decision.disposition is DecompositionDisposition.SPLIT
+            ):
+                raise RuntimeError(
+                    "durable atomic route state contradicts the decomposition decision"
+                )
+            # The provider boundary already emitted a RouteCandidate only
+            # after this root passed decomposition as atomic.  Re-running the
+            # preflight provider on resume/successor dispatch would repeat an
+            # effect before replay authorization and could switch call sites.
+            node_decision = DecompositionDecisionRecord(
+                node_id=node_identity.node_id,
+                source=DecompositionSource.PREFLIGHT,
+                disposition=DecompositionDisposition.ATOMIC,
+                reasons=("durable_route_history_proves_atomic",),
+            )
+            self._decomposition_decisions[node_identity.node_id] = node_decision
 
         # Compatibility mode keeps preflight ordering, but every result is now a
         # persisted explicit decision and only a trusted SPLIT may lower children.
-        if self._decomposition_mode == "preflight" and depth < self._max_decomposition_depth:
+        if (
+            not durable_route_proves_atomic
+            and self._decomposition_mode == "preflight"
+            and depth < self._max_decomposition_depth
+        ):
             display_label = (
                 f"AC {node_identity.display_path}"
                 if node_identity.depth == 0
@@ -9241,15 +9388,20 @@ Respond with either ATOMIC or the structured JSON object only.
         grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices
         }
+        observation_event_limit = len(seed.acceptance_criteria) * MAX_ROUTE_ATTEMPTS + 1
         events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.route_observed",
-            limit=None,
+            limit=observation_event_limit,
         )
+        if len(events) >= observation_event_limit:
+            raise RuntimeError("route observation replay exceeds the execution-wide bound")
         for event in events:
             if event.type != "execution.ac.route_observed":
                 continue
             data = event.data
+            if not _mapping_has_exact_keys(data, _PARALLEL_ROUTE_OBSERVATION_KEYS):
+                raise RuntimeError("route observation replay has an invalid event envelope")
             if data.get("session_id") != session_id:
                 continue
             if data.get("call_site") != "parallel":
@@ -9426,6 +9578,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
                 if candidate is None:
                     raise RuntimeError("route observation replay references a removed route")
+                eligible_candidate = next(
+                    (
+                        configured
+                        for configured in escalation_registry.candidates
+                        if configured.route_id == observation.route_id
+                    ),
+                    None,
+                )
+                if eligible_candidate != candidate:
+                    raise RuntimeError(
+                        "route observation replay detected starting-tier floor drift"
+                    )
                 expected_observation = RouteObservation.from_candidate(
                     candidate,
                     RouteRequirements(
@@ -9529,17 +9693,22 @@ Respond with either ATOMIC or the structured JSON object only.
             else:
                 raise RuntimeError("route escalation replay contains an unknown action")
 
+        pause_event_limit = len(seed.acceptance_criteria) * _MAX_PARALLEL_ROUTE_PAUSE_EVENTS + 1
         pause_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.route_paused",
-            limit=None,
+            limit=pause_event_limit,
         )
+        if len(pause_events) >= pause_event_limit:
+            raise RuntimeError("parallel route pause replay exceeds the execution-wide bound")
         unresolved_pauses: dict[int, RouteCandidate] = {}
         pause_counts: dict[int, int] = {}
         for event in pause_events:
             if event.type != "execution.ac.route_paused":
                 continue
             data = event.data
+            if not _mapping_has_exact_keys(data, _PARALLEL_ROUTE_PAUSE_KEYS):
+                raise RuntimeError("parallel route pause has an invalid event envelope")
             if data.get("session_id") != session_id:
                 continue
             root_ac_index = data.get("root_ac_index")
@@ -9604,16 +9773,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 model_router=self._model_router,
                 effort=paused_candidate.effort,
             )
+            live_registry = build_compat_escalation_registry(live_projection)
             live_candidate = (
                 next(
                     (
                         candidate
-                        for candidate in live_projection.registry.candidates
+                        for candidate in live_registry.candidates
                         if candidate.route_id == paused_candidate.route_id
                     ),
                     None,
                 )
-                if live_projection is not None
+                if live_registry is not None
                 else None
             )
             if live_candidate != paused_candidate:

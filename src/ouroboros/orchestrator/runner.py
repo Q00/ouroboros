@@ -185,6 +185,20 @@ if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+_MAX_DIRECT_ROUTE_PAUSE_EVENTS = 64
+_DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "call_site",
+        "observation",
+        "decision",
+        "human_handoff_required",
+        "final_acceptance_declared",
+    }
+)
 
 
 def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
@@ -1628,6 +1642,7 @@ class OrchestratorRunner:
             build_route_compat_projection,
         )
         from ouroboros.orchestrator.route_escalation import (
+            MAX_ROUTE_ATTEMPTS,
             EscalationAction,
             RouteEscalationDecision,
             RouteObservation,
@@ -1639,13 +1654,23 @@ class OrchestratorRunner:
         observation_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.route_observed",
-            limit=None,
+            limit=MAX_ROUTE_ATTEMPTS + 1,
         )
         pause_events = await self._event_store.query_execution_related_events(
             execution_id,
             event_type="execution.ac.route_paused",
-            limit=None,
+            limit=_MAX_DIRECT_ROUTE_PAUSE_EVENTS + 1,
         )
+        if len(observation_events) > MAX_ROUTE_ATTEMPTS:
+            raise OrchestratorError(
+                message="Refusing to replay unbounded direct route observations",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        if len(pause_events) > _MAX_DIRECT_ROUTE_PAUSE_EVENTS:
+            raise OrchestratorError(
+                message="Refusing to replay unbounded direct route pauses",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
         direct_events = [
             event
             for event in observation_events
@@ -1668,6 +1693,14 @@ class OrchestratorRunner:
         ):
             raise OrchestratorError(
                 message="Refusing to replay route evidence from another call site",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        if any(
+            not _mapping_has_exact_keys(event.data, _DIRECT_ROUTE_OBSERVATION_KEYS)
+            for event in direct_events
+        ):
+            raise OrchestratorError(
+                message="Refusing to replay an invalid direct route observation envelope",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
         expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
@@ -1823,13 +1856,18 @@ class OrchestratorRunner:
                 message="Refusing to replay a paused route without a live registry",
                 details={"execution_id": execution_id, "session_id": session_id},
             )
-        live_paused_candidate = next(
-            (
-                candidate
-                for candidate in live_paused_projection.registry.candidates
-                if candidate.route_id == paused_candidate.route_id
-            ),
-            None,
+        live_paused_registry = build_compat_escalation_registry(live_paused_projection)
+        live_paused_candidate = (
+            next(
+                (
+                    candidate
+                    for candidate in live_paused_registry.candidates
+                    if candidate.route_id == paused_candidate.route_id
+                ),
+                None,
+            )
+            if live_paused_registry is not None
+            else None
         )
         if live_paused_candidate != paused_candidate:
             raise OrchestratorError(
