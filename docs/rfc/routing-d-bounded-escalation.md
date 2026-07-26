@@ -266,7 +266,12 @@ or parallel execution consume those snapshots without rescanning a changed
 workspace, reloading profile YAML, or adopting a different parent conversation.
 Contractless sessions and versions 2 through 8 cannot reconstruct the complete v9
 effect population and therefore fail closed on resume; every new Routing D owner
-is born with version 9.
+is born with version 9. Version 9 itself has one exact top-level schema:
+`version`, `foundation_a_authority`, `execution_preferences`,
+`execution_semantics`, `execution_inputs`, `model_routing`, `frugality_proof`,
+`guidance`, and `resume`. Resume rejects every missing or unknown top-level member
+before restoring guidance or preferences and before analyzer or provider effects;
+no current-format field is synthesized from runtime defaults.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a

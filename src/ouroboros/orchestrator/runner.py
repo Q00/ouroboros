@@ -731,6 +731,19 @@ CANCELLATION_CHECK_INTERVAL = 5
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
 EXECUTION_CONTRACT_VERSION = 9
+EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS = frozenset(
+    {
+        "version",
+        "foundation_a_authority",
+        "execution_preferences",
+        "execution_semantics",
+        "execution_inputs",
+        "model_routing",
+        "frugality_proof",
+        "guidance",
+        "resume",
+    }
+)
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
@@ -741,6 +754,40 @@ PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
+
+
+def _require_exact_execution_contract_v9(raw_contract: object) -> Mapping[str, Any]:
+    """Return a current contract only when its complete top-level shape is canonical."""
+    raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
+    if (
+        not isinstance(raw_contract, Mapping)
+        or isinstance(raw_version, bool)
+        or not isinstance(raw_version, int)
+        or raw_version != EXECUTION_CONTRACT_VERSION
+    ):
+        raise OrchestratorError(
+            message="Cannot resume with an invalid execution contract",
+            details={"contract_version": raw_version},
+        )
+
+    actual_top_level_keys = frozenset(raw_contract)
+    if actual_top_level_keys != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
+        missing_keys = sorted(EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS - actual_top_level_keys)
+        unknown_keys = sorted(
+            key if isinstance(key, str) else repr(key)
+            for key in actual_top_level_keys - EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
+        )
+        raise OrchestratorError(
+            message="Cannot resume with an invalid execution contract top-level schema",
+            details={
+                "contract_version": raw_version,
+                "invalid": "top_level_schema",
+                "missing": missing_keys,
+                "unknown": unknown_keys,
+            },
+        )
+    return raw_contract
+
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _DURATION_PATTERN = re.compile(
@@ -5146,9 +5193,6 @@ class OrchestratorRunner:
     def _restore_guidance_contract(self, raw_contract: Mapping[str, Any]) -> None:
         """Restore persisted guidance refs without consulting the current allowlist."""
         raw_guidance = raw_contract.get("guidance")
-        if raw_guidance is None:
-            self._execution_guidance = self._resolve_guidance_bundle(())
-            return
         if not isinstance(raw_guidance, Mapping):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -5275,7 +5319,7 @@ class OrchestratorRunner:
             }
         else:
             authority_contract = self._process_local_authority_contract(authority_generation)
-        return {
+        contract = {
             "version": EXECUTION_CONTRACT_VERSION,
             "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
@@ -5288,6 +5332,9 @@ class OrchestratorRunner:
                 "workspace": self._resume_workspace_identity(),
             },
         }
+        if frozenset(contract) != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
+            raise AssertionError("execution contract v9 builder emitted a non-canonical shape")
+        return contract
 
     async def _emit_run_configuration_resolved(
         self,
@@ -5804,6 +5851,8 @@ class OrchestratorRunner:
                 },
             )
 
+        raw_contract = _require_exact_execution_contract_v9(raw_contract)
+
         migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
         migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
         migrate_v4_contract = raw_version == PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION
@@ -5948,14 +5997,11 @@ class OrchestratorRunner:
             )
 
         persisted_preferences = execution_preferences_from_contract(raw_preferences)
-        preferences_migrated = persisted_preferences is None and raw_preferences is None
         if persisted_preferences is None:
-            if not preferences_migrated:
-                raise OrchestratorError(
-                    message="Cannot resume with invalid execution preferences",
-                    details={"invalid": "execution_preferences"},
-                )
-            persisted_preferences = resolve_execution_preferences(None, None)
+            raise OrchestratorError(
+                message="Cannot resume with invalid execution preferences",
+                details={"invalid": "execution_preferences"},
+            )
         if (
             self._execution_preferences_override_explicit
             and self._execution_preferences != persisted_preferences
@@ -6267,11 +6313,6 @@ class OrchestratorRunner:
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
-        if preferences_migrated:
-            self._execution_contract["execution_preferences"] = (
-                persisted_preferences.to_contract_data()
-            )
-            return True
         return False
 
     def _restore_execution_contract_snapshot(
@@ -8407,7 +8448,11 @@ class OrchestratorRunner:
                 )
             )
         try:
-            await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
+            validated_contract = await asyncio.to_thread(
+                _require_exact_execution_contract_v9,
+                raw_contract,
+            )
+            await asyncio.to_thread(self._restore_guidance_contract, validated_contract)
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
             cancellation_result = (
@@ -8453,7 +8498,7 @@ class OrchestratorRunner:
         # Keep the immutable per-session contract local to this invocation.
         # ``self._execution_contract`` is retained for legacy helpers, but it
         # must never be the source of acceptance authority under concurrency.
-        execution_contract = dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+        execution_contract = dict(validated_contract)
         self._execution_contract = execution_contract
 
         log.info(

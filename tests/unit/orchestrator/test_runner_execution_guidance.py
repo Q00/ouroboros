@@ -557,3 +557,59 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
     ]
     assert len(guidance_events) == 1
     assert guidance_events[0].data["injection_key"] == "resume:0"
+
+
+@pytest.mark.asyncio
+async def test_guided_resume_rejects_missing_guidance_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    _write_guidance(tmp_path, "team", "Preserve project conventions.\n")
+    runner, event_store = _runner(tmp_path, ("team",))
+    seed = _seed()
+    generation = runner._begin_process_local_authority_generation()
+    malformed_contract = runner._build_execution_contract(
+        seed=seed,
+        authority_generation=generation,
+    )
+    del malformed_contract["guidance"]
+    tracker = SessionTracker.create(
+        "exec-guidance-missing",
+        seed.metadata.seed_id,
+        session_id="sess-guidance-missing",
+    ).with_status(SessionStatus.PAUSED)
+    tracker = tracker.with_progress(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: malformed_contract,
+            "messages_processed": 0,
+        }
+    )
+    runner._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=malformed_contract,
+        generation=generation,
+    )
+    provider = MagicMock(side_effect=AssertionError("provider must not run"))
+    runner._adapter.execute_task = provider
+
+    try:
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(tracker)),
+        ):
+            result = await runner.resume_session(tracker.session_id, seed)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    assert result.is_err
+    assert result.error.details["invalid"] == "top_level_schema"
+    assert result.error.details["missing"] == ["guidance"]
+    provider.assert_not_called()
+    assert all(
+        call.args[0].type != "orchestrator.guidance.injected"
+        for call in event_store.append.await_args_list
+    )

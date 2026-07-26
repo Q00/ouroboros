@@ -33,6 +33,7 @@ from ouroboros.orchestrator.model_routing import (
 )
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
+    EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS,
     FRUGALITY_PROOF_PROTOCOL_VERSION,
     OrchestratorError,
     OrchestratorRunner,
@@ -240,6 +241,64 @@ def test_resume_restores_persisted_custom_frontier_router() -> None:
 
     assert changed is False
     assert resumed._model_router == _frontier_custom_router()
+
+
+@pytest.mark.parametrize(
+    "schema_mutation",
+    [
+        "version",
+        "foundation_a_authority",
+        "execution_preferences",
+        "execution_semantics",
+        "execution_inputs",
+        "model_routing",
+        "frugality_proof",
+        "guidance",
+        "resume",
+        "unknown_top_level_key",
+    ],
+)
+def test_v9_resume_rejects_every_inexact_top_level_shape_before_effects(
+    schema_mutation: str,
+) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    assert frozenset(persisted) == EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
+    if schema_mutation == "unknown_top_level_key":
+        persisted[schema_mutation] = "not part of v9"
+        expected_missing: list[str] = []
+        expected_unknown = [schema_mutation]
+    else:
+        del persisted[schema_mutation]
+        expected_missing = [schema_mutation]
+        expected_unknown = []
+
+    resumed = _runner()
+    provider = MagicMock(side_effect=AssertionError("provider must not run"))
+    guidance_restore = MagicMock(side_effect=AssertionError("restoration must not start"))
+    resumed._adapter.execute_task = provider
+    resumed._restore_guidance_contract = guidance_restore
+
+    error_match = (
+        "invalid execution contract" if schema_mutation == "version" else "top-level schema"
+    )
+    with pytest.raises(OrchestratorError, match=error_match) as exc_info:
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    if schema_mutation == "version":
+        assert exc_info.value.details == {"contract_version": None}
+    else:
+        assert exc_info.value.details == {
+            "contract_version": persisted.get("version"),
+            "invalid": "top_level_schema",
+            "missing": expected_missing,
+            "unknown": expected_unknown,
+        }
+    provider.assert_not_called()
+    guidance_restore.assert_not_called()
 
 
 def test_resume_rejects_router_policy_that_validates_its_own_projection() -> None:
