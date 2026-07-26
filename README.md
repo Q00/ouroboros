@@ -160,11 +160,11 @@ Then run `ooo setup` inside a Claude Code session.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # base
-pip install ouroboros-ai[claude]        # + Claude Code deps; pair with [mcp] for the MCP server
-pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider; Python 3.12-3.13
-pip install ouroboros-ai[mcp]           # + MCP server/client support
-pip install ouroboros-ai[tui]           # + Textual terminal UI
-pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui); Python 3.12-3.13
+pip install 'ouroboros-ai[claude]'        # + Claude Code deps; pair with [mcp] for the MCP server
+pip install 'ouroboros-ai[litellm]'       # + LiteLLM multi-provider; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'           # + MCP server/client support
+pip install 'ouroboros-ai[tui]'           # + Textual terminal UI
+pip install 'ouroboros-ai[all]'           # everything (claude + litellm + mcp + tui); Python 3.12-3.13
 ouroboros setup                         # configure runtime
 ```
 

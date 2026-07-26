@@ -110,11 +110,11 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 
 ```bash
 pip install ouroboros-ai              # Base package (core engine)
-pip install ouroboros-ai[claude]      # + Claude Code runtime deps; pair with [mcp] for the MCP server
-pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support; Python 3.12-3.13
-pip install ouroboros-ai[mcp]         # + MCP server/client runtime support
-pip install ouroboros-ai[tui]         # + Textual terminal UI
-pip install ouroboros-ai[all]         # Everything (claude + litellm + mcp + tui); Python 3.12-3.13
+pip install 'ouroboros-ai[claude]'      # + Claude Code runtime deps; pair with [mcp] for the MCP server
+pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
+pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
+pip install 'ouroboros-ai[all]'         # Everything (claude + litellm + mcp + tui); Python 3.12-3.13
 
 ouroboros --version                   # verify CLI
 ```
