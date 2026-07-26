@@ -23,6 +23,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
     _iter_outer_ac_field_markers,
+    _parse_acceptance_criterion_contract,
     _parse_string_array_values,
     load_seed,
     save_seed_sync,
@@ -41,6 +42,12 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionResponse, UsageInfo
+
+_ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS = (
+    "printf'%s| artifacts: literal'",
+    "echo foo'| artifacts: literal'",
+    "python -c'print(\"| verify: literal\")'",
+)
 
 
 def create_mock_completion_response(
@@ -475,6 +482,21 @@ class TestSeedGeneratorExtraction:
             _iter_outer_ac_field_markers(
                 "Files exist | verify: test -f output.txt | artifacts output.txt"
             )
+
+    @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
+    def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
+        self,
+        verify_command: str,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Adjacent shell quote remains payload | "
+            f"verify: {verify_command} | artifacts: out.txt | expect: OK"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("out.txt",)
+        assert criterion.output_assertion == "OK"
 
     @pytest.mark.asyncio
     async def test_generate_extracts_goal(self) -> None:
@@ -1045,6 +1067,45 @@ class TestSeedGeneratorExtraction:
         assert criterion.description == "Users' files exist"
         assert criterion.verify_command == "test -f users.txt"
         assert criterion.expected_artifacts == ("users.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
+    async def test_generate_preserves_adjacent_single_quoted_verify_payloads(
+        self,
+        verify_command: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Adjacent shell quote remains payload | "
+                f"verify: {verify_command} | artifacts: out.txt | expect: OK\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 1
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("out.txt",)
+        assert criterion.output_assertion == "OK"
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True

@@ -69,7 +69,7 @@ class _ACFieldMarker:
     end: int
 
 
-def _is_unquoted_word_apostrophe(value: str, index: int) -> bool:
+def _is_description_word_apostrophe(value: str, index: int) -> bool:
     return value[index] == "'" and index > 0 and value[index - 1].isalnum()
 
 
@@ -136,6 +136,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     """Return structured AC field markers found outside quoted/escaped payloads."""
     markers: list[_ACFieldMarker] = []
     quote: str | None = None
+    structured_payload_started = False
     escaped = False
     index = 0
     while index < len(body):
@@ -153,7 +154,11 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 quote = None
             index += 1
             continue
-        if char in {"'", '"'} and not (char == "'" and _is_unquoted_word_apostrophe(body, index)):
+        if char in {"'", '"'} and not (
+            char == "'"
+            and not structured_payload_started
+            and _is_description_word_apostrophe(body, index)
+        ):
             quote = char
             index += 1
             continue
@@ -164,6 +169,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         remainder = body[index:]
         match = _AC_CONTRACT_FIELD_RE.match(remainder)
         if match is not None:
+            structured_payload_started = True
             markers.append(
                 _ACFieldMarker(
                     name=match.group(1).lower(),
