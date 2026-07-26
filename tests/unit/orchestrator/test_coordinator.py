@@ -471,6 +471,20 @@ class TestCoordinatorReview:
 
         assert restored.conflicts_detected == tuple(conflicts)
 
+    def test_conflict_paths_keep_a_finite_per_item_bound(self) -> None:
+        """Population-derived counts do not make each durable item unbounded."""
+
+        conflict = FileConflict(file_path="p" * 32_769, ac_indices=(0, 1))
+        with pytest.raises(ValueError, match="durable bounds"):
+            build_coordinator_started_payload(
+                execution_id="exec",
+                session_id="session",
+                level_number=1,
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+                conflicts=[conflict],
+            )
+
     def test_frozen(self):
         review = CoordinatorReview(level_number=1)
         with pytest.raises(AttributeError):

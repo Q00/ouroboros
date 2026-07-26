@@ -1728,6 +1728,7 @@ _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
+_DURABLE_CONFLICT_PATH_CHARS = 32_768
 _COMPOSITE_RESULT_TEXT_CHARS = 4_000
 # This replay envelope is derived from the same public live-depth contract used
 # by CLI, Seed, runner, and executor admission.  Do not hand-tune it separately.
@@ -1943,7 +1944,10 @@ def _serialize_context_summary(summary: ACContextSummary) -> dict[str, object]:
         or any(not isinstance(tool, str) or not tool for tool in tools)
         or not isinstance(files, tuple)
         or tuple(sorted(set(files))) != files
-        or any(not isinstance(path, str) or not path for path in files)
+        or any(
+            not isinstance(path, str) or not path or len(path) > _DURABLE_CONFLICT_PATH_CHARS
+            for path in files
+        )
         or not isinstance(summary.key_output, str)
         or len(summary.key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
         or not isinstance(summary.public_api, str)
@@ -1997,7 +2001,10 @@ def _deserialize_context_summary(
         or not all(isinstance(tool, str) and bool(tool) for tool in raw_tools)
         or raw_tools != sorted(set(raw_tools))
         or not isinstance(raw_files, list)
-        or not all(isinstance(path, str) and bool(path) for path in raw_files)
+        or not all(
+            isinstance(path, str) and 0 < len(path) <= _DURABLE_CONFLICT_PATH_CHARS
+            for path in raw_files
+        )
         or raw_files != sorted(set(raw_files))
         or not isinstance(key_output, str)
         or len(key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
@@ -2036,7 +2043,10 @@ def _collect_result_conflict_files(result: ACExecutionResult) -> tuple[str, ...]
     if (
         not isinstance(files, tuple)
         or tuple(sorted(set(files))) != files
-        or any(not isinstance(path, str) or not path for path in files)
+        or any(
+            not isinstance(path, str) or not path or len(path) > _DURABLE_CONFLICT_PATH_CHARS
+            for path in files
+        )
     ):
         raise RuntimeError("durable conflict projection exceeds its bounds")
     return files
@@ -2045,7 +2055,10 @@ def _collect_result_conflict_files(result: ACExecutionResult) -> tuple[str, ...]
 def _deserialize_conflict_files(value: object) -> tuple[str, ...]:
     if (
         not isinstance(value, list)
-        or not all(isinstance(path, str) and bool(path) for path in value)
+        or not all(
+            isinstance(path, str) and 0 < len(path) <= _DURABLE_CONFLICT_PATH_CHARS
+            for path in value
+        )
         or value != sorted(set(value))
     ):
         raise RuntimeError("durable conflict projection is malformed")
