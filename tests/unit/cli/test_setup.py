@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1153,6 +1155,72 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def _make_valid_claude_recovery_manifest(
+        self,
+        tmp_path: Path,
+        *,
+        phase: str,
+    ) -> tuple[Path, Path, Path, Path, dict[str, object]]:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: claude\n  cli_path: /usr/local/bin/claude\n"
+            "llm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        credentials_path = config_dir / "credentials.yaml"
+        credentials_path.write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "docker",
+                            "args": ["run", "ouroboros-mcp"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        mcp_snapshot = setup_cmd._read_claude_setup_file_snapshot(mcp_path)
+        config_snapshot = setup_cmd._read_claude_setup_file_snapshot(config_path)
+        credentials_snapshot = setup_cmd._read_claude_setup_file_snapshot(credentials_path)
+        assert mcp_snapshot is not None
+        assert config_snapshot is not None
+        assert credentials_snapshot is not None
+        manifest = setup_cmd._build_claude_setup_manifest(
+            mcp=setup_cmd._ClaudeSetupStagedFile(mcp_path, mcp_snapshot, None, mcp_snapshot.mode),
+            config=setup_cmd._ClaudeSetupStagedFile(
+                config_path, config_snapshot, config_snapshot.content, config_snapshot.mode
+            ),
+            credentials=setup_cmd._ClaudeSetupStagedFile(
+                credentials_path, credentials_snapshot, None, credentials_snapshot.mode
+            ),
+            claude_path="/usr/local/bin/claude",
+        )
+        manifest["phase"] = phase
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        if phase in {
+            "mcp_written",
+            "config_written",
+            "credentials_written",
+            "committed",
+            "cleanup_pending",
+        }:
+            targets["mcp"]["post"] = setup_cmd._snapshot_to_manifest(mcp_snapshot)
+        if phase in {"config_written", "credentials_written", "committed", "cleanup_pending"}:
+            targets["config"]["post"] = setup_cmd._snapshot_to_manifest(config_snapshot)
+        if phase in {"credentials_written", "committed", "cleanup_pending"}:
+            targets["credentials"]["post"] = setup_cmd._snapshot_to_manifest(credentials_snapshot)
+        return claude_dir, mcp_path, config_path, credentials_path, manifest
+
     def test_malformed_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
@@ -2243,6 +2311,177 @@ class TestClaudeSetup:
         assert recovered is False
         assert recovery_path.exists()
         assert "unsupported version" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_rejects_forged_credentials_target_path(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="config_written")
+        )
+        victim_path = tmp_path / "victim.yaml"
+        victim_path.write_text("operator: keep\n", encoding="utf-8")
+        staged_credentials = b"providers: {}\n"
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        credentials_target = targets["credentials"]
+        assert isinstance(credentials_target, dict)
+        credentials_target["path"] = str(victim_path)
+        credentials_target["operation"] = "write"
+        credentials_target["content_b64"] = base64.b64encode(staged_credentials).decode("ascii")
+        credentials_target["sha256"] = hashlib.sha256(staged_credentials).hexdigest()
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert victim_path.read_text(encoding="utf-8") == "operator: keep\n"
+        assert credentials_path.read_text(encoding="utf-8") == "providers: {}\n"
+        assert "incomplete" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_rejects_malformed_staged_credentials_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="config_written")
+        )
+        invalid_credentials = b"providers:\n  openai: {}\n"
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        credentials_target = targets["credentials"]
+        assert isinstance(credentials_target, dict)
+        credentials_target["operation"] = "write"
+        credentials_target["content_b64"] = base64.b64encode(invalid_credentials).decode("ascii")
+        credentials_target["sha256"] = hashlib.sha256(invalid_credentials).hexdigest()
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert credentials_path.read_text(encoding="utf-8") == "providers: {}\n"
+        assert "incomplete" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_rejects_completed_phase_without_post_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="credentials_written")
+        )
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        credentials_target = targets["credentials"]
+        assert isinstance(credentials_target, dict)
+        credentials_target.pop("post")
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert "phase is inconsistent" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_rejects_write_phase_with_stale_post_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, mcp_path, _config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="mcp_written")
+        )
+        original_snapshot = setup_cmd._read_claude_setup_file_snapshot(mcp_path)
+        assert original_snapshot is not None
+        staged_mcp = json.dumps(
+            {"mcpServers": {"ouroboros": {"command": "uvx", "args": ["ouroboros"]}}},
+            indent=2,
+        ).encode("utf-8")
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        mcp_target = targets["mcp"]
+        assert isinstance(mcp_target, dict)
+        mcp_target["operation"] = "write"
+        mcp_target["content_b64"] = base64.b64encode(staged_mcp).decode("ascii")
+        mcp_target["sha256"] = hashlib.sha256(staged_mcp).hexdigest()
+        mcp_target["post"] = setup_cmd._snapshot_to_manifest(original_snapshot)
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert "phase is inconsistent" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_accepts_live_rebased_config_post_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="config_written")
+        )
+        config_path.write_text(
+            "custom:\n  concurrent: keep\n"
+            "orchestrator:\n  runtime_backend: claude\n  cli_path: /usr/local/bin/claude\n"
+            "llm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        config_snapshot = setup_cmd._read_claude_setup_file_snapshot(config_path)
+        assert config_snapshot is not None
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        targets["config"]["post"] = setup_cmd._snapshot_to_manifest(config_snapshot)
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert not recovery_path.exists()
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["custom"]["concurrent"] == "keep"
+
+    def test_setup_claude_recovery_derives_legacy_v2_operations_for_cleanup_pending(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="cleanup_pending")
+        )
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        for raw_target in targets.values():
+            assert isinstance(raw_target, dict)
+            raw_target.pop("operation")
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert not recovery_path.exists()
 
     @pytest.mark.parametrize(
         (

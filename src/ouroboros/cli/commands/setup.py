@@ -183,6 +183,15 @@ class _ParentDirectoryFsyncError(OSError):
     """A promoted directory entry could not be made durable."""
 
 
+def _expected_claude_setup_target_paths() -> dict[str, Path]:
+    config_dir = Path.home() / ".ouroboros"
+    return {
+        "mcp": _claude_mcp_config_path(),
+        "config": config_dir / "config.yaml",
+        "credentials": config_dir / "credentials.yaml",
+    }
+
+
 def _claude_mcp_file_identity(stat_result: os.stat_result) -> dict[str, int]:
     return {
         "dev": int(stat_result.st_dev),
@@ -330,6 +339,20 @@ def _claude_setup_file_matches(path: Path, snapshot: _ClaudeSetupFileSnapshot) -
     )
 
 
+def _decode_manifest_target_content(raw: dict[str, object]) -> bytes | None | Literal[False]:
+    raw_content = raw.get("content_b64")
+    raw_sha = raw.get("sha256")
+    if raw_content is None:
+        return None if raw_sha is None else False
+    if not isinstance(raw_content, str) or not isinstance(raw_sha, str):
+        return False
+    try:
+        content = base64.b64decode(raw_content.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError):
+        return False
+    return content if hashlib.sha256(content).hexdigest() == raw_sha else False
+
+
 def _path_matches_snapshot_while_linked(path: Path, snapshot: _ClaudeSetupFileSnapshot) -> bool:
     try:
         stat_result = path.stat()
@@ -347,6 +370,175 @@ def _path_matches_snapshot_while_linked(path: Path, snapshot: _ClaudeSetupFileSn
         and identity.get("mtime_ns") == snapshot.identity.get("mtime_ns")
         and hashlib.sha256(content).hexdigest() == snapshot.content_sha256
     )
+
+
+def _staged_mcp_content_is_valid(content: bytes) -> bool:
+    try:
+        data = json.loads(
+            content.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constant,
+        )
+        _reject_non_finite_json_numbers(data)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
+        return False
+    if not isinstance(data, dict):
+        return False
+    servers = data.get("mcpServers")
+    entry = servers.get("ouroboros") if isinstance(servers, dict) else None
+    return isinstance(entry, dict) and _is_supported_claude_mcp_entry(entry)
+
+
+def _staged_config_content_has_owned_values(content: bytes, claude_path: str) -> bool:
+    return _claude_config_snapshot_has_owned_values(
+        _ClaudeSetupFileSnapshot(
+            True,
+            content,
+            0o600,
+            None,
+            hashlib.sha256(content).hexdigest(),
+        ),
+        claude_path,
+    )
+
+
+def _staged_credentials_content_is_valid(content: bytes) -> bool:
+    from ouroboros.config.models import CredentialsConfig
+
+    try:
+        data = yaml.safe_load(content.decode("utf-8"))
+        if data is None:
+            data = {}
+        CredentialsConfig.model_validate(data)
+    except (UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError, RecursionError):
+        return False
+    return True
+
+
+def _manifest_config_update_claude_path(manifest: dict[str, object]) -> str | None:
+    updates = manifest.get("config_updates")
+    if not isinstance(updates, dict):
+        return None
+    cli_path = updates.get("orchestrator.cli_path")
+    return cli_path if isinstance(cli_path, str) and cli_path else None
+
+
+def _staged_target_content_is_valid(
+    manifest: dict[str, object],
+    name: str,
+    content: bytes,
+) -> bool:
+    if name == "mcp":
+        return _staged_mcp_content_is_valid(content)
+    if name == "config":
+        claude_path = _manifest_config_update_claude_path(manifest)
+        return claude_path is not None and _staged_config_content_has_owned_values(
+            content, claude_path
+        )
+    if name == "credentials":
+        return _staged_credentials_content_is_valid(content)
+    return False
+
+
+def _snapshot_content_matches_content(
+    snapshot: _ClaudeSetupFileSnapshot,
+    content: bytes,
+) -> bool:
+    return (
+        snapshot.existed
+        and snapshot.content is not None
+        and snapshot.content_sha256 == hashlib.sha256(content).hexdigest()
+    )
+
+
+def _manifest_target_post_is_operation_consistent(
+    manifest: dict[str, object],
+    name: str,
+) -> bool:
+    target = _manifest_target(manifest, name)
+    if target is None:
+        return False
+    path, pre, content, _mode = target
+    targets = manifest.get("targets")
+    if not isinstance(targets, dict):
+        return False
+    raw = targets.get(name)
+    if not isinstance(raw, dict):
+        return False
+    raw_post = raw.get("post")
+    if not isinstance(raw_post, dict):
+        return False
+    post = _snapshot_from_manifest(raw_post)
+    if post is None or not _claude_setup_file_matches(path, post):
+        return False
+    if content is None:
+        return post == pre
+    if name == "config":
+        if _snapshot_content_matches_content(post, content):
+            return True
+        claude_path = _manifest_config_update_claude_path(manifest)
+        if claude_path is None:
+            return False
+        return _claude_config_snapshot_has_owned_values(post, claude_path)
+    return _snapshot_content_matches_content(post, content)
+
+
+def _manifest_completed_targets_are_consistent(manifest: dict[str, object]) -> bool:
+    phase = manifest.get("phase")
+    completed_by_phase = {
+        "prepared": (),
+        "mcp_written": ("mcp",),
+        "config_written": ("mcp", "config"),
+        "credentials_written": ("mcp", "config", "credentials"),
+        "committed": ("mcp", "config", "credentials"),
+        "cleanup_pending": ("mcp", "config", "credentials"),
+    }
+    completed_targets = completed_by_phase.get(phase)
+    if completed_targets is None:
+        return False
+    return all(
+        _manifest_target_post_is_operation_consistent(manifest, target_name)
+        for target_name in completed_targets
+    )
+
+
+def _normalize_claude_mcp_recovery_manifest(manifest: dict[str, object]) -> bool:
+    targets = manifest.get("targets")
+    if not isinstance(targets, dict):
+        return False
+
+    expected_paths = _expected_claude_setup_target_paths()
+    seen_paths: set[Path] = set()
+    for target_name, expected_path in expected_paths.items():
+        raw = targets.get(target_name)
+        if not isinstance(raw, dict):
+            return False
+        raw_path = raw.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            return False
+        target_path = Path(raw_path)
+        if (
+            not target_path.is_absolute()
+            or target_path != expected_path
+            or target_path in seen_paths
+        ):
+            return False
+        seen_paths.add(target_path)
+
+        raw_operation = raw.get("operation")
+        if raw_operation is None:
+            decoded_content = _decode_manifest_target_content(raw)
+            if decoded_content is False:
+                return False
+            raw["operation"] = "noop" if decoded_content is None else "write"
+        elif not isinstance(raw_operation, str) or raw_operation not in {"write", "noop"}:
+            return False
+    return True
 
 
 def _write_temp_bytes(path: Path, content: bytes, *, mode: int) -> Path:
@@ -493,10 +685,19 @@ def _load_claude_mcp_recovery_manifest(recovery_path: Path) -> dict[str, object]
     if data.get("phase") not in _CLAUDE_MCP_RECOVERY_PHASES:
         print_warning("Claude MCP recovery journal has unknown phase — setup aborted.")
         return None
+    if not _normalize_claude_mcp_recovery_manifest(data):
+        print_warning("Claude MCP recovery journal target is incomplete — setup aborted.")
+        return None
     for target_name in ("mcp", "config", "credentials"):
         if _manifest_target(data, target_name) is None:
             print_warning("Claude MCP recovery journal target is incomplete — setup aborted.")
             return None
+    if not _manifest_completed_targets_are_consistent(data):
+        print_warning(
+            "Claude MCP recovery journal phase is inconsistent and does not match current "
+            "targets — setup aborted."
+        )
+        return None
     return data
 
 
@@ -585,7 +786,6 @@ def _manifest_target(
     if not isinstance(raw, dict):
         return None
     raw_path = raw.get("path")
-    raw_content = raw.get("content_b64")
     raw_operation = raw.get("operation")
     raw_mode = raw.get("mode")
     raw_pre = raw.get("pre")
@@ -598,28 +798,29 @@ def _manifest_target(
         or not isinstance(raw_pre, dict)
     ):
         return None
+    path = Path(raw_path)
+    expected_path = _expected_claude_setup_target_paths()[name]
+    if not path.is_absolute() or path != expected_path:
+        return None
     pre = _snapshot_from_manifest(raw_pre)
     if pre is None:
         return None
-    raw_sha = raw.get("sha256")
-    if raw_content is None:
-        if raw_sha is not None or raw_operation != "noop":
+    decoded_content = _decode_manifest_target_content(raw)
+    if decoded_content is False:
+        return None
+    if decoded_content is None:
+        if raw_operation != "noop":
             return None
         if not _manifest_noop_target_is_valid(name, pre):
             return None
         content: bytes | None = None
     else:
-        if not isinstance(raw_content, str) or not isinstance(raw_sha, str):
-            return None
         if raw_operation != "write":
             return None
-        try:
-            content = base64.b64decode(raw_content.encode("ascii"), validate=True)
-        except (ValueError, UnicodeEncodeError):
+        if not _staged_target_content_is_valid(manifest, name, decoded_content):
             return None
-        if hashlib.sha256(content).hexdigest() != raw_sha:
-            return None
-    return Path(raw_path), pre, content, raw_mode
+        content = decoded_content
+    return path, pre, content, raw_mode
 
 
 def _manifest_noop_target_is_valid(name: str, pre: _ClaudeSetupFileSnapshot) -> bool:
