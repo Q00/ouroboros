@@ -15,6 +15,7 @@ import asyncio
 import base64
 from contextlib import contextmanager
 from copy import deepcopy
+import hashlib
 from importlib import metadata as importlib_metadata
 import json
 import math
@@ -24,7 +25,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Literal, NamedTuple, NoReturn
 
 from rich.prompt import Prompt
 from rich.table import Table
@@ -123,36 +124,96 @@ def _claude_mcp_recovery_path(mcp_config_path: Path | None = None) -> Path:
     return path.with_name(f"{path.name}.ouroboros-recovery")
 
 
-def _read_claude_mcp_snapshot(mcp_config_path: Path) -> tuple[bool, bytes | None, int] | None:
+class _ClaudeMcpSnapshot(NamedTuple):
+    existed: bool
+    content: bytes | None
+    mode: int
+    identity: dict[str, int] | None
+    content_sha256: str | None
+
+
+def _claude_mcp_file_identity(stat_result: os.stat_result) -> dict[str, int]:
+    return {
+        "dev": int(stat_result.st_dev),
+        "ino": int(stat_result.st_ino),
+        "size": int(stat_result.st_size),
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "ctime_ns": int(stat_result.st_ctime_ns),
+    }
+
+
+def _read_claude_mcp_snapshot(mcp_config_path: Path) -> _ClaudeMcpSnapshot | None:
     """Return the exact pre-activation MCP snapshot, or ``None`` when unsafe."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    fd = -1
     try:
-        if mcp_config_path.exists():
-            if not mcp_config_path.is_file() or mcp_config_path.is_symlink():
-                return None
-            stat_result = mcp_config_path.stat()
-            if stat_result.st_nlink > 1:
-                return None
-            return True, mcp_config_path.read_bytes(), stat.S_IMODE(stat_result.st_mode)
-        return False, None, 0o600
+        fd = os.open(mcp_config_path, flags)
+    except FileNotFoundError:
+        return _ClaudeMcpSnapshot(False, None, 0o600, None, None)
     except OSError:
         return None
+    try:
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode) or stat_result.st_nlink > 1:
+            return None
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            content = stream.read()
+        return _ClaudeMcpSnapshot(
+            True,
+            content,
+            stat.S_IMODE(stat_result.st_mode),
+            _claude_mcp_file_identity(stat_result),
+            hashlib.sha256(content).hexdigest(),
+        )
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _claude_mcp_snapshot_matches(
+    snapshot: _ClaudeMcpSnapshot,
+    *,
+    identity: dict[str, object] | None,
+    content_sha256: object,
+) -> bool:
+    return (
+        snapshot.existed
+        and snapshot.identity == identity
+        and snapshot.content_sha256 == content_sha256
+    )
 
 
 def _write_claude_mcp_recovery(
     mcp_config_path: Path,
     *,
-    existed: bool,
-    content: bytes | None,
-    mode: int,
+    snapshot: _ClaudeMcpSnapshot,
+    target_config_path: Path,
+    target_config_content: str,
 ) -> bool:
+    encoded_config = target_config_content.encode("utf-8")
     payload: dict[str, object] = {
         "version": 1,
         "state": "pending",
-        "action": "restore" if existed else "remove",
-        "mode": mode,
+        "action": "restore" if snapshot.existed else "remove",
+        "mode": snapshot.mode,
+        "target_config_path": str(target_config_path),
+        "target_config_sha256": hashlib.sha256(encoded_config).hexdigest(),
+        "target_config_b64": base64.b64encode(encoded_config).decode("ascii"),
     }
-    if existed:
-        payload["content_b64"] = base64.b64encode(content or b"").decode("ascii")
+    if snapshot.existed:
+        payload["content_b64"] = base64.b64encode(snapshot.content or b"").decode("ascii")
+        payload["pre_identity"] = snapshot.identity
+        payload["pre_content_sha256"] = snapshot.content_sha256
     try:
         _atomic_write_text(
             _claude_mcp_recovery_path(mcp_config_path),
@@ -161,6 +222,49 @@ def _write_claude_mcp_recovery(
         )
     except (OSError, TypeError, ValueError) as exc:
         print_warning(f"Could not write Claude MCP recovery journal — setup aborted: {exc}")
+        return False
+    return True
+
+
+def _record_claude_mcp_recovery_expected_post_content(mcp_config_path: Path, content: str) -> bool:
+    recovery_path = _claude_mcp_recovery_path(mcp_config_path)
+    try:
+        data = json.loads(recovery_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            print_warning("Claude MCP recovery journal is malformed — setup aborted.")
+            return False
+        data["post_content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        _atomic_write_text(
+            recovery_path,
+            json.dumps(data, indent=2, allow_nan=False) + "\n",
+            mode=0o600,
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        print_warning(f"Could not record Claude MCP recovery target — setup aborted: {exc}")
+        return False
+    return True
+
+
+def _record_claude_mcp_recovery_post_state(mcp_config_path: Path) -> bool:
+    recovery_path = _claude_mcp_recovery_path(mcp_config_path)
+    snapshot = _read_claude_mcp_snapshot(mcp_config_path)
+    if snapshot is None or not snapshot.existed:
+        print_warning("Could not record Claude MCP recovery target — setup aborted.")
+        return False
+    try:
+        data = json.loads(recovery_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            print_warning("Claude MCP recovery journal is malformed — setup aborted.")
+            return False
+        data["post_identity"] = snapshot.identity
+        data["post_content_sha256"] = snapshot.content_sha256
+        _atomic_write_text(
+            recovery_path,
+            json.dumps(data, indent=2, allow_nan=False) + "\n",
+            mode=0o600,
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        print_warning(f"Could not record Claude MCP recovery target — setup aborted: {exc}")
         return False
     return True
 
@@ -193,6 +297,57 @@ def _clear_claude_mcp_recovery(mcp_config_path: Path) -> bool:
     return True
 
 
+def _claude_mcp_target_config_is_committed(data: dict[str, object]) -> bool:
+    raw_path = data.get("target_config_path")
+    raw_sha256 = data.get("target_config_sha256")
+    if not isinstance(raw_path, str) or not isinstance(raw_sha256, str):
+        return False
+    try:
+        content = Path(raw_path).read_bytes()
+    except OSError:
+        return False
+    return hashlib.sha256(content).hexdigest() == raw_sha256
+
+
+def _claude_mcp_current_matches_post_state(mcp_config_path: Path, data: dict[str, object]) -> bool:
+    snapshot = _read_claude_mcp_snapshot(mcp_config_path)
+    if snapshot is None or not snapshot.existed:
+        return False
+    raw_identity = data.get("post_identity")
+    if raw_identity is None:
+        return snapshot.content_sha256 == data.get("post_content_sha256")
+    return _claude_mcp_snapshot_matches(
+        snapshot,
+        identity=raw_identity if isinstance(raw_identity, dict) else None,
+        content_sha256=data.get("post_content_sha256"),
+    )
+
+
+def _recover_claude_mcp_target_config(data: dict[str, object]) -> bool:
+    raw_path = data.get("target_config_path")
+    raw_sha256 = data.get("target_config_sha256")
+    raw_content = data.get("target_config_b64")
+    if (
+        not isinstance(raw_path, str)
+        or not isinstance(raw_sha256, str)
+        or not isinstance(raw_content, str)
+    ):
+        print_warning("Claude MCP recovery journal is incomplete — setup aborted.")
+        return False
+    try:
+        content = base64.b64decode(raw_content.encode("ascii"), validate=True)
+        if hashlib.sha256(content).hexdigest() != raw_sha256:
+            print_warning("Claude MCP recovery journal target config is corrupt — setup aborted.")
+            return False
+        config_path = Path(raw_path)
+        mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
+        _atomic_write_text(config_path, content.decode("utf-8"), mode=mode)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print_warning(f"Could not complete Claude config recovery — setup aborted: {exc}")
+        return False
+    return True
+
+
 def _recover_claude_mcp_activation() -> bool:
     """Recover a previously interrupted Claude MCP activation, if any."""
     mcp_config_path = _claude_mcp_config_path()
@@ -215,37 +370,20 @@ def _recover_claude_mcp_activation() -> bool:
         print_warning("Claude MCP recovery journal has unknown state — setup aborted.")
         return False
 
-    action = data.get("action")
-    try:
-        if action == "restore":
-            raw_content = data.get("content_b64")
-            raw_mode = data.get("mode", 0o600)
-            if not isinstance(raw_content, str) or not isinstance(raw_mode, int):
-                print_warning("Claude MCP recovery journal is malformed — setup aborted.")
-                return False
-            content = base64.b64decode(raw_content.encode("ascii"), validate=True)
-            _atomic_write_text(
-                mcp_config_path,
-                content.decode("utf-8"),
-                mode=raw_mode,
-            )
-        elif action == "remove":
-            try:
-                if mcp_config_path.exists():
-                    if not mcp_config_path.is_file() or mcp_config_path.is_symlink():
-                        print_warning(
-                            f"Could not recover Claude MCP registration because {mcp_config_path} "
-                            "is not a regular file."
-                        )
-                        return False
-                    mcp_config_path.unlink()
-            except FileNotFoundError:
-                pass
-        else:
-            print_warning("Claude MCP recovery journal has unknown action — setup aborted.")
-            return False
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
-        print_warning(f"Could not recover Claude MCP registration — setup aborted: {exc}")
+    if _claude_mcp_target_config_is_committed(data):
+        return _clear_claude_mcp_recovery(mcp_config_path)
+
+    if data.get("action") not in {"restore", "remove"}:
+        print_warning("Claude MCP recovery journal has unknown action — setup aborted.")
+        return False
+
+    if not _claude_mcp_current_matches_post_state(mcp_config_path, data):
+        print_warning(
+            "Claude MCP recovery journal does not match the current MCP config — setup aborted."
+        )
+        return False
+
+    if not _recover_claude_mcp_target_config(data):
         return False
 
     return _clear_claude_mcp_recovery(mcp_config_path)
@@ -277,7 +415,12 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
     return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
 
 
-def _ensure_claude_mcp_entry(*, emit_status: bool = True, recover_pending: bool = True) -> bool:
+def _ensure_claude_mcp_entry(
+    *,
+    emit_status: bool = True,
+    recover_pending: bool = True,
+    expected_snapshot: _ClaudeMcpSnapshot | None = None,
+) -> bool:
     """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
 
     Creates the entry if missing (detecting install method), updates stale
@@ -319,6 +462,22 @@ def _ensure_claude_mcp_entry(*, emit_status: bool = True, recover_pending: bool 
     except OSError as exc:
         print_warning(f"Could not inspect {mcp_config_path} — leaving it untouched: {exc}")
         return False
+
+    if expected_snapshot is not None:
+        current_snapshot = _read_claude_mcp_snapshot(mcp_config_path)
+        if current_snapshot is None:
+            print_warning(f"Could not verify {mcp_config_path} snapshot — leaving it untouched.")
+            return False
+        if expected_snapshot.existed != current_snapshot.existed:
+            print_warning(f"{mcp_config_path} changed during setup — leaving it untouched.")
+            return False
+        if expected_snapshot.existed and not _claude_mcp_snapshot_matches(
+            current_snapshot,
+            identity=expected_snapshot.identity,
+            content_sha256=expected_snapshot.content_sha256,
+        ):
+            print_warning(f"{mcp_config_path} changed during setup — leaving it untouched.")
+            return False
 
     mcp_data: dict[str, object] = {}
     if config_exists:
@@ -412,9 +571,14 @@ def _ensure_claude_mcp_entry(*, emit_status: bool = True, recover_pending: bool 
     if needs_write:
         try:
             mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if config_exists else 0o600
+            content = json.dumps(mcp_data, indent=2, allow_nan=False)
+            if expected_snapshot is not None and not (
+                _record_claude_mcp_recovery_expected_post_content(mcp_config_path, content)
+            ):
+                return False
             _atomic_write_text(
                 mcp_config_path,
-                json.dumps(mcp_data, indent=2, allow_nan=False),
+                content,
                 mode=mode,
             )
         except (OSError, TypeError, ValueError) as exc:
@@ -2605,59 +2769,36 @@ def _setup_claude(claude_path: str) -> bool:
     if snapshot is None:
         print_warning(f"Could not snapshot {mcp_config_path} safely — Claude setup aborted.")
         return False
-    had_mcp_config, previous_mcp_content, previous_mcp_mode = snapshot
 
     if not _write_claude_mcp_recovery(
         mcp_config_path,
-        existed=had_mcp_config,
-        content=previous_mcp_content,
-        mode=previous_mcp_mode,
+        snapshot=snapshot,
+        target_config_path=config_path,
+        target_config_content=staged_config,
     ):
         return False
 
-    if not _ensure_claude_mcp_entry(emit_status=False, recover_pending=False):
+    if not _ensure_claude_mcp_entry(
+        emit_status=False,
+        recover_pending=False,
+        expected_snapshot=snapshot,
+    ):
         _clear_claude_mcp_recovery(mcp_config_path)
         return False
 
+    if not _record_claude_mcp_recovery_post_state(mcp_config_path):
+        _recover_claude_mcp_activation()
+        return False
+
     if not _ensure_credentials_file(config_dir):
-        if had_mcp_config and previous_mcp_content is not None:
-            try:
-                _atomic_write_text(
-                    mcp_config_path,
-                    previous_mcp_content.decode("utf-8"),
-                    mode=previous_mcp_mode,
-                )
-            except OSError as rollback_exc:
-                print_warning(f"Could not roll back Claude MCP registration: {rollback_exc}")
-        elif mcp_config_path.exists():
-            try:
-                mcp_config_path.unlink()
-            except OSError as rollback_exc:
-                print_warning(
-                    f"Could not remove rolled-back Claude MCP registration: {rollback_exc}"
-                )
+        _recover_claude_mcp_activation()
         return False
 
     try:
         mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
         _atomic_write_text(config_path, staged_config, mode=mode)
     except OSError as exc:
-        if had_mcp_config and previous_mcp_content is not None:
-            try:
-                _atomic_write_text(
-                    mcp_config_path,
-                    previous_mcp_content.decode("utf-8"),
-                    mode=previous_mcp_mode,
-                )
-            except OSError as rollback_exc:
-                print_warning(f"Could not roll back Claude MCP registration: {rollback_exc}")
-        elif mcp_config_path.exists():
-            try:
-                mcp_config_path.unlink()
-            except OSError as rollback_exc:
-                print_warning(
-                    f"Could not remove rolled-back Claude MCP registration: {rollback_exc}"
-                )
+        _recover_claude_mcp_activation()
         print_warning(f"Could not write {config_path} — Claude setup aborted: {exc}")
         return False
 
