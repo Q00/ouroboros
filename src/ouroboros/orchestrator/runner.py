@@ -8580,6 +8580,10 @@ class OrchestratorRunner:
                 )
             return Result.err(durable_status_error)
 
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(durable_tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
+
         # Preserve the historical terminal-copy recovery contract, but only
         # after durable identity and RUNNING status have been authenticated.
         # Nonterminal caller copies must still match the sealed prepared receipt.
