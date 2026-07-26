@@ -283,6 +283,15 @@ are authenticated before prompt construction or provider entry.
 Live-only runtimes may preserve the builder's explicit unobservable runtime or
 workspace states at this first boundary because the opaque generation and seal
 still bind the exact process; durable resume continues to reject those states.
+The prepared tracker is only a contract receipt, never lifecycle authority.
+Every precreated dispatch reconstructs event-sourced session status before the
+process-local claim and again immediately after a successful claim. Only
+`RUNNING` at both observations may reach contract authentication or tool setup.
+`PAUSED` is rejected without retiring the retained owner and can continue only
+through `resume_session`; terminal status retires local authority, and an
+unreadable observation is retryable with zero provider effects. The second read
+closes the race where another execution publishes `PAUSED` between the first
+observation and claim release.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a

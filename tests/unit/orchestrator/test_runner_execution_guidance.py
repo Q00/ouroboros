@@ -39,6 +39,15 @@ def _write_guidance(root: Path, guidance_id: str, text: str) -> Path:
     return path
 
 
+def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
+    """Treat a unit-test tracker as the durable snapshot for mocked stores."""
+
+    async def reconstruct(tracker: SessionTracker):
+        return Result.ok(tracker)
+
+    runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
+
+
 def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[OrchestratorRunner, AsyncMock]:
     adapter = MagicMock()
     adapter.runtime_backend = "opencode"
@@ -56,7 +65,9 @@ def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[Orchestrato
     execution = config.execution.model_copy(update={"project_guidance": guidance_ids})
     config = config.model_copy(update={"execution": execution})
     with patch("ouroboros.config.load_config", return_value=config):
-        return OrchestratorRunner(adapter, event_store, MagicMock()), event_store
+        runner = OrchestratorRunner(adapter, event_store, MagicMock())
+    _allow_mocked_precreated_durable_state(runner)
+    return runner, event_store
 
 
 def test_empty_guidance_preserves_prompt_bytes() -> None:

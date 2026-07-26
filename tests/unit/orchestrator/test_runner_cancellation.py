@@ -29,6 +29,15 @@ from ouroboros.orchestrator.session import SessionTracker
 # =============================================================================
 
 
+def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
+    """Treat a unit-test tracker as the durable snapshot for mocked stores."""
+
+    async def reconstruct(tracker: SessionTracker):
+        return Result.ok(tracker)
+
+    runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
+
+
 @pytest.fixture
 def mock_adapter() -> MagicMock:
     """Create a mock Claude agent adapter."""
@@ -63,7 +72,9 @@ def runner(
     mock_console: MagicMock,
 ) -> OrchestratorRunner:
     """Create a runner with mocked dependencies."""
-    return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+    runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+    _allow_mocked_precreated_durable_state(runner)
+    return runner
 
 
 @pytest.fixture(autouse=True)

@@ -4086,6 +4086,113 @@ class OrchestratorRunner:
             execution_contract,
         )
 
+    async def _reconstruct_precreated_durable_tracker(
+        self,
+        tracker: SessionTracker,
+    ) -> Result[SessionTracker, OrchestratorError]:
+        """Return the durable lifecycle owner for one prepared execution.
+
+        Caller-owned trackers are immutable preparation receipts, not lifecycle
+        authority. Every prepared dispatch observes the event-sourced status at
+        this choke point before it may claim process-local execution authority.
+        """
+        try:
+            durable_result = await self._session_repo.reconstruct_session(tracker.session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return Result.err(
+                OrchestratorError(
+                    message="Cannot verify durable prepared session state",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "cause": str(exc),
+                        "resume_blocked": "precreated_state_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
+        if durable_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message="Cannot verify durable prepared session state",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "cause": str(durable_result.error),
+                        "resume_blocked": "precreated_state_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
+        durable_tracker = durable_result.value
+        if (
+            durable_tracker.session_id != tracker.session_id
+            or durable_tracker.execution_id != tracker.execution_id
+        ):
+            return Result.err(
+                OrchestratorError(
+                    message="Durable session identity does not match the supplied tracker",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "durable_session_id": durable_tracker.session_id,
+                        "durable_execution_id": durable_tracker.execution_id,
+                        "resume_blocked": "precreated_session_identity_mismatch",
+                    },
+                )
+            )
+        return Result.ok(durable_tracker)
+
+    @staticmethod
+    def _precreated_non_running_error(
+        durable_tracker: SessionTracker,
+    ) -> OrchestratorError | None:
+        """Reject every durable lifecycle state except a fresh RUNNING owner."""
+        if durable_tracker.status is SessionStatus.RUNNING:
+            return None
+        if durable_tracker.status is SessionStatus.PAUSED:
+            return OrchestratorError(
+                message=(
+                    "Session is paused; resume it through resume_session instead of "
+                    "reusing a prepared tracker"
+                ),
+                details={
+                    "session_id": durable_tracker.session_id,
+                    "execution_id": durable_tracker.execution_id,
+                    "status": durable_tracker.status.value,
+                    "resume_blocked": "precreated_session_paused",
+                },
+            )
+        if durable_tracker.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        }:
+            return OrchestratorError(
+                message=(
+                    f"Session is in terminal state {durable_tracker.status.value}, cannot execute"
+                ),
+                details={
+                    "session_id": durable_tracker.session_id,
+                    "execution_id": durable_tracker.execution_id,
+                    "status": durable_tracker.status.value,
+                },
+            )
+        return OrchestratorError(
+            message=(
+                "Session is not in durable running state, cannot execute "
+                f"({durable_tracker.status.value})"
+            ),
+            details={
+                "session_id": durable_tracker.session_id,
+                "execution_id": durable_tracker.execution_id,
+                "status": durable_tracker.status.value,
+                "resume_blocked": "precreated_session_not_running",
+            },
+        )
+
     def _cleanup_process_local_authority_after_external_terminal(
         self,
         *,
@@ -8456,40 +8563,37 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
-        if tracker.status in (
-            SessionStatus.COMPLETED,
-            SessionStatus.CANCELLED,
-            SessionStatus.FAILED,
-        ):
-            durable_tracker_result = await self._session_repo.reconstruct_session(
-                tracker.session_id
-            )
-            if durable_tracker_result.is_err:
-                return Result.err(
-                    OrchestratorError(
-                        message="Cannot verify caller-supplied terminal session state",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                            "cause": str(durable_tracker_result.error),
-                            "resume_blocked": "terminal_state_unverified",
-                        },
-                    )
-                )
-            durable_tracker = durable_tracker_result.value
-            if (
-                durable_tracker.session_id != tracker.session_id
-                or durable_tracker.execution_id != tracker.execution_id
+        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
             ):
                 return Result.err(
-                    OrchestratorError(
-                        message="Durable session identity does not match the supplied tracker",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                        },
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
                     )
                 )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
+
+        durable_before_claim = await self._reconstruct_precreated_durable_tracker(tracker)
+        if durable_before_claim.is_err:
+            return Result.err(durable_before_claim.error)
+        durable_tracker = durable_before_claim.value
+        durable_status_error = self._precreated_non_running_error(durable_tracker)
+        if durable_status_error is not None:
             if durable_tracker.status in {
                 SessionStatus.COMPLETED,
                 SessionStatus.CANCELLED,
@@ -8499,22 +8603,7 @@ class OrchestratorRunner:
                     session_id=durable_tracker.session_id,
                     execution_id=durable_tracker.execution_id,
                 )
-                return Result.err(
-                    OrchestratorError(
-                        message=(
-                            "Session is in terminal state "
-                            f"{durable_tracker.status.value}, cannot execute"
-                        ),
-                        details={
-                            "session_id": durable_tracker.session_id,
-                            "status": durable_tracker.status.value,
-                        },
-                    )
-                )
-            tracker = durable_tracker
-            exec_id = tracker.execution_id
-
-        raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+            return Result.err(durable_status_error)
 
         # This API may execute only the tracker returned by ``prepare_session``.
         # Claim its live capability first, then authenticate the caller-owned
@@ -8554,6 +8643,43 @@ class OrchestratorRunner:
                     tracker.execution_id,
                 )
             )
+
+        # Close the observation-to-claim race. If another execution published
+        # PAUSED or a terminal state after the first durable read, this claimed
+        # generation prevents further legitimate dispatch while the second read
+        # rejects the stale prepared receipt before any tool or provider effect.
+        try:
+            durable_after_claim = await self._reconstruct_precreated_durable_tracker(tracker)
+        except asyncio.CancelledError:
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+            raise
+        if durable_after_claim.is_err:
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+            return Result.err(durable_after_claim.error)
+        durable_tracker = durable_after_claim.value
+        durable_status_error = self._precreated_non_running_error(durable_tracker)
+        if durable_status_error is not None:
+            if durable_tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=durable_tracker.session_id,
+                    execution_id=durable_tracker.execution_id,
+                )
+            else:
+                self._preserve_process_local_owner_for_retry(
+                    execution_id=tracker.execution_id,
+                    session_id=tracker.session_id,
+                )
+            return Result.err(durable_status_error)
 
         try:
             authenticated_contract = self._authenticate_process_local_prepared_contract(

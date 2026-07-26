@@ -94,6 +94,15 @@ def _task_workspace() -> TaskWorkspace:
     )
 
 
+def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
+    """Treat a unit-test tracker as the durable snapshot for mocked stores."""
+
+    async def reconstruct(tracker: SessionTracker):
+        return Result.ok(tracker)
+
+    runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
+
+
 def _attach_live_process_local_contract(
     runner: OrchestratorRunner,
     tracker: SessionTracker,
@@ -120,6 +129,7 @@ def _attach_live_process_local_contract(
         generation=generation,
         execution_contract=contract,
     )
+    _allow_mocked_precreated_durable_state(runner)
     return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 
@@ -158,6 +168,7 @@ def _enable_direct_bounded_routes(
     runner._route_economics = economics
     runner._model_router = build_model_router(economics, runtime_backend="claude")
     assert runner._model_router is not None
+    _allow_mocked_precreated_durable_state(runner)
 
 
 def test_seed_investment_detection_supports_legacy_string_criteria(sample_seed: Seed) -> None:
@@ -592,7 +603,9 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
         """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
+        return runner
 
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
@@ -938,6 +951,7 @@ class TestOrchestratorRunner:
             model_override_support=ParamSupport.NATIVE,
         )
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
         runner._route_economics = economics
         runner._model_router = build_model_router(economics, runtime_backend="claude")
         assert runner._model_router is not None
@@ -4003,6 +4017,7 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
         tracker = SessionTracker.create(
             "exec_setup",
             sample_seed.metadata.seed_id,
@@ -4060,6 +4075,7 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
         tracker = SessionTracker.create(
             "exec_tools",
             sample_seed.metadata.seed_id,
@@ -7398,6 +7414,7 @@ class TestOrchestratorRunner:
             inherited_tools=["WebFetch", "mcp__chrome-devtools__click"],
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
 
         from ouroboros.core.types import Result
 
@@ -8117,6 +8134,7 @@ class TestOrchestratorRunnerWithMCP:
             mock_console,
             mcp_manager=mock_mcp_manager,
         )
+        _allow_mocked_precreated_durable_state(runner)
 
         # Mock session creation
         async def mock_create_session(*args: Any, **kwargs: Any):
@@ -8176,7 +8194,9 @@ class TestCancellationPolling:
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
         """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
+        return runner
 
     @pytest.mark.asyncio
     async def test_check_cancellation_returns_false_when_no_event(
