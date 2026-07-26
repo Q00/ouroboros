@@ -103,12 +103,16 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
     return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
 
 
-def _ensure_claude_mcp_entry() -> None:
+def _ensure_claude_mcp_entry() -> bool:
     """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
 
     Creates the entry if missing (detecting install method), updates stale
     uvx args (e.g. ouroboros-ai without [claude] extras), and removes the
-    legacy timeout key.  Skips the file write when nothing changed.
+    legacy timeout key. Skips the file write when nothing changed.
+
+    Returns:
+        True when the entry is registered or already usable, False when the
+        existing configuration could not be updated safely.
     """
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
     try:
@@ -117,7 +121,7 @@ def _ensure_claude_mcp_entry() -> None:
         print_warning(
             f"Could not create {mcp_config_path.parent} — MCP registration skipped: {exc}"
         )
-        return
+        return False
 
     try:
         if mcp_config_path.is_symlink():
@@ -126,18 +130,18 @@ def _ensure_claude_mcp_entry() -> None:
                 "leaving it untouched. Update the linked configuration target manually "
                 "and re-run setup."
             )
-            return
+            return False
         if mcp_config_path.exists() and mcp_config_path.stat().st_nlink > 1:
             print_warning(
                 f"Could not update {mcp_config_path} because it is hard-linked — "
                 "leaving it untouched. Update the linked configuration manually "
                 "and re-run setup."
             )
-            return
+            return False
         config_exists = mcp_config_path.exists()
     except OSError as exc:
         print_warning(f"Could not inspect {mcp_config_path} — leaving it untouched: {exc}")
-        return
+        return False
 
     mcp_data: dict[str, object] = {}
     if config_exists:
@@ -152,19 +156,19 @@ def _ensure_claude_mcp_entry() -> None:
                 f"Could not decode {mcp_config_path} as UTF-8 — leaving it untouched. "
                 "Fix the file encoding and re-run setup."
             )
-            return
+            return False
         except (json.JSONDecodeError, ValueError):
             print_warning(
                 f"Could not parse {mcp_config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings. Fix the JSON syntax and re-run setup."
             )
-            return
+            return False
         except OSError as exc:
             print_warning(f"Could not read {mcp_config_path} — leaving it untouched: {exc}")
-            return
+            return False
         if not isinstance(mcp_data, dict):
             print_warning(f"{mcp_config_path} top-level is not an object — leaving it untouched.")
-            return
+            return False
 
     if "mcpServers" not in mcp_data:
         servers: dict[str, object] = {}
@@ -175,7 +179,7 @@ def _ensure_claude_mcp_entry() -> None:
             print_warning(
                 f"{mcp_config_path} 'mcpServers' section is not an object — leaving it untouched."
             )
-            return
+            return False
         servers = raw_servers
 
     if "ouroboros" not in servers:
@@ -186,14 +190,14 @@ def _ensure_claude_mcp_entry() -> None:
             print_warning(
                 f"{mcp_config_path} mcpServers.ouroboros is not an object — leaving it untouched."
             )
-            return
+            return False
         existing = raw_existing
         if "command" in existing and not isinstance(existing["command"], str):
             print_warning(
                 f"{mcp_config_path} mcpServers.ouroboros.command is not a string — "
                 "leaving it untouched."
             )
-            return
+            return False
 
     detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
     needs_write = False
@@ -207,7 +211,7 @@ def _ensure_claude_mcp_entry() -> None:
                 "Cannot register MCP server: no working ouroboros installation found.\n"
                 "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
             )
-            return
+            return False
         servers["ouroboros"] = detected
         needs_write = True
         registered = True
@@ -241,7 +245,7 @@ def _ensure_claude_mcp_entry() -> None:
             _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2), mode=mode)
         except (OSError, TypeError, ValueError) as exc:
             print_warning(f"Could not write {mcp_config_path} — leaving it untouched: {exc}")
-            return
+            return False
 
         if registered:
             print_success("Registered MCP server in ~/.claude/mcp.json")
@@ -249,6 +253,8 @@ def _ensure_claude_mcp_entry() -> None:
             print_info("Removed legacy MCP timeout override.")
         if updated_entry:
             print_info("Updated MCP server entry to match current install method.")
+
+    return True
 
 
 app = typer.Typer(
@@ -2370,8 +2376,14 @@ def _setup_goose(goose_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
-def _setup_claude(claude_path: str) -> None:
+def _setup_claude(claude_path: str) -> bool:
     """Configure Ouroboros for the Claude Code runtime."""
+    # Register/fix MCP before persisting Claude as the active backend. A failed
+    # operator-owned MCP update must not leave config.yaml claiming setup
+    # succeeded when Claude cannot reach the Ouroboros server.
+    if not _ensure_claude_mcp_entry():
+        return False
+
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
     config_dir = ensure_config_dir()
@@ -2394,11 +2406,9 @@ def _setup_claude(claude_path: str) -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    # Register/fix MCP server in ~/.claude/mcp.json
-    _ensure_claude_mcp_entry()
-
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
+    return True
 
 
 def _strip_jsonc(text: str) -> str:
@@ -2656,12 +2666,19 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o600) -> None:
             os.fchmod(fd, mode)
         else:
             os.chmod(tmp_name, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with stream as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_name, path)
     except OSError:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             Path(tmp_name).unlink()
         except OSError:
@@ -3263,7 +3280,8 @@ def setup(
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude(claude_path)
+        if _setup_claude(claude_path) is False:
+            raise typer.Exit(1)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:

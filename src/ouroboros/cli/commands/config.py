@@ -539,11 +539,12 @@ def backend(
 
     prev_quiet = console.quiet
     setup_failed = False
+    setup_returned_failure = False
     try:
         console.quiet = True
         setup_mod.print_error = _tracking_print_error  # type: ignore[assignment]
         if new_backend == "claude":
-            _setup_claude(cli_path)
+            setup_returned_failure = _setup_claude(cli_path) is False
         elif new_backend == "codex":
             _setup_codex(cli_path)
         elif new_backend == "hermes":
@@ -573,6 +574,9 @@ def backend(
 
     if setup_failed:
         pass  # Already warned above
+    elif setup_returned_failure:
+        print_warning("Backend switch aborted because Claude setup could not complete safely.")
+        raise typer.Exit(1)
     elif _setup_had_errors:
         print_warning("Backend switched but some setup steps had issues.")
         print_info("Run [bold]ouroboros setup[/] to verify configuration.")
