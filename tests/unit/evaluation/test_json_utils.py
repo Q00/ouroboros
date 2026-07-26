@@ -110,6 +110,14 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"valid": true' in result
 
+    def test_unclosed_unsupported_fence_fails_closed(self):
+        text = '```python\nEXAMPLE = {"stale": true}\n{"actual": true}'
+        assert extract_json_payload(text) is None
+
+    def test_invalid_supported_fence_fails_closed_instead_of_later_prose_json(self):
+        text = '```json\n{not json}\n```\n{"actual": true}'
+        assert extract_json_payload(text) is None
+
 
 class TestExtractJsonArray:
     """extract_json_payload must also handle top-level JSON arrays."""

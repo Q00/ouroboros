@@ -4,7 +4,14 @@ Provides a robust bracket-matching JSON extractor used by semantic,
 consensus, and QA evaluation stages.
 """
 
+from enum import Enum
 import json
+
+
+class _FenceScanState(Enum):
+    NO_FENCE = "no_fence"
+    PAYLOAD = "payload"
+    MALFORMED = "malformed"
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -20,44 +27,52 @@ def extract_json_payload(text: str) -> str | None:
     Returns:
         Extracted JSON string, or None if no valid JSON is found
     """
-    fenced_payload = _extract_fenced_json_payload(text)
-    if fenced_payload is not None:
+    fence_state, fenced_payload = _extract_fenced_json_payload(text)
+    if fence_state is _FenceScanState.PAYLOAD:
         return fenced_payload
+    if fence_state is _FenceScanState.MALFORMED:
+        return None
 
     return _extract_first_json_from_text(text)
 
 
-def _extract_fenced_json_payload(text: str) -> str | None:
-    """Extract the first valid JSON payload from a JSON or bare code fence."""
+def _extract_fenced_json_payload(text: str) -> tuple[_FenceScanState, str | None]:
+    """Extract JSON from fences, distinguishing absent from malformed fences."""
     fence_start = 0
+    saw_fence = False
     while True:
         opener = text.find("```", fence_start)
         if opener == -1:
-            return None
+            return (_FenceScanState.NO_FENCE, None)
+        saw_fence = True
 
         info_start = opener + 3
         line_end = text.find("\n", info_start)
         if line_end == -1:
-            return None
+            return (_FenceScanState.MALFORMED, None)
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
             closing = _find_closing_fence(text, line_end + 1)
             if closing is None:
-                return None
+                return (_FenceScanState.MALFORMED, None)
             fence_start = closing + 3
             continue
 
         body_start = line_end + 1
         closing = _find_closing_fence(text, body_start)
         if closing is None:
-            return None
+            return (_FenceScanState.MALFORMED, None)
 
         body = text[body_start:closing]
         payload = _extract_first_json_from_text(body)
         if payload is not None:
-            return payload
+            return (_FenceScanState.PAYLOAD, payload)
 
+        # A supported fence is an explicit JSON answer boundary. If it cannot
+        # be parsed, do not let stale examples elsewhere in the response win.
+        if saw_fence:
+            return (_FenceScanState.MALFORMED, None)
         fence_start = closing + 3
 
 
