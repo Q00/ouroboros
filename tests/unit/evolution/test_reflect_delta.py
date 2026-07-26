@@ -14,7 +14,8 @@ import json
 
 import pytest
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary
+from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.reflect import (
     ACPatch,
@@ -39,6 +40,20 @@ def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
             name="o",
             description="d",
             fields=(OntologyField(name="f", field_type="entity", description="a field"),),
+        ),
+    )
+
+
+def _seed_with_ontology(fields: tuple[OntologyField, ...]) -> Seed:
+    return Seed(
+        metadata=SeedMetadata(ambiguity_score=0.1),
+        goal="Build a thing",
+        constraints=("c1",),
+        acceptance_criteria=PARENT_ACS,
+        ontology_schema=OntologySchema(
+            name="o",
+            description="d",
+            fields=fields,
         ),
     )
 
@@ -319,6 +334,58 @@ class TestReflectEndToEnd:
         assert 0 in out.settled_ac_indices
         assert 2 in out.settled_ac_indices
         assert 1 not in out.settled_ac_indices
+
+    async def test_valid_mutations_materialize_downstream_seed(self) -> None:
+        parent = _seed_with_ontology(
+            (
+                OntologyField(name="f", field_type="entity", description="a field"),
+                OntologyField(name="obsolete", field_type="string", description="obsolete field"),
+            )
+        )
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing with materialized ontology",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [
+                    {
+                        "action": "add",
+                        "field_name": "new_signal",
+                        "field_type": "string",
+                        "reason": "Captures the new signal",
+                    },
+                    {
+                        "action": "modify",
+                        "field_name": "f",
+                        "field_type": "object",
+                    },
+                    {
+                        "action": "remove",
+                        "field_name": "obsolete",
+                    },
+                ],
+                "reasoning": "r",
+            }
+        )
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=parent,
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        seed_result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent, result.value
+        )
+
+        assert seed_result.is_ok
+        fields = {field.name: field for field in seed_result.value.ontology_schema.fields}
+        assert fields["new_signal"].description == "Captures the new signal"
+        assert fields["f"].field_type == "object"
+        assert fields["f"].description == "a field"
+        assert "obsolete" not in fields
 
 
 class _FakeAdapter:

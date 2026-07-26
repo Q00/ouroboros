@@ -203,11 +203,17 @@ class TestReflectFenceRobustness:
             '{"ac_patches": {"0": {"op": "keep"}}, "ontology_mutations": []}',
             '{"ac_patches": "not-a-list", "ontology_mutations": []}',
             '{"refined_goal": ["not", "text"], "ontology_mutations": []}',
+            '{"refined_goal": "   ", "ontology_mutations": []}',
             '{"refined_constraints": "not-a-list", "ontology_mutations": []}',
             '{"refined_acs": "single string is not a list", "ontology_mutations": []}',
             '{"refined_acs": {"0": "mapping is not a list"}, "ontology_mutations": []}',
             '{"refined_acs": [{"description": "object member"}], "ontology_mutations": []}',
             '{"refined_acs": ["valid", 7], "ontology_mutations": []}',
+            (
+                '{"ontology_mutations": ['
+                '{"action": "add", "field_name": "empty_add", "description": " ", "reason": " "}'
+                "]}"
+            ),
         ],
     )
     async def test_bad_typed_shapes_return_result_error(self, content: str) -> None:
@@ -279,6 +285,14 @@ class TestAssertionExtractorFenceRobustness:
             [{"ac_index": 0, "tier": "not_a_tier", "description": "invalid tier"}],
             [{"ac_index": 0, "tier": "t1_constant", "expected_value": "10"}],
             [{"ac_index": 0, "tier": "t2_structural", "expected_value": "Widget"}],
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": "(",
+                    "expected_value": "10",
+                }
+            ],
         ],
     )
     def test_bad_assertion_shapes_do_not_escape(self, payload: object) -> None:

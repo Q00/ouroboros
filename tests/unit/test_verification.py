@@ -270,7 +270,7 @@ class TestSpecVerifier:
         assert summary.skipped_count == 2
 
     def test_no_files_match_hint(self) -> None:
-        """File hint matches nothing → trust agent (verified=True)."""
+        """File hint matches nothing → verification fails closed."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
@@ -281,8 +281,10 @@ class TestSpecVerifier:
             expected_value="bar",
             file_hint="*.rs",
         )
-        summary = verifier.verify_all((assertion,))
-        assert summary.verified_count == 1  # Trust agent when can't verify
+        summary = verifier.verify_all((assertion,), agent_results={0: True})
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
 
     def test_multiple_assertions_per_ac(self) -> None:
         """Multiple assertions for one AC — all must pass."""
@@ -342,11 +344,15 @@ class TestAssertionExtractor:
 
     def _make_extractor(self, response_json: list[dict]) -> AssertionExtractor:
         """Create extractor with mocked LLM that returns given JSON."""
+        return self._make_extractor_content(json.dumps(response_json))
+
+    def _make_extractor_content(self, content: str) -> AssertionExtractor:
+        """Create extractor with mocked LLM that returns raw content."""
         mock_adapter = AsyncMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
                 CompletionResponse(
-                    content=json.dumps(response_json),
+                    content=content,
                     model="test",
                     usage={"input": 0, "output": 0},
                 )
@@ -401,6 +407,58 @@ class TestAssertionExtractor:
         )
         assert summary.total_assertions == 0
         assert summary.verified_count == 0
+
+    @pytest.mark.asyncio
+    async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
+        """Invalid T1/T2 regexes are unusable and must not become assertions."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": "(",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "MAX_RETRIES should be five",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(f"Here is the answer:\n```json\n{payload}\n```")
+
+        result = await extractor.extract("seed_invalid_regex", ("MAX_RETRIES should be 5",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_wrapped_nonmatching_file_hint_fails_verification(self) -> None:
+        """A real extracted assertion with no matching files is failed, not promoted."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"MAX_RETRIES\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.rs",
+                    "description": "MAX_RETRIES should be five",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(f"```json\n{payload}\n```\nDone.")
+        result = await extractor.extract("seed_no_files", ("MAX_RETRIES should be 5",))
+        assert result.is_ok
+        assert len(result.value) == 1
+
+        project = TestSpecVerifier()._create_project({"config.py": "MAX_RETRIES = 5\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(
+            result.value, agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+        assert "No files matched hint" in summary.reports[0].results[0].detail
 
     @pytest.mark.asyncio
     async def test_caches_by_seed_id(self) -> None:

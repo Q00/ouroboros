@@ -13,6 +13,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 
 from pydantic import ValidationError
 
@@ -29,6 +30,8 @@ from ouroboros.providers.base import (
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
 logger = logging.getLogger(__name__)
+
+MAX_PATTERN_LENGTH = 200
 
 _SYSTEM_PROMPT = """You are a spec verification assistant. Given acceptance criteria for a software project, extract machine-verifiable assertions.
 
@@ -201,6 +204,16 @@ class AssertionExtractor:
                         item,
                     )
                     continue
+                if tier in (
+                    VerificationTier.T1_CONSTANT,
+                    VerificationTier.T2_STRUCTURAL,
+                ) and not _is_usable_regex_pattern(text_fields["pattern"]):
+                    logger.warning(
+                        "Ignoring %s assertion with unusable verification pattern: %r",
+                        tier.value,
+                        item,
+                    )
+                    continue
                 if (
                     tier is VerificationTier.T1_CONSTANT
                     and not text_fields["expected_value"].strip()
@@ -232,3 +245,14 @@ class AssertionExtractor:
         except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse extraction response: %s", e)
             return ()
+
+
+def _is_usable_regex_pattern(pattern: str) -> bool:
+    """Return whether a verifier regex can be compiled within verifier limits."""
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        return False
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True

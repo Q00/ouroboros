@@ -113,7 +113,8 @@ class SpecVerifier:
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="No pattern to verify",
             )
 
@@ -121,7 +122,8 @@ class SpecVerifier:
         if not files:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,  # Can't verify = trust agent
+                verified=False,
+                discrepancy=True,
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
 
@@ -129,7 +131,8 @@ class SpecVerifier:
         if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="Invalid or too-long regex pattern",
             )
 
@@ -178,7 +181,8 @@ class SpecVerifier:
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="No pattern to verify",
             )
 
@@ -203,7 +207,8 @@ class SpecVerifier:
         if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="Invalid or too-long regex pattern",
             )
 

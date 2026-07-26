@@ -18,6 +18,16 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"score": 0.85' in result
 
+    def test_json_fence_with_literal_backticks_after_brace_in_string(self):
+        text = (
+            '```json\n{"message": "literal }``` marker", "questions": ["keep outer object"]}\n```'
+        )
+        result = extract_json_payload(text)
+        assert result is not None
+        assert result.startswith("{")
+        assert '"message": "literal }``` marker"' in result
+        assert '"questions": ["keep outer object"]' in result
+
     def test_prose_before_json(self):
         """The classic Anthropic prefill failure: prose with braces before JSON."""
         text = (

@@ -5,7 +5,6 @@ consensus, and QA evaluation stages.
 """
 
 import json
-import re
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -21,21 +20,67 @@ def extract_json_payload(text: str) -> str | None:
     Returns:
         Extracted JSON string, or None if no valid JSON is found
     """
-    # Strip code fences first (```json ... ```)
-    fence_match = re.search(r"```(?:json)?\s*([\[{][\s\S]*?[}\]])\s*```", text)
-    if fence_match:
-        text = fence_match.group(1)
+    fenced_payload = _extract_fenced_json_payload(text)
+    if fenced_payload is not None:
+        return fenced_payload
 
-    pos = 0
+    return _extract_first_json_from_text(text)
+
+
+def _extract_fenced_json_payload(text: str) -> str | None:
+    """Extract the first valid JSON payload from a JSON or bare code fence."""
+    fence_start = 0
     while True:
-        # Find the next { or [ opener
-        obj_start = text.find("{", pos)
-        arr_start = text.find("[", pos)
-
-        if obj_start == -1 and arr_start == -1:
+        opener = text.find("```", fence_start)
+        if opener == -1:
             return None
 
-        # Pick whichever comes first
+        info_start = opener + 3
+        line_end = text.find("\n", info_start)
+        if line_end == -1:
+            return None
+
+        info = text[info_start:line_end].strip().lower()
+        if info not in ("", "json"):
+            fence_start = info_start
+            continue
+
+        body_start = line_end + 1
+        closing = _find_closing_fence(text, body_start)
+        if closing is None:
+            return None
+
+        body = text[body_start:closing]
+        payload = _extract_first_json_from_text(body)
+        if payload is not None:
+            return payload
+
+        fence_start = closing + 3
+
+
+def _find_closing_fence(text: str, start: int) -> int | None:
+    """Return the next markdown closing fence at line start."""
+    pos = start
+    while True:
+        candidate = text.find("```", pos)
+        if candidate == -1:
+            return None
+
+        line_start = text.rfind("\n", start, candidate) + 1
+        prefix = text[line_start:candidate]
+        if prefix.strip() == "":
+            return candidate
+
+        pos = candidate + 3
+
+
+def _extract_first_json_from_text(text: str) -> str | None:
+    pos = 0
+    while True:
+        obj_start = text.find("{", pos)
+        arr_start = text.find("[", pos)
+        if obj_start == -1 and arr_start == -1:
+            return None
         if obj_start == -1:
             start = arr_start
         elif arr_start == -1:
@@ -50,7 +95,6 @@ def extract_json_payload(text: str) -> str | None:
                 return candidate
             except (json.JSONDecodeError, ValueError):
                 pass
-
         pos = start + 1
 
 

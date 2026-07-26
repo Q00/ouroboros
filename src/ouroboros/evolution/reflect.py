@@ -106,6 +106,7 @@ def _parse_ontology_mutations(data: dict[str, object]) -> list[OntologyMutation]
         raw_field_name = item.get("field_name")
         if not isinstance(raw_field_name, str) or not raw_field_name.strip():
             raise TypeError("Expected ontology mutation field_name to be a non-empty string")
+        field_name = raw_field_name.strip()
 
         if "action" not in item:
             raise TypeError("Expected ontology mutation action to be explicit")
@@ -124,11 +125,15 @@ def _parse_ontology_mutations(data: dict[str, object]) -> list[OntologyMutation]
         raw_reason = item.get("reason", "")
         if not isinstance(raw_reason, str):
             raise TypeError("Expected ontology mutation reason to be a string")
+        if action is MutationAction.ADD and not (
+            (raw_description and raw_description.strip()) or raw_reason.strip()
+        ):
+            raise TypeError("Expected add ontology mutation description or reason to be non-empty")
 
         mutations.append(
             OntologyMutation(
                 action=action,
-                field_name=raw_field_name,
+                field_name=field_name,
                 field_type=raw_field_type,
                 description=raw_description,
                 reason=raw_reason,
@@ -697,6 +702,8 @@ Guidelines:
             refined_goal = data.get("refined_goal", current_seed.goal)
             if not isinstance(refined_goal, str):
                 raise TypeError("Expected refined_goal to be a string")
+            if not refined_goal.strip():
+                raise TypeError("Expected refined_goal to be a non-empty string")
             refined_constraints = data.get("refined_constraints", list(current_seed.constraints))
             if not isinstance(refined_constraints, list | tuple) or not all(
                 isinstance(constraint, str) for constraint in refined_constraints
