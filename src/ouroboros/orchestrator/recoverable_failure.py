@@ -17,6 +17,20 @@ from ouroboros.orchestrator.adapter import AgentMessage
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _MAX_METADATA_MAPS = 32
+_HTTP_STATUS_FIELDS = (
+    "http_status",
+    "httpStatus",
+    "http_status_code",
+    "httpStatusCode",
+    "status_code",
+    "statusCode",
+    "api_error_status",
+    "apiErrorStatus",
+    "status",
+    "code",
+    "error_code",
+    "errorCode",
+)
 _RECOVERY_KINDS = frozenset(
     {
         "usage_limit",
@@ -204,11 +218,7 @@ def _has_runtime_shape(metadata: Mapping[str, object]) -> bool:
         key in metadata
         for key in (
             "error_type",
-            "error_code",
-            "code",
-            "status",
-            "status_code",
-            "http_status",
+            *_HTTP_STATUS_FIELDS,
             "provider",
             "recoverable",
             "is_retriable",
@@ -231,6 +241,24 @@ def _has_runtime_shape(metadata: Mapping[str, object]) -> bool:
     )
 
 
+def _metadata_has_http_429(metadata: Mapping[str, object]) -> bool:
+    """Recognize HTTP 429 across the closed provider status vocabulary.
+
+    Provider adapters and protocol bridges use both snake_case and camelCase,
+    while JSON transports may retain the code as a decimal string.  Only the
+    exact integer/string code is admitted: bools, floats, and status prose do
+    not become quota authority merely because they compare loosely to 429.
+    """
+
+    for key in _HTTP_STATUS_FIELDS:
+        value = metadata.get(key)
+        if type(value) is int and value == 429:
+            return True
+        if type(value) is str and value.strip() == "429":
+            return True
+    return False
+
+
 def is_usage_limit_pause_message(
     message: AgentMessage,
     *,
@@ -247,6 +275,18 @@ def is_usage_limit_pause_message(
         # ambiguous. It must pause rather than authorize a costlier successor.
         return True
     runtime_shaped = any(_has_runtime_shape(metadata) for metadata in metadata_rows)
+    has_http_429 = any(_metadata_has_http_429(metadata) for metadata in metadata_rows)
+    has_long_retry_window = any(
+        (duration := _duration_from_metadata(metadata, now=resolved_now)) is not None
+        and duration >= _LONG_RETRY_AFTER_SECONDS
+        for metadata in metadata_rows
+    )
+    if has_http_429 and has_long_retry_window:
+        # Provider bridges may place the HTTP envelope and retry headers at
+        # adjacent bounded metadata layers. They still describe one final
+        # failure and must not authorize a costlier route merely because a
+        # wrapper split the fields across its error/details objects.
+        return True
 
     for metadata in metadata_rows:
         recovery = metadata.get("recovery")
@@ -256,11 +296,8 @@ def is_usage_limit_pause_message(
                 return True
         if metadata.get("usage_limit") is True or metadata.get("quota_exhausted") is True:
             return True
-        status = metadata.get("http_status", metadata.get("status_code"))
         text = _metadata_text(metadata)
         duration = _duration_from_metadata(metadata, now=resolved_now)
-        if status == 429 and duration is not None and duration >= _LONG_RETRY_AFTER_SECONDS:
-            return True
         if _LIMIT_PATTERN.search(text) is not None:
             return True
         if (

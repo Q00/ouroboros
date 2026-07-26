@@ -9,6 +9,100 @@ import pytest
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
 
+_STATUS_FIELDS = (
+    "http_status",
+    "httpStatus",
+    "http_status_code",
+    "httpStatusCode",
+    "status_code",
+    "statusCode",
+    "api_error_status",
+    "apiErrorStatus",
+    "status",
+    "code",
+    "error_code",
+    "errorCode",
+)
+
+
+@pytest.mark.parametrize("status_field", _STATUS_FIELDS)
+@pytest.mark.parametrize("status_value", (429, "429", " 429 "))
+def test_long_window_429_status_population_is_one_pause_class(
+    status_field: str,
+    status_value: object,
+) -> None:
+    """Every supported provider spelling and JSON encoding pauses identically."""
+
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            status_field: status_value,
+            "retry_after_seconds": 7_200,
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
+
+@pytest.mark.parametrize("status_field", _STATUS_FIELDS)
+@pytest.mark.parametrize("status_value", (True, 429.0, "429.0", "429x", None))
+def test_non_exact_429_status_population_never_authorizes_a_quota_pause(
+    status_field: str,
+    status_value: object,
+) -> None:
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            status_field: status_value,
+            "retry_after_seconds": 7_200,
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is False
+
+
+@pytest.mark.parametrize("status_field", _STATUS_FIELDS)
+@pytest.mark.parametrize("status_value", (429, "429"))
+def test_short_window_429_population_remains_an_ordinary_retryable_failure(
+    status_field: str,
+    status_value: object,
+) -> None:
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            status_field: status_value,
+            "retry_after_seconds": 30,
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is False
+
+
+@pytest.mark.parametrize(
+    "container_field",
+    ("meta", "mcp_meta", "metadata", "error", "details", "response"),
+)
+@pytest.mark.parametrize("status_is_nested", (False, True))
+def test_status_and_retry_window_share_one_bounded_metadata_population(
+    container_field: str,
+    status_is_nested: bool,
+) -> None:
+    outer = {"statusCode": "429"} if not status_is_nested else {"retryAfterSeconds": "7200"}
+    nested = {"retryAfterSeconds": "7200"} if not status_is_nested else {"statusCode": "429"}
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={"subtype": "error", **outer, container_field: nested},
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
 
 @pytest.mark.parametrize(
     "retry_after",

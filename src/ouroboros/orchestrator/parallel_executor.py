@@ -101,7 +101,12 @@ from ouroboros.orchestrator.backend_limits import (
     resolve_backend_limits,
 )
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
-from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
+from ouroboros.orchestrator.coordinator import (
+    CoordinatorReview,
+    FileConflict,
+    LevelCoordinator,
+    validate_coordinator_started_payload,
+)
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
     MAX_DECOMPOSITION_CHILDREN,
@@ -2821,6 +2826,7 @@ class ParallelACExecutor:
             adapter,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=task_cwd,
+            reasoning_effort=self._reasoning_effort,
         )
         self._authority_coordinator = self._coordinator
         self._authority_coordinator_review = self._coordinator.run_review
@@ -7243,68 +7249,19 @@ Respond with either ATOMIC or the structured JSON object only.
 
         runtime_scope = build_level_coordinator_runtime_scope(execution_id, level)
         expected_conflicts = tuple(conflicts)
-        expected_started_conflicts = [
-            {
-                "file_path": conflict.file_path,
-                "ac_indices": list(conflict.ac_indices),
-            }
-            for conflict in expected_conflicts
-        ]
         started_data = started.data
-        started_keys_valid = set(started_data) == {
-            "schema_version",
-            "execution_id",
-            "session_id",
-            "scope",
-            "session_role",
-            "stage_index",
-            "level_number",
-            "session_scope_id",
-            "session_state_path",
-            "conflict_count",
-            "conflicts",
-        }
-        raw_started_conflicts = started_data.get("conflicts")
-        started_conflicts_valid = (
-            isinstance(raw_started_conflicts, list)
-            and len(raw_started_conflicts) == len(expected_conflicts)
-            and all(
-                isinstance(raw_conflict, Mapping)
-                and set(raw_conflict) == {"file_path", "ac_indices"}
-                and raw_conflict.get("file_path") == expected.file_path
-                and isinstance(raw_conflict.get("ac_indices"), list)
-                and all(
-                    isinstance(index, int) and not isinstance(index, bool) and index >= 0
-                    for index in raw_conflict["ac_indices"]
-                )
-                and tuple(raw_conflict["ac_indices"]) == expected.ac_indices
-                for raw_conflict, expected in zip(
-                    raw_started_conflicts,
-                    expected_conflicts,
-                    strict=True,
-                )
+        try:
+            validate_coordinator_started_payload(
+                started_data,
+                execution_id=execution_id,
+                session_id=session_id,
+                level_number=level,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+                expected_conflicts=expected_conflicts,
             )
-        )
-        if (
-            not started_keys_valid
-            or type(started_data.get("schema_version")) is not int
-            or started_data.get("schema_version") != 1
-            or started_data.get("execution_id") != execution_id
-            or started_data.get("session_id") != session_id
-            or started_data.get("scope") != "level"
-            or started_data.get("session_role") != "coordinator"
-            or type(started_data.get("stage_index")) is not int
-            or started_data.get("stage_index") != level - 1
-            or type(started_data.get("level_number")) is not int
-            or started_data.get("level_number") != level
-            or started_data.get("session_scope_id") != runtime_scope.aggregate_id
-            or started_data.get("session_state_path") != runtime_scope.state_path
-            or type(started_data.get("conflict_count")) is not int
-            or started_data.get("conflict_count") != len(expected_conflicts)
-            or not started_conflicts_valid
-            or raw_started_conflicts != expected_started_conflicts
-        ):
-            raise RuntimeError("coordinator started event drifted from the current stage")
+        except ValueError as exc:
+            raise RuntimeError("coordinator started event drifted from the current stage") from exc
 
         completed_data = completed.data
         if (
@@ -7317,6 +7274,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 completed_data,
                 level_number=level,
                 expected_conflicts=expected_conflicts,
+                execution_id=execution_id,
+                session_id=session_id,
                 session_scope_id=runtime_scope.aggregate_id,
                 session_state_path=runtime_scope.state_path,
             )

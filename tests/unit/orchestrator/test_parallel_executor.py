@@ -678,13 +678,14 @@ def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
     )
 
 
-def _make_executor() -> ParallelACExecutor:
+def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor:
     """Create an executor with mocked dependencies and muted event emitters."""
     executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=False,
+        reasoning_effort=reasoning_effort,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
     executor._event_store.query_events = AsyncMock(return_value=[])
@@ -693,6 +694,21 @@ def _make_executor() -> ParallelACExecutor:
     executor._emit_level_completed = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
     return executor
+
+
+def test_executor_freezes_coordinator_effort_from_its_execution_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parallel owner, coordinator, and durable policy share one effort value."""
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+    executor = _make_executor(reasoning_effort="low")
+
+    assert executor._reasoning_effort == "low"
+    assert executor._coordinator._reasoning_effort == "low"
+    policy = executor._execution_authority_policy()
+    assert policy["reasoning_effort"] == "low"
+    assert policy["coordinator_reasoning_effort"] == "low"
 
 
 def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
@@ -11778,7 +11794,7 @@ class TestParallelACExecutor:
                 final_message=f"AC {ac_index} complete",
             )
 
-        first = _make_executor()
+        first = _make_executor(reasoning_effort="low")
         first._event_store.query_events = AsyncMock(return_value=[])
         first._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
         first._execute_single_ac = execute_ac  # type: ignore[method-assign]
@@ -11796,7 +11812,7 @@ class TestParallelACExecutor:
             event_type = kwargs.get("event_type")
             return [event for event in first_events if event.type == event_type]
 
-        resumed = _make_executor()
+        resumed = _make_executor(reasoning_effort="low")
         resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
         resumed._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
         resumed._execute_single_ac = execute_ac  # type: ignore[method-assign]
@@ -11810,6 +11826,7 @@ class TestParallelACExecutor:
         )
 
         assert review_provider.await_count == 1
+        assert resumed._coordinator._reasoning_effort == "low"
         assert replayed.stages[0].coordinator_review is not None
         assert replayed.stages[0].coordinator_review.review_summary == "Reconciled shared.py once"
         replayed_coordinator_writes = [

@@ -59,6 +59,25 @@ from ouroboros.orchestrator.runner import (
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 
+_LONG_WINDOW_429_ENCODINGS = tuple(
+    (field, value)
+    for field in (
+        "http_status",
+        "httpStatus",
+        "http_status_code",
+        "httpStatusCode",
+        "status_code",
+        "statusCode",
+        "api_error_status",
+        "apiErrorStatus",
+        "status",
+        "code",
+        "error_code",
+        "errorCode",
+    )
+    for value in (429, "429")
+)
+
 
 def _task_workspace() -> TaskWorkspace:
     return TaskWorkspace(
@@ -1139,8 +1158,11 @@ class TestOrchestratorRunner:
         assert not await is_cancellation_requested(session_id)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status_field", "status_value"), _LONG_WINDOW_429_ENCODINGS)
     async def test_direct_bounded_usage_limit_pause_remains_resume_eligible(
         self,
+        status_field: str,
+        status_value: object,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
@@ -1154,8 +1176,12 @@ class TestOrchestratorRunner:
             models.append(kwargs["model"])
             yield AgentMessage(
                 type="result",
-                content="Usage limit reached. Please try again in 5 hours.",
-                data={"subtype": "error", "error_type": "CodexCliError"},
+                content="Provider request failed.",
+                data={
+                    "subtype": "error",
+                    status_field: status_value,
+                    "retry_after_seconds": 7_200,
+                },
                 resume_handle=RuntimeHandle(
                     backend="claude",
                     native_session_id="route-paused",
@@ -1217,8 +1243,11 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status_field", "status_value"), _LONG_WINDOW_429_ENCODINGS)
     async def test_parallel_bounded_usage_limit_pauses_without_escalation(
         self,
+        status_field: str,
+        status_value: object,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
@@ -1237,10 +1266,11 @@ class TestOrchestratorRunner:
         )
         runner._run_verify_commands = False
         _enable_direct_bounded_routes(runner, mock_adapter)
+        encoding_id = f"{status_field}-{type(status_value).__name__}"
         tracker = SessionTracker.create(
-            "execution-parallel-quota",
+            f"execution-parallel-quota-{encoding_id}",
             seed.metadata.seed_id,
-            session_id="session-parallel-quota",
+            session_id=f"session-parallel-quota-{encoding_id}",
         )
         tracker = _attach_live_process_local_contract(
             runner,
@@ -1259,8 +1289,12 @@ class TestOrchestratorRunner:
             provider_calls += 1
             yield AgentMessage(
                 type="result",
-                content="Usage limit reached. Please try again in 5 hours.",
-                data={"subtype": "error", "error_type": "CodexCliError"},
+                content="Provider request failed.",
+                data={
+                    "subtype": "error",
+                    status_field: status_value,
+                    "retry_after_seconds": 7_200,
+                },
                 resume_handle=RuntimeHandle(
                     backend="claude",
                     native_session_id="parallel-route-paused",
@@ -1305,6 +1339,10 @@ class TestOrchestratorRunner:
         }
         assert "execution.ac.route_observed" not in emitted_types
         assert "execution.ac.attempt_judged" not in emitted_types
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
 
     @pytest.mark.asyncio
     async def test_parallel_route_cancellation_is_terminalized_by_runner_owner(
