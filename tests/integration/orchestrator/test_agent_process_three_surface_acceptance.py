@@ -33,6 +33,7 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.agent_process import (
     AgentProcessHandle,
     AgentProcessStatus,
+    project_agent_process_snapshot,
     run_with_agent_process,
 )
 from ouroboros.persistence.checkpoint import CheckpointStore
@@ -86,6 +87,26 @@ async def _wait_for_status(
     while handle.status() is not status and loop.time() < deadline:
         await asyncio.sleep(0.01)
     assert handle.status() is status
+
+
+async def _wait_for_projected_status(
+    store: EventStore,
+    process_id: str,
+    status: AgentProcessStatus,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        snapshot = project_agent_process_snapshot(
+            await store.replay("agent_process", process_id),
+            process_id=process_id,
+        )
+        if snapshot is not None and snapshot.status is status:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"persisted status did not become {status}")
 
 
 def _event_directives(events: list[Any]) -> list[str]:
@@ -383,6 +404,7 @@ async def test_ralph_agent_process_pause_inspect_resume_preserves_event_tail(
         await handle.pause(reason="closeout audit pause", store=checkpoint_store)
         release_pause_checkpoint.set()
         await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+        await _wait_for_projected_status(event_store, process_id, AgentProcessStatus.PAUSED)
 
         paused_events = await event_store.replay("agent_process", process_id)
         assert _event_directives(paused_events) == ["continue", "wait"]
