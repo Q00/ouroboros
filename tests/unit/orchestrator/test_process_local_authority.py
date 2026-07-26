@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import os
 from pathlib import Path
 import pickle
@@ -171,6 +172,134 @@ async def _prepare(
         )
     assert prepared.is_ok
     return prepared.value
+
+
+@pytest.mark.asyncio
+async def test_precreated_session_rejects_modified_seed_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepared-seed-drift.db'}")
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-prepared-seed-drift",
+        session_id="session-prepared-seed-drift",
+    )
+    assert prepared.is_ok
+
+    try:
+        changed_seed = _seed().model_copy(update={"goal": "Changed after durable preparation"})
+        result = await runner.execute_precreated_session(
+            changed_seed,
+            prepared.value,
+            parallel=False,
+        )
+
+        assert result.is_err
+        assert "modified Seed" in result.error.message
+        assert runtime.execute_calls == 0
+    finally:
+        runner._retire_process_local_authority(
+            session_id=prepared.value.session_id,
+            execution_id=prepared.value.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested_mutation", ["strategy", "context_pack_fragment"])
+async def test_precreated_session_rejects_caller_nested_input_mutation_before_provider_call(
+    tmp_path: Path,
+    nested_mutation: str,
+) -> None:
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'prepared-caller-{nested_mutation}.db'}"
+    )
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-prepared-caller-{nested_mutation}",
+        session_id=f"session-prepared-caller-{nested_mutation}",
+    )
+    assert prepared.is_ok
+    tampered_contract = deepcopy(prepared.value.progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+    if nested_mutation == "strategy":
+        tampered_contract["execution_inputs"]["strategy"]["system_prompt_fragment"] += "\nchanged"
+    else:
+        tampered_contract["execution_inputs"]["context_pack_fragment"] += "\nchanged"
+    tampered_tracker = prepared.value.with_progress(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: tampered_contract}
+    )
+
+    try:
+        result = await runner.execute_precreated_session(
+            _seed(),
+            tampered_tracker,
+            parallel=False,
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+        assert runtime.execute_calls == 0
+    finally:
+        runner._retire_process_local_authority(
+            session_id=prepared.value.session_id,
+            execution_id=prepared.value.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested_mutation", ["strategy", "context_pack_fragment"])
+async def test_precreated_session_rejects_durable_nested_input_with_stale_fingerprint(
+    tmp_path: Path,
+    nested_mutation: str,
+) -> None:
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'prepared-durable-{nested_mutation}.db'}"
+    )
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-prepared-durable-{nested_mutation}",
+        session_id=f"session-prepared-durable-{nested_mutation}",
+    )
+    assert prepared.is_ok
+    tampered_contract = deepcopy(prepared.value.progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+    if nested_mutation == "strategy":
+        tampered_contract["execution_inputs"]["strategy"]["system_prompt_fragment"] += "\nchanged"
+    else:
+        tampered_contract["execution_inputs"]["context_pack_fragment"] += "\nchanged"
+    tampered_progress = {EXECUTION_CONTRACT_PROGRESS_KEY: tampered_contract}
+    persisted = await runner._session_repo.track_progress(
+        prepared.value.session_id,
+        tampered_progress,
+    )
+    assert persisted.is_ok
+    tampered_tracker = prepared.value.with_progress(tampered_progress)
+
+    try:
+        result = await runner.execute_precreated_session(
+            _seed(),
+            tampered_tracker,
+            parallel=False,
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+        assert runtime.execute_calls == 0
+    finally:
+        runner._retire_process_local_authority(
+            session_id=prepared.value.session_id,
+            execution_id=prepared.value.execution_id,
+        )
+        await event_store.close()
 
 
 def _paused(tracker: SessionTracker) -> SessionTracker:

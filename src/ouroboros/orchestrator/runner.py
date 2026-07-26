@@ -101,6 +101,7 @@ from ouroboros.orchestrator.events import (
 )
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
+    _authenticate_process_local_prepared_contract,
     _await_process_local_cleanup,
     _claim_process_local_authority_generation,
     _discard_process_local_authority_generation,
@@ -114,6 +115,7 @@ from ouroboros.orchestrator.execution_authority import (
     _register_process_local_authority_terminal_finalizer,
     _release_process_local_authority_generation,
     _retire_process_local_authority_generation,
+    _seal_process_local_prepared_contract,
     collect_cancellation_acceptance_plan,
     collect_terminal_acceptance_plan,
     constructor_model_contract,
@@ -4050,6 +4052,40 @@ class OrchestratorRunner:
             self._adapter,
         )
 
+    def _seal_process_local_prepared_contract(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        execution_contract: Mapping[str, object],
+    ) -> None:
+        """Bind the successfully persisted prepare contract to its live owner."""
+        _seal_process_local_prepared_contract(
+            session_id,
+            execution_id,
+            generation,
+            self._adapter,
+            execution_contract,
+        )
+
+    def _authenticate_process_local_prepared_contract(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        execution_contract: object,
+    ) -> dict[str, Any] | None:
+        """Recover the sealed snapshot only for an exact claimed caller copy."""
+        return _authenticate_process_local_prepared_contract(
+            session_id,
+            execution_id,
+            generation,
+            self._adapter,
+            execution_contract,
+        )
+
     def _cleanup_process_local_authority_after_external_terminal(
         self,
         *,
@@ -5795,13 +5831,18 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        require_bound_execution_inputs: bool = True,
+        prepared_live_execution: bool = False,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
         Returns whether a replacement contract (an explicit override or one-time
         legacy migration) should be checkpointed for subsequent resumes. A present
         malformed contract blocks resume; it is never reinterpreted as a legacy
-        session or allowed to change models silently.
+        session or allowed to change models silently. ``prepared_live_execution``
+        admits only the explicit unobservable states emitted by the new-run builder;
+        the caller must already hold and match that run's sealed process-local
+        contract, while the normal durable resume path remains strict.
         """
         if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
             raise OrchestratorError(
@@ -5935,17 +5976,22 @@ class OrchestratorRunner:
             if migrate_legacy_contract
             else self._normalize_execution_inputs_contract(
                 raw_execution_inputs,
-                require_bound=True,
+                require_bound=require_bound_execution_inputs,
             )
         )
         if (
             isinstance(protocol_version, bool)
             or not isinstance(protocol_version, int)
             or protocol_version != FRUGALITY_PROOF_PROTOCOL_VERSION
-            or not isinstance(persisted_project_root, str)
-            or not persisted_project_root.strip()
-            or not isinstance(persisted_workspace_path, str)
-            or not persisted_workspace_path.strip()
+            or not (
+                isinstance(persisted_project_root, str)
+                and bool(persisted_project_root.strip())
+                and isinstance(persisted_workspace_path, str)
+                and bool(persisted_workspace_path.strip())
+                or prepared_live_execution
+                and persisted_project_root is None
+                and persisted_workspace_path is None
+            )
             or not isinstance(persisted_routing_fingerprint, str)
             or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
             or (
@@ -5967,12 +6013,23 @@ class OrchestratorRunner:
                 )
             )
             or (seed is not None and not valid_seed_fingerprint)
-            or not self._valid_constructor_model_contract(persisted_constructor_model)
+            or not (
+                self._valid_constructor_model_contract(persisted_constructor_model)
+                or (prepared_live_execution and persisted_constructor_model == {"observed": False})
+            )
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
-            or not isinstance(persisted_runtime_backend, str)
-            or not persisted_runtime_backend.strip()
-            or not isinstance(persisted_llm_backend, str)
-            or not persisted_llm_backend.strip()
+            or not (
+                isinstance(persisted_runtime_backend, str)
+                and bool(persisted_runtime_backend.strip())
+                or prepared_live_execution
+                and persisted_runtime_backend is None
+            )
+            or not (
+                isinstance(persisted_llm_backend, str)
+                and bool(persisted_llm_backend.strip())
+                or prepared_live_execution
+                and persisted_llm_backend is None
+            )
             or not self._valid_permission_mode_contract(persisted_permission_mode)
             or (
                 not migrate_v2_contract
@@ -5989,7 +6046,11 @@ class OrchestratorRunner:
                     not in {None, "frugal", "standard", "frontier"}
                 )
             )
-            or not isinstance(persisted_resume_workspace, Mapping)
+            or not (
+                isinstance(persisted_resume_workspace, Mapping)
+                or prepared_live_execution
+                and persisted_resume_workspace is None
+            )
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -6019,10 +6080,14 @@ class OrchestratorRunner:
             self._seed_semantics_fingerprint(seed) if seed is not None else None
         )
         active_workspace = self._proof_workspace_identity()
-        persisted_workspace = {
-            "project_root": persisted_project_root,
-            "workspace_path": persisted_workspace_path,
-        }
+        persisted_workspace = (
+            None
+            if persisted_project_root is None and persisted_workspace_path is None
+            else {
+                "project_root": persisted_project_root,
+                "workspace_path": persisted_workspace_path,
+            }
+        )
         if active_workspace != persisted_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different project workspace",
@@ -6033,11 +6098,16 @@ class OrchestratorRunner:
                 },
             )
         active_resume_workspace = self._resume_workspace_identity()
-        if active_resume_workspace != dict(persisted_resume_workspace):
+        normalized_persisted_resume_workspace = (
+            dict(persisted_resume_workspace)
+            if isinstance(persisted_resume_workspace, Mapping)
+            else None
+        )
+        if active_resume_workspace != normalized_persisted_resume_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different execution workspace",
                 details={
-                    "persisted_workspace": dict(persisted_resume_workspace),
+                    "persisted_workspace": normalized_persisted_resume_workspace,
                     "current_workspace": active_resume_workspace,
                     "hint": "Resume from the exact original worktree and branch.",
                 },
@@ -6321,6 +6391,8 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        require_bound_execution_inputs: bool = True,
+        prepared_live_execution: bool = False,
     ) -> tuple[bool, dict[str, Any]]:
         """Restore and return one immutable invocation-local contract snapshot.
 
@@ -6334,6 +6406,8 @@ class OrchestratorRunner:
                 progress,
                 seed=seed,
                 authority_generation=authority_generation,
+                require_bound_execution_inputs=require_bound_execution_inputs,
+                prepared_live_execution=prepared_live_execution,
             )
             if not isinstance(self._execution_contract, Mapping):
                 raise OrchestratorError(
@@ -8329,6 +8403,40 @@ class OrchestratorRunner:
                 )
             )
 
+        try:
+            self._seal_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=execution_contract,
+            )
+        except ValueError as exc:
+            seal_details: dict[str, Any] = {
+                "session_id": tracker.session_id,
+                "execution_id": tracker.execution_id,
+                "cause": str(exc),
+                "resume_blocked": "prepared_execution_contract_unsealed",
+            }
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to seal persisted initial session contract",
+                details=seal_details,
+            )
+            if terminal_mark_error is None:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            else:
+                seal_details["terminal_mark_error"] = terminal_mark_error
+                seal_details["terminal_persistence_pending"] = True
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to seal persisted initial session contract",
+                    details=seal_details,
+                )
+            )
+
         return Result.ok(tracker.with_progress(initial_progress))
 
     async def execute_precreated_session(
@@ -8409,9 +8517,8 @@ class OrchestratorRunner:
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
 
         # This API may execute only the tracker returned by ``prepare_session``.
-        # A legacy/reconstructed tracker with no contract is not a new-session
-        # shortcut: it has no Foundation A generation and must fail closed before
-        # prompts, tool setup, or any runtime-owned provider are consulted.
+        # Claim its live capability first, then authenticate the caller-owned
+        # contract against the snapshot sealed only after durable publication.
         authority_generation, authority_claimed = self._claim_process_local_authority_generation(
             tracker.session_id,
             exec_id,
@@ -8447,12 +8554,39 @@ class OrchestratorRunner:
                     tracker.execution_id,
                 )
             )
+
         try:
-            validated_contract = await asyncio.to_thread(
-                _require_exact_execution_contract_v9,
-                raw_contract,
+            authenticated_contract = self._authenticate_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=raw_contract,
             )
-            await asyncio.to_thread(self._restore_guidance_contract, validated_contract)
+            if authenticated_contract is None:
+                raise OrchestratorError(
+                    message=(
+                        "Caller-supplied execution contract does not match the "
+                        "persisted prepared contract"
+                    ),
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": "prepared_execution_contract_mismatch",
+                    },
+                )
+            contract_changed, validated_contract = await asyncio.to_thread(
+                self._restore_execution_contract_snapshot,
+                {EXECUTION_CONTRACT_PROGRESS_KEY: authenticated_contract},
+                seed=seed,
+                authority_generation=authority_generation,
+                require_bound_execution_inputs=False,
+                prepared_live_execution=True,
+            )
+            if contract_changed:
+                raise OrchestratorError(
+                    message="Prepared execution contract changed during authentication",
+                    details={"resume_blocked": "prepared_execution_contract_changed"},
+                )
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
             cancellation_result = (

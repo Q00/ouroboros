@@ -171,6 +171,7 @@ class _ProcessLocalAuthorityLifecycle:
     registration: _ProcessLocalAuthorityRegistration
     state: _ProcessLocalAuthorityLifecycleState
     terminal_finalizers: dict[object, Callable[[], object]]
+    prepared_contract_json: str | None = None
     terminalization_retryable: bool = False
 
 
@@ -245,6 +246,83 @@ class _ProcessLocalAuthorityRegistry:
                 "scope": "process_local",
                 "correlation_id": generation.correlation_id,
             }
+
+    @staticmethod
+    def _canonical_prepared_contract(value: object) -> str:
+        """Encode one prepared contract without lossy Python coercions."""
+        if not isinstance(value, Mapping):
+            raise ValueError("prepared execution contract must be a mapping")
+        try:
+            return json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("prepared execution contract must be canonical JSON") from exc
+
+    def seal_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> None:
+        """Seal the exact contract only after its durable publication succeeds."""
+        canonical_contract = self._canonical_prepared_contract(value)
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED
+            ):
+                raise ValueError("prepared contract requires its exact registered authority")
+            if (
+                lifecycle.prepared_contract_json is not None
+                and lifecycle.prepared_contract_json != canonical_contract
+            ):
+                raise ValueError("process-local authority already seals a different contract")
+            lifecycle.prepared_contract_json = canonical_contract
+
+    def authenticate_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> dict[str, Any] | None:
+        """Return a fresh trusted snapshot iff the claimed caller copy is exact."""
+        try:
+            canonical_contract = self._canonical_prepared_contract(value)
+        except ValueError:
+            return None
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.CLAIMED
+                or lifecycle.prepared_contract_json != canonical_contract
+            ):
+                return None
+            sealed_contract = lifecycle.prepared_contract_json
+        restored = json.loads(sealed_contract)
+        return restored if isinstance(restored, dict) else None
 
     def register(
         self,
@@ -642,6 +720,38 @@ def _register_process_local_authority_generation(
     adapter: object,
 ) -> None:
     _PROCESS_LOCAL_AUTHORITY_REGISTRY.register(session_id, execution_id, generation, adapter)
+
+
+def _seal_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> None:
+    _PROCESS_LOCAL_AUTHORITY_REGISTRY.seal_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
+
+
+def _authenticate_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> dict[str, Any] | None:
+    return _PROCESS_LOCAL_AUTHORITY_REGISTRY.authenticate_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
 
 
 def _live_process_local_authority_generation(

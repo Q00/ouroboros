@@ -113,6 +113,12 @@ def _attach_live_process_local_contract(
         execution_contract=contract,
         generation=generation,
     )
+    runner._seal_process_local_prepared_contract(
+        session_id=session_id,
+        execution_id=tracker.execution_id,
+        generation=generation,
+        execution_contract=contract,
+    )
     return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 

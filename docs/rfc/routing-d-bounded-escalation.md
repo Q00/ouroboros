@@ -272,6 +272,17 @@ is born with version 9. Version 9 itself has one exact top-level schema:
 `guidance`, and `resume`. Resume rejects every missing or unknown top-level member
 before restoring guidance or preferences and before analyzer or provider effects;
 no current-format field is synthesized from runtime defaults.
+The prepare-to-execute boundary also stops trusting the caller-owned tracker
+copy. Only after initial progress is durably published, the process-local
+authority seals that exact prepared contract as canonical JSON. Execution must
+claim the same opaque authority and equal the seal before the trusted snapshot
+is released, then applies the same complete contract restoration with unbound
+tool-catalog state admitted only during this pre-provider phase. Seed, routing,
+semantics, preferences, guidance, workspace, and every nested input fingerprint
+are authenticated before prompt construction or provider entry.
+Live-only runtimes may preserve the builder's explicit unobservable runtime or
+workspace states at this first boundary because the opaque generation and seal
+still bind the exact process; durable resume continues to reject those states.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
