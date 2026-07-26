@@ -8629,6 +8629,7 @@ class OrchestratorRunner:
             if persistence_pending is not None:
                 return persistence_pending
             return Result.err(exc)
+
         # Keep the immutable per-session contract local to this invocation.
         # ``self._execution_contract`` is retained for legacy helpers, but it
         # must never be the source of acceptance authority under concurrency.
@@ -8657,39 +8658,18 @@ class OrchestratorRunner:
             # Build prompts from the strategy frozen during preparation. The
             # fat-harness profile and legacy registry are effect-bearing inputs;
             # neither may be reread after the durable session is published.
-            execution_semantics = self._execution_semantics_snapshot(execution_contract)
             strategy = self._execution_strategy_snapshot(
                 execution_contract,
                 require_bound=False,
             )
-            system_prompt = build_system_prompt(
-                seed,
-                strategy=strategy,
-                repo_root=self._effective_cwd(),
-                guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
-                context_pack_enabled=execution_semantics["context_pack_enabled"],
-                resolved_context_pack_fragment=(
-                    self._execution_context_pack_fragment_snapshot(
-                        execution_contract,
-                        require_bound=False,
-                    )
-                ),
-            )
-            await self._record_execution_guidance_injection(
-                session_id=tracker.session_id,
-                execution_id=exec_id,
-                injection_key="start",
-            )
-            task_prompt = build_task_prompt(seed, strategy=strategy)
-
-            # Get merged tools (strategy tools + MCP tools if configured)
+            # Get merged tools (strategy tools + MCP tools if configured) and
+            # authenticate the fully bound prompt/tool input contract before
+            # building prompts or entering any provider path.
             merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
                 session_id=tracker.session_id,
                 tool_prefix=self._mcp_tool_prefix,
                 strategy=strategy,
             )
-            if execution_contract is None:
-                raise OrchestratorError(message="Cannot bind missing execution inputs")
             execution_contract, inputs_changed = self._bind_execution_tool_authority(
                 execution_contract,
                 merged_tools=merged_tools,
@@ -8714,6 +8694,32 @@ class OrchestratorRunner:
                     )
                 tracker = tracker.with_progress(bound_progress)
                 self._execution_contract = execution_contract
+            await asyncio.to_thread(
+                self._restore_execution_contract_snapshot,
+                {EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract},
+                seed=seed,
+                authority_generation=authority_generation,
+            )
+            execution_semantics = self._execution_semantics_snapshot(execution_contract)
+            system_prompt = build_system_prompt(
+                seed,
+                strategy=strategy,
+                repo_root=self._effective_cwd(),
+                guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=execution_semantics["context_pack_enabled"],
+                resolved_context_pack_fragment=(
+                    self._execution_context_pack_fragment_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    )
+                ),
+            )
+            await self._record_execution_guidance_injection(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                injection_key="start",
+            )
+            task_prompt = build_task_prompt(seed, strategy=strategy)
             await self._emit_run_configuration_resolved(
                 execution_id=exec_id,
                 session_id=tracker.session_id,

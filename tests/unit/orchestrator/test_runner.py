@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import copy
 from datetime import UTC, datetime, timedelta
 import hashlib
 from typing import Any
@@ -563,6 +564,8 @@ class TestOrchestratorRunner:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
@@ -3566,6 +3569,185 @@ class TestOrchestratorRunner:
         assert terminal.data["pause_seconds"] == 18000
         assert terminal.data["pause_kind"] == "usage_limit"
         retrospective.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_precreated_rejects_changed_seed_goal_before_effects(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Caller Seed mutations must fail before prompts, tools, or providers run."""
+        tracker = SessionTracker.create(
+            "exec_precreated_seed_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_seed_drift",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        changed_seed = sample_seed.model_copy(update={"goal": f"{sample_seed.goal} changed"})
+        provider = MagicMock(side_effect=AssertionError("provider must not run"))
+        get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
+        execute_parallel = AsyncMock(side_effect=AssertionError("parallel executor must not run"))
+        persist_failure = AsyncMock(return_value=(None, None))
+        mock_adapter.execute_task = provider
+
+        try:
+            with (
+                patch(
+                    "ouroboros.orchestrator.runner.build_system_prompt",
+                    MagicMock(side_effect=AssertionError("system prompt must not be built")),
+                ) as system_prompt,
+                patch(
+                    "ouroboros.orchestrator.runner.build_task_prompt",
+                    MagicMock(side_effect=AssertionError("task prompt must not be built")),
+                ) as task_prompt,
+                patch.object(runner, "_get_merged_tools", get_tools),
+                patch.object(runner, "_execute_parallel", execute_parallel),
+                patch.object(runner, "_persist_failure_and_cleanup", persist_failure),
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=changed_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result.is_err
+            assert result.error.message == "Cannot resume with a modified Seed"
+            system_prompt.assert_not_called()
+            task_prompt.assert_not_called()
+            get_tools.assert_not_awaited()
+            execute_parallel.assert_not_awaited()
+            provider.assert_not_called()
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_precreated_rejects_stale_nested_input_proof_before_effects(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Valid nested input mutations need a matching durable fingerprint."""
+        tracker = SessionTracker.create(
+            "exec_precreated_input_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_input_drift",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        stale_contract = copy.deepcopy(tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+        stale_contract["execution_inputs"]["strategy"]["task_prompt_suffix"] += (
+            "\nPreserve this mutated but otherwise valid suffix."
+        )
+        assert stale_contract["frugality_proof"][
+            "execution_inputs_fingerprint"
+        ] != runner._execution_inputs_fingerprint(stale_contract["execution_inputs"])
+        tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: stale_contract})
+        provider = MagicMock(side_effect=AssertionError("provider must not run"))
+        get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
+        execute_parallel = AsyncMock(side_effect=AssertionError("parallel executor must not run"))
+        persist_failure = AsyncMock(return_value=(None, None))
+        mock_adapter.execute_task = provider
+
+        try:
+            with (
+                patch(
+                    "ouroboros.orchestrator.runner.build_system_prompt",
+                    MagicMock(side_effect=AssertionError("system prompt must not be built")),
+                ) as system_prompt,
+                patch(
+                    "ouroboros.orchestrator.runner.build_task_prompt",
+                    MagicMock(side_effect=AssertionError("task prompt must not be built")),
+                ) as task_prompt,
+                patch.object(runner, "_get_merged_tools", get_tools),
+                patch.object(runner, "_execute_parallel", execute_parallel),
+                patch.object(runner, "_persist_failure_and_cleanup", persist_failure),
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=sample_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result.is_err
+            assert (
+                result.error.message
+                == "Caller-supplied execution contract does not match the persisted prepared contract"
+            )
+            assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+            system_prompt.assert_not_called()
+            task_prompt.assert_not_called()
+            get_tools.assert_not_awaited()
+            execute_parallel.assert_not_awaited()
+            provider.assert_not_called()
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_precreated_preserves_exact_prepared_state_success(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """The exact prepared v9 state still reaches the existing execution path."""
+        tracker = SessionTracker.create(
+            "exec_precreated_exact",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_exact",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        try:
+            with (
+                patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+                patch.object(
+                    runner, "_execute_parallel", AsyncMock(return_value=expected)
+                ) as execute,
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=sample_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result is expected
+            assert (
+                execute.await_args.kwargs["execution_contract"]
+                == tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+            )
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
 
     @pytest.mark.asyncio
     async def test_execute_precreated_pause_persistence_failure_preserves_owner(
@@ -6762,6 +6944,7 @@ class TestOrchestratorRunner:
         """Parallel execution should restore LLM-assisted dependency analysis."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
+        runner._adapter.llm_backend = None
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=tuple(
@@ -6838,6 +7021,7 @@ class TestOrchestratorRunner:
     ) -> None:
         """Nested dependency analysis should inherit the runtime's resolved Codex CLI path."""
         mock_adapter.runtime_backend = "codex"
+        mock_adapter.llm_backend = None
         mock_adapter.cli_path = "/tmp/real-codex"
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
@@ -7097,6 +7281,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> None:
         """TypeError from create_llm_adapter propagates uncaught (programming error)."""
+        mock_adapter.llm_backend = None
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
         with (
@@ -7115,6 +7300,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> None:
         """AttributeError from create_llm_adapter propagates uncaught (programming error)."""
+        mock_adapter.llm_backend = None
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
         with (
@@ -7174,6 +7360,11 @@ class TestOrchestratorRunner:
             metadata={"fork_session": True},
         )
         mock_adapter = MagicMock()
+        mock_adapter.runtime_backend = "claude"
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        mock_adapter.working_directory = "/tmp/project"
+        mock_adapter.permission_mode = "acceptEdits"
         captured_kwargs: dict[str, Any] = {}
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -7497,6 +7688,8 @@ class TestOrchestratorRunnerWithMCP:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
@@ -7945,6 +8138,8 @@ class TestCancellationPolling:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
