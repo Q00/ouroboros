@@ -177,7 +177,7 @@ owner while escalating in another.
 Finite but unrepresentably large provider retry hints fall back to the validated
 operator pause window before constructing the durable resume timestamp.
 The operator fallback is resolved before the first provider effect, bounded to
-`1..31,536,000` seconds (one year), and stored in execution contract v8. Direct
+`1..31,536,000` seconds (one year), and stored in execution contract v9. Direct
 and parallel pause construction consume that exact integer after a provider
 turn; they never reread environment or YAML at the recovery boundary.
 
@@ -212,19 +212,24 @@ before the first route event. Resume therefore fails before dependency analysis 
 provider entry if native model enforcement, routing configuration, or durable-depth
 eligibility is no longer available.
 
-Execution contract version 8 also seals the complete scalar executor semantics
+Execution contract version 9 also seals the complete scalar executor semantics
 used by that owner: verification enablement and timeout, retry and cross-harness
 budgets, decomposition enablement/mode/depth, requested and backend-capped effective
 worker counts, backend concurrency/rate limits, adapter pacing ownership,
 fat-harness acceptance, shadow replay, checkpoint/signal capability presence, and
-the resolved context-pack mode that controls provider system prompts. Version 8
-adds the bounded usage-limit pause seconds to that exact-schema sub-contract.
+the resolved context-pack mode that controls provider system prompts. Version 9
+retains the bounded usage-limit pause seconds and adds the complete runtime
+capability declaration: resume targeting, structured output, parameter support,
+the enforceable reasoning-effort vocabulary, model override support, subagent
+mode, and session-signal capabilities. This exact-schema population is checked
+again at each direct and parallel provider choke point, so capability drift
+between resume validation and dispatch also fails closed.
 The sub-contract has its own fingerprint. Resume rejects any current-setting
 drift before constructing prompts or `ParallelACExecutor`. Prompt construction,
 fan-out, rate pacing, and pause publication consume the immutable persisted
 snapshot instead of rereading mutable environment or config.
 
-Version 8 retains the v7 complete provider-input population and freezes the
+Version 9 retains the v8 complete provider-input population and freezes the
 resolved execution strategy: its system-prompt
 fragment, task suffix, base tools, and activity map. After session-scoped MCP
 discovery, the complete canonical tool catalog and the policy-allowed tool list
@@ -239,9 +244,9 @@ canonical `ExecutionProfile`, and persisted inherited `RuntimeHandle` are frozen
 the same input fingerprint before the session is published. New and resumed direct
 or parallel execution consume those snapshots without rescanning a changed
 workspace, reloading profile YAML, or adopting a different parent conversation.
-Contractless sessions and versions 2 through 7 cannot reconstruct the complete v8
+Contractless sessions and versions 2 through 8 cannot reconstruct the complete v9
 effect population and therefore fail closed on resume; every new Routing D owner
-is born with version 8.
+is born with version 9.
 
 The historical decomposition input contract remains any non-negative integer
 across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
@@ -278,7 +283,12 @@ escalation decision, then resumes the same provider handle with that exact
 route. The event and session `PAUSED` transition are published only after the
 provider exposes an exact nonterminal resume ID and that complete handle is
 durably stored in session progress. This rule also applies to a paused successor
-during resume. A handle-less, terminal, or unpersisted quota boundary emits no
+during resume. Once `PAUSED` wins, or its durable publication is explicitly
+pending, the execution coroutine transfers cleanup ownership and must not invoke
+the handle terminator; only a terminal lifecycle winner may destroy that provider
+session. Parallel and direct paths share the same resumable predicate, so a
+terminal lifecycle event cannot be persisted as a recoverable pause even when it
+still carries a session ID. A handle-less, terminal, or unpersisted quota boundary emits no
 route-pause event, makes no second fresh provider call, and reaches the Final
 Gate as `outcome=blocked`, `disposition=blocked` with human handoff. Any
 same-session route evidence with a missing or non-runner call site blocks direct

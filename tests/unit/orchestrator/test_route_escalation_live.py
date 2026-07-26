@@ -1674,6 +1674,68 @@ async def test_live_first_route_pause_resumes_same_capsule_and_provider_handle(
 
 
 @pytest.mark.asyncio
+async def test_live_terminal_parallel_handle_cannot_publish_recoverable_pause(
+    tmp_path: Any,
+) -> None:
+    """A provider terminal event cannot be rebranded as resumable authority."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-route-pause.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    provider_calls = 0
+
+    async def execute_task(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+        nonlocal provider_calls
+        provider_calls += 1
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+            resume_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id="terminal-provider-session",
+                cwd=str(tmp_path),
+                approval_mode="acceptEdits",
+                metadata={"runtime_event_type": "session.failed"},
+            ),
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    executor = _live_executor(
+        adapter=adapter,
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="9" * 32,
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="parallel route pause has no exact resumable provider boundary",
+        ):
+            await executor._run_batch_with_bounded_route_escalation(
+                seed=_seed(),
+                batch_executable=[0],
+                session_id="session-terminal-route-pause",
+                execution_id="execution-terminal-route-pause",
+                tools=[],
+                tool_catalog=None,
+                system_prompt="sys",
+                level_contexts=[],
+                ac_retry_attempts={0: 0},
+                execution_counters=None,
+            )
+
+        assert provider_calls == 1
+        pauses = await store.query_execution_related_events(
+            "execution-terminal-route-pause",
+            event_type="execution.ac.route_paused",
+            limit=2,
+        )
+        assert pauses == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_live_repeated_quota_restores_latest_unconsumed_provider_boundary(
     tmp_path: Any,
 ) -> None:

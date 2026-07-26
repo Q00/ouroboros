@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import wraps
@@ -288,6 +289,8 @@ from ouroboros.orchestrator.execution_authority import (
     ExecutionAuthorityContract,
     ExecutionAuthorityLiveBinding,
     canonical_workspace_authority,
+    runtime_effect_capabilities_contract,
+    valid_runtime_effect_capabilities_contract,
 )
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import (
@@ -2746,6 +2749,7 @@ class ParallelACExecutor:
         process_local_resume_nonce: str | None = None,
         resolved_backend_limits: BackendConcurrencyLimits | None = None,
         resolved_self_governs_rate_limit: bool | None = None,
+        expected_runtime_effect_capabilities: Mapping[str, object] | None = None,
         _foundation_a_roots: _FoundationAClosedRoots = _FOUNDATION_A_CLOSED_ROOTS,
         _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
         _foundation_a_internal_entry_roots_are_closed: bool = False,
@@ -2791,12 +2795,26 @@ class ParallelACExecutor:
                 resume never rereads changed backend-limit configuration.
             resolved_self_governs_rate_limit: Optional immutable adapter pacing
                 mode paired with ``resolved_backend_limits``.
+            expected_runtime_effect_capabilities: Complete durable runtime
+                declaration that must still match at every provider entry.
         """
         if _foundation_a_internal_entry_roots is None:
             raise ValueError("execution authority internal entry roots are unavailable")
         internal_entry_roots = _foundation_a_internal_entry_roots
 
         self._adapter = adapter
+        if expected_runtime_effect_capabilities is not None:
+            if not valid_runtime_effect_capabilities_contract(expected_runtime_effect_capabilities):
+                raise ValueError("invalid expected runtime effect capabilities")
+            if runtime_effect_capabilities_contract(adapter) != dict(
+                expected_runtime_effect_capabilities
+            ):
+                raise ValueError("runtime effect capabilities drifted before executor creation")
+        self._expected_runtime_effect_capabilities = (
+            deepcopy(dict(expected_runtime_effect_capabilities))
+            if expected_runtime_effect_capabilities is not None
+            else None
+        )
         self._event_store = event_store
         self._console = console or Console()
         if decomposition_mode not in {"preflight", "bounce_only", "off"}:
@@ -7980,6 +7998,12 @@ Respond with either ATOMIC or the structured JSON object only.
         def _live_provider_kwargs() -> dict[str, Any] | None:
             """Revalidate carried admission against live state at provider entry."""
 
+            if (
+                self._expected_runtime_effect_capabilities is not None
+                and runtime_effect_capabilities_contract(self._adapter)
+                != self._expected_runtime_effect_capabilities
+            ):
+                return None
             if route_admission is None:
                 return dict(execute_effort_kwargs)
             if self._model_router != model_router_snapshot:

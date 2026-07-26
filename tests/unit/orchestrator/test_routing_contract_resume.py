@@ -19,7 +19,11 @@ from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
     _resolve_model_tier_request,
 )
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.model_routing import (
@@ -313,7 +317,7 @@ def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effec
         )
 
 
-@pytest.mark.parametrize("legacy_version", [5, 6, 7])
+@pytest.mark.parametrize("legacy_version", [5, 6, 7, 8])
 def test_recent_contracts_without_complete_effect_inputs_fail_closed(
     legacy_version: int,
 ) -> None:
@@ -344,7 +348,7 @@ def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() ->
     assert len(inputs["tool_catalog_fingerprint"]) == 64
 
 
-def test_v8_inputs_freeze_context_profile_parent_lineage_and_pause_policy(
+def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capabilities(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -367,8 +371,9 @@ def test_v8_inputs_freeze_context_profile_parent_lineage_and_pause_policy(
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 2
+    assert semantics["version"] == 3
     assert semantics["usage_limit_pause_seconds"] == 18000
+    assert semantics["runtime_effect_capabilities"]["version"] == 1
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
     persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
     persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
@@ -590,6 +595,58 @@ def test_resume_rejects_usage_limit_pause_policy_drift(
 
 
 @pytest.mark.parametrize(
+    "resumed_capabilities",
+    [
+        RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.IGNORED,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        ),
+        RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        ),
+    ],
+)
+def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
+    resumed_capabilities: RuntimeCapabilities,
+) -> None:
+    """Provider kwargs cannot be recomputed from a changed runtime declaration."""
+    original = _runner()
+    original._reasoning_effort = "high"
+    original._adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        reasoning_effort_support=ParamSupport.NATIVE,
+        enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+        model_override_support=ParamSupport.NATIVE,
+    )
+    persisted = original._build_execution_contract(seed=_seed())
+    assert (
+        persisted["execution_semantics"]["runtime_effect_capabilities"]["reasoning_effort_support"]
+        == "native"
+    )
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+    resumed._adapter.capabilities = resumed_capabilities
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "run_verify_commands",
@@ -612,12 +669,36 @@ def test_resume_rejects_usage_limit_pause_policy_drift(
         "backend_tokens_per_minute",
         "backend_self_governs_rate_limit",
         "usage_limit_pause_seconds",
+        "runtime_effect_capabilities",
     ],
 )
 def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:
     original = _runner()
     persisted = copy.deepcopy(original._build_execution_contract())
     del persisted["execution_semantics"][field]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "targeted_resume",
+        "reasoning_effort_support",
+        "enforceable_reasoning_efforts",
+        "model_override_support",
+        "session_signals",
+    ],
+)
+def test_current_runtime_effect_capabilities_require_complete_exact_population(
+    field: str,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    del persisted["execution_semantics"]["runtime_effect_capabilities"][field]
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
     )

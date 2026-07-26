@@ -611,6 +611,15 @@ The Foundation A implementation must demonstrate all of the following:
     sibling cancelled after execution-authority entry seals its dispatch and
     persists an uncertain-effect `BLOCKED` handoff that replay treats as
     terminal human ownership.
+88. durable `PAUSED` and `pause_persistence_pending` transfer an exact runtime
+    handle out of the returning execution/resume coroutine; its unconditional
+    cleanup cannot terminate the provider session that owns future resume.
+89. direct and parallel resumability require both a reconnect identifier and a
+    nonterminal runtime lifecycle state; a failed/completed/cancelled/terminated
+    handle cannot authorize a pause or another provider effect.
+90. execution contract v9 fingerprints the complete runtime capability and
+    reasoning-effort vocabulary population, and direct/parallel provider choke
+    points revalidate it after pre-dispatch awaits before effect entry.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

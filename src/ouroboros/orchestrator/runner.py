@@ -118,9 +118,11 @@ from ouroboros.orchestrator.execution_authority import (
     collect_terminal_acceptance_plan,
     constructor_model_contract,
     request_process_local_cancellation,
+    runtime_effect_capabilities_contract,
     runtime_execution_proves_effective_model,
     valid_constructor_model_contract,
     valid_process_local_authority_contract,
+    valid_runtime_effect_capabilities_contract,
     valid_runtime_execution_identity_contract,
 )
 from ouroboros.orchestrator.execution_guidance import (
@@ -725,13 +727,14 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 8
+EXECUTION_CONTRACT_VERSION = 9
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
 PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
 PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
 PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
+PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
@@ -1166,6 +1169,7 @@ class OrchestratorRunner:
         bounded_escalation: bool = False,
         route_id_override: str | None = None,
         expected_route_candidate: Any | None = None,
+        expected_runtime_effect_capabilities: Mapping[str, object] | None = None,
         selected_route_sink: list[Any] | None = None,
     ) -> dict[str, str]:
         """Lay the runner's own execute_task paths on BOTH investment contracts.
@@ -1203,6 +1207,7 @@ class OrchestratorRunner:
             validate_compat_escalation_admission,
         )
 
+        self._require_runtime_effect_capabilities(expected_runtime_effect_capabilities)
         investment_assessment = assess_investment(None)
         decision, kwargs = resolve_execute_effort(
             self._adapter,
@@ -1514,13 +1519,45 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
-        # Model kwargs are collapsed only after live admission above. Callers
-        # invoke execute_task on the next statement without another await.
+        # Model kwargs are collapsed only after live admission above. Recheck
+        # the complete runtime declaration after every observability await so
+        # an unused vocabulary entry cannot drift into a later resumed effect.
+        self._require_runtime_effect_capabilities(expected_runtime_effect_capabilities)
+        # Callers invoke execute_task on the next statement without another await.
         if selected_route_sink is not None and route_admission is not None:
             selected = route_admission.selected
             if selected is not None:
                 selected_route_sink.append(selected)
         return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
+
+    def _require_runtime_effect_capabilities(
+        self,
+        expected: Mapping[str, object] | None,
+    ) -> None:
+        """Fail before provider entry when any declared runtime effect can drift."""
+        if expected is None:
+            return
+        if not valid_runtime_effect_capabilities_contract(expected):
+            raise OrchestratorError(
+                message="Provider effect capability snapshot is invalid",
+                details={"invalid": "runtime_effect_capabilities"},
+            )
+        try:
+            current = runtime_effect_capabilities_contract(self._adapter)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Provider effect capability snapshot is unavailable",
+                details={"cause": type(exc).__name__},
+            ) from exc
+        if current != dict(expected):
+            raise OrchestratorError(
+                message="Provider effect capabilities drifted before dispatch",
+                details={
+                    "persisted_runtime_effect_capabilities": dict(expected),
+                    "current_runtime_effect_capabilities": current,
+                    "resume_blocked": "runtime_effect_capability_drift",
+                },
+            )
 
     @staticmethod
     def _classify_direct_route_failure(message: AgentMessage | None) -> Any:
@@ -3653,7 +3690,7 @@ class OrchestratorRunner:
         """Return every scalar setting that can change resumed AC effects."""
         backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
         return {
-            "version": 2,
+            "version": 3,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
@@ -3679,6 +3716,7 @@ class OrchestratorRunner:
                 getattr(self._adapter, "self_governs_rate_limit", False)
             ),
             "usage_limit_pause_seconds": get_usage_limit_pause_seconds(),
+            "runtime_effect_capabilities": runtime_effect_capabilities_contract(self._adapter),
         }
 
     @staticmethod
@@ -3707,6 +3745,7 @@ class OrchestratorRunner:
                 "backend_tokens_per_minute",
                 "backend_self_governs_rate_limit",
                 "usage_limit_pause_seconds",
+                "runtime_effect_capabilities",
             }
         )
         if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
@@ -3724,7 +3763,7 @@ class OrchestratorRunner:
         )
         if (
             type(value.get("version")) is not int
-            or value.get("version") != 2
+            or value.get("version") != 3
             or any(type(value.get(key)) is not bool for key in boolean_keys)
         ):
             return False
@@ -3767,6 +3806,7 @@ class OrchestratorRunner:
             and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
             and type(usage_limit_pause_seconds) is int
             and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+            and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
         )
 
     def _execution_semantics_snapshot(
@@ -5756,6 +5796,7 @@ class OrchestratorRunner:
                 PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
                 PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
                 PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
+                PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -5766,10 +5807,10 @@ class OrchestratorRunner:
 
         if raw_version != EXECUTION_CONTRACT_VERSION:
             # Every older version may already have dispatched provider effects,
-            # but none sealed the complete v8 effect population, including the
-            # resolved operator pause-window policy. Reconstructing any missing
-            # field from the current workspace or configuration would change
-            # replay authorization.
+            # but none sealed the complete v9 effect population, including the
+            # runtime capability/vocabulary that builds provider-call kwargs.
+            # Reconstructing any missing field from current runtime state would
+            # change replay authorization.
             raise OrchestratorError(
                 message="Cannot resume a session without durable effect inputs",
                 details={
@@ -6185,15 +6226,25 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        current_execution_semantics = self._execution_semantics_contract()
         if (
             not migrate_legacy_contract
-            and dict(raw_execution_semantics) != self._execution_semantics_contract()
+            and dict(raw_execution_semantics) != current_execution_semantics
         ):
+            runtime_capability_drift = raw_execution_semantics.get(
+                "runtime_effect_capabilities"
+            ) != current_execution_semantics.get("runtime_effect_capabilities")
             raise OrchestratorError(
                 message="Cannot resume with changed execution semantics",
                 details={
                     "persisted_execution_semantics": dict(raw_execution_semantics),
-                    "current_execution_semantics": self._execution_semantics_contract(),
+                    "current_execution_semantics": current_execution_semantics,
+                    "resume_blocked": (
+                        "runtime_effect_capability_drift"
+                        if runtime_capability_drift
+                        else "execution_semantics_drift"
+                    ),
+                    "retryable": True,
                     "hint": (
                         "Restore the original verification, retry, decomposition, and "
                         "executor settings or start a new session."
@@ -8640,6 +8691,7 @@ class OrchestratorRunner:
             last_tool: str | None = None
             last_completed_count = 0
             runtime_handle: RuntimeHandle | None = None
+            runtime_handle_transferred_to_pause = False
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
             recoverable_failure_pause: RecoverableFailurePause | None = None
@@ -8686,6 +8738,9 @@ class OrchestratorRunner:
                     bounded_escalation=direct_bounded_routing,
                     route_id_override=route_id_override,
                     expected_route_candidate=expected_route_candidate,
+                    expected_runtime_effect_capabilities=execution_semantics[
+                        "runtime_effect_capabilities"
+                    ],
                     selected_route_sink=selected_routes,
                 )
                 direct_route_candidate = selected_routes[0] if selected_routes else None
@@ -9129,9 +9184,14 @@ class OrchestratorRunner:
                     pause=recoverable_failure_pause,
                 )
                 if pause_pending is not None:
+                    # The lifecycle helper explicitly retained process-local
+                    # pause ownership. Terminating here would destroy the exact
+                    # provider boundary that its retry must publish.
+                    runtime_handle_transferred_to_pause = True
                     return pause_pending
                 assert pause_status is not None
                 if pause_status is SessionStatus.PAUSED:
+                    runtime_handle_transferred_to_pause = True
                     self._console.print(
                         Panel(
                             Text(final_message[:1000], style="yellow"),
@@ -9344,11 +9404,12 @@ class OrchestratorRunner:
                 )
             )
         finally:
-            await self._terminate_runtime_handle(
-                runtime_handle,
-                session_id=tracker.session_id,
-                context="execute",
-            )
+            if not runtime_handle_transferred_to_pause:
+                await self._terminate_runtime_handle(
+                    runtime_handle,
+                    session_id=tracker.session_id,
+                    context="execute",
+                )
 
     async def _execute_parallel(
         self,
@@ -9590,6 +9651,7 @@ class OrchestratorRunner:
             process_local_resume_nonce=self._parallel_process_local_resume_nonce(tracker),
             resolved_backend_limits=resolved_backend_limits,
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
+            expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
         )
 
         # Check for cancellation before starting parallel execution
@@ -10579,6 +10641,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             last_tool: str | None = None
             last_completed_count = state_tracker.state.completed_count
             live_runtime_handle = runtime_handle
+            runtime_handle_transferred_to_pause = False
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
             resume_route_state: _DirectRouteResumeState | None = None
             last_resume_final_message: AgentMessage | None = None
@@ -10624,6 +10687,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                     expected_route_candidate=(
                         resume_route_state.candidate if resume_route_state is not None else None
                     ),
+                    expected_runtime_effect_capabilities=execution_semantics[
+                        "runtime_effect_capabilities"
+                    ],
                 )
                 if resume_route_state is not None:
                     cancelled_result = await self._handle_requested_cancellation(
@@ -10837,6 +10903,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                         bounded_escalation=True,
                         route_id_override=successor.route_id,
                         expected_route_candidate=successor,
+                        expected_runtime_effect_capabilities=execution_semantics[
+                            "runtime_effect_capabilities"
+                        ],
                     )
                     cancelled_result = await self._handle_requested_cancellation(
                         session_id=session_id,
@@ -11040,9 +11109,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     pause=recoverable_resume_failure,
                 )
                 if pause_pending is not None:
+                    runtime_handle_transferred_to_pause = True
                     return pause_pending
                 assert pause_status is not None
                 if pause_status is SessionStatus.PAUSED:
+                    runtime_handle_transferred_to_pause = True
                     self._console.print(
                         Panel(
                             Text(final_message[:1000], style="yellow"),
@@ -11246,11 +11317,12 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
             )
         finally:
-            await self._terminate_runtime_handle(
-                live_runtime_handle,
-                session_id=session_id,
-                context="resume",
-            )
+            if not runtime_handle_transferred_to_pause:
+                await self._terminate_runtime_handle(
+                    live_runtime_handle,
+                    session_id=session_id,
+                    context="resume",
+                )
 
 
 __all__ = [

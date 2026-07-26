@@ -2080,6 +2080,80 @@ class TestOrchestratorRunner:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_live_direct_pause_transfers_runtime_handle_without_termination(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Any,
+    ) -> None:
+        """A durable PAUSED owner keeps the exact live provider boundary intact."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'direct-live-pause.db'}")
+        await store.initialize()
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        terminate_calls = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="durable-live-pause",
+            cwd=str(tmp_path),
+        ).bind_controls(terminate_callback=terminate)
+
+        async def execute_task(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=live_handle,
+            )
+
+        mock_adapter.execute_task = execute_task
+        execution_id = "execution-direct-live-pause"
+        session_id = "session-direct-live-pause"
+        try:
+            result = await runner.execute_seed(
+                seed,
+                parallel=False,
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+            assert result.is_ok and result.value.success is False
+            assert terminate_calls == 0
+            session = await runner._session_repo.reconstruct_session(session_id)
+            assert session.is_ok and session.value.status is SessionStatus.PAUSED
+            pauses = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.route_paused",
+                limit=2,
+            )
+            assert len(pauses) == 1
+        finally:
+            runner._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            runner._unregister_session(execution_id, session_id)
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_direct_resumed_short_turn_cancellation_never_dispatches_successor(
         self,
         mock_adapter: MagicMock,
@@ -4007,7 +4081,17 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_recoverable",
         )
-        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+        terminate_calls = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            native_session_id="thread-123",
+        ).bind_controls(terminate_callback=terminate)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -4051,6 +4135,7 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is False
         assert result.value.final_message == "Codex rejected the resume command"
+        assert terminate_calls == 0
         mark_paused.assert_awaited_once()
         mark_failed.assert_not_called()
         retrospective.assert_not_awaited()
@@ -5029,6 +5114,43 @@ class TestOrchestratorRunner:
         executor_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_direct_provider_entry_rejects_post_restore_runtime_capability_drift(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+    ) -> None:
+        """The provider choke point rechecks the full durable capability vocabulary."""
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runner._reasoning_effort = "high"
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        )
+        expected = runner._execution_semantics_contract()["runtime_effect_capabilities"]
+        assert isinstance(expected, dict)
+
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.IGNORED,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        )
+
+        with pytest.raises(OrchestratorError, match="capabilities drifted before dispatch"):
+            await runner._route_call_effort(
+                execution_id="execution-capability-drift",
+                session_id="session-capability-drift",
+                bounded_escalation=True,
+                expected_runtime_effect_capabilities=expected,
+            )
+
+    @pytest.mark.asyncio
     async def test_parallel_dispatch_consumes_resolved_worker_and_rate_snapshot(
         self,
         runner: OrchestratorRunner,
@@ -5142,7 +5264,7 @@ class TestOrchestratorRunner:
             result = await runner.resume_session(tracker.session_id, sample_seed)
 
         assert result.is_err
-        assert result.error.details["resume_blocked"] == "routing_enforcement_unavailable"
+        assert result.error.details["resume_blocked"] == "runtime_effect_capability_drift"
         assert result.error.details["retryable"] is True
         provider.assert_not_called()
 

@@ -1940,26 +1940,122 @@ def runtime_execution_proves_effective_model(value: object) -> bool:
     return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
 
 
+_RUNTIME_EFFECT_CAPABILITY_KEYS = frozenset(
+    {
+        "version",
+        "skill_dispatch",
+        "targeted_resume",
+        "structured_output",
+        "system_prompt_support",
+        "tool_restriction_support",
+        "permission_mode_support",
+        "reasoning_effort_support",
+        "enforceable_reasoning_efforts",
+        "model_override_support",
+        "subagent_orchestration",
+        "session_signals",
+    }
+)
+_PARAM_SUPPORT_VALUES = frozenset({"native", "translated", "ignored"})
+_REASONING_EFFORT_VALUES = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_SUBAGENT_ORCHESTRATION_VALUES = frozenset(
+    {
+        "none",
+        "internal",
+        "external_host_bridge",
+        "external_leader_driven",
+    }
+)
+_SESSION_SIGNAL_CAPABILITY_KEYS = frozenset(
+    {
+        "inform_delivery",
+        "background_reply",
+        "after_turn_delivery",
+        "checkpoint_redirect",
+        "owned_turn_abort",
+        "replacement_resume",
+    }
+)
+
+
+def valid_runtime_effect_capabilities_contract(value: object) -> bool:
+    """Validate every declared runtime capability that can change a live effect."""
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS
+        or value.get("version") != 1
+        or type(value.get("version")) is not int
+    ):
+        return False
+    if any(
+        type(value.get(key)) is not bool
+        for key in ("skill_dispatch", "targeted_resume", "structured_output")
+    ):
+        return False
+    if any(
+        value.get(key) not in _PARAM_SUPPORT_VALUES
+        for key in (
+            "system_prompt_support",
+            "tool_restriction_support",
+            "permission_mode_support",
+            "reasoning_effort_support",
+            "model_override_support",
+        )
+    ):
+        return False
+    if value.get("subagent_orchestration") not in _SUBAGENT_ORCHESTRATION_VALUES:
+        return False
+    raw_levels = value.get("enforceable_reasoning_efforts")
+    if raw_levels is not None and (
+        type(raw_levels) is not list
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+        or len(set(raw_levels)) != len(raw_levels)
+        or raw_levels != sorted(raw_levels)
+    ):
+        return False
+    raw_signals = value.get("session_signals")
+    return bool(
+        isinstance(raw_signals, Mapping)
+        and set(raw_signals) == _SESSION_SIGNAL_CAPABILITY_KEYS
+        and all(type(raw_signals.get(key)) is bool for key in _SESSION_SIGNAL_CAPABILITY_KEYS)
+    )
+
+
+def runtime_effect_capabilities_contract(adapter: object) -> dict[str, object]:
+    """Return the complete closed runtime-capability population used by effects."""
+    capabilities = runtime_capabilities_for(adapter)
+    raw_levels = capabilities.enforceable_reasoning_efforts
+    if raw_levels is not None and (
+        not isinstance(raw_levels, frozenset)
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+    ):
+        raise ValueError("runtime reasoning-effort vocabulary must be a closed immutable set")
+    contract: dict[str, object] = {
+        "version": 1,
+        "skill_dispatch": capabilities.skill_dispatch,
+        "targeted_resume": capabilities.targeted_resume,
+        "structured_output": capabilities.structured_output,
+        "system_prompt_support": capabilities.system_prompt_support.value,
+        "tool_restriction_support": capabilities.tool_restriction_support.value,
+        "permission_mode_support": capabilities.permission_mode_support.value,
+        "reasoning_effort_support": capabilities.reasoning_effort_support.value,
+        "enforceable_reasoning_efforts": sorted(raw_levels) if raw_levels is not None else None,
+        "model_override_support": capabilities.model_override_support.value,
+        "subagent_orchestration": capabilities.subagent_orchestration.value,
+        "session_signals": capabilities.session_signals.to_event_data(),
+    }
+    if not valid_runtime_effect_capabilities_contract(contract):
+        raise ValueError("runtime effect capabilities are not canonical")
+    return contract
+
+
 def _runtime_capabilities_descriptor(adapter: object) -> dict[str, object]:
     try:
-        capabilities = runtime_capabilities_for(adapter)
-        value = {
-            "skill_dispatch": capabilities.skill_dispatch,
-            "targeted_resume": capabilities.targeted_resume,
-            "structured_output": capabilities.structured_output,
-            "system_prompt_support": capabilities.system_prompt_support.value,
-            "tool_restriction_support": capabilities.tool_restriction_support.value,
-            "permission_mode_support": capabilities.permission_mode_support.value,
-            "reasoning_effort_support": capabilities.reasoning_effort_support.value,
-            "enforceable_reasoning_efforts": (
-                sorted(capabilities.enforceable_reasoning_efforts)
-                if capabilities.enforceable_reasoning_efforts is not None
-                else None
-            ),
-            "model_override_support": capabilities.model_override_support.value,
-            "subagent_orchestration": capabilities.subagent_orchestration.value,
-            "session_signals": capabilities.session_signals.to_event_data(),
-        }
+        value = runtime_effect_capabilities_contract(adapter)
     except Exception:
         return {"observed": False}
     return _digest_descriptor(value, field="runtime capabilities")
@@ -3232,10 +3328,12 @@ __all__ = [
     "execution_policy_authority_contract",
     "executor_authority_contract",
     "runtime_authority_contract",
+    "runtime_effect_capabilities_contract",
     "runtime_execution_identity_contract",
     "runtime_execution_proves_effective_model",
     "valid_constructor_model_contract",
     "valid_process_local_authority_contract",
+    "valid_runtime_effect_capabilities_contract",
     "valid_runtime_execution_identity_contract",
     "verifier_authority_contract",
 ]
