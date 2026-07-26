@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _SCRIPT_PATH = Path(__file__).parent.parent.parent.parent / "scripts" / "sync-plugin-version.py"
 _spec = importlib.util.spec_from_file_location("sync_plugin_version", str(_SCRIPT_PATH))
 assert _spec is not None
@@ -174,3 +176,48 @@ def test_main_write_preflights_json_targets_before_mutation(
         assert plugin_json.read_text() == original_plugin_json
     else:
         raise AssertionError("invalid marketplace JSON must fail before mutation")
+
+
+@pytest.mark.parametrize("missing_target", ["plugin", "marketplace"])
+def test_main_write_fails_before_mutation_when_required_json_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+    missing_target: str,
+) -> None:
+    source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
+
+    source_skill.parent.mkdir(parents=True, exist_ok=True)
+    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:0.39.1 -->\nbundled\n")
+    if missing_target != "plugin":
+        plugin_json.write_text('{"version": "1.2.3"}\n')
+    if missing_target != "marketplace":
+        marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
+
+    original_source = source_skill.read_text()
+    original_bundled = bundled_skill.read_text()
+    existing_json = marketplace_json if missing_target == "plugin" else plugin_json
+    original_json = existing_json.read_text()
+
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+
+    with pytest.raises(SystemExit, match="required plugin metadata not found"):
+        sync_plugin_version.main()
+
+    assert source_skill.read_text() == original_source
+    assert bundled_skill.read_text() == original_bundled
+    assert existing_json.read_text() == original_json

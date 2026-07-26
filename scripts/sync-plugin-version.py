@@ -172,7 +172,7 @@ def main() -> None:
     json_targets: list[tuple[Path, str | None, object, str]] = []
     for path, nested in targets:
         if not path.exists():
-            continue
+            sys.exit(f"Error: required plugin metadata not found: {path.relative_to(ROOT)}")
 
         try:
             data = json.loads(path.read_text())
