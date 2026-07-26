@@ -69,6 +69,16 @@ class _ACFieldMarker:
     end: int
 
 
+def _is_word_apostrophe(value: str, index: int) -> bool:
+    return (
+        value[index] == "'"
+        and index > 0
+        and index + 1 < len(value)
+        and value[index - 1].isalnum()
+        and value[index + 1].isalnum()
+    )
+
+
 def _parse_string_array_values(
     raw_value: object, *, field_label: str, strict: bool = False
 ) -> tuple[str, ...]:
@@ -145,11 +155,11 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             index += 1
             continue
         if quote is not None:
-            if char == quote:
+            if char == quote and not (quote == "'" and _is_word_apostrophe(body, index)):
                 quote = None
             index += 1
             continue
-        if char in {"'", '"'}:
+        if char in {"'", '"'} and not (char == "'" and _is_word_apostrophe(body, index)):
             quote = char
             index += 1
             continue

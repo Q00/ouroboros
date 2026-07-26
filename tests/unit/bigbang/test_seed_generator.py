@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
+from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AmbiguityScore,
@@ -899,6 +900,55 @@ class TestSeedGeneratorExtraction:
             assert criterion.expected_artifacts == (expected_artifact,)
             assert criterion.output_assertion is None
             assert Seed.model_validate(result.value.model_dump()) == result.value
+
+    @pytest.mark.asyncio
+    async def test_generate_does_not_treat_possessive_description_as_quote_bypass(
+        self,
+    ) -> None:
+        """A possessive apostrophe cannot hide malformed structured AC fields."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bypass_attempt = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: User's file exists | verify: test -f user.txt | "
+                "artifacts: schema v2 outputs.json | expect: NONE\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: User's file exists | verify: test -f user.txt | "
+                "artifacts: user.txt | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bypass_attempt)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "User's file exists"
+        assert criterion.verify_command == "test -f user.txt"
+        assert criterion.expected_artifacts == ("user.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
 
     @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
