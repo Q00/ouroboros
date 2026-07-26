@@ -1239,6 +1239,47 @@ class TestClaudeSetup:
         assert credentials_path.exists()
         assert credentials_path.stat().st_mode & 0o777 == 0o600
 
+    def test_setup_claude_fresh_credentials_failure_leaves_activation_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        credentials_path = config_dir / "credentials.yaml"
+        claude_dir = tmp_path / ".claude"
+        mcp_path = claude_dir / "mcp.json"
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_atomic_write = setup_cmd._atomic_write_text
+
+        def fail_credentials_write(path: Path, content: str, *, mode: int = 0o600) -> None:
+            if path == credentials_path:
+                raise OSError("credentials write failed")
+            real_atomic_write(path, content, mode=mode)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text",
+                side_effect=fail_credentials_write,
+            ),
+            patch("ouroboros.cli.commands.setup._detect_mcp_entry") as detect,
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+            from ouroboros.config.loader import config_exists
+
+            exists_after_failure = config_exists()
+
+        assert configured is False
+        assert exists_after_failure is False
+        assert not (config_dir / "config.yaml").exists()
+        assert not credentials_path.exists()
+        assert not mcp_path.exists()
+        assert not recovery_path.exists()
+        detect.assert_not_called()
+        assert "credentials.yaml" in warning.call_args.args[0]
+
     def test_setup_claude_preserves_existing_credentials(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1550,6 +1591,7 @@ class TestClaudeSetup:
             "llm": {"backend": "codex"},
         }
         config_path.write_text(yaml.safe_dump(original_config), encoding="utf-8")
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         (claude_dir / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")

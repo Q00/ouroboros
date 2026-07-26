@@ -2761,6 +2761,9 @@ def _setup_claude(claude_path: str) -> bool:
         print_warning("Could not stage Claude config safely — setup aborted.")
         return False
 
+    if not _ensure_credentials_file(config_dir):
+        return False
+
     mcp_config_path = _claude_mcp_config_path()
     if not _recover_claude_mcp_activation():
         return False
@@ -2787,10 +2790,6 @@ def _setup_claude(claude_path: str) -> bool:
         return False
 
     if not _record_claude_mcp_recovery_post_state(mcp_config_path):
-        _recover_claude_mcp_activation()
-        return False
-
-    if not _ensure_credentials_file(config_dir):
         _recover_claude_mcp_activation()
         return False
 
