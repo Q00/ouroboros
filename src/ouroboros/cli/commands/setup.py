@@ -490,6 +490,8 @@ def _manifest_target_post_is_operation_consistent(
 
 def _manifest_completed_targets_are_consistent(manifest: dict[str, object]) -> bool:
     phase = manifest.get("phase")
+    if not isinstance(phase, str):
+        return False
     completed_by_phase = {
         "prepared": (),
         "mcp_written": ("mcp",),
