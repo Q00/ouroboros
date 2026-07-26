@@ -94,6 +94,56 @@ class TestRunCommands:
         assert "runtime" in result.output.lower()
         assert "hermes" in result.output.lower()
 
+    def test_run_workflow_rejects_depth_above_durable_replay_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The primary CLI rejects depth 5 during argument admission."""
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - test\n")
+
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                "workflow",
+                str(seed_file),
+                "--max-decomposition-depth",
+                "5",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--max-decomposition-depth'" in result.output
+        assert "range" in result.output
+        assert "4" in result.output
+
+    def test_zcode_run_rejects_depth_above_durable_replay_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The Zcode convenience CLI exposes the identical finite range."""
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - test\n")
+
+        result = runner.invoke(
+            app,
+            [
+                "zcode",
+                "run",
+                str(seed_file),
+                "--max-decomposition-depth",
+                "5",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--max-decomposition-depth'" in result.output
+        assert "range" in result.output
+        assert "4" in result.output
+
     def test_run_resume_help(self) -> None:
         """Test run resume command help."""
         result = runner.invoke(app, ["run", "resume", "--help"])

@@ -426,6 +426,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
 | `-s, --sequential` | Execute ACs sequentially instead of in parallel |
+| `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (`0..4`, default `2`). The same bound applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` so every accepted complete tree is durably replayable |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
@@ -456,7 +457,15 @@ ouroboros run seed.yaml --debug
 
 # Sequential execution (one AC at a time)
 ouroboros run seed.yaml --sequential
+
+# Allow up to four recursive splits (the supported maximum)
+ouroboros run seed.yaml --max-decomposition-depth 4
 ```
+
+Depth values above `4` were previously accepted by the CLI/Seed parser but
+could not be sealed by the durable replay projection after effects. They now
+fail before runtime setup. Reduce an older override to `4` or less and start a
+fresh run; do not resume an event history that already crossed the live limit.
 
 ### `run resume`
 

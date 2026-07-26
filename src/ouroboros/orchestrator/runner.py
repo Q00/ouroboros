@@ -79,6 +79,10 @@ from ouroboros.orchestrator.control_plane import (
     build_control_plane_state,
     serialize_control_plane_state,
 )
+from ouroboros.orchestrator.decomposition_limits import (
+    DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    validate_max_decomposition_depth,
+)
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_execution_terminal_event,
@@ -128,10 +132,6 @@ from ouroboros.orchestrator.mcp_tools import (
     assemble_session_tool_catalog,
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
-)
-from ouroboros.orchestrator.parallel_executor import (
-    DEFAULT_MAX_DECOMPOSITION_DEPTH,
-    MAX_DECOMPOSITION_DEPTH,
 )
 from ouroboros.orchestrator.policy import (
     PolicyContext,
@@ -819,15 +819,7 @@ class OrchestratorRunner:
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
-        if (
-            type(max_decomposition_depth) is not int
-            or not 0 <= max_decomposition_depth <= MAX_DECOMPOSITION_DEPTH
-        ):
-            raise ValueError(
-                "max_decomposition_depth must be between 0 and "
-                f"{MAX_DECOMPOSITION_DEPTH} so completed trees remain replayable"
-            )
-        self._max_decomposition_depth = max_decomposition_depth
+        self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
         self._session_signal_hub = session_signal_hub

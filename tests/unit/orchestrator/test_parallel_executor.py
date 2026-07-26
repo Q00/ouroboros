@@ -31,6 +31,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
+from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
@@ -9255,8 +9256,8 @@ class TestParallelACExecutor:
             (101, True, 1, 1),
         ]
 
-    def test_depth_three_is_rejected_before_executor_construction(self) -> None:
-        """A five-way depth-3 tree cannot outrun its durable 64-node envelope."""
+    def test_depth_above_public_max_is_rejected_before_executor_construction(self) -> None:
+        """A live tree cannot outrun its shared durable replay envelope."""
         adapter = MagicMock()
 
         with pytest.raises(ValueError, match="completed trees remain replayable"):
@@ -9265,7 +9266,7 @@ class TestParallelACExecutor:
                 event_store=AsyncMock(),
                 console=MagicMock(),
                 enable_decomposition=True,
-                max_decomposition_depth=3,
+                max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
             )
 
         adapter.execute_task.assert_not_called()

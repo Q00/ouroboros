@@ -99,6 +99,14 @@ from ouroboros.orchestrator.atomic_prompt_builder import (
 from ouroboros.orchestrator.backend_limits import resolve_backend_limits
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
+from ouroboros.orchestrator.decomposition_limits import (
+    DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    MAX_DECOMPOSITION_CHILDREN,
+    MAX_DECOMPOSITION_DEPTH,  # noqa: F401  (re-exported for tests/back-compat)
+    MAX_DECOMPOSITION_REPLAY_NODES,
+    MIN_DECOMPOSITION_CHILDREN,
+    validate_max_decomposition_depth,
+)
 from ouroboros.orchestrator.decomposition_params import (
     build_decomposition_system_prompt,
     params_from_profile,
@@ -1636,12 +1644,8 @@ def _structured_literal(value: str) -> str | None:
 
 # Decomposition constants
 # Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
-# The maximum is also the largest five-way tree whose complete child projection
-# fits the durable 64-node replay envelope (5 + 25 = 30 child nodes).
-DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
-MAX_DECOMPOSITION_DEPTH = DEFAULT_MAX_DECOMPOSITION_DEPTH
-MIN_SUB_ACS = 2
-MAX_SUB_ACS = 5
+MIN_SUB_ACS = MIN_DECOMPOSITION_CHILDREN
+MAX_SUB_ACS = MAX_DECOMPOSITION_CHILDREN
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
@@ -1655,7 +1659,9 @@ _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _ROUTE_SUCCESS_ERROR_CHARS = 4_000
 _ROUTE_SUCCESS_SESSION_ID_CHARS = 512
 _COMPOSITE_RESULT_TEXT_CHARS = 4_000
-_COMPOSITE_RESULT_MAX_NODES = 64
+# This replay envelope is derived from the same public live-depth contract used
+# by CLI, Seed, runner, and executor admission.  Do not hand-tune it separately.
+_COMPOSITE_RESULT_MAX_NODES = MAX_DECOMPOSITION_REPLAY_NODES
 _COMPOSITE_RESULT_MAX_DEPTH = 8
 _VERIFY_REASON_CHARS = 2000
 _VERIFY_MISSING_ARTIFACTS = 128
@@ -2821,15 +2827,7 @@ class ParallelACExecutor:
             "off" if not enable_decomposition else decomposition_mode
         )
         self._enable_decomposition = self._decomposition_mode != "off"
-        if (
-            type(max_decomposition_depth) is not int
-            or not 0 <= max_decomposition_depth <= MAX_DECOMPOSITION_DEPTH
-        ):
-            raise ValueError(
-                "max_decomposition_depth must be between 0 and "
-                f"{MAX_DECOMPOSITION_DEPTH} so completed trees remain replayable"
-            )
-        self._max_decomposition_depth = max_decomposition_depth
+        self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_concurrent = max_concurrent
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (

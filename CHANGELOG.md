@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **orchestrator/decomposition**: Define one replay-safe `0..4` live decomposition-depth contract across CLI, environment, Seed, runner, executor, completion persistence, and pause replay. The maximum five-way tree (780 child nodes) now round-trips through the durable projection. Older overrides above `4` fail before runtime setup and must be reduced to `4` or less for a fresh run.
+
 ### Fixed
 - **run/mcp**: Make fat-harness acceptance opt-in via `seed.orchestrator.execution_mode: fat_harness` for fresh CLI/MCP seed execution. Missing/blank execution mode now uses the default runner again until seed authoring and QA guidance consistently emit profile-compatible typed evidence for every AC. This mitigates layered scaffold AC failures reported in #1202.
 

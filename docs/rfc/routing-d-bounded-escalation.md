@@ -180,11 +180,24 @@ stronger Routing D owner contract or redirect resume through that state machine.
 The owner decision and executor are bound to the same pre-await capability/config
 snapshot, preventing cancellation checks from opening a drift window between them.
 
-Live decomposition depth is admitted only in the inclusive range 0-2. At the
-maximum five-way branching factor this yields at most 30 persisted child nodes
-(`5 + 25`), within the fixed 64-node completion/pause replay envelope. Larger or
-non-integer depths are rejected during runner/executor construction, before any
-provider effect; restored split decisions cannot cross the same depth boundary.
+Live decomposition depth is admitted only in the inclusive range 0-4. At the
+maximum five-way branching factor this yields exactly 780 possible persisted
+child nodes (`5 + 25 + 125 + 625`). The completion/pause replay node envelope is
+derived from the same public live-depth constants rather than being configured
+independently. CLI, environment, Seed, runner, and executor inputs all pass
+through this shared range gate, so every accepted override has a replayable
+worst-case complete tree. Larger or non-integer depths are rejected before
+workspace, persistence, or provider setup; restored split decisions cannot
+cross the same live boundary.
+
+This is an explicit migration from the formerly parser-only, unbounded
+non-negative override contract. Older `--max-decomposition-depth`,
+`OUROBOROS_MAX_DECOMPOSITION_DEPTH`, or
+`seed.orchestrator.max_decomposition_depth` values above `4` fail with a
+source-specific remediation message. They must be reduced to `4` or less and
+started as a fresh run. Historical projection depth remains separately bounded
+for diagnosis, but pre-existing deeper state cannot authorize another live
+provider effect.
 
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is

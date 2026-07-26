@@ -33,6 +33,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
 # TODO: uncomment when OpenCode runtime is shipped
@@ -620,10 +621,25 @@ class TestOrchestratorRunner:
                 mock_adapter,
                 mock_event_store,
                 mock_console,
-                max_decomposition_depth=3,
+                max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
             )
 
         mock_adapter.execute_task.assert_not_called()
+
+    def test_runner_accepts_shared_persistable_maximum_depth(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH,
+        )
+
+        assert runner._max_decomposition_depth == MAX_DECOMPOSITION_DEPTH == 4
 
     @pytest.mark.asyncio
     async def test_route_call_effort_emits_observability_only_event(
