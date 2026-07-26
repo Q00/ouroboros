@@ -146,6 +146,14 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             index += 1
             continue
         if char == "\\":
+            if not structured_payload_started:
+                escaped_remainder = body[index + 1 :]
+                escaped_marker = _AC_CONTRACT_FIELD_RE.match(escaped_remainder)
+                if escaped_marker is None:
+                    escaped_marker = _AC_RESERVED_FIELD_FRAGMENT_RE.match(escaped_remainder)
+                if escaped_marker is not None:
+                    field_name = escaped_marker.group(1).lower()
+                    raise ValueError(f"Escaped {field_name} field in acceptance criterion")
             escaped = True
             index += 1
             continue
