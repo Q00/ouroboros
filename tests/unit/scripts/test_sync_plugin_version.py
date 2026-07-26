@@ -23,8 +23,27 @@ def test_git_describe_fallback_preserves_exact_tag_version() -> None:
     assert sync_plugin_version.version_from_git_describe("v0.39.1") == "0.39.1"
 
 
-def test_plugin_metadata_version_normalizes_dev_suffix_to_public_version() -> None:
-    assert sync_plugin_version.normalize_version("0.39.2.dev28") == "0.39.2"
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.39.2.dev28", "0.39.2"),
+        ("1.2.3a1", "1.2.3a1"),
+        ("1.2.3b4", "1.2.3b4"),
+        ("1.2.3rc2", "1.2.3rc2"),
+        ("1.2.3b4.dev1", "1.2.3b4"),
+    ],
+)
+def test_plugin_metadata_version_normalizes_supported_versions(
+    version: str,
+    expected: str,
+) -> None:
+    assert sync_plugin_version.normalize_version(version) == expected
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "1.2", "1.2.3garbage"])
+def test_plugin_metadata_version_rejects_unsupported_versions(version: str) -> None:
+    with pytest.raises(ValueError, match="unsupported version"):
+        sync_plugin_version.normalize_version(version)
 
 
 def test_main_write_updates_both_setup_skill_markers(
@@ -221,3 +240,97 @@ def test_main_write_fails_before_mutation_when_required_json_is_missing(
     assert source_skill.read_text() == original_source
     assert bundled_skill.read_text() == original_bundled
     assert existing_json.read_text() == original_json
+
+
+@pytest.mark.parametrize(
+    ("plugin_version", "marketplace_version"),
+    [
+        (None, "1.2.3"),
+        (123, "1.2.3"),
+        ("1.2.3", None),
+        ("1.2.3", 123),
+    ],
+)
+def test_main_write_rejects_missing_or_non_string_json_version_before_mutation(
+    tmp_path: Path,
+    monkeypatch,
+    plugin_version: object,
+    marketplace_version: object,
+) -> None:
+    source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
+
+    source_skill.parent.mkdir(parents=True, exist_ok=True)
+    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
+
+    plugin_payload = {} if plugin_version is None else {"version": plugin_version}
+    marketplace_plugin = {} if marketplace_version is None else {"version": marketplace_version}
+    plugin_json.write_text(__import__("json").dumps(plugin_payload) + "\n")
+    marketplace_json.write_text(__import__("json").dumps({"plugins": [marketplace_plugin]}) + "\n")
+    original_plugin = plugin_json.read_text()
+    original_marketplace = marketplace_json.read_text()
+    original_source = source_skill.read_text()
+    original_bundled = bundled_skill.read_text()
+
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.4"],
+    )
+
+    with pytest.raises(SystemExit, match="version must be a string"):
+        sync_plugin_version.main()
+
+    assert plugin_json.read_text() == original_plugin
+    assert marketplace_json.read_text() == original_marketplace
+    assert source_skill.read_text() == original_source
+    assert bundled_skill.read_text() == original_bundled
+
+
+def test_main_write_rejects_unsupported_source_version_before_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_skill = tmp_path / "skills" / "setup" / "SKILL.md"
+    bundled_skill = tmp_path / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    marketplace_json = tmp_path / ".claude-plugin" / "marketplace.json"
+
+    source_skill.parent.mkdir(parents=True, exist_ok=True)
+    bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+    plugin_json.parent.mkdir(parents=True, exist_ok=True)
+    source_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nsource\n")
+    bundled_skill.write_text("<!-- ooo:VERSION:1.2.3 -->\nbundled\n")
+    plugin_json.write_text('{"version": "1.2.3"}\n')
+    marketplace_json.write_text('{"plugins": [{"version": "1.2.3"}]}\n')
+    originals = {
+        path: path.read_text()
+        for path in (source_skill, bundled_skill, plugin_json, marketplace_json)
+    }
+
+    monkeypatch.setattr(sync_plugin_version, "ROOT", tmp_path)
+    monkeypatch.setattr(sync_plugin_version, "PLUGIN_JSON", plugin_json)
+    monkeypatch.setattr(sync_plugin_version, "MARKETPLACE_JSON", marketplace_json)
+    monkeypatch.setattr(sync_plugin_version, "SETUP_SKILL_MD", source_skill)
+    monkeypatch.setattr(sync_plugin_version, "BUNDLED_SETUP_SKILL_MD", bundled_skill)
+    monkeypatch.setattr(
+        sync_plugin_version.sys,
+        "argv",
+        ["sync-plugin-version.py", "--write", "--version", "1.2.3garbage"],
+    )
+
+    with pytest.raises(SystemExit, match="unsupported version"):
+        sync_plugin_version.main()
+
+    for path, original in originals.items():
+        assert path.read_text() == original

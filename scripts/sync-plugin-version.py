@@ -90,8 +90,14 @@ def normalize_version(v: str) -> str:
     e.g. 0.26.0b4 -> 0.26.0b4, 0.26.0.dev3 -> 0.26.0, 0.26.0b4.dev1 -> 0.26.0b4
     """
     # Match semver + optional pre-release (a/alpha/b/beta/rc + number)
-    m = re.match(r"(\d+\.\d+\.\d+(?:(?:a|alpha|b|beta|rc)\d*)?)", v)
-    return m.group(1) if m else v
+    # and an optional hatch-vcs development suffix.
+    match = re.fullmatch(
+        r"(?P<public>\d+\.\d+\.\d+(?:(?:a|alpha|b|beta|rc)\d*)?)(?:\.dev\d+)?",
+        v,
+    )
+    if match is None:
+        raise ValueError(f"unsupported version: {v}")
+    return match.group("public")
 
 
 def update_version_marker(path: Path, version: str) -> bool:
@@ -148,7 +154,10 @@ def main() -> None:
             explicit_version = sys.argv[i + 1]
 
     raw_version = explicit_version or get_version()
-    version = normalize_version(raw_version)
+    try:
+        version = normalize_version(raw_version)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
 
     print(f"Source version: {raw_version}")
     print(f"Plugin version: {version}")
@@ -191,10 +200,12 @@ def main() -> None:
                         target = target[key]
                 if not isinstance(target, dict):
                     raise TypeError("version target must be an object")
-            old = target.get("version", "?")
+            old = target.get("version")
+            if not isinstance(old, str):
+                raise TypeError("version must be a string")
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
             sys.exit(f"Error: could not validate {path.relative_to(ROOT)}: {exc}")
-        json_targets.append((path, nested, data, str(old)))
+        json_targets.append((path, nested, data, old))
 
     changed = False
     for path, nested, _data, old in json_targets:
