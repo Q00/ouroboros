@@ -80,6 +80,17 @@ def _wrap_unclosed_unsupported_fence(stale_payload: str, actual_payload: str) ->
     )
 
 
+def _wrap_unsupported_fence_then_prose(stale_payload: str, actual_payload: str) -> str:
+    return (
+        "Do not use this example:\n"
+        "```python\n"
+        f"EXAMPLE = {stale_payload}\n"
+        "```\n"
+        "Actual answer:\n"
+        f"{actual_payload}"
+    )
+
+
 def _wrap_invalid_json_fence_then_prose(actual_payload: str) -> str:
     return f"```json\n{{not json}}\n```\n{actual_payload}"
 
@@ -128,6 +139,31 @@ class TestWonderFenceRobustness:
 
         out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
             _wrap_after_unsupported_fence(example_payload, actual_payload),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual answer"
+        assert out.should_continue is True
+        assert out.questions == ("actual token refresh question",)
+
+    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+        stale_payload = json.dumps(
+            {
+                "questions": [{"question": "stale example question", "kind": "gap"}],
+                "should_continue": False,
+                "reasoning": "stale example",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual token refresh question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual answer",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
             _seed(),
         )
 
@@ -247,6 +283,51 @@ class TestReflectFenceRobustness:
         assert result.is_ok
         assert result.value.reasoning == "reflect reasoning"
         assert result.value.ontology_mutations[0].field_name == "refresh_token"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Build a login system with refresh-token clarity",
+                "refined_constraints": ["Must use OAuth"],
+                "ac_patches": [{"op": "keep", "index": 0, "reason": "still valid"}],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What handles token refresh?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_ok
+        assert result.value.reasoning == "actual reflect"
+        assert result.value.refined_goal == "Build a login system with refresh-token clarity"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -431,6 +512,36 @@ class TestAssertionExtractorFenceRobustness:
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             _wrap_after_unsupported_fence(example_payload, actual_payload),
+            ("AC number 1",),
+        )
+
+        assert len(assertions) == 1
+        assert assertions[0].description == "actual assertion"
+
+    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale example",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
             ("AC number 1",),
         )
 

@@ -118,6 +118,18 @@ class TestExtractJsonPayload:
         text = '```json\n{not json}\n```\n{"actual": true}'
         assert extract_json_payload(text) is None
 
+    def test_supported_fallback_excludes_well_formed_unsupported_fence_body(self):
+        text = '```python\nEXAMPLE = {"stale": true}\n```\nActual: {"actual": true}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_fallback_excludes_multiple_well_formed_unsupported_fence_bodies(self):
+        text = (
+            '```python\nEXAMPLE = {"stale": 1}\n```\n'
+            '```yaml\nstale: {"stale": 2}\n```\n'
+            'Actual: {"actual": true}'
+        )
+        assert extract_json_payload(text) == '{"actual": true}'
+
 
 class TestExtractJsonArray:
     """extract_json_payload must also handle top-level JSON arrays."""

@@ -27,53 +27,58 @@ def extract_json_payload(text: str) -> str | None:
     Returns:
         Extracted JSON string, or None if no valid JSON is found
     """
-    fence_state, fenced_payload = _extract_fenced_json_payload(text)
+    fence_state, fenced_payload, fallback_segments = _extract_fenced_json_payload(text)
     if fence_state is _FenceScanState.PAYLOAD:
         return fenced_payload
     if fence_state is _FenceScanState.MALFORMED:
         return None
 
-    return _extract_first_json_from_text(text)
+    for segment in fallback_segments:
+        payload = _extract_first_json_from_text(segment)
+        if payload is not None:
+            return payload
+    return None
 
 
-def _extract_fenced_json_payload(text: str) -> tuple[_FenceScanState, str | None]:
-    """Extract JSON from fences, distinguishing absent from malformed fences."""
+def _extract_fenced_json_payload(
+    text: str,
+) -> tuple[_FenceScanState, str | None, tuple[str, ...]]:
+    """Extract fenced JSON and return safe outside-fence fallback segments."""
     fence_start = 0
-    saw_fence = False
+    fallback_parts: list[str] = []
     while True:
         opener = text.find("```", fence_start)
         if opener == -1:
-            return (_FenceScanState.NO_FENCE, None)
-        saw_fence = True
+            fallback_parts.append(text[fence_start:])
+            return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
         info_start = opener + 3
         line_end = text.find("\n", info_start)
         if line_end == -1:
-            return (_FenceScanState.MALFORMED, None)
+            return (_FenceScanState.MALFORMED, None, ())
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
             closing = _find_closing_fence(text, line_end + 1)
             if closing is None:
-                return (_FenceScanState.MALFORMED, None)
+                return (_FenceScanState.MALFORMED, None, ())
+            fallback_parts.append(text[fence_start:opener])
             fence_start = closing + 3
             continue
 
         body_start = line_end + 1
         closing = _find_closing_fence(text, body_start)
         if closing is None:
-            return (_FenceScanState.MALFORMED, None)
+            return (_FenceScanState.MALFORMED, None, ())
 
         body = text[body_start:closing]
         payload = _extract_first_json_from_text(body)
         if payload is not None:
-            return (_FenceScanState.PAYLOAD, payload)
+            return (_FenceScanState.PAYLOAD, payload, ())
 
         # A supported fence is an explicit JSON answer boundary. If it cannot
         # be parsed, do not let stale examples elsewhere in the response win.
-        if saw_fence:
-            return (_FenceScanState.MALFORMED, None)
-        fence_start = closing + 3
+        return (_FenceScanState.MALFORMED, None, ())
 
 
 def _find_closing_fence(text: str, start: int) -> int | None:
