@@ -37,6 +37,8 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
+- Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`.
+- Do not put commas or backslashes inside artifact paths.
 - NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
 - Prefix a top-level file or directory containing spaces with `./`, for example `./Build Outputs`; nested paths such as `docs/User Guide.md` are already explicit.
 - If no exact path is known, write `artifacts: NONE` and provide a concrete `verify` command instead.
@@ -84,8 +86,8 @@ Provide your analysis in this exact structure:
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...

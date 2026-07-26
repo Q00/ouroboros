@@ -60,6 +60,7 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
         "LPT³",
     }
 )
+_EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
 
 
 def _windows_component_error(component: str) -> str | None:
@@ -78,6 +79,10 @@ def expected_artifact_path_error(artifact: str) -> str | None:
 
     if not artifact or any(ord(character) < 32 or ord(character) == 127 for character in artifact):
         return "contains an empty value or control character"
+    if "\\" in artifact:
+        return "contains a backslash; use POSIX '/' separators"
+    if "," in artifact:
+        return "contains a comma; artifact list strings use comma+whitespace delimiters"
 
     posix_path = PurePosixPath(artifact)
     windows_path = PureWindowsPath(artifact)
@@ -101,6 +106,20 @@ def expected_artifact_path_error(artifact: str) -> str | None:
         if not has_explicit_relative_structure:
             return "is ambiguous prose; prefix a top-level spaced path with ./"
     return None
+
+
+def parse_expected_artifact_list(value: str) -> tuple[str, ...]:
+    """Parse a generated expected-artifacts list using the shared path grammar."""
+
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("expected_artifacts entries cannot contain control characters")
+    stripped = value.strip(" ")
+    if not stripped or stripped.upper() == "NONE":
+        return ()
+    artifacts = tuple(item.strip(" ") for item in _EXPECTED_ARTIFACT_DELIMITER_RE.split(value))
+    if any(not artifact for artifact in artifacts):
+        raise ValueError("expected_artifacts entries cannot be empty")
+    return artifacts
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -359,15 +378,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if value is None:
             return ()
         if isinstance(value, str):
-            if any(ord(character) < 32 or ord(character) == 127 for character in value):
-                raise ValueError("expected_artifacts entries cannot contain control characters")
-            stripped = value.strip(" ")
-            if not stripped or stripped.upper() == "NONE":
-                return ()
-            artifacts = tuple(item.strip(" ") for item in value.split(","))
-            if any(not artifact for artifact in artifacts):
-                raise ValueError("expected_artifacts entries cannot be empty")
-            return artifacts
+            return parse_expected_artifact_list(value)
         if isinstance(value, list | tuple | set):
             artifacts = tuple(str(item) for item in value)
             if any(

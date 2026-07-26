@@ -510,7 +510,10 @@ class TestSeedGeneratorExtraction:
             ",",
             "safe.txt,,other.txt",
             "safe.txt | artifacts: other.txt",
+            "safe.txt | artifacts other.txt",
             "schema v2 outputs.json",
+            "reports/summary,v2.json",
+            r"docs\guide.md",
             "NUL",
             "docs/a:b",
         ),
@@ -527,7 +530,8 @@ class TestSeedGeneratorExtraction:
             f"AC: Files exist | verify: pytest -q | artifacts: {malformed_artifacts} | expect: NONE"
         )
         repaired_contract = (
-            "AC: Files exist | verify: pytest -q | artifacts: safe.txt, other.txt | expect: NONE"
+            "AC: Files exist | verify: pytest -q | "
+            "artifacts: safe.txt, other.txt, ./Build Outputs | expect: NONE"
         )
         if representation == "multiline":
             bad_contract = f"\n{bad_contract}\n"
@@ -552,7 +556,43 @@ class TestSeedGeneratorExtraction:
         assert mock_adapter.complete.await_count == 2
         (criterion,) = result.value.acceptance_criteria
         assert isinstance(criterion, AcceptanceCriterionSpec)
-        assert criterion.expected_artifacts == ("safe.txt", "other.txt")
+        assert criterion.expected_artifacts == ("safe.txt", "other.txt", "./Build Outputs")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("multiline", "inline"))
+    async def test_generate_retries_on_contract_marker_without_leading_whitespace(
+        self,
+        representation: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = "AC: Files exist|artifacts: NUL"
+        repaired_contract = "AC: Files exist|artifacts: reports/summary.json, ./Build Outputs"
+        if representation == "multiline":
+            bad_contract = f"\n{bad_contract}\n"
+            repaired_contract = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_contract)
+        repaired_response = create_valid_extraction_response(acceptance_criteria=repaired_contract)
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.expected_artifacts == ("reports/summary.json", "./Build Outputs")
 
     @pytest.mark.asyncio
     async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:
@@ -728,7 +768,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria=(
                 "\n"
                 'AC: CLI lists tasks | verify: bash -lc "pytest -q | tee out.log" | '
-                "artifacts: tasks.json, logs/task.log | expect: No tasks\n"
+                "artifacts: tasks.json, logs/task.log, ./Build Outputs | expect: No tasks\n"
                 "AC: Docs explain usage | verify: NONE | artifacts: README.md | expect: NONE\n"
                 "AC: Legacy line without contract"
             )
@@ -750,7 +790,7 @@ class TestSeedGeneratorExtraction:
             assert isinstance(first, AcceptanceCriterionSpec)
             assert first.description == "CLI lists tasks"
             assert first.verify_command == 'bash -lc "pytest -q | tee out.log"'
-            assert first.expected_artifacts == ("tasks.json", "logs/task.log")
+            assert first.expected_artifacts == ("tasks.json", "logs/task.log", "./Build Outputs")
             assert first.output_assertion == "No tasks"
             assert second.description == "Docs explain usage"
             assert second.verify_command is None
@@ -1422,15 +1462,17 @@ class TestAcceptanceCriteriaGranularityContract:
 
         assert "ACCEPTANCE_CRITERIA:\nAC:" in prompt
         assert "verify: <command or NONE>" in prompt
-        assert "artifacts: <comma-list or NONE>" in prompt
+        assert "artifacts: <comma+space-list or NONE>" in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
         assert "combined stdout and stderr" in prompt
+        assert "Do not put commas or backslashes inside paths" in prompt
         assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
         retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
         assert "combined stdout and stderr" in retry_prompt
+        assert "Do not put commas or backslashes inside paths" in retry_prompt
         assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:

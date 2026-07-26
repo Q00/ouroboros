@@ -21,6 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
     ac_texts,
     expected_artifact_path_error,
+    parse_expected_artifact_list,
 )
 
 
@@ -431,7 +432,9 @@ class TestSeed:
             r"D:outside",
             r"\outside.txt",
             r"\\server\share\outside.txt",
+            r"docs\User Guide.md",
             "schema v2 outputs.json",
+            "reports/summary,v2.json",
             "NUL",
             "nul.txt",
             "dir/CON",
@@ -447,9 +450,15 @@ class TestSeed:
             "docs",
             "docs/User Guide.md",
             "./Build Outputs",
-            r"docs\User Guide.md",
         ):
             assert expected_artifact_path_error(artifact) is None
+
+    def test_expected_artifact_list_uses_comma_whitespace_delimiter(self) -> None:
+        assert parse_expected_artifact_list("tasks.json, logs/task.log, ./Build Outputs") == (
+            "tasks.json",
+            "logs/task.log",
+            "./Build Outputs",
+        )
 
     @pytest.mark.parametrize(
         "artifact",
@@ -459,11 +468,13 @@ class TestSeed:
             r"D:outside",
             r"\\server\share\outside.txt",
             "schema v2 outputs.json",
+            "reports/summary,v2.json",
             "NUL",
             "nul.txt",
             "dir/CON",
             "foo.",
             "docs/a:b",
+            r"docs\User Guide.md",
         ),
     )
     def test_expected_artifacts_reject_nonportable_paths_at_schema_ingress(
@@ -483,7 +494,10 @@ class TestSeed:
             ("report.txt\n",),
             ("report.txt\t",),
             ("report.txt\x7f",),
+            ("reports/summary,v2.json",),
+            (r"docs\User Guide.md",),
             "report.txt\n",
+            "reports/summary,v2.json",
         ],
     )
     def test_expected_artifacts_reject_malformed_raw_entries(self, artifacts: object) -> None:

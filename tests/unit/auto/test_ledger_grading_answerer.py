@@ -439,6 +439,8 @@ def test_grade_gate_rejects_windows_reserved_and_impossible_paths() -> None:
         "dir/CON",
         "foo.",
         "docs/a:b",
+        "reports/summary,v2.json",
+        r"docs\guide.md",
         r"D:folder\outside.txt",
         r"D:\outside.txt",
         r"\\server\share\outside.txt",

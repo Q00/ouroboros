@@ -46,6 +46,7 @@ from ouroboros.core.seed import (
     OntologySchema,
     Seed,
     SeedMetadata,
+    parse_expected_artifact_list,
 )
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
@@ -54,7 +55,10 @@ log = structlog.get_logger()
 
 EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
-_AC_CONTRACT_FIELD_RE = re.compile(r"\s\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
+_AC_CONTRACT_FIELD_RE = re.compile(r"\|\s*(verify|artifacts|expect)\s*:", re.IGNORECASE)
+_AC_RESERVED_FIELD_FRAGMENT_RE = re.compile(
+    r"\|\s*(verify|artifacts|expect)\b(?!\s*:)", re.IGNORECASE
+)
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -150,6 +154,10 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
         return None
     body = line.removeprefix("AC:").strip()
     matches = tuple(_AC_CONTRACT_FIELD_RE.finditer(body))
+    malformed_reserved_field = _AC_RESERVED_FIELD_FRAGMENT_RE.search(body)
+    if malformed_reserved_field is not None:
+        field_name = malformed_reserved_field.group(1).lower()
+        raise ValueError(f"Malformed {field_name} field in acceptance criterion")
     description_end = matches[0].start() if matches else len(body)
     description = body[:description_end].strip()
     if not description:
@@ -171,10 +179,7 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
         if normalized_key == "verify":
             fields["verify_command"] = normalized_value
         elif normalized_key == "artifacts":
-            artifact_entries = normalized_value.split(",")
-            if any(not item.strip(" ") for item in artifact_entries):
-                raise ValueError("Malformed artifacts field contains an empty path")
-            fields["expected_artifacts"] = tuple(item.strip(" ") for item in artifact_entries)
+            fields["expected_artifacts"] = parse_expected_artifact_list(normalized_value)
         elif normalized_key == "expect":
             fields["output_assertion"] = normalized_value
     return AcceptanceCriterionSpec.model_validate(fields)
@@ -633,7 +638,7 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`. Do not put commas or backslashes inside paths. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
@@ -641,8 +646,8 @@ CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<co
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
@@ -741,7 +746,7 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`. Do not put commas or backslashes inside paths. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
@@ -749,8 +754,8 @@ CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<co
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
 ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...

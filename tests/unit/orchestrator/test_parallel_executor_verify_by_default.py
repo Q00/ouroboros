@@ -1245,11 +1245,12 @@ async def test_skip_completed_executes_when_verify_gate_fails(tmp_path: Any) -> 
 async def test_artifacts_only_gate_passes_when_files_exist(tmp_path: Any) -> None:
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "guide.md").write_text("guide\n")
+    (tmp_path / "Build Outputs").mkdir()
     (tmp_path / "README.md").write_text("readme\n")
     executor = _make_executor(working_directory=str(tmp_path))
     spec = AcceptanceCriterionSpec(
         description="docs exist",
-        expected_artifacts=("README.md", "docs/guide.md", "docs"),
+        expected_artifacts=("README.md", "docs/guide.md", "docs", "./Build Outputs"),
     )
 
     outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
@@ -1273,6 +1274,32 @@ async def test_artifacts_only_gate_reports_all_missing(tmp_path: Any) -> None:
     assert outcome.missing_artifacts == ("absent-one.md", "absent/two.md")
     assert "absent-one.md" in (outcome.reason or "")
     assert "absent/two.md" in (outcome.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_gate_rejects_nonportable_constructed_paths(
+    tmp_path: Any,
+) -> None:
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "summary,v2.json").write_text("{}\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("guide\n")
+    executor = _make_executor(working_directory=str(tmp_path))
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="docs exist",
+        verify_command=None,
+        expected_artifacts=("reports/summary,v2.json", r"docs\guide.md"),
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+
+    outcome = await executor._run_ac_verify_gate(spec=spec, cwd=str(tmp_path))
+
+    assert outcome.passed is False
+    assert len(outcome.missing_artifacts) == 2
+    assert "contains a comma" in outcome.missing_artifacts[0]
+    assert "contains a backslash" in outcome.missing_artifacts[1]
 
 
 @pytest.mark.asyncio
