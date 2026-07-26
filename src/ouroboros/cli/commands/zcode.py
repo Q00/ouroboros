@@ -18,7 +18,7 @@ from ouroboros.cli.commands import init as init_command
 from ouroboros.cli.commands import qa as qa_command_module
 from ouroboros.cli.commands import run as run_command
 from ouroboros.mcp.tools.qa import DEFAULT_PASS_THRESHOLD
-from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
+from ouroboros.orchestrator.decomposition_limits import MAX_DURABLE_DECOMPOSITION_DEPTH
 
 _DEFAULT_ZCODE_CLI_PATH = Path("/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs")
 
@@ -178,8 +178,10 @@ def run(
         typer.Option(
             "--max-decomposition-depth",
             min=0,
-            max=MAX_DECOMPOSITION_DEPTH,
-            help=f"Maximum recursive split depth (0-{MAX_DECOMPOSITION_DEPTH}).",
+            help=(
+                "Maximum recursive split depth. "
+                f"Depths above {MAX_DURABLE_DECOMPOSITION_DEPTH} use legacy execution."
+            ),
         ),
     ] = None,
 ) -> None:

@@ -9256,19 +9256,21 @@ class TestParallelACExecutor:
             (101, True, 1, 1),
         ]
 
-    def test_depth_above_public_max_is_rejected_before_executor_construction(self) -> None:
-        """A live tree cannot outrun its shared durable replay envelope."""
+    def test_depth_above_durable_max_uses_compatible_legacy_executor(self) -> None:
+        """Historical larger depths remain live without Routing D replay claims."""
         adapter = MagicMock()
 
-        with pytest.raises(ValueError, match="completed trees remain replayable"):
-            ProcessLocalTestExecutor(
-                adapter=adapter,
-                event_store=AsyncMock(),
-                console=MagicMock(),
-                enable_decomposition=True,
-                max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
-            )
+        executor = ProcessLocalTestExecutor(
+            adapter=adapter,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
+        )
 
+        assert executor._max_decomposition_depth == 5
+        assert executor._durable_decomposition_replay_enabled is False
+        assert executor._bounded_route_escalation_enabled is False
         adapter.execute_task.assert_not_called()
 
     @pytest.mark.asyncio

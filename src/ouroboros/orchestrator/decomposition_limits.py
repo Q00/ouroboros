@@ -1,9 +1,9 @@
 """Single-source live decomposition and durable replay limits.
 
-Live decomposition is admitted only when its worst-case complete child tree can
-be represented by the durable completion and pause projections.  Keep the
-public input range and the replay node envelope derived from the same constants
-so CLI, Seed, runner, executor, persistence, and replay cannot drift apart.
+The historical live input contract accepts any non-negative depth. Routing D
+adds stronger crash replay only for the bounded subset whose worst-case complete
+tree can be represented by its durable projections. Keep that boundary explicit
+so compatibility and replay claims cannot drift apart.
 """
 
 from __future__ import annotations
@@ -13,7 +13,10 @@ from typing import cast
 from ouroboros.orchestrator.decomposition_policy import MAX_CHILDREN, MIN_CHILDREN
 
 DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
-MAX_DECOMPOSITION_DEPTH = 4
+MAX_DURABLE_DECOMPOSITION_DEPTH = 4
+# Back-compatible name for callers that need the strongest durable depth. It is
+# not a maximum for the historical live decomposition input contract.
+MAX_DECOMPOSITION_DEPTH = MAX_DURABLE_DECOMPOSITION_DEPTH
 MIN_DECOMPOSITION_CHILDREN = MIN_CHILDREN
 MAX_DECOMPOSITION_CHILDREN = MAX_CHILDREN
 
@@ -27,7 +30,9 @@ def _complete_decomposition_child_capacity(max_depth: int) -> int:
 # A depth-four five-way tree contains 5 + 25 + 125 + 625 child nodes.  Durable
 # completion and pause projections exclude the top-level root, so 780 is the
 # exact population that every accepted live override must be able to replay.
-MAX_DECOMPOSITION_REPLAY_NODES = _complete_decomposition_child_capacity(MAX_DECOMPOSITION_DEPTH)
+MAX_DECOMPOSITION_REPLAY_NODES = _complete_decomposition_child_capacity(
+    MAX_DURABLE_DECOMPOSITION_DEPTH
+)
 
 
 def validate_max_decomposition_depth(
@@ -37,14 +42,16 @@ def validate_max_decomposition_depth(
 ) -> int:
     """Validate the shared live-depth contract at any public entry point."""
 
-    error = (
-        f"{source} must be an integer between 0 and "
-        f"{MAX_DECOMPOSITION_DEPTH} inclusive so completed trees remain replayable; "
-        f"migrate older values above {MAX_DECOMPOSITION_DEPTH} by reducing the value"
-    )
+    error = f"{source} must be a non-negative integer"
     if type(value) is not int:
         raise ValueError(error)
     depth = cast(int, value)
-    if not 0 <= depth <= MAX_DECOMPOSITION_DEPTH:
+    if depth < 0:
         raise ValueError(error)
     return depth
+
+
+def has_durable_decomposition_replay(depth: int) -> bool:
+    """Return whether Routing D can own crash replay for this live depth."""
+
+    return 0 <= depth <= MAX_DURABLE_DECOMPOSITION_DEPTH

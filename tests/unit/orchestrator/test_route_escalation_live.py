@@ -26,6 +26,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
     DecompositionDecisionRecord,
     DecompositionDisposition,
@@ -159,6 +160,18 @@ def _executor(
         process_local_resume_nonce=process_local_resume_nonce,
     )
     return executor, store, events
+
+
+def test_larger_legacy_depth_disables_bounded_routes_with_native_configuration() -> None:
+    """Depth compatibility cannot accidentally publish Routing D replay authority."""
+
+    executor, _store, _events = _executor(
+        max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
+    )
+
+    assert executor._max_decomposition_depth == 5
+    assert executor._durable_decomposition_replay_enabled is False
+    assert executor._bounded_route_escalation_enabled is False
 
 
 def _route_judgment(
@@ -533,6 +546,128 @@ async def test_parallel_usage_limit_pauses_before_route_observation_or_escalatio
     assert pause.data["route"]["route_id"] == "compat:claude:frugal"
     assert pause.data["prior_route_ids"] == []
     assert pause.data["attempt_index"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retry_metadata",
+    [
+        {"retry_after_ms": 7_200_000},
+        {"resume_after": "2099-01-01T02:00:00+00:00"},
+        {"reset_at": "2099-01-01T02:00:00+00:00"},
+    ],
+)
+async def test_supported_quota_metadata_never_authorizes_a_route_successor(
+    retry_metadata: dict[str, object],
+) -> None:
+    """Every established retry encoding pauses before another provider effect."""
+
+    executor, _store, events = _executor()
+    calls = 0
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Provider quota window.",
+                outcome=ACExecutionOutcome.FAILED,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Provider quota window.",
+                        data={
+                            "subtype": "error",
+                            "reason": "quota window",
+                            **retry_metadata,
+                        },
+                    ),
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert not any(
+        event.type in {"execution.ac.attempt_judged", "execution.ac.route_observed"}
+        for event in events
+    )
+    assert [event.type for event in events].count("execution.ac.route_paused") == 1
+
+
+@pytest.mark.asyncio
+async def test_quota_metadata_population_overflow_stops_after_one_route() -> None:
+    """Overflow of the bounded metadata walk fails closed before escalation."""
+
+    executor, _store, events = _executor()
+    calls = 0
+    data: dict[str, object] = {"subtype": "error", "reason": "provider failure"}
+    cursor = data
+    for _ in range(33):
+        child: dict[str, object] = {}
+        cursor["details"] = child
+        cursor = child
+    cursor["quota_exhausted"] = True
+
+    async def fake_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal calls
+        calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="Provider request failed.",
+                outcome=ACExecutionOutcome.FAILED,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="Provider request failed.",
+                        data=data,
+                    ),
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    executor._execute_ac_batch = fake_batch  # type: ignore[method-assign]
+    await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert calls == 1
+    assert not any(
+        event.type in {"execution.ac.attempt_judged", "execution.ac.route_observed"}
+        for event in events
+    )
+    assert [event.type for event in events].count("execution.ac.route_paused") == 1
 
 
 @pytest.mark.asyncio
@@ -1204,25 +1339,26 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
         "first child complete",
         "second child complete",
     )
-    assert restored.conflict_files == (str(touched),)
+    assert restored.conflict_files == ()
+    assert restored.sub_results[0].conflict_files == (str(touched),)
     executor._try_decompose_ac.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-async def test_provisional_success_replay_preserves_canonical_21_file_projection(
+async def test_provisional_success_replay_preserves_canonical_513_file_projection(
     tmp_path: Any,
 ) -> None:
     executor, store, events = _executor()
     executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
     seed = _seed()
     candidate = _candidate(executor, "compat:claude:frugal")
-    ordered_paths = [tmp_path / f"z{index:02d}.py" for index in range(20)]
+    ordered_paths = [tmp_path / f"z{index:03d}.py" for index in range(511)]
     ordered_paths.append(tmp_path / "a.py")
     for path in ordered_paths:
         path.write_text(
             "def canonical_first():\n    return True\n" if path.name == "a.py" else "value = 1\n"
         )
-    messages = tuple(
+    file_messages = tuple(
         AgentMessage(
             type="tool",
             content=f"wrote {path.name}",
@@ -1230,6 +1366,25 @@ async def test_provisional_success_replay_preserves_canonical_21_file_projection
             data={"tool_input": {"file_path": str(path)}},
         )
         for path in ordered_paths
+    )
+    long_path = "/virtual/" + "p" * 2_049
+    tool_messages = tuple(
+        AgentMessage(
+            type="tool",
+            content=f"used tool {index}",
+            tool_name=f"Tool-{index:03d}-" + "t" * 129,
+        )
+        for index in range(127)
+    )
+    messages = (
+        *file_messages,
+        AgentMessage(
+            type="tool",
+            content="edited a long virtual path",
+            tool_name="Edit",
+            data={"tool_input": {"file_path": long_path}},
+        ),
+        *tool_messages,
     )
     original = ACExecutionResult(
         ac_index=0,
@@ -1282,10 +1437,15 @@ async def test_provisional_success_replay_preserves_canonical_21_file_projection
     )
     restored = restored_results[0]
     assert restored.context_summary == live_summary
-    assert len(restored.context_summary.files_modified) == 21
+    assert len(restored.context_summary.files_modified) == 513
+    assert len(restored.context_summary.tools_used) == 129
+    assert long_path in restored.context_summary.files_modified
+    assert any(len(tool) > 128 for tool in restored.context_summary.tools_used)
     assert restored.context_summary.files_modified[0] == str(tmp_path / "a.py")
     assert "canonical_first" in restored.context_summary.public_api
-    assert restored.conflict_files == tuple(sorted(str(path) for path in ordered_paths))
+    assert restored.conflict_files == tuple(
+        sorted((long_path, *(str(path) for path in ordered_paths)))
+    )
     assert (
         LevelContext(
             level_number=0,
@@ -1313,6 +1473,63 @@ async def test_provisional_success_replay_preserves_canonical_21_file_projection
     assert [(item.file_path, item.ac_indices) for item in conflicts] == [
         (str(tmp_path / "a.py"), (0, 1))
     ]
+
+
+@pytest.mark.asyncio
+async def test_provisional_success_replay_preserves_admitted_long_ac_identity() -> None:
+    """A 65,537-character criterion cannot strand its durable judgment."""
+
+    executor, store, events = _executor()
+    description = "x" * 65_537
+    seed = _seed().model_copy(
+        update={"acceptance_criteria": (AcceptanceCriterionSpec(description=description),)}
+    )
+    candidate = _candidate(executor, "compat:claude:frugal")
+    provider_session_id = "provider-" + "s" * 2_048
+    result = ACExecutionResult(
+        ac_index=0,
+        ac_content=description,
+        success=True,
+        final_message="long criterion completed",
+        session_id=provider_session_id,
+        outcome=ACExecutionOutcome.SUCCEEDED,
+        route_candidate=candidate,
+    )
+    await executor._emit_ac_attempt_judged(
+        result=result,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        required=True,
+        route_episode_id=_episode_id(seed),
+        route_attempt_index=0,
+    )
+    await executor._persist_route_observation(
+        seed=seed,
+        result=result,
+        root_ac_index=0,
+        session_id="session-1",
+        execution_id="execution-1",
+        attempted_route_ids=(candidate.route_id,),
+        failure_class=None,
+        decision=None,
+    )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    _histories, _overrides, _terminals, restored = await executor._load_bounded_route_resume_state(
+        seed=seed,
+        execution_id="execution-1",
+        session_id="session-1",
+        root_ac_indices=(0,),
+    )
+
+    assert restored[0].ac_content == description
+    assert restored[0].session_id == provider_session_id
+    assert restored[0].context_summary is not None
+    assert restored[0].context_summary.ac_content == description
 
 
 @pytest.mark.asyncio
@@ -2829,7 +3046,7 @@ async def test_provisional_success_resume_restores_verify_evidence_and_level_con
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutation",
-    ["unknown_result_field", "oversized_session", "unknown_verify_field", "oversized_reason"],
+    ["unknown_result_field", "non_string_session", "unknown_verify_field", "non_string_reason"],
 )
 async def test_provisional_success_replay_rejects_non_strict_cached_evidence(
     mutation: str,
@@ -2849,8 +3066,8 @@ async def test_provisional_success_replay_rejects_non_strict_cached_evidence(
     assert isinstance(cached, dict)
     if mutation == "unknown_result_field":
         cached["accepted"] = True
-    elif mutation == "oversized_session":
-        cached["session_id"] = "s" * 513
+    elif mutation == "non_string_session":
+        cached["session_id"] = 123
     else:
         verify = {
             "passed": True,
@@ -2863,7 +3080,7 @@ async def test_provisional_success_replay_rejects_non_strict_cached_evidence(
         if mutation == "unknown_verify_field":
             verify["acceptance_authority"] = "gate"
         else:
-            verify["reason"] = "r" * 2001
+            verify["reason"] = 123
         cached["verify_gate_outcome"] = verify
     _set_route_replay_events(store, [event])
 

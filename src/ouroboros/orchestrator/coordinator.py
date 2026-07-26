@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import json
@@ -492,31 +493,29 @@ def _collect_file_modifications(
         result: AC execution result to scan.
         file_to_acs: Accumulator mapping file_path → ac_indices.
     """
-    # Interrupted-stage replay carries an exact canonical file projection
-    # rather than a synthetic provider transcript.  Prefer it whenever it is
-    # present so conflict detection is identical before and after resume.
-    if result.conflict_files is not None:
-        for file_path in result.conflict_files:
-            file_to_acs.setdefault(file_path, set()).add(result.ac_index)
-        return
+    # Every durable node stores only its local canonical file projection. Walk
+    # the complete tree for both live transcripts and replayed projections so a
+    # grandchild has identical coordinator semantics before and after resume.
+    root_ac_index = result.ac_index
 
-    # Check direct messages for Write/Edit tool calls
-    for msg in result.messages:
-        if msg.tool_name in ("Write", "Edit"):
-            tool_input = msg.data.get("tool_input", {})
-            file_path = tool_input.get("file_path")
-            if file_path:
-                file_to_acs.setdefault(file_path, set()).add(result.ac_index)
-
-    # Recurse into Sub-AC results
-    for sub_result in result.sub_results:
-        # Sub-ACs inherit the parent AC index for conflict tracking
-        for msg in sub_result.messages:
-            if msg.tool_name in ("Write", "Edit"):
+    def visit(current: ACExecutionResult) -> None:
+        if current.conflict_files is not None:
+            for file_path in current.conflict_files:
+                file_to_acs.setdefault(file_path, set()).add(root_ac_index)
+        else:
+            for msg in current.messages:
+                if msg.tool_name not in ("Write", "Edit"):
+                    continue
                 tool_input = msg.data.get("tool_input", {})
+                if not isinstance(tool_input, Mapping):
+                    continue
                 file_path = tool_input.get("file_path")
-                if file_path:
-                    file_to_acs.setdefault(file_path, set()).add(result.ac_index)
+                if isinstance(file_path, str) and file_path:
+                    file_to_acs.setdefault(file_path, set()).add(root_ac_index)
+        for sub_result in current.sub_results:
+            visit(sub_result)
+
+    visit(result)
 
 
 def _build_review_prompt(

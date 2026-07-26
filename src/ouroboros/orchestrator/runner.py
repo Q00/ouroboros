@@ -81,6 +81,7 @@ from ouroboros.orchestrator.control_plane import (
 )
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    has_durable_decomposition_replay,
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
@@ -142,7 +143,11 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
-from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
+from ouroboros.orchestrator.recoverable_failure import (
+    is_usage_limit_pause_message,
+    retry_duration_seconds_from_message,
+    retry_duration_seconds_from_metadata,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -5789,52 +5794,15 @@ class OrchestratorRunner:
         *,
         now: datetime,
     ) -> int | None:
-        """Extract retry/pause duration from structured runtime metadata."""
-        for key in (
-            "pause_seconds",
-            "retry_after_seconds",
-            "retryAfterSeconds",
-            "reset_after_seconds",
-            "resetAfterSeconds",
-        ):
-            parsed = cls._duration_value_to_seconds(metadata.get(key))
-            if parsed is not None:
-                return parsed
+        """Extract retry metadata through the provider-neutral shared parser."""
 
-        for key in ("retry_after_ms", "retryAfterMs", "reset_after_ms", "resetAfterMs"):
-            parsed = cls._duration_value_to_seconds(metadata.get(key))
-            if parsed is not None:
-                return max(1, (parsed + 999) // 1000)
-
-        for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
-            value = metadata.get(key)
-            parsed_datetime = cls._parse_datetime(value)
-            if parsed_datetime is not None:
-                seconds = math.ceil((parsed_datetime - now).total_seconds())
-                if seconds > 0:
-                    return seconds
-            parsed_duration = cls._duration_value_to_seconds(value)
-            if parsed_duration is not None:
-                return parsed_duration
-
-        for key in ("resume_after", "resumeAfter", "reset_at", "resetAt"):
-            parsed_datetime = cls._parse_datetime(metadata.get(key))
-            if parsed_datetime is not None:
-                seconds = math.ceil((parsed_datetime - now).total_seconds())
-                if seconds > 0:
-                    return seconds
-
-        return None
+        return retry_duration_seconds_from_metadata(metadata, now=now)
 
     @classmethod
     def _duration_from_message(cls, message: AgentMessage, *, now: datetime) -> int | None:
-        """Extract a retry/pause duration from metadata, then final error text."""
-        for metadata in cls._metadata_candidates(message):
-            duration = cls._duration_from_metadata(metadata, now=now)
-            if duration is not None:
-                return duration
+        """Extract a retry duration through the same parser used for classification."""
 
-        return cls._duration_text_to_seconds(message.content)
+        return retry_duration_seconds_from_message(message, now=now)
 
     @staticmethod
     def _metadata_has_runtime_error_shape(metadata: Mapping[str, Any]) -> bool:
@@ -6003,7 +5971,8 @@ class OrchestratorRunner:
     def _bounded_route_runtime_active(self) -> bool:
         """Return whether this runner can authorize a Routing D provider effect."""
         return bool(
-            self._model_router is not None
+            has_durable_decomposition_replay(self._max_decomposition_depth)
+            and self._model_router is not None
             and self._route_economics is not None
             and getattr(
                 getattr(self._adapter, "capabilities", None),
@@ -8586,7 +8555,10 @@ class OrchestratorRunner:
         # Execute in parallel. Reuse the base effort resolved once in __init__
         # (self._reasoning_effort) so a single runner instance has one consistent
         # effort source across its direct paths and the parallel executor.
-        parallel_bounded_routing = self._bounded_route_runtime_active()
+        parallel_bounded_routing = (
+            self._bounded_route_runtime_active()
+            and has_durable_decomposition_replay(self._max_decomposition_depth)
+        )
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
@@ -8601,8 +8573,8 @@ class OrchestratorRunner:
             execution_profile=execution_profile,
             fat_harness_mode=self._fat_harness_mode,
             reasoning_effort=self._reasoning_effort,
-            model_router=self._model_router,
-            route_economics=self._route_economics,
+            model_router=self._model_router if parallel_bounded_routing else None,
+            route_economics=self._route_economics if parallel_bounded_routing else None,
             run_verify_commands=self._run_verify_commands,
             verify_command_timeout_seconds=self._verify_command_timeout_seconds,
             ac_retry_attempts=self._ac_retry_attempts,

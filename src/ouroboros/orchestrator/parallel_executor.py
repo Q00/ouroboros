@@ -105,6 +105,7 @@ from ouroboros.orchestrator.decomposition_limits import (
     MAX_DECOMPOSITION_DEPTH,  # noqa: F401  (re-exported for tests/back-compat)
     MAX_DECOMPOSITION_REPLAY_NODES,
     MIN_DECOMPOSITION_CHILDREN,
+    has_durable_decomposition_replay,
     validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.decomposition_params import (
@@ -1649,22 +1650,12 @@ DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
-_ROUTE_SUCCESS_CONTEXT_TOOLS = 128
-_ROUTE_SUCCESS_CONTEXT_FILES = 512
-_ROUTE_SUCCESS_TOOL_NAME_CHARS = 128
-_ROUTE_SUCCESS_FILE_PATH_CHARS = 2048
-_ROUTE_SUCCESS_AC_CONTENT_CHARS = 65_536
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
-_ROUTE_SUCCESS_ERROR_CHARS = 4_000
-_ROUTE_SUCCESS_SESSION_ID_CHARS = 512
 _COMPOSITE_RESULT_TEXT_CHARS = 4_000
 # This replay envelope is derived from the same public live-depth contract used
 # by CLI, Seed, runner, and executor admission.  Do not hand-tune it separately.
 _COMPOSITE_RESULT_MAX_NODES = MAX_DECOMPOSITION_REPLAY_NODES
 _COMPOSITE_RESULT_MAX_DEPTH = 8
-_VERIFY_REASON_CHARS = 2000
-_VERIFY_MISSING_ARTIFACTS = 128
-_VERIFY_ARTIFACT_CHARS = 2048
 _WORKSPACE_DIGEST_CHARS = 64
 
 
@@ -1708,14 +1699,17 @@ def _serialize_verify_gate_outcome(outcome: object) -> dict[str, object] | None:
     if not isinstance(outcome, _VerifyGateOutcome):
         return None
     if (
-        (outcome.reason is not None and len(outcome.reason) > _VERIFY_REASON_CHARS)
+        (outcome.reason is not None and not isinstance(outcome.reason, str))
+        or not isinstance(outcome.output_tail, str)
         or len(outcome.output_tail) > _VERIFY_OUTPUT_TAIL_CHARS
-        or len(outcome.missing_artifacts) > _VERIFY_MISSING_ARTIFACTS
-        or any(len(item) > _VERIFY_ARTIFACT_CHARS for item in outcome.missing_artifacts)
+        or not isinstance(outcome.missing_artifacts, tuple)
+        or any(not isinstance(item, str) for item in outcome.missing_artifacts)
+        or not isinstance(outcome.workspace_mutated, bool)
         or (
             outcome.workspace_digest is not None
             and (
-                len(outcome.workspace_digest) != _WORKSPACE_DIGEST_CHARS
+                not isinstance(outcome.workspace_digest, str)
+                or len(outcome.workspace_digest) != _WORKSPACE_DIGEST_CHARS
                 or any(char not in "0123456789abcdef" for char in outcome.workspace_digest)
             )
         )
@@ -1754,17 +1748,11 @@ def _deserialize_verify_gate_outcome(value: object) -> _VerifyGateOutcome | None
     workspace_digest = value.get("workspace_digest")
     if not isinstance(passed, bool) or not isinstance(output_tail, str):
         return None
-    if reason is not None and (not isinstance(reason, str) or len(reason) > _VERIFY_REASON_CHARS):
+    if reason is not None and not isinstance(reason, str):
         return None
     if len(output_tail) > _VERIFY_OUTPUT_TAIL_CHARS:
         return None
-    if (
-        not isinstance(raw_missing, list)
-        or len(raw_missing) > _VERIFY_MISSING_ARTIFACTS
-        or not all(
-            isinstance(item, str) and len(item) <= _VERIFY_ARTIFACT_CHARS for item in raw_missing
-        )
-    ):
+    if not isinstance(raw_missing, list) or not all(isinstance(item, str) for item in raw_missing):
         return None
     if not isinstance(workspace_mutated, bool):
         return None
@@ -1864,22 +1852,13 @@ def _serialize_context_summary(summary: ACContextSummary) -> dict[str, object]:
         type(summary.ac_index) is not int
         or summary.ac_index < 0
         or not isinstance(summary.ac_content, str)
-        or len(summary.ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
         or type(summary.success) is not bool
         or not isinstance(tools, tuple)
-        or len(tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
         or tuple(sorted(set(tools))) != tools
-        or any(
-            not isinstance(tool, str) or not tool or len(tool) > _ROUTE_SUCCESS_TOOL_NAME_CHARS
-            for tool in tools
-        )
+        or any(not isinstance(tool, str) or not tool for tool in tools)
         or not isinstance(files, tuple)
-        or len(files) > _ROUTE_SUCCESS_CONTEXT_FILES
         or tuple(sorted(set(files))) != files
-        or any(
-            not isinstance(path, str) or not path or len(path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
-            for path in files
-        )
+        or any(not isinstance(path, str) or not path for path in files)
         or not isinstance(summary.key_output, str)
         or len(summary.key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
         or not isinstance(summary.public_api, str)
@@ -1930,18 +1909,10 @@ def _deserialize_context_summary(
         or value.get("ac_content") != ac_content
         or value.get("success") is not success
         or not isinstance(raw_tools, list)
-        or len(raw_tools) > _ROUTE_SUCCESS_CONTEXT_TOOLS
-        or not all(
-            isinstance(tool, str) and bool(tool) and len(tool) <= _ROUTE_SUCCESS_TOOL_NAME_CHARS
-            for tool in raw_tools
-        )
+        or not all(isinstance(tool, str) and bool(tool) for tool in raw_tools)
         or raw_tools != sorted(set(raw_tools))
         or not isinstance(raw_files, list)
-        or len(raw_files) > _ROUTE_SUCCESS_CONTEXT_FILES
-        or not all(
-            isinstance(path, str) and bool(path) and len(path) <= _ROUTE_SUCCESS_FILE_PATH_CHARS
-            for path in raw_files
-        )
+        or not all(isinstance(path, str) and bool(path) for path in raw_files)
         or raw_files != sorted(set(raw_files))
         or not isinstance(key_output, str)
         or len(key_output) > _ROUTE_SUCCESS_CONTEXT_CHARS
@@ -1961,36 +1932,26 @@ def _deserialize_context_summary(
 
 
 def _collect_result_conflict_files(result: ACExecutionResult) -> tuple[str, ...]:
-    """Project the exact recursive file set consumed by the coordinator."""
+    """Project one result node's exact local file set for recursive replay."""
 
     if result.conflict_files is not None:
         files = result.conflict_files
     else:
         collected: set[str] = set()
-
-        def visit(current: ACExecutionResult) -> None:
-            for message in current.messages:
-                if message.tool_name not in {"Write", "Edit"}:
-                    continue
-                tool_input = message.data.get("tool_input")
-                if not isinstance(tool_input, Mapping):
-                    continue
-                file_path = tool_input.get("file_path")
-                if isinstance(file_path, str) and file_path:
-                    collected.add(file_path)
-            for child in current.sub_results:
-                visit(child)
-
-        visit(result)
+        for message in result.messages:
+            if message.tool_name not in {"Write", "Edit"}:
+                continue
+            tool_input = message.data.get("tool_input")
+            if not isinstance(tool_input, Mapping):
+                continue
+            file_path = tool_input.get("file_path")
+            if isinstance(file_path, str) and file_path:
+                collected.add(file_path)
         files = tuple(sorted(collected))
     if (
         not isinstance(files, tuple)
-        or len(files) > _ROUTE_SUCCESS_CONTEXT_FILES
         or tuple(sorted(set(files))) != files
-        or any(
-            not isinstance(path, str) or not path or len(path) > _ROUTE_SUCCESS_FILE_PATH_CHARS
-            for path in files
-        )
+        or any(not isinstance(path, str) or not path for path in files)
     ):
         raise RuntimeError("durable conflict projection exceeds its bounds")
     return files
@@ -1999,11 +1960,7 @@ def _collect_result_conflict_files(result: ACExecutionResult) -> tuple[str, ...]
 def _deserialize_conflict_files(value: object) -> tuple[str, ...]:
     if (
         not isinstance(value, list)
-        or len(value) > _ROUTE_SUCCESS_CONTEXT_FILES
-        or not all(
-            isinstance(path, str) and bool(path) and len(path) <= _ROUTE_SUCCESS_FILE_PATH_CHARS
-            for path in value
-        )
+        or not all(isinstance(path, str) and bool(path) for path in value)
         or value != sorted(set(value))
     ):
         raise RuntimeError("durable conflict projection is malformed")
@@ -2022,13 +1979,7 @@ def _serialize_provisional_route_success(
         or result.duration_seconds < 0
         or type(result.retry_attempt) is not int
         or result.retry_attempt < 0
-        or (
-            result.session_id is not None
-            and (
-                not isinstance(result.session_id, str)
-                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
+        or (result.session_id is not None and not isinstance(result.session_id, str))
     ):
         raise RuntimeError("provisional route success cannot seal malformed result context")
     summary = _canonical_result_context(result, workspace_root=workspace_root)
@@ -2077,12 +2028,7 @@ def _deserialize_provisional_route_success(
         or isinstance(duration_seconds, bool)
         or not math.isfinite(duration_seconds)
         or duration_seconds < 0
-        or (
-            session_id is not None
-            and (
-                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
+        or (session_id is not None and not isinstance(session_id, str))
         or type(retry_attempt) is not int
         or retry_attempt < 0
     ):
@@ -2146,7 +2092,6 @@ def _serialize_composite_result_tree(
         type(result.ac_index) is not int
         or result.ac_index < 0
         or not isinstance(result.ac_content, str)
-        or len(result.ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
         or type(result.success) is not bool
         or not math.isfinite(result.duration_seconds)
         or result.duration_seconds < 0
@@ -2155,19 +2100,8 @@ def _serialize_composite_result_tree(
         or type(result.depth) is not int
         or not 0 <= result.depth <= _COMPOSITE_RESULT_MAX_DEPTH
         or type(result.decomposition_depth_warning) is not bool
-        or (
-            result.session_id is not None
-            and (
-                not isinstance(result.session_id, str)
-                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
-        or (
-            result.error is not None
-            and (
-                not isinstance(result.error, str) or len(result.error) > _ROUTE_SUCCESS_ERROR_CHARS
-            )
-        )
+        or (result.session_id is not None and not isinstance(result.session_id, str))
+        or (result.error is not None and not isinstance(result.error, str))
         or not isinstance(result.final_message, str)
     ):
         raise RuntimeError("composite completion result tree is malformed")
@@ -2284,24 +2218,15 @@ def _deserialize_composite_result_tree(
         type(ac_index) is not int
         or ac_index < 0
         or not isinstance(ac_content, str)
-        or len(ac_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
         or type(success) is not bool
         or not isinstance(final_message, str)
         or len(final_message) > _COMPOSITE_RESULT_TEXT_CHARS
-        or (
-            error is not None
-            and (not isinstance(error, str) or len(error) > _ROUTE_SUCCESS_ERROR_CHARS)
-        )
+        or (error is not None and not isinstance(error, str))
         or not isinstance(duration_seconds, int | float)
         or isinstance(duration_seconds, bool)
         or not math.isfinite(duration_seconds)
         or duration_seconds < 0
-        or (
-            session_id is not None
-            and (
-                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
+        or (session_id is not None and not isinstance(session_id, str))
         or type(retry_attempt) is not int
         or retry_attempt < 0
         or type(is_decomposed) is not bool
@@ -2404,19 +2329,8 @@ def _serialize_composite_completion_result(
         or result.duration_seconds < 0
         or type(result.retry_attempt) is not int
         or result.retry_attempt < 0
-        or (
-            result.session_id is not None
-            and (
-                not isinstance(result.session_id, str)
-                or len(result.session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
-        or (
-            result.error is not None
-            and (
-                not isinstance(result.error, str) or len(result.error) > _ROUTE_SUCCESS_ERROR_CHARS
-            )
-        )
+        or (result.session_id is not None and not isinstance(result.session_id, str))
+        or (result.error is not None and not isinstance(result.error, str))
     ):
         raise RuntimeError("composite completion cannot seal malformed result context")
     summary = _canonical_result_context(result, workspace_root=workspace_root)
@@ -2498,20 +2412,12 @@ def _deserialize_composite_completion_result(
             ACExecutionOutcome.BLOCKED,
         }
         or success is not (outcome is ACExecutionOutcome.SUCCEEDED)
-        or (
-            error is not None
-            and (not isinstance(error, str) or len(error) > _ROUTE_SUCCESS_ERROR_CHARS)
-        )
+        or (error is not None and not isinstance(error, str))
         or not isinstance(duration_seconds, int | float)
         or isinstance(duration_seconds, bool)
         or not math.isfinite(duration_seconds)
         or duration_seconds < 0
-        or (
-            session_id is not None
-            and (
-                not isinstance(session_id, str) or len(session_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
-            )
-        )
+        or (session_id is not None and not isinstance(session_id, str))
         or type(retry_attempt) is not int
         or retry_attempt < 0
     ):
@@ -2827,6 +2733,9 @@ class ParallelACExecutor:
         )
         self._enable_decomposition = self._decomposition_mode != "off"
         self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
+        self._durable_decomposition_replay_enabled = has_durable_decomposition_replay(
+            self._max_decomposition_depth
+        )
         self._max_concurrent = max_concurrent
         approval_mode = getattr(adapter, "permission_mode", None)
         self._inherited_runtime_handle = (
@@ -2857,7 +2766,8 @@ class ParallelACExecutor:
         # historical dispatch path until they opt into the bridge.
         self._route_economics = route_economics
         self._bounded_route_escalation_enabled = (
-            route_economics is not None
+            self._durable_decomposition_replay_enabled
+            and route_economics is not None
             and model_router is not None
             and getattr(
                 getattr(adapter, "capabilities", None),
@@ -9576,7 +9486,6 @@ Respond with either ATOMIC or the structured JSON object only.
             or runtime_metadata.get("node_id") != expected_child.node_id
             or not isinstance(runtime_scope_id, str)
             or not runtime_scope_id
-            or len(runtime_scope_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
             or not isinstance(dispatch_id, str)
             or len(dispatch_id) != 32
             or any(char not in "0123456789abcdef" for char in dispatch_id)
@@ -10800,7 +10709,6 @@ Respond with either ATOMIC or the structured JSON object only.
             if (
                 not isinstance(leaf_scope_id, str)
                 or not leaf_scope_id
-                or len(leaf_scope_id) > _ROUTE_SUCCESS_SESSION_ID_CHARS
                 or not isinstance(leaf_dispatch_id, str)
                 or len(leaf_dispatch_id) != 32
                 or any(char not in "0123456789abcdef" for char in leaf_dispatch_id)
@@ -10836,7 +10744,6 @@ Respond with either ATOMIC or the structured JSON object only.
                     or type(paused_child_ac_index) is not int
                     or paused_child_ac_index != parent_ac_index * 100 + paused_child_index
                     or not isinstance(paused_child_content, str)
-                    or len(paused_child_content) > _ROUTE_SUCCESS_AC_CONTENT_CHARS
                     or paused_child_content != decision.children[paused_child_index].description
                     or type(paused_retry_attempt) is not int
                     or paused_retry_attempt < 0

@@ -170,6 +170,10 @@ queued SessionSignal follow-up. A quota-ending turn therefore performs no later
 provider effect, retains its exact resumable handle, and leaves queued signals to
 be rejected at target teardown. Non-finite retry hints are ignored by both direct
 and shared pause classifiers rather than being passed into integer rounding.
+Classification and pause construction consume one provider-neutral duration
+parser for seconds, milliseconds, relative durations, and absolute
+`resume_after`/`reset_at` timestamps, so a supported encoding cannot pause one
+owner while escalating in another.
 Finite but unrepresentably large provider retry hints fall back to the validated
 operator pause window before constructing the durable resume timestamp.
 
@@ -180,24 +184,22 @@ stronger Routing D owner contract or redirect resume through that state machine.
 The owner decision and executor are bound to the same pre-await capability/config
 snapshot, preventing cancellation checks from opening a drift window between them.
 
-Live decomposition depth is admitted only in the inclusive range 0-4. At the
-maximum five-way branching factor this yields exactly 780 possible persisted
-child nodes (`5 + 25 + 125 + 625`). The completion/pause replay node envelope is
-derived from the same public live-depth constants rather than being configured
-independently. CLI, environment, Seed, runner, and executor inputs all pass
-through this shared range gate, so every accepted override has a replayable
-worst-case complete tree. Larger or non-integer depths are rejected before
-workspace, persistence, or provider setup; restored split decisions cannot
-cross the same live boundary.
+The historical decomposition input contract remains any non-negative integer
+across CLI, environment, Seed, runner, and executor boundaries. Routing D adds a
+separate durable subset at depths `0..4`. At the maximum five-way branching
+factor this subset contains exactly 780 child nodes
+(`5 + 25 + 125 + 625`), and its completion/pause envelope is derived from that
+same boundary. Values above `4` are not rejected or silently clamped: they run
+through the established legacy parallel path, with no Routing D route switching
+or parallel resume-owner claim. This preserves existing execution behavior while
+making the stronger crash-replay guarantee explicit and version-local.
 
-This is an explicit migration from the formerly parser-only, unbounded
-non-negative override contract. Older `--max-decomposition-depth`,
-`OUROBOROS_MAX_DECOMPOSITION_DEPTH`, or
-`seed.orchestrator.max_decomposition_depth` values above `4` fail with a
-source-specific remediation message. They must be reduced to `4` or less and
-started as a fresh run. Historical projection depth remains separately bounded
-for diagnosis, but pre-existing deeper state cannot authorize another live
-provider effect.
+The durable conflict representation is also population-safe at depth four.
+Each result node seals only its own bounded file projection; the coordinator
+walks the full result tree for both live and replayed execution. A complete
+five-way tree therefore does not flatten 625 leaf paths into a 512-entry parent
+field, and nested writes have identical conflict semantics before and after
+resume.
 
 The direct runner uses a fresh provider session whenever the route changes. A
 direct route with a durable success, escalation, or `BLOCKED` observation is

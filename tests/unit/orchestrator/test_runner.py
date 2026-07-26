@@ -610,20 +610,29 @@ class TestOrchestratorRunner:
         assert runner._decomposition_mode == "bounce_only"
         assert disabled_runner._decomposition_mode == "off"
 
-    def test_runner_rejects_unpersistable_decomposition_depth_before_effects(
+    def test_runner_preserves_legacy_depth_above_durable_replay_boundary(
         self,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        with pytest.raises(ValueError, match="completed trees remain replayable"):
-            OrchestratorRunner(
-                mock_adapter,
-                mock_event_store,
-                mock_console,
-                max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
-            )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
+        )
 
+        assert runner._max_decomposition_depth == 5
+        runner._model_router = MagicMock()
+        runner._route_economics = MagicMock()
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        assert runner._bounded_route_runtime_active() is False
         mock_adapter.execute_task.assert_not_called()
 
     def test_runner_accepts_shared_persistable_maximum_depth(
@@ -4214,15 +4223,20 @@ class TestOrchestratorRunner:
         execute_parallel.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("compatibility_mode", ["routing_dormant", "depth_above_durable"])
     async def test_legacy_parallel_pause_does_not_publish_routing_d_resume_owner(
         self,
         runner: OrchestratorRunner,
         sample_seed: Seed,
+        compatibility_mode: str,
     ) -> None:
         """Dormant Routing D cannot claim replay authority for legacy stages."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
-        runner._model_router = None
+        if compatibility_mode == "routing_dormant":
+            runner._model_router = None
+        else:
+            runner._max_decomposition_depth = MAX_DECOMPOSITION_DEPTH + 1
         tracker = SessionTracker.create(
             "exec_legacy_parallel_pause",
             sample_seed.metadata.seed_id,

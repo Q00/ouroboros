@@ -334,9 +334,9 @@ def test_derive_coordinator_tools_matches_policy_envelope() -> None:
 
     def test_decomposed_sub_acs_inherit_parent_index(self):
         """Sub-AC modifications are attributed to the parent AC index."""
-        sub_result = ACExecutionResult(
-            ac_index=100,  # Sub-AC index (parent * 100 + sub)
-            ac_content="Sub-AC 1",
+        grandchild = ACExecutionResult(
+            ac_index=10000,
+            ac_content="Nested Sub-AC",
             success=True,
             messages=(
                 AgentMessage(
@@ -346,6 +346,13 @@ def test_derive_coordinator_tools_matches_policy_envelope() -> None:
                     data={"tool_input": {"file_path": "src/shared.py"}},
                 ),
             ),
+        )
+        sub_result = ACExecutionResult(
+            ac_index=100,  # Sub-AC index (parent * 100 + sub)
+            ac_content="Sub-AC 1",
+            success=True,
+            is_decomposed=True,
+            sub_results=(grandchild,),
         )
         results = [
             _make_result(0, sub_results=[sub_result]),
@@ -397,9 +404,9 @@ class TestCollectFileModifications:
         assert acc == {"a.py": {0}, "b.py": {0}}
 
     def test_nested_sub_results(self):
-        sub = ACExecutionResult(
-            ac_index=100,
-            ac_content="sub",
+        grandchild = ACExecutionResult(
+            ac_index=10000,
+            ac_content="grandchild",
             success=True,
             messages=(
                 AgentMessage(
@@ -409,6 +416,13 @@ class TestCollectFileModifications:
                     data={"tool_input": {"file_path": "deep.py"}},
                 ),
             ),
+        )
+        sub = ACExecutionResult(
+            ac_index=100,
+            ac_content="sub",
+            success=True,
+            is_decomposed=True,
+            sub_results=(grandchild,),
         )
         parent = _make_result(0, [("Write", "top.py")], sub_results=[sub])
         acc: dict[str, set[int]] = {}

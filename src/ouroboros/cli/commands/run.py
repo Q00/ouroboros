@@ -36,7 +36,7 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
-    MAX_DECOMPOSITION_DEPTH,
+    MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
 )
 
@@ -896,10 +896,11 @@ def workflow(
         typer.Option(
             "--max-decomposition-depth",
             min=0,
-            max=MAX_DECOMPOSITION_DEPTH,
             help=(
                 "Maximum recursive AC decomposition depth. "
-                f"0 disables decomposition; maximum {MAX_DECOMPOSITION_DEPTH}; default 2."
+                "0 disables decomposition; default 2. "
+                f"Depths above {MAX_DURABLE_DECOMPOSITION_DEPTH} use the historical "
+                "legacy non-resumable path."
             ),
         ),
     ] = None,

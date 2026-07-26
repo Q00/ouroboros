@@ -402,11 +402,11 @@ def test_resolve_max_decomposition_depth_admits_shared_maximum_for_every_source(
 
 
 @pytest.mark.parametrize("source", ["cli", "env", "seed"])
-def test_resolve_max_decomposition_depth_rejects_above_max_for_every_source(
+def test_resolve_max_decomposition_depth_preserves_larger_legacy_values_for_every_source(
     monkeypatch: pytest.MonkeyPatch,
     source: str,
 ) -> None:
-    """No public source can reach a constructor with an unpersistable value."""
+    """The historical non-negative contract remains valid above durable depth four."""
 
     monkeypatch.delenv("OUROBOROS_MAX_DECOMPOSITION_DEPTH", raising=False)
     cli_value: int | None = None
@@ -421,31 +421,17 @@ def test_resolve_max_decomposition_depth_rejects_above_max_for_every_source(
     else:
         seed_data["orchestrator"] = {"max_decomposition_depth": MAX_DECOMPOSITION_DEPTH + 1}
 
-    with (
-        patch("ouroboros.cli.commands.run.print_error") as print_error,
-        pytest.raises(typer.Exit),
-    ):
-        _resolve_max_decomposition_depth(seed_data, cli_value)
-
-    message = str(print_error.call_args.args[0])
-    expected_source = {
-        "cli": "--max-decomposition-depth",
-        "env": "OUROBOROS_MAX_DECOMPOSITION_DEPTH",
-        "seed": "seed.orchestrator.max_decomposition_depth",
-    }[source]
-    assert expected_source in message
-    assert "between 0 and 4 inclusive" in message
-    assert "remain replayable" in message
+    assert _resolve_max_decomposition_depth(seed_data, cli_value) == MAX_DECOMPOSITION_DEPTH + 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["env", "seed"])
-async def test_run_orchestrator_rejects_unpersistable_depth_before_runtime_setup(
+async def test_run_orchestrator_rejects_negative_depth_before_runtime_setup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
 ) -> None:
-    """Raw env/Seed migration errors precede stores, worktrees, and providers."""
+    """Invalid raw env/Seed values still fail before stores and providers."""
 
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
@@ -454,10 +440,10 @@ async def test_run_orchestrator_rejects_unpersistable_depth_before_runtime_setup
     if source == "env":
         monkeypatch.setenv(
             "OUROBOROS_MAX_DECOMPOSITION_DEPTH",
-            str(MAX_DECOMPOSITION_DEPTH + 1),
+            "-1",
         )
     else:
-        seed_data["orchestrator"] = {"max_decomposition_depth": MAX_DECOMPOSITION_DEPTH + 1}
+        seed_data["orchestrator"] = {"max_decomposition_depth": -1}
 
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
