@@ -657,8 +657,10 @@ async def test_pause_persistence_failure_keeps_durable_running_owner(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_precreated_retry_replays_pending_pause_before_provider_effect(tmp_path) -> None:
-    """The prepared ingress cannot bypass a retained PAUSED publication."""
+async def test_precreated_retry_replays_pending_pause_before_provider_effect(
+    tmp_path: Path,
+) -> None:
+    """Reusing a prepared tracker persists the retained pause before dispatch."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'precreated-pause-retry.db'}")
     await event_store.initialize()
     runtime = _RecoverablePauseRuntime()
@@ -670,37 +672,37 @@ async def test_precreated_retry_replays_pending_pause_before_provider_effect(tmp
     )
     assert prepared.is_ok
     tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
 
     try:
-        mark_paused = AsyncMock(
-            return_value=Result.err(PersistenceError("pause write unavailable"))
-        )
         with patch.object(
             runner._session_repo,
             "mark_paused",
-            mark_paused,
+            AsyncMock(return_value=Result.err(PersistenceError("pause write unavailable"))),
         ):
             first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
 
-            second = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
-
         assert first.is_err
         assert first.error.details["resume_blocked"] == "pause_persistence_pending"
-        assert second.is_err
-        assert second.error.details["resume_blocked"] == "pause_persistence_pending"
-        assert mark_paused.await_count == 2
         assert runtime.execute_calls == 1
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
 
-        third = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        retried = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
 
-        assert third.is_ok
-        assert third.value.summary["replayed_pending_lifecycle"] == "paused"
+        assert retried.is_ok
+        assert retried.value.success is False
+        assert retried.value.summary["replayed_pending_lifecycle"] == "paused"
         assert runtime.execute_calls == 1
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok and durable.value.status == SessionStatus.PAUSED
         assert tracker.session_id not in runner._pending_lifecycle_intents
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
     finally:
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
@@ -711,7 +713,59 @@ async def test_precreated_retry_replays_pending_pause_before_provider_effect(tmp
 
 
 @pytest.mark.asyncio
-async def test_precreated_retry_replays_pending_completion_before_provider_effect(tmp_path) -> None:
+async def test_precreated_retry_repeated_pause_failure_stays_pending_without_provider_effect(
+    tmp_path: Path,
+) -> None:
+    """Repeated PAUSED write failure cannot re-enter provider execution."""
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / 'precreated-pause-retry-still-pending.db'}"
+    )
+    await event_store.initialize()
+    runtime = _RecoverablePauseRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock())
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-precreated-pause-still-pending",
+        session_id="session-precreated-pause-still-pending",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    mark_paused = AsyncMock(return_value=Result.err(PersistenceError("pause write unavailable")))
+
+    try:
+        with patch.object(runner._session_repo, "mark_paused", mark_paused):
+            first = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+            second = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert first.is_err
+        assert first.error.details["resume_blocked"] == "pause_persistence_pending"
+        assert second.is_err
+        assert second.error.details["resume_blocked"] == "pause_persistence_pending"
+        assert mark_paused.await_count == 2
+        assert runtime.execute_calls == 1
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
+        assert tracker.session_id in runner._pending_lifecycle_intents
+        assert runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        runner._unregister_session(tracker.execution_id, tracker.session_id)
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_precreated_retry_replays_pending_completion_before_provider_effect(
+    tmp_path: Path,
+) -> None:
     """Every retained lifecycle kind outranks normal prepared execution."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'precreated-completion-retry.db'}")
     await event_store.initialize()
@@ -740,10 +794,10 @@ async def test_precreated_retry_replays_pending_completion_before_provider_effec
         assert durable.is_ok and durable.value.status == SessionStatus.RUNNING
 
         runner._session_repo.mark_completed = original_mark_completed
-        second = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+        retried = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
 
-        assert second.is_ok
-        assert second.value.summary["replayed_pending_lifecycle"] == "completed"
+        assert retried.is_ok
+        assert retried.value.summary["replayed_pending_lifecycle"] == "completed"
         assert runtime.execute_calls == 1
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
         assert durable.is_ok and durable.value.status == SessionStatus.COMPLETED

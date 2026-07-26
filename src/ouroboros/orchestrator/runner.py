@@ -8580,6 +8580,16 @@ class OrchestratorRunner:
                 )
             return Result.err(durable_status_error)
 
+        # A retained lifecycle transition outranks a still-RUNNING durable
+        # snapshot. Persistence-pending means the previous provider effect
+        # already happened and only its PAUSED/terminal publication remains;
+        # entering normal prepared authentication would repeat that effect.
+        # Use the authenticated durable tracker at the same replay choke point
+        # as ``resume_session`` before any normal prepared claim or dispatch.
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(durable_tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
+
         # Preserve the historical terminal-copy recovery contract, but only
         # after durable identity and RUNNING status have been authenticated.
         # Nonterminal caller copies must still match the sealed prepared receipt.
@@ -8590,17 +8600,6 @@ class OrchestratorRunner:
         }:
             tracker = durable_tracker
             exec_id = tracker.execution_id
-
-        # A retained lifecycle transition outranks a still-RUNNING durable
-        # snapshot.  Persistence-pending means the previous provider effect
-        # already happened and only its PAUSED/terminal publication remains;
-        # entering the normal prepared claim below would repeat that effect.
-        # Route every lifecycle kind through the same replay choke point used
-        # by ``resume_session`` before normal prepared authentication or
-        # provider entry.
-        pending_lifecycle = await self._retry_pending_lifecycle_intent(tracker)
-        if pending_lifecycle is not None:
-            return pending_lifecycle
 
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
         if not isinstance(raw_contract, Mapping):
