@@ -138,6 +138,7 @@ def _attach_live_process_local_contract(
         generation=generation,
         execution_contract=contract,
     )
+    _allow_mocked_precreated_durable_state(runner)
     return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
 
 

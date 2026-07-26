@@ -4162,7 +4162,7 @@ class OrchestratorRunner:
                     "session_id": durable_tracker.session_id,
                     "execution_id": durable_tracker.execution_id,
                     "status": durable_tracker.status.value,
-                    "resume_blocked": "precreated_session_paused",
+                    "resume_blocked": "session_paused_use_resume",
                 },
             )
         if durable_tracker.status in {
@@ -8563,6 +8563,34 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
+        durable_before_claim = await self._reconstruct_precreated_durable_tracker(tracker)
+        if durable_before_claim.is_err:
+            return Result.err(durable_before_claim.error)
+        durable_tracker = durable_before_claim.value
+        durable_status_error = self._precreated_non_running_error(durable_tracker)
+        if durable_status_error is not None:
+            if durable_tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=durable_tracker.session_id,
+                    execution_id=durable_tracker.execution_id,
+                )
+            return Result.err(durable_status_error)
+
+        # Preserve the historical terminal-copy recovery contract, but only
+        # after durable identity and RUNNING status have been authenticated.
+        # Nonterminal caller copies must still match the sealed prepared receipt.
+        if tracker.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        }:
+            tracker = durable_tracker
+            exec_id = tracker.execution_id
+
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
         if not isinstance(raw_contract, Mapping):
             if self._process_local_authority_held_elsewhere(
@@ -8587,23 +8615,6 @@ class OrchestratorRunner:
                     tracker.execution_id,
                 )
             )
-
-        durable_before_claim = await self._reconstruct_precreated_durable_tracker(tracker)
-        if durable_before_claim.is_err:
-            return Result.err(durable_before_claim.error)
-        durable_tracker = durable_before_claim.value
-        durable_status_error = self._precreated_non_running_error(durable_tracker)
-        if durable_status_error is not None:
-            if durable_tracker.status in {
-                SessionStatus.COMPLETED,
-                SessionStatus.CANCELLED,
-                SessionStatus.FAILED,
-            }:
-                await self._cleanup_terminal_process_local_state(
-                    session_id=durable_tracker.session_id,
-                    execution_id=durable_tracker.execution_id,
-                )
-            return Result.err(durable_status_error)
 
         # This API may execute only the tracker returned by ``prepare_session``.
         # Claim its live capability first, then authenticate the caller-owned
