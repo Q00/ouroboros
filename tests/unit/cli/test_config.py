@@ -186,6 +186,9 @@ class TestConfigBackend:
         assert result.exit_code == 1
         assert "Switched backend" not in result.output
         assert "aborted" in result.output
+        config = yaml.safe_load((codex_config_dir / "config.yaml").read_text())
+        assert config["orchestrator"]["runtime_backend"] == "codex"
+        assert config["llm"]["backend"] == "codex"
 
     def test_switch_to_hermes_delegates_to_setup(self, config_dir: Path) -> None:
         """config backend hermes should delegate to _setup_hermes."""

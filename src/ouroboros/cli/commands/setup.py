@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from importlib import metadata as importlib_metadata
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -77,6 +78,38 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return result
 
 
+def _reject_non_finite_json_numbers(value: object) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_non_finite_json_numbers(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_non_finite_json_numbers(item)
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_supported_claude_mcp_entry(entry: dict[str, object]) -> bool:
+    command = entry.get("command")
+    args = entry.get("args")
+    url = entry.get("url")
+    transport = entry.get("transport")
+
+    if isinstance(command, str):
+        return args is None or _is_string_list(args)
+
+    if isinstance(url, str):
+        if transport not in (None, "sse", "http", "streamable_http"):
+            return False
+        return args is None or _is_string_list(args)
+
+    return False
+
+
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
     """Build the correct MCP entry based on how ouroboros is installed.
 
@@ -103,7 +136,7 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
     return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
 
 
-def _ensure_claude_mcp_entry() -> bool:
+def _ensure_claude_mcp_entry(*, emit_status: bool = True) -> bool:
     """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
 
     Creates the entry if missing (detecting install method), updates stale
@@ -151,6 +184,7 @@ def _ensure_claude_mcp_entry() -> bool:
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_json_constant,
             )
+            _reject_non_finite_json_numbers(mcp_data)
         except UnicodeDecodeError:
             print_warning(
                 f"Could not decode {mcp_config_path} as UTF-8 — leaving it untouched. "
@@ -186,18 +220,10 @@ def _ensure_claude_mcp_entry() -> bool:
         existing: dict[str, object] | None = None
     else:
         raw_existing = servers["ouroboros"]
-        if not isinstance(raw_existing, dict):
-            print_warning(
-                f"{mcp_config_path} mcpServers.ouroboros is not an object — leaving it untouched."
-            )
-            return False
-        existing = raw_existing
-        if "command" in existing and not isinstance(existing["command"], str):
-            print_warning(
-                f"{mcp_config_path} mcpServers.ouroboros.command is not a string — "
-                "leaving it untouched."
-            )
-            return False
+        if not isinstance(raw_existing, dict) or not _is_supported_claude_mcp_entry(raw_existing):
+            existing = None
+        else:
+            existing = raw_existing
 
     detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
     needs_write = False
@@ -236,22 +262,26 @@ def _ensure_claude_mcp_entry() -> bool:
                 needs_write = True
                 updated_entry = True
 
-        if not needs_write:
+        if not needs_write and emit_status:
             print_info("MCP server already registered.")
 
     if needs_write:
         try:
             mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if config_exists else 0o600
-            _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2), mode=mode)
+            _atomic_write_text(
+                mcp_config_path,
+                json.dumps(mcp_data, indent=2, allow_nan=False),
+                mode=mode,
+            )
         except (OSError, TypeError, ValueError) as exc:
             print_warning(f"Could not write {mcp_config_path} — leaving it untouched: {exc}")
             return False
 
-        if registered:
+        if registered and emit_status:
             print_success("Registered MCP server in ~/.claude/mcp.json")
-        if removed_timeout:
+        if removed_timeout and emit_status:
             print_info("Removed legacy MCP timeout override.")
-        if updated_entry:
+        if updated_entry and emit_status:
             print_info("Updated MCP server entry to match current install method.")
 
     return True
@@ -2378,13 +2408,8 @@ def _setup_goose(goose_path: str) -> None:
 
 def _setup_claude(claude_path: str) -> bool:
     """Configure Ouroboros for the Claude Code runtime."""
-    # Register/fix MCP before persisting Claude as the active backend. A failed
-    # operator-owned MCP update must not leave config.yaml claiming setup
-    # succeeded when Claude cannot reach the Ouroboros server.
-    if not _ensure_claude_mcp_entry():
-        return False
-
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.loader import ensure_config_dir
+    from ouroboros.config.models import get_default_config
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
@@ -2392,8 +2417,7 @@ def _setup_claude(claude_path: str) -> bool:
     if config_path.exists():
         config_dict = yaml.safe_load(config_path.read_text()) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     # Set runtime and LLM backend to claude
     config_dict.setdefault("orchestrator", {})
@@ -2403,8 +2427,40 @@ def _setup_claude(claude_path: str) -> bool:
     config_dict.setdefault("llm", {})
     config_dict["llm"]["backend"] = "claude"
 
-    with config_path.open("w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    staged_config = yaml.safe_dump(config_dict, default_flow_style=False, sort_keys=False)
+    staged_loaded = yaml.safe_load(staged_config)
+    if not isinstance(staged_loaded, dict):
+        print_warning("Could not stage Claude config safely — setup aborted.")
+        return False
+
+    mcp_config_path = Path.home() / ".claude" / "mcp.json"
+    had_mcp_config = mcp_config_path.exists()
+    previous_mcp_content = mcp_config_path.read_bytes() if had_mcp_config else None
+    previous_mcp_mode = stat.S_IMODE(mcp_config_path.stat().st_mode) if had_mcp_config else 0o600
+
+    if not _ensure_claude_mcp_entry(emit_status=False):
+        return False
+
+    try:
+        mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
+        _atomic_write_text(config_path, staged_config, mode=mode)
+    except OSError as exc:
+        if had_mcp_config and previous_mcp_content is not None:
+            try:
+                _atomic_write_text(
+                    mcp_config_path,
+                    previous_mcp_content.decode("utf-8"),
+                    mode=previous_mcp_mode,
+                )
+            except OSError as rollback_exc:
+                print_warning(f"Could not roll back Claude MCP registration: {rollback_exc}")
+        elif mcp_config_path.exists():
+            try:
+                mcp_config_path.unlink()
+            except OSError as rollback_exc:
+                print_warning(f"Could not remove rolled-back Claude MCP registration: {rollback_exc}")
+        print_warning(f"Could not write {config_path} — Claude setup aborted: {exc}")
+        return False
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")

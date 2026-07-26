@@ -1194,6 +1194,24 @@ class TestClaudeSetup:
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original_config
         success.assert_not_called()
 
+    def test_setup_claude_mcp_failure_does_not_create_config_file(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "mcp.json").write_text("{broken json", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert not (config_dir / "config.yaml").exists()
+        success.assert_not_called()
+
     def test_setup_cli_exits_when_claude_mcp_registration_fails(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1233,16 +1251,12 @@ class TestClaudeSetup:
             "[]",
             '{"mcpServers": null}',
             '{"mcpServers": []}',
-            '{"mcpServers": {"ouroboros": null}}',
-            '{"mcpServers": {"ouroboros": "disabled"}}',
         ],
         ids=[
             "null-top-level",
             "array-top-level",
             "null-servers",
             "array-servers",
-            "null-ouroboros-entry",
-            "scalar-ouroboros-entry",
         ],
     )
     def test_invalid_mcp_json_shape_warns_without_overwriting(
@@ -1265,33 +1279,85 @@ class TestClaudeSetup:
         warning.assert_called_once()
         assert "leaving it untouched" in warning.call_args.args[0]
 
-    @pytest.mark.parametrize("invalid_command", [[], {}], ids=["array", "object"])
-    def test_invalid_mcp_command_shape_warns_without_overwriting(
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            None,
+            "disabled",
+            {"command": []},
+            {"command": "uvx", "args": "--from ouroboros-ai"},
+            {"url": "https://example.test/mcp", "transport": "ftp"},
+            {"args": ["mcp", "serve"]},
+        ],
+        ids=[
+            "null-entry",
+            "scalar-entry",
+            "non-string-command",
+            "non-list-args",
+            "unsupported-url-transport",
+            "missing-command-and-url",
+        ],
+    )
+    def test_malformed_ouroboros_mcp_entry_is_replaced(
         self,
         tmp_path: Path,
-        invalid_command: object,
+        entry: object,
     ) -> None:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"
-        original_content = json.dumps(
-            {"mcpServers": {"ouroboros": {"command": invalid_command, "timeout": 600}}}
-        )
-        claude_config.write_text(original_content, encoding="utf-8")
+        claude_config.write_text(json.dumps({"mcpServers": {"ouroboros": entry}}), encoding="utf-8")
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch(
                 "ouroboros.cli.commands.setup._detect_mcp_entry",
-                return_value={"command": "uvx", "args": []},
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
             ),
-            patch("ouroboros.cli.commands.setup.print_warning") as warning,
         ):
-            setup_cmd._ensure_claude_mcp_entry()
+            registered = setup_cmd._ensure_claude_mcp_entry()
 
-        assert claude_config.read_text(encoding="utf-8") == original_content
-        warning.assert_called_once()
-        assert "command" in warning.call_args.args[0]
+        assert registered is True
+        claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
+        assert claude_mcp["mcpServers"]["ouroboros"] == {
+            "command": "uvx",
+            "args": ["--from", "ouroboros-ai[mcp,claude]"],
+        }
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"url": "https://example.test/mcp", "transport": "sse"},
+            {"url": "https://example.test/mcp", "transport": "http", "args": []},
+            {"command": "docker", "args": ["run", "--rm", "ouroboros-mcp"]},
+        ],
+        ids=["sse-url", "http-url-with-args", "custom-command"],
+    )
+    def test_supported_existing_mcp_entry_is_preserved(
+        self,
+        tmp_path: Path,
+        entry: dict[str, object],
+    ) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        claude_config.write_text(json.dumps({"mcpServers": {"ouroboros": entry}}), encoding="utf-8")
+        mtime_before = claude_config.stat().st_mtime
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
+            ),
+        ):
+            registered = setup_cmd._ensure_claude_mcp_entry()
+
+        assert registered is True
+        assert claude_config.stat().st_mtime == mtime_before
+        assert json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"][
+            "ouroboros"
+        ] == entry
 
     def test_non_utf8_mcp_json_warns_without_overwriting(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / ".claude"
@@ -1315,6 +1381,7 @@ class TestClaudeSetup:
         [
             '{"mcpServers": {"existing": {}}, "mcpServers": {}}',
             '{"mcpServers": {"existing": NaN}}',
+            '{"mcpServers": {"existing": 1e9999}}',
         ],
     )
     def test_non_standard_mcp_json_warns_without_overwriting(
@@ -1457,6 +1524,45 @@ class TestClaudeSetup:
         assert registered is False
         assert claude_config.read_text(encoding="utf-8") == original_content
         assert list(claude_dir.glob(f".{claude_config.name}.*.tmp")) == []
+
+    def test_setup_claude_rolls_back_mcp_when_config_commit_fails(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = {
+            "orchestrator": {"runtime_backend": "codex"},
+            "llm": {"backend": "codex"},
+        }
+        config_path.write_text(yaml.safe_dump(original_config), encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_mcp = json.dumps({"mcpServers": {"existing": {"command": "custom"}}})
+        claude_config.write_text(original_mcp, encoding="utf-8")
+
+        real_atomic_write = setup_cmd._atomic_write_text
+
+        def fail_config_write(path: Path, content: str, *, mode: int = 0o600) -> None:
+            if path == config_path:
+                raise OSError("config activation failed")
+            real_atomic_write(path, content, mode=mode)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
+            ),
+            patch("ouroboros.cli.commands.setup._atomic_write_text", side_effect=fail_config_write),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original_config
+        assert claude_config.read_text(encoding="utf-8") == original_mcp
+        success.assert_not_called()
 
     def test_atomic_write_closes_descriptor_when_mode_application_fails(
         self, tmp_path: Path
