@@ -92,8 +92,69 @@ class TestWonderFenceRobustness:
             "What assumptions remain untested for goal: Build a login system?",
         )
 
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '["incidental", "array"]',
+            '{"questions": [[["not a question object"]]], "ontology_tensions": [], "reasoning": 7}',
+            '{"questions": [{"question": ["not", "text"]}], "should_continue": true}',
+        ],
+    )
+    def test_bad_typed_shapes_use_fallback_contract(self, content: str) -> None:
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(content, _seed())
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert out.questions == (
+            "What assumptions remain untested for goal: Build a login system?",
+        )
+
 
 class TestReflectFenceRobustness:
+    @pytest.mark.asyncio
+    async def test_successful_fenced_json_variants_parse_through_public_reflect(self) -> None:
+        payload = json.dumps(
+            {
+                "refined_goal": "Build a login system with refresh-token clarity",
+                "refined_constraints": ["Must use OAuth"],
+                "ac_patches": [{"op": "keep", "index": 0, "reason": "still valid"}],
+                "ontology_mutations": [
+                    {
+                        "action": "add",
+                        "field_name": "refresh_token",
+                        "field_type": "entity",
+                        "description": "A token used to renew sessions",
+                        "reason": "Wonder asked about token refresh",
+                    }
+                ],
+                "reasoning": "reflect reasoning",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap("prose_prefix_fence", payload),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What handles token refresh?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_ok
+        assert result.value.reasoning == "reflect reasoning"
+        assert result.value.ontology_mutations[0].field_name == "refresh_token"
+
     @pytest.mark.asyncio
     async def test_malformed_outer_object_with_nested_array_returns_error(self) -> None:
         adapter = AsyncMock()
@@ -107,6 +168,43 @@ class TestReflectFenceRobustness:
         engine = ReflectEngine(llm_adapter=adapter, model="test")
 
         result = await engine.reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '["incidental", "array"]',
+            '{"ontology_mutations": [[["not a mutation object"]]], "reasoning": 7}',
+            '{"ontology_mutations": [{"action": "add", "field_name": ["not", "text"]}]}',
+            '{"refined_goal": ["not", "text"], "ontology_mutations": []}',
+            '{"refined_constraints": "not-a-list", "ontology_mutations": []}',
+        ],
+    )
+    async def test_bad_typed_shapes_return_result_error(self, content: str) -> None:
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=content,
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
             current_seed=_seed(),
             execution_output="",
             evaluation_summary=EvaluationSummary(
@@ -150,6 +248,22 @@ class TestAssertionExtractorFenceRobustness:
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             "I considered AC indices [0, 1] before answering.",
             ("AC number 1", "AC number 2"),
+        )
+
+        assert assertions == ()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [[{"ac_index": 0, "description": "nested object"}]],
+            [{"ac_index": 0, "description": ["not", "text"]}],
+            [{"ac_index": 0, "pattern": ["not", "regex"], "expected_value": 10}],
+            [{"ac_index": True, "description": "bool is not an index"}],
+        ],
+    )
+    def test_bad_assertion_shapes_do_not_escape(self, payload: object) -> None:
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            json.dumps(payload), ("AC number 1",)
         )
 
         assert assertions == ()

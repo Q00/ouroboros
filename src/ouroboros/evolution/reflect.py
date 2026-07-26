@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
@@ -666,19 +666,28 @@ Guidelines:
                 wonder_output,
                 regression_report,
             )
+            refined_goal = data.get("refined_goal", current_seed.goal)
+            if not isinstance(refined_goal, str):
+                raise TypeError("Expected refined_goal to be a string")
+            refined_constraints = data.get("refined_constraints", list(current_seed.constraints))
+            if not isinstance(refined_constraints, list | tuple) or not all(
+                isinstance(constraint, str) for constraint in refined_constraints
+            ):
+                raise TypeError("Expected refined_constraints to be a list of strings")
+            reasoning = data.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                raise TypeError("Expected reasoning to be a string")
 
             return ReflectOutput(
-                refined_goal=data.get("refined_goal", current_seed.goal),
-                refined_constraints=tuple(
-                    data.get("refined_constraints", list(current_seed.constraints))
-                ),
+                refined_goal=refined_goal,
+                refined_constraints=tuple(refined_constraints),
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
                 settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
-                reasoning=data.get("reasoning", ""),
+                reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             logger.warning(
                 "reflect.parse_failed",
                 extra={

@@ -17,7 +17,7 @@ import logging
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
@@ -410,17 +410,31 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             data = json.loads(json_str if json_str is not None else content)
             if not isinstance(data, dict):
                 raise TypeError(f"Expected JSON object, got {type(data).__name__}")
-            grounded = self._parse_grounded_questions(data.get("questions", []), total_acs)
+            raw_questions = data.get("questions", [])
+            grounded = self._parse_grounded_questions(raw_questions, total_acs)
+            if raw_questions and not grounded:
+                raise TypeError("Expected questions to contain strings or question objects")
+            ontology_tensions = data.get("ontology_tensions", [])
+            if not isinstance(ontology_tensions, list) or not all(
+                isinstance(tension, str) for tension in ontology_tensions
+            ):
+                raise TypeError("Expected ontology_tensions to be a list of strings")
+            should_continue = data.get("should_continue", True)
+            if not isinstance(should_continue, bool):
+                raise TypeError("Expected should_continue to be a boolean")
+            reasoning = data.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                raise TypeError("Expected reasoning to be a string")
             return WonderOutput(
                 # ``questions`` stays a flat string tuple for events, lineage, and
                 # the repetitive-feedback convergence check (unchanged contract).
                 questions=tuple(gq.question for gq in grounded),
                 grounded_questions=grounded,
-                ontology_tensions=tuple(data.get("ontology_tensions", [])),
-                should_continue=data.get("should_continue", True),
-                reasoning=data.get("reasoning", ""),
+                ontology_tensions=tuple(ontology_tensions),
+                should_continue=should_continue,
+                reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
             scope_hint = f" for goal: {seed.goal}" if seed else ""
             fallback = f"What assumptions remain untested{scope_hint}?"

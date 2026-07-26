@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 import json
 import logging
 
+from pydantic import ValidationError
+
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.seed import AcceptanceCriterionInput, ac_texts
@@ -166,25 +168,37 @@ class AssertionExtractor:
                     logger.warning("Ignoring assertion with invalid ac_index: %r", ac_idx)
                     continue
                 ac_text = acceptance_criteria[ac_idx]
+                raw_tier = item.get("tier", "t4_unverifiable")
                 try:
-                    tier = VerificationTier(item.get("tier", "t4_unverifiable"))
-                except ValueError:
+                    tier = VerificationTier(raw_tier)
+                except (TypeError, ValueError):
                     tier = VerificationTier.T4_UNVERIFIABLE
+                text_fields = {
+                    name: item.get(name, "")
+                    for name in ("pattern", "expected_value", "file_hint", "description")
+                }
+                if not all(isinstance(value, str) for value in text_fields.values()):
+                    logger.warning("Ignoring assertion with invalid text fields: %r", item)
+                    continue
 
-                assertions.append(
-                    SpecAssertion(
-                        ac_index=ac_idx,
-                        ac_text=ac_text,
-                        tier=tier,
-                        pattern=item.get("pattern", ""),
-                        expected_value=item.get("expected_value", ""),
-                        file_hint=item.get("file_hint", ""),
-                        description=item.get("description", ""),
+                try:
+                    assertions.append(
+                        SpecAssertion(
+                            ac_index=ac_idx,
+                            ac_text=ac_text,
+                            tier=tier,
+                            pattern=text_fields["pattern"],
+                            expected_value=text_fields["expected_value"],
+                            file_hint=text_fields["file_hint"],
+                            description=text_fields["description"],
+                        )
                     )
-                )
+                except ValidationError as e:
+                    logger.warning("Ignoring invalid assertion object: %s", e)
+                    continue
 
             return tuple(assertions)
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse extraction response: %s", e)
             return ()
