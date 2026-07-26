@@ -8,12 +8,8 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-import errno
 import functools
-import os
 from pathlib import Path
-import stat
-import tempfile
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -22,6 +18,7 @@ import structlog
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.requirement_candidate import (
     RequirementDistillation,
     compute_requirement_input_fingerprint,
@@ -103,72 +100,6 @@ _TOOLLESS_INTERVIEW_BASE_PROMPT = """## Role Boundaries
 - Prefer scope, non-goal, success criteria, ownership, risk, and verification questions.
 - For brownfield work, focus on intent and decisions rather than discovering what exists.
 """
-
-
-def _fsync_parent_directory(file_path: Path) -> bool:
-    if os.name != "posix":
-        return True
-
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        directory_fd = os.open(file_path.parent, flags)
-    except OSError as error:
-        return error.errno in (errno.EINVAL, errno.ENOTSUP)
-    durability_confirmed = True
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError as error:
-            if error.errno not in (errno.EINVAL, errno.ENOTSUP):
-                durability_confirmed = False
-    finally:
-        try:
-            os.close(directory_fd)
-        except OSError:
-            durability_confirmed = False
-    return durability_confirmed
-
-
-def _atomic_write_text(file_path: Path, content: str) -> bool:
-    try:
-        existing_mode = stat.S_IMODE(file_path.stat().st_mode)
-    except FileNotFoundError:
-        existing_mode = None
-
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{file_path.name}.",
-        suffix=".tmp",
-        dir=str(file_path.parent),
-    )
-    raw_fd: int | None = fd
-    tmp_path = Path(tmp_name)
-    try:
-        if existing_mode is not None:
-            if os.name == "posix":
-                os.fchmod(fd, existing_mode)
-            else:
-                tmp_path.chmod(existing_mode)
-
-        handle = os.fdopen(fd, "w", encoding="utf-8")
-        raw_fd = None
-        with handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, file_path)
-        return _fsync_parent_directory(file_path)
-    finally:
-        if raw_fd is not None:
-            try:
-                os.close(raw_fd)
-            except OSError:
-                pass
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
 
 
 class InterviewPerspective(StrEnum):
@@ -729,7 +660,7 @@ class InterviewEngine:
         self.model_is_explicit = self.model is not None
         if self.model is None:
             self.model = get_llm_model_for_role("interview")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        secure_directory(self.state_dir)
 
     def _state_file_path(self, interview_id: str) -> Path:
         """Get the path to the state file for an interview.
@@ -1109,7 +1040,7 @@ class InterviewEngine:
 
             def _sync_write() -> bool:
                 with _file_lock(file_path, exclusive=True):
-                    return _atomic_write_text(file_path, content)
+                    return write_owner_only(file_path, content)
 
             durability_confirmed = await asyncio.to_thread(_sync_write)
 

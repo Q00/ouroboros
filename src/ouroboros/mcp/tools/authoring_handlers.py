@@ -51,6 +51,7 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
@@ -1211,10 +1212,22 @@ async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[P
         state.mark_updated()
         content = state.model_dump_json(indent=2)
 
-        def _sync_write() -> None:
-            file_path.write_text(content, encoding="utf-8")
+        def _sync_write() -> bool:
+            # The plugin transport persists the same transcript the stdio one
+            # does, so it uses the same owner-only writer. This fourth site was
+            # still on write_text and produced 0644 under a 022 umask.
+            secure_directory(file_path.parent)
+            return write_owner_only(file_path, content)
 
-        await asyncio.to_thread(_sync_write)
+        durability_confirmed = await asyncio.to_thread(_sync_write)
+        if not durability_confirmed:
+            # The stdio writer logs this state; discarding it here reported a
+            # durability the filesystem never confirmed.
+            log.warning(
+                "plugin.state_save_durability_uncertain",
+                interview_id=state.interview_id,
+                file_path=str(file_path),
+            )
         return Result.ok(file_path)
     except (OSError, ValueError) as e:
         return Result.err(f"Failed to save interview state: {e}")

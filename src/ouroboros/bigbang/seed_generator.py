@@ -36,6 +36,7 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -1047,7 +1048,14 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 sort_keys=False,
             )
 
-            file_path.write_text(content, encoding="utf-8")
+            if not write_owner_only(file_path, content):
+                # Reported like every other artifact writer: the file exists
+                # but the directory flush was unconfirmed.
+                log.warning(
+                    "seed.save_durability_uncertain",
+                    seed_id=seed.metadata.seed_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "seed.saved",
@@ -1155,7 +1163,12 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        file_path.write_text(content, encoding="utf-8")
+        if not write_owner_only(file_path, content):
+            log.warning(
+                "seed.save_durability_uncertain",
+                seed_id=seed.metadata.seed_id,
+                file_path=str(file_path),
+            )
 
         log.info(
             "seed.saved.sync",
