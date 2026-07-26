@@ -8,8 +8,8 @@ IMPORTANT: If MCP is not configured (ooo setup not run),
 ALL ooo commands (except setup/help) redirect to setup first.
 
 Hook: UserPromptSubmit
-Input: User prompt text via stdin (piped by Claude Code)
-Output: Modified prompt with skill suggestion appended
+Input: JSON hook payload via stdin, with raw prompt text supported as a fallback
+Output: Structured hook context when a skill is suggested; otherwise no output
 """
 
 import json
@@ -275,53 +275,80 @@ def detect_keywords(text: str) -> dict:
     return {"detected": False, "keyword": None, "suggested_skill": None}
 
 
-def main() -> None:
-    # Read user prompt from stdin
+def _extract_prompt_and_host(hook_input: str) -> tuple[str, str]:
+    """Extract a prompt and identify the hook host from its wire envelope."""
+
     try:
-        user_input = sys.stdin.read().strip()
+        payload = json.loads(hook_input)
+    except (ValueError, RecursionError):
+        return hook_input, "claude"
+
+    if (
+        isinstance(payload, dict)
+        and payload.get("hook_event_name") == "UserPromptSubmit"
+        and isinstance(payload.get("session_id"), str)
+        and isinstance(payload.get("prompt"), str)
+    ):
+        host = "codex" if isinstance(payload.get("turn_id"), str) else "claude"
+        return payload["prompt"], host
+    return hook_input, "claude"
+
+
+def _emit_context(context: str) -> None:
+    """Emit a schema-valid UserPromptSubmit response."""
+
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def main() -> None:
+    # Read the hook payload from stdin. Older integrations may still pipe raw text.
+    try:
+        hook_input = sys.stdin.read().strip()
     except Exception:
-        user_input = ""
+        hook_input = ""
+
+    user_input, host = _extract_prompt_and_host(hook_input)
 
     result = detect_keywords(user_input)
 
-    # First-time user: append welcome suggestion to their first message
+    # First-time user: add welcome context to their first message.
     if not result["detected"] and is_first_time():
         skill_name = "welcome"
-        print(f"""{user_input}
-
-<skill-suggestion>
+        _emit_context(f"""<skill-suggestion>
 🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
 IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
-</skill-suggestion>
-""")
+</skill-suggestion>""")
         return
 
     if result["detected"]:
         skill = result["suggested_skill"]
         keyword = result["keyword"]
 
-        # Gate check: if MCP not configured and skill requires it, redirect to setup
-        if skill not in SETUP_BYPASS_SKILLS and not is_mcp_configured():
-            print(f"""{user_input}
-
-<skill-suggestion>
+        # Codex hook envelopes do not expose the parent session's profile/config
+        # layers, so a child hook process cannot reconstruct its effective MCP state.
+        needs_setup = host != "codex" and not is_mcp_configured()
+        if skill not in SETUP_BYPASS_SKILLS and needs_setup:
+            _emit_context("""<skill-suggestion>
 🎯 REQUIRED SKILL:
 - /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
-</skill-suggestion>
-""")
+</skill-suggestion>""")
         else:
             skill_name = skill.replace("/ouroboros:", "")
-            print(f"""{user_input}
-
-<skill-suggestion>
+            _emit_context(f"""<skill-suggestion>
 🎯 MATCHED SKILLS:
 - /ouroboros:{skill_name} - Detected "{keyword}"
-</skill-suggestion>
-""")
-    else:
-        # Pass through unchanged when no keyword detected
-        print(user_input)
+</skill-suggestion>""")
 
 
 if __name__ == "__main__":
