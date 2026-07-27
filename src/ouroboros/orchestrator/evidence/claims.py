@@ -107,7 +107,7 @@ def _file_claim_matches_runtime_path(
     """Return True when a claimed workspace path matches a runtime path value."""
     try:
         claim_path = Path(claim.strip())
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return False
     if not claim_path or claim_path.is_absolute() or ".." in claim_path.parts:
         return False
@@ -117,22 +117,28 @@ def _file_claim_matches_runtime_path(
 
     try:
         runtime_candidate = Path(runtime_path)
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return False
     if task_cwd is not None:
         try:
             base = Path(task_cwd).resolve()
             runtime_base = Path(runtime_cwd).resolve() if runtime_cwd is not None else base
             runtime_base.relative_to(base)
-            claimed_absolute = (base / claim_path).resolve()
-            runtime_absolute = (
+            claimed_candidate = base / claim_path
+            runtime_candidate_absolute = (
                 runtime_candidate
                 if runtime_candidate.is_absolute()
                 else runtime_base / runtime_candidate
-            ).resolve()
+            )
+            if _path_has_resolution_error(claimed_candidate) or _path_has_resolution_error(
+                runtime_candidate_absolute
+            ):
+                return False
+            claimed_absolute = claimed_candidate.resolve()
+            runtime_absolute = runtime_candidate_absolute.resolve()
             claimed_absolute.relative_to(base)
             runtime_absolute.relative_to(base)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             return False
         return runtime_absolute == claimed_absolute
 
@@ -160,20 +166,33 @@ def _workspace_relative_file_claim(value: str, *, task_cwd: str | None) -> str |
     if not raw_value or task_cwd is None:
         return None
 
-    base = Path(task_cwd).resolve()
-    candidate = Path(raw_value)
-    if not candidate.is_absolute() and ".." in candidate.parts:
-        return None
-
-    resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
     try:
+        base = Path(task_cwd).resolve()
+        candidate = Path(raw_value)
+        if not candidate.is_absolute() and ".." in candidate.parts:
+            return None
+        absolute_candidate = candidate if candidate.is_absolute() else base / candidate
+        if _path_has_resolution_error(absolute_candidate):
+            return None
+        resolved = absolute_candidate.resolve()
         relative = resolved.relative_to(base)
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return None
 
     if not relative.parts or ".." in relative.parts:
         return None
     return relative.as_posix()
+
+
+def _path_has_resolution_error(path: Path) -> bool:
+    try:
+        path.resolve(strict=True)
+    except FileNotFoundError:
+        parent = path.parent
+        return parent != path and _path_has_resolution_error(parent)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
 
 
 def _runtime_support_messages_for_field(
@@ -298,8 +317,14 @@ def _runtime_messages_support_file_claim(
         if relative_claim is None:
             return False
         candidate = Path(relative_claim)
-        base = Path(task_cwd).resolve()
-        resolved = (base / candidate).resolve()
+        try:
+            base = Path(task_cwd).resolve()
+            absolute_candidate = base / candidate
+            if _path_has_resolution_error(absolute_candidate):
+                return False
+            resolved = absolute_candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
         if any(
             _runtime_message_supports_file_reference(
                 relative_claim,
@@ -494,7 +519,7 @@ def _runtime_message_effective_cwd(message: AgentMessage, *, task_cwd: str | Non
         candidate = Path(cwd)
         effective = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
         effective.relative_to(workspace)
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
     return str(effective)
 
@@ -543,7 +568,9 @@ def _python_c_pathlib_write_reference_match(
     if python_index is False:
         return False
     if python_index is None:
-        if _command_has_python_c(argv) and _source_mentions_pathlib_write(command):
+        if _raw_command_mentions_python_c_pathlib_write(
+            command
+        ) or _argv_mentions_python_c_pathlib_write(argv):
             return False
         return None
     if len(argv) <= python_index + 2 or "-c" not in argv[python_index + 1 :]:
@@ -556,9 +583,10 @@ def _python_c_pathlib_write_reference_match(
         return None
     if (
         python_index != 0
-        or source_index != 3
-        or len(argv) != 4
+        or source_index != 4
+        or len(argv) != 5
         or argv[1] != "-I"
+        or argv[2] != "-S"
         or _source_needs_shell_expansion(source)
     ):
         return False
@@ -581,8 +609,9 @@ def _python_c_pathlib_write_reference_match(
 
 
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
-    lowered = command.lower()
-    return "python" in lowered and " -c" in lowered and _source_mentions_pathlib_write(command)
+    return re.search(
+        r"\bpython(?:3(?:\.\d+)?)?\s+-c\b", command, re.IGNORECASE
+    ) is not None and _source_mentions_pathlib_write(command)
 
 
 def _source_mentions_pathlib_write(source: str) -> bool:
@@ -716,12 +745,8 @@ def _is_path_constructor(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "Path"
 
 
-def _command_has_python_c(argv: list[str]) -> bool:
-    for index, value in enumerate(argv):
-        name = Path(value).name.lower()
-        if name in {"python", "python3"} or re.fullmatch(r"python3\.\d+", name):
-            return "-c" in argv[index + 1 :]
-    return False
+def _argv_mentions_python_c_pathlib_write(argv: list[str]) -> bool:
+    return any(_raw_command_mentions_python_c_pathlib_write(value) for value in argv)
 
 
 def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool:
@@ -741,7 +766,7 @@ def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
         path = Path(value)
         candidate = path if path.is_absolute() else Path(task_cwd) / path
         return candidate.resolve() == Path(sys.executable).resolve()
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return False
 
 

@@ -74,7 +74,7 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 
 
 def _trusted_python_c(source: str) -> str:
-    return shlex.join([sys.executable, "-I", "-c", source])
+    return shlex.join([sys.executable, "-I", "-S", "-c", source])
 
 
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
@@ -292,6 +292,97 @@ def test_files_touched_treats_python_wrapper_transcript_text_as_inert_data(tmp_p
     )
 
 
+def test_files_touched_rejects_nested_shell_python_pathlib_payload(tmp_path) -> None:
+    """A nested shell command cannot hide unsafe Python pathlib evidence."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = (
+        "bash -c 'python -c \"from pathlib import Path; # touch claimed.py\n"
+        "Path('\\''other.py'\\'').write_text('\\''x'\\'')\"'"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_parser_failure_with_tabbed_python_c_payload(tmp_path) -> None:
+    """Malformed shell text with tabbed Python ``-c`` evidence fails closed."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = (
+        "cat <<'PY\n"
+        'python\t-c "from pathlib import Path; # touch claimed.py\n'
+        "Path('other.py').write_text('x')\"\n"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_python_c_pathlib_static_proof_rejects_isolated_without_no_site(tmp_path) -> None:
+    """``-I`` alone can still run site customization, so it is not static proof."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+    command = shlex.join(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "from pathlib import Path; Path('src/generated.py').write_text('x')",
+        ]
+    )
+
+    assert (
+        _python_c_pathlib_write_targets_reference(
+            command,
+            reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
 def test_files_touched_resolves_relative_python_executable_against_command_cwd(
     tmp_path, monkeypatch
 ) -> None:
@@ -303,7 +394,7 @@ def test_files_touched_resolves_relative_python_executable_against_command_cwd(
     fake_python = command_cwd / "python3"
     fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr(sys, "executable", str(fake_python))
-    command = "./python3 -I -c \"from pathlib import Path; Path('claimed.py').write_text('x')\""
+    command = "./python3 -I -S -c \"from pathlib import Path; Path('claimed.py').write_text('x')\""
     messages = (
         AgentMessage(
             type="tool",
@@ -345,6 +436,34 @@ def test_python_c_pathlib_static_proof_rejects_deep_receiver_without_exception(
         _python_c_pathlib_write_targets_reference(
             _trusted_python_c(source),
             reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_symlink_loop_claim_without_exception(tmp_path) -> None:
+    """Symlink-loop resolution errors are malformed evidence, not verifier crashes."""
+    loop = tmp_path / "a"
+    try:
+        os.symlink(tmp_path / "b", loop)
+        os.symlink(loop, tmp_path / "b")
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    message = AgentMessage(
+        type="tool",
+        content="Edit: a/generated.py",
+        tool_name="Edit",
+        data={
+            "tool_input": {"file_path": "a/generated.py"},
+            "exit_code": 0,
+        },
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "a/generated.py",
+            (message,),
             task_cwd=str(tmp_path),
         )
         is False
@@ -2938,6 +3057,7 @@ def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tm
             "cmd": [
                 sys.executable,
                 "-I",
+                "-S",
                 "-c",
                 "from pathlib import Path; Path('generated.py').write_text('x')",
             ]
