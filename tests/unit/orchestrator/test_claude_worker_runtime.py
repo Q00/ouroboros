@@ -104,18 +104,22 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    @pytest.mark.parametrize("cwd", [None, "workspace"], ids=["omitted", "relative"])
     @pytest.mark.asyncio
-    async def test_omitted_cwd_is_shared_by_spawn_and_persistent_resume(
+    async def test_cwd_is_resolved_once_and_shared_by_spawn_and_persistent_resume(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        cwd: str | None,
     ) -> None:
         launch_cwd = tmp_path / "launch"
         later_cwd = tmp_path / "later"
         launch_cwd.mkdir()
         later_cwd.mkdir()
+        resolved_cwd = launch_cwd if cwd is None else launch_cwd / cwd
+        resolved_cwd.mkdir(exist_ok=True)
         monkeypatch.chdir(launch_cwd)
-        runtime = build_claude_worker_runtime(persist_sessions=True)
+        runtime = build_claude_worker_runtime(cwd=cwd, persist_sessions=True)
         transport = runtime._transport
         observed_cwds: list[str | None] = []
 
@@ -136,8 +140,8 @@ class TestRuntimeWiring:
             )
         ]
 
-        assert runtime.working_directory == str(launch_cwd)
-        assert observed_cwds == [str(launch_cwd), str(launch_cwd)]
+        assert runtime.working_directory == str(resolved_cwd)
+        assert observed_cwds == [str(resolved_cwd), str(resolved_cwd)]
 
     def test_exposes_effective_cli_path(self) -> None:
         rt = build_claude_worker_runtime(cli_path="/tmp/claude", cwd="/tmp")

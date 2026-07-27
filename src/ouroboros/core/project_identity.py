@@ -265,10 +265,9 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
     # Git's own config parser to apply an explicit ``core.worktree`` owner.
     # It fails for a bare primary, where the worktree-list path is the desired
     # stable common-directory identity.
-    main_checkout = main_worktree if (main_worktree / ".git").exists() else None
     top_level = _run_git(
         main_worktree,
-        *_git_dir_argument(main_checkout),
+        f"--git-dir={common_dir}",
         "rev-parse",
         "--path-format=absolute",
         "--show-toplevel",

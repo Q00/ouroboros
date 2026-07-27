@@ -63,7 +63,9 @@ config and prompting and set a five-second timeout. Only
 complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
 accepted. When a checkout marker is present, it is passed back to Git explicitly
 as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor
-of a parent repository. Acceptance of that argument is not ownership proof:
+of a parent repository. Primary-top-level discovery is likewise bound to the
+already validated common directory, so a markerless reported path cannot fall
+through to an unrelated ancestor checkout. Acceptance of that argument is not ownership proof:
 the active checkout must also appear in Git's returned worktree population or
 equal Git's configured top level for an explicit `core.worktree` owner.
 
@@ -119,12 +121,14 @@ partial, or conflicting identity payloads before appending the immutable start
 event. Contract-free utility sessions remain valid; historical events are read
 without being recreated through this API.
 
-Every bundled runtime normalizes an omitted working directory to the process
-cwd at runtime construction, and the runner captures the same fallback for
-valid optional-cwd protocol implementations. Persistent Claude transport and
-runtime objects share that captured path for both spawn and resume. The
-resulting concrete workspace is therefore available before a runner-owned
-session publishes its mandatory identity.
+Every bundled runtime normalizes its working directory to one absolute path at
+runtime construction, resolving relative inputs against that instant's process
+cwd. The runner captures the same process fallback for valid optional-cwd
+protocol implementations; an unavailable process cwd cannot replace an
+explicit runtime or task cwd. Persistent Claude transport and runtime objects
+share that captured path for both spawn and resume. The resulting concrete
+workspace is therefore available before a runner-owned session publishes its
+mandatory identity.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

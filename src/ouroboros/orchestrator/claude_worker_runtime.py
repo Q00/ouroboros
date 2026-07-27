@@ -343,7 +343,7 @@ def build_claude_worker_runtime(
     ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
     no-op — the worker command is identical to the pre-C4 invocation.
     """
-    normalized_cwd = os.fspath(cwd) if cwd is not None else os.getcwd()
+    normalized_cwd = str(Path(cwd).expanduser().resolve()) if cwd is not None else os.getcwd()
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
             cli_path=cli_path,
