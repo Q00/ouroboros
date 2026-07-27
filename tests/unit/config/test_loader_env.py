@@ -549,6 +549,41 @@ class TestHostileEnvCannotBlockStartup:
     def test_ordinary_keys_are_accepted(self, key: str) -> None:
         assert _is_assignable_env_key(key) is True
 
+    @pytest.mark.parametrize(
+        ("name", "content"),
+        [
+            pytest.param("illegal-key", b"'BROKEN=KEY'=value\n", id="illegal-key"),
+            pytest.param("invalid-utf8", b"BROKEN=\xff\n", id="invalid-utf8"),
+            pytest.param("binary-garbage", bytes(range(0, 32)), id="binary-garbage"),
+        ],
+    )
+    def test_malformed_env_files_do_not_abort_import(
+        self, tmp_path: Path, name: str, content: bytes
+    ) -> None:
+        """Every parser failure must degrade to "no variables loaded"."""
+        (tmp_path / ".env").write_bytes(content)
+
+        result = subprocess.run(
+            [sys.executable, "-c", "import ouroboros.config.loader; print('started')"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "started" in result.stdout
+
+    def test_non_utf8_env_leaves_the_environment_untouched(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("AFTER_BAD_BYTE", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_bytes(b"BROKEN=\xff\nAFTER_BAD_BYTE=value\n")
+
+        _load_env_file(env_file, trusted=True)
+
+        assert "AFTER_BAD_BYTE" not in os.environ
+
     def test_import_survives_a_hostile_project_env(self, tmp_path: Path) -> None:
         """The regression the blocker describes: startup, not just this function.
 

@@ -347,8 +347,18 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
 
     try:
         entries = dotenv_values(path, interpolate=False, encoding="utf-8")
-    except OSError:
-        # An unreadable .env is not fatal; the process environment still wins.
+    except (OSError, UnicodeDecodeError):
+        # An unreadable or non-UTF-8 .env is not fatal; the process
+        # environment still wins. `UnicodeDecodeError` is a `ValueError`, not
+        # an `OSError`, so it needs naming: a single invalid byte
+        # (`BROKEN=\xFF`) in a cloned repository would otherwise abort import.
+        return
+    except Exception:  # noqa: BLE001 - startup must survive any parser failure
+        # This module runs `_load_env_file` at import, so a malformed `.env`
+        # must degrade to "no variables loaded", never to an unstartable
+        # process. Enumerating the parser's failure modes has already missed
+        # two -- an illegal key name and a decoding error -- so the invariant
+        # is enforced here rather than predicted.
         return
 
     for key, parsed_value in entries.items():
