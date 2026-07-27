@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import ast
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 
@@ -357,7 +358,12 @@ def _runtime_message_supports_file_reference(
     if message.tool_name == "Bash":
         return _text_supports_file_mutation_reference(text, normalized_reference) or (
             allow_bash_command_text
-            and _bash_command_mutates_file_reference(message, normalized_reference)
+            and _bash_command_mutates_file_reference(
+                message,
+                reference=reference,
+                normalized_reference=normalized_reference,
+                task_cwd=task_cwd,
+            )
             and _runtime_message_has_success_evidence(message, messages=messages, index=index)
         )
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
@@ -396,7 +402,13 @@ def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
 
 
-def _bash_command_mutates_file_reference(message: AgentMessage, normalized_reference: str) -> bool:
+def _bash_command_mutates_file_reference(
+    message: AgentMessage,
+    *,
+    reference: str,
+    normalized_reference: str,
+    task_cwd: str | None,
+) -> bool:
     """Return True for explicit shell writes to the referenced file.
 
     Bash command text is only trusted when the command itself carries mutation
@@ -419,6 +431,8 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
     quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
     if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
         return True
+    if _python_c_pathlib_write_targets_reference(command, reference=reference, task_cwd=task_cwd):
+        return True
     return bool(
         re.search(
             rf"(^|[\s;&|])(touch|truncate|tee)\b[^;&|]*\s{quoted_reference}(?=$|[\s;&|])",
@@ -430,6 +444,75 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
             normalized_command,
         )
     )
+
+
+def _python_c_pathlib_write_targets_reference(
+    command: str,
+    *,
+    reference: str,
+    task_cwd: str | None,
+) -> bool:
+    """Return True when a direct Python ``-c`` pathlib write targets the claim."""
+    if task_cwd is None:
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if len(argv) < 3:
+        return False
+    executable = Path(argv[0]).name.lower()
+    if executable not in {"python", "python3"} and not re.fullmatch(r"python3\.\d+", executable):
+        return False
+    if argv[1] != "-c":
+        return False
+    try:
+        tree = ast.parse(argv[2])
+    except SyntaxError:
+        return False
+    return any(
+        _file_claim_matches_runtime_path(reference, target, task_cwd=task_cwd)
+        for target in _pathlib_write_targets(tree)
+    )
+
+
+def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
+    targets: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"write_text", "write_bytes"}:
+            continue
+        target = _literal_pathlib_receiver(node.func.value)
+        if target is not None:
+            targets.append(target)
+    return tuple(targets)
+
+
+def _literal_pathlib_receiver(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Call) and _is_path_constructor(node.func):
+        if len(node.args) != 1 or node.keywords:
+            return None
+        return _literal_path_segment(node.args[0])
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _literal_pathlib_receiver(node.left)
+        right = _literal_path_segment(node.right)
+        if left is None or right is None:
+            return None
+        return str(PurePosixPath(left) / right)
+    return None
+
+
+def _is_path_constructor(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "Path"
+
+
+def _literal_path_segment(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
+        return node.value.strip()
+    return None
 
 
 def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
