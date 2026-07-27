@@ -60,7 +60,9 @@ configured submodule Git directory therefore stays separate. Core section names
 are interpreted case-insensitively with later values winning, matching Git.
 The bounded core parser accepts Git section comments, valueless boolean
 shorthand, empty boolean values, quoted values, documented escapes, inline
-comments, and variable-value backslash continuations. Section headers cannot
+comments, variable-value backslash continuations, and Git's signed 32-bit
+numeric boolean forms, including octal, hexadecimal, and `k`/`m`/`g` scaling.
+Section headers cannot
 span physical lines and fail closed before continuation folding. Includes fail
 closed because they escape the bounded config file used for identity proof.
 

@@ -16,6 +16,8 @@ PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_POINTER_LENGTH = 4096
 _MAX_GIT_CONFIG_LENGTH = 65_536
+_GIT_INT_MIN = -(2**31)
+_GIT_INT_MAX = 2**31 - 1
 
 
 class ProjectIdentityError(ValueError):
@@ -399,17 +401,60 @@ def _parse_git_config_values(
     return relevant_values
 
 
+def _parse_git_numeric_boolean(value: str) -> bool | None:
+    """Parse the signed 32-bit integer grammar accepted for Git booleans."""
+    candidate = value
+    sign = 1
+    if candidate.startswith(("+", "-")):
+        if candidate[0] == "-":
+            sign = -1
+        candidate = candidate[1:]
+    if not candidate:
+        return None
+
+    multiplier = 1
+    if candidate[-1].casefold() in {"k", "m", "g"}:
+        multiplier = 1024 ** ({"k": 1, "m": 2, "g": 3}[candidate[-1].casefold()])
+        candidate = candidate[:-1]
+    if not candidate:
+        return None
+
+    if candidate.casefold().startswith("0x"):
+        digits = candidate[2:]
+        base = 16
+        valid_digits = "0123456789abcdefABCDEF"
+    elif len(candidate) > 1 and candidate.startswith("0"):
+        digits = candidate
+        base = 8
+        valid_digits = "01234567"
+    else:
+        digits = candidate
+        base = 10
+        valid_digits = "0123456789"
+    if not digits or any(character not in valid_digits for character in digits):
+        return None
+
+    significant_digits = digits.lstrip("0") or "0"
+    max_significant_digits = {8: 11, 10: 10, 16: 8}[base]
+    if len(significant_digits) > max_significant_digits:
+        return None
+    parsed = sign * int(significant_digits, base) * multiplier
+    if not _GIT_INT_MIN <= parsed <= _GIT_INT_MAX:
+        return None
+    return parsed != 0
+
+
 def _parse_git_boolean(value: str | None) -> bool | None:
     if value is None:
         return True
     normalized = value.casefold()
     if not normalized:
         return False
-    if normalized in {"true", "yes", "on", "1"}:
+    if normalized in {"true", "yes", "on"}:
         return True
-    if normalized in {"false", "no", "off", "0"}:
+    if normalized in {"false", "no", "off"}:
         return False
-    return None
+    return _parse_git_numeric_boolean(value)
 
 
 def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:

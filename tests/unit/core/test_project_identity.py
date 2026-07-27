@@ -11,6 +11,7 @@ import pytest
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
+    _parse_git_boolean,
     project_id_for_root,
     resolve_project_identity,
 )
@@ -227,6 +228,92 @@ def test_valueless_bare_config_joins_direct_and_linked_identity(tmp_path: Path) 
     assert direct_identity.project_root == str(common_git.resolve())
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, True),
+        ("", False),
+        ("true", True),
+        ("OFF", False),
+        ("0", False),
+        ("00", False),
+        ("+0", False),
+        ("-0", False),
+        ("0x0", False),
+        ("0k", False),
+        ("1", True),
+        ("01", True),
+        ("2", True),
+        ("+2", True),
+        ("-2", True),
+        ("010", True),
+        ("0x1", True),
+        ("-0x1", True),
+        ("1k", True),
+        ("1M", True),
+        ("1g", True),
+        ("2147483647", True),
+        ("-2147483648", True),
+        ("0" * 5000 + "2", True),
+        ("08", None),
+        ("1.0", None),
+        ("1e2", None),
+        ("0x", None),
+        ("1t", None),
+        ("2g", None),
+        ("2147483648", None),
+        ("-2147483649", None),
+        ("0xffffffff", None),
+        ("9" * 5000, None),
+        ("١", None),
+        ("２", None),
+    ],
+)
+def test_git_boolean_numeric_grammar_matches_git(
+    value: str | None,
+    expected: bool | None,
+) -> None:
+    assert _parse_git_boolean(value) is expected
+
+
+def test_numeric_bare_config_joins_linked_and_managed_identity(tmp_path: Path) -> None:
+    common_git = tmp_path / "common.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        "[core]\n\tbare = 2\n",
+        encoding="utf-8",
+    )
+    linked_roots: list[Path] = []
+    for name in ("linked-a", "linked-b"):
+        linked = tmp_path / name
+        linked.mkdir()
+        linked_git_dir = common_git / "worktrees" / name
+        linked_git_dir.mkdir(parents=True)
+        (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (linked_git_dir / "gitdir").write_text(
+            f"{linked / '.git'}\n",
+            encoding="utf-8",
+        )
+        linked_roots.append(linked)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    common_identity = resolve_project_identity(common_git)
+    linked_identities = [resolve_project_identity(linked) for linked in linked_roots]
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked_roots[0],
+        source_workspace=linked_roots[0],
+    )
+
+    assert all(identity == common_identity for identity in linked_identities)
+    assert managed_identity == common_identity
+    assert common_identity.project_root == str(common_git.resolve())
+
+
 def test_quoted_continued_core_worktree_keeps_direct_linked_parity(tmp_path: Path) -> None:
     common_git = tmp_path / "storage.git"
     (common_git / "objects").mkdir(parents=True)
@@ -260,15 +347,21 @@ def test_quoted_continued_core_worktree_keeps_direct_linked_parity(tmp_path: Pat
     assert direct_identity.project_root == str(primary.resolve())
 
 
+@pytest.mark.parametrize(
+    "worktree_config_value",
+    ["true", "2"],
+    ids=["text-boolean", "numeric-boolean"],
+)
 def test_worktree_config_owner_joins_direct_linked_and_managed_identity(
     tmp_path: Path,
+    worktree_config_value: str,
 ) -> None:
     common_git = tmp_path / "storage.git"
     (common_git / "objects").mkdir(parents=True)
     (common_git / "refs").mkdir()
     (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     (common_git / "config").write_text(
-        "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n",
+        f"[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = {worktree_config_value}\n",
         encoding="utf-8",
     )
     primary = tmp_path / "primary"
