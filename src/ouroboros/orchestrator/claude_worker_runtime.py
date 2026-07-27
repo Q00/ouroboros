@@ -114,7 +114,7 @@ class ClaudeWorkerTransport:
         # Claude sessions are CWD-SCOPED: ``--resume`` finds a conversation only
         # when run from the directory it was created in ("No conversation found"
         # otherwise). The transport pins the cwd so resume targets the same store.
-        self._cwd = cwd
+        self._cwd = cwd or os.getcwd()
         self._timeout = timeout if timeout and timeout > 0 else None
         # Native passthrough keeps the worker's MCP surface, MINUS these tools
         # (recursion hardening — see _RECURSION_GUARD_DISALLOWED_TOOLS).
@@ -131,7 +131,7 @@ class ClaudeWorkerTransport:
         # seed's brownfield ``context_references`` dirs via ``--add-dir``.
         # Resolved once against cwd (existing dirs only, deduped, capped) so the
         # command builder just appends the flags. Empty ⇒ no ``--add-dir`` at all.
-        self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=cwd)
+        self._add_dirs = _resolve_add_dirs(context_reference_dirs, cwd=self._cwd)
 
     @property
     def cli_path(self) -> str:
@@ -343,7 +343,7 @@ def build_claude_worker_runtime(
     ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
     no-op — the worker command is identical to the pre-C4 invocation.
     """
-    normalized_cwd = os.fspath(cwd) if cwd is not None else None
+    normalized_cwd = os.fspath(cwd) if cwd is not None else os.getcwd()
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
             cli_path=cli_path,

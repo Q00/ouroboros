@@ -64,9 +64,9 @@ def create_session_started_event(
         execution_id: Associated workflow execution ID.
         seed_id: ID of the seed being executed.
         seed_goal: Goal from the seed specification.
-        project_identity: Optional canonical Project Map V1 anchor. Historical
-            and low-level callers may omit it; runner-owned new sessions supply
-            it whenever a working directory is available.
+        project_identity: Canonical Project Map V1 anchor, mandatory for
+            runner-owned new sessions. Historical and contract-free low-level
+            events may omit it.
 
     Returns:
         BaseEvent for session start.
