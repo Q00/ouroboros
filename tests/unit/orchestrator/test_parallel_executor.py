@@ -159,6 +159,9 @@ def test_python_c_pathlib_static_proof_accepts_direct_top_level_write(tmp_path, 
         "python -c \"from pathlib import Path; Path.write_text = lambda *args: None; Path('src/generated.py').write_text('x')\"",
         "python -c \"from pathlib import Path; import os; os.chdir('src'); Path('generated.py').write_text('x')\"",
         "python -c \"from pathlib import Path; other = 1; Path('src/generated.py').write_text('x')\"",
+        "PAYLOAD=x python -c \"from pathlib import Path; Path('src/generated.py').write_text('$PAYLOAD')\"",
+        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\" | cat",
+        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')",
         'python -c ""',
         "python -c from pathlib import Path",
         'python -c "' + ("(" * 5000) + '"',
@@ -7414,6 +7417,166 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "files_touched: src/preexisting.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_nonmatching_pathlib_without_shell_fallback(
+        self, tmp_path
+    ) -> None:
+        """A Python comment cannot make a nonmatching pathlib write prove the claim."""
+        claimed_file = tmp_path / "claimed.py"
+        other_file = tmp_path / "other.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        other_file.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            'python -c "from pathlib import Path; # touch claimed.py\n'
+            "Path('other.py').write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_shell_expanded_pathlib_source(
+        self, tmp_path
+    ) -> None:
+        """Raw shell text with expansion is not proof of the executed Python source."""
+        generated_file = tmp_path / "generated.py"
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        command = (
+            'PAYLOAD=x python -c "from pathlib import Path; '
+            "Path('generated.py').write_text('$PAYLOAD')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: generated.py" in result.error
         evidence_event = next(
             event
             for event in appended_events

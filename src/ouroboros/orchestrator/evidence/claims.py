@@ -438,13 +438,14 @@ def _bash_command_mutates_file_reference(
         normalized_command = command.strip().lower()
         if not normalized_command:
             continue
-        if _python_c_pathlib_write_targets_reference(
+        python_pathlib_match = _python_c_pathlib_write_reference_match(
             command,
             reference=reference,
             task_cwd=effective_cwd,
             claim_cwd=task_cwd,
-        ):
-            return True
+        )
+        if python_pathlib_match is not None:
+            return python_pathlib_match
         if not _file_reference_pattern(normalized_reference).search(normalized_command):
             continue
         if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
@@ -489,21 +490,50 @@ def _python_c_pathlib_write_targets_reference(
     claim_cwd: str | None = None,
 ) -> bool:
     """Return True when a direct Python ``-c`` pathlib write targets the claim."""
+    return (
+        _python_c_pathlib_write_reference_match(
+            command,
+            reference=reference,
+            task_cwd=task_cwd,
+            claim_cwd=claim_cwd,
+        )
+        is True
+    )
+
+
+def _python_c_pathlib_write_reference_match(
+    command: str,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    claim_cwd: str | None = None,
+) -> bool | None:
+    """Classify a Python ``-c`` pathlib write as matching, rejected, or unrelated.
+
+    ``None`` means the command is not a pathlib-write Python ``-c`` form and
+    other shell mutation evidence may still be considered. ``False`` is
+    authoritative: a recognized pathlib write did not safely prove the claim.
+    """
     if task_cwd is None:
-        return False
+        return None
     try:
         argv = shlex.split(command)
     except ValueError:
-        return False
-    if len(argv) < 3:
-        return False
-    executable = Path(argv[0]).name.lower()
-    if executable not in {"python", "python3"} and not re.fullmatch(r"python3\.\d+", executable):
-        return False
-    if argv[1] != "-c":
+        if _raw_command_mentions_python_c_pathlib_write(command):
+            return False
+        return None
+    python_index = _python_c_argv_index(argv)
+    if python_index is None:
+        return None
+    if len(argv) <= python_index + 2 or argv[python_index + 1] != "-c":
+        return None
+    source = argv[python_index + 2]
+    if not _source_mentions_pathlib_write(source):
+        return None
+    if python_index != 0 or len(argv) != python_index + 3 or _source_needs_shell_expansion(source):
         return False
     try:
-        tree = ast.parse(argv[2])
+        tree = ast.parse(source)
     except SyntaxError:
         return False
     targets = _pathlib_write_targets(tree)
@@ -518,6 +548,29 @@ def _python_c_pathlib_write_targets_reference(
         )
         for target in targets
     )
+
+
+def _python_c_argv_index(argv: list[str]) -> int | None:
+    for index, value in enumerate(argv):
+        executable = Path(value).name.lower()
+        if executable in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable):
+            return index
+        if "=" not in value:
+            return None
+    return None
+
+
+def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
+    lowered = command.lower()
+    return "python" in lowered and " -c" in lowered and _source_mentions_pathlib_write(command)
+
+
+def _source_mentions_pathlib_write(source: str) -> bool:
+    return ".write_text" in source or ".write_bytes" in source
+
+
+def _source_needs_shell_expansion(source: str) -> bool:
+    return "$" in source or "`" in source
 
 
 def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
