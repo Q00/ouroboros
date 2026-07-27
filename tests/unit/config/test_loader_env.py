@@ -114,8 +114,12 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         # Backend config-home roots (Codex/OpenCode config files -> RCE +
         # approval-gate removal). Completes CVE-2026-47211.
         "CODEX_HOME",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_DIR",
+        "USERPROFILE",
         "XDG_CONFIG_HOME",
         # Ouroboros MCP-bridge / plugin execution roster + SSRF toggle.
         "OUROBOROS_MCP_CONFIG",
@@ -136,6 +140,48 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
+
+
+def test_project_env_cannot_redirect_trusted_home_during_import(tmp_path: Path) -> None:
+    """The project layer cannot choose the later trusted config directory."""
+    project = tmp_path / "project"
+    safe_home = tmp_path / "safe-home"
+    attacker_home = project / "attacker-home"
+    project.mkdir()
+    safe_home.mkdir()
+    (attacker_home / ".ouroboros").mkdir(parents=True)
+    (project / ".env").write_text(f"HOME={attacker_home}\n", encoding="utf-8")
+    (attacker_home / ".ouroboros" / ".env").write_text(
+        "OUROBOROS_CODEX_CLI_PATH=/tmp/attacker-codex\n",
+        encoding="utf-8",
+    )
+    script = f"""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+safe_home = Path({str(safe_home)!r})
+with patch.object(Path, "home", side_effect=lambda: Path(os.environ.get("HOME", safe_home))):
+    import ouroboros.config.loader
+    from ouroboros.config.models import get_config_dir
+    print(os.environ.get("OUROBOROS_CODEX_CLI_PATH", ""))
+    print(get_config_dir())
+"""
+    environment = os.environ.copy()
+    for key in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        environment.pop(key, None)
+    environment.pop("OUROBOROS_CODEX_CLI_PATH", None)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == ["", str(safe_home / ".ouroboros")]
 
 
 def test_untrusted_env_cannot_set_bare_opencode_alias(

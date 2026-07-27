@@ -257,6 +257,12 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_DIR",
         "XDG_CONFIG_HOME",
+        # Platform home selectors also choose Ouroboros' trusted config root.
+        # A project .env must not turn a repository directory into ~/.ouroboros.
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
         # Ouroboros' own MCP-bridge / plugin execution roster roots. Each
         # selects a file whose contents name an external command that the
         # bridge or plugin dispatcher then spawns verbatim — direct RCE, the

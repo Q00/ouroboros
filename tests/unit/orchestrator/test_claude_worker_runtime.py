@@ -106,16 +106,23 @@ class TestRuntimeWiring:
 
     def test_omitted_cwd_survives_unavailable_process_cwd(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        calls: list[int] = []
+
         def unavailable_cwd() -> str:
-            raise FileNotFoundError
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise FileNotFoundError
+            return str(tmp_path / f"moving-cwd-{len(calls)}")
 
         monkeypatch.setattr("ouroboros.orchestrator.worker_runtime.os.getcwd", unavailable_cwd)
 
         runtime = build_claude_worker_runtime(persist_sessions=True)
         assert runtime.working_directory is None
         assert runtime._transport._cwd is None
+        assert len(calls) == 1
 
     @pytest.mark.parametrize("cwd", [None, "workspace"], ids=["omitted", "relative"])
     @pytest.mark.asyncio
