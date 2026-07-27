@@ -30,6 +30,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
+    BounceCause,
     DecompositionChild,
     DecompositionDecisionRecord,
     DecompositionDisposition,
@@ -62,7 +63,7 @@ from ouroboros.orchestrator.route_escalation import (
     advance_route,
 )
 from ouroboros.orchestrator.route_policy import RouteRequirements
-from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -545,6 +546,98 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     assert [event.data["route_id"] for event in judgments] == calls
     assert [event.data["route_attempt_index"] for event in judgments] == [0, 1, 2]
     assert all(event.data["route_episode_id"] == _episode_id(_seed()) for event in judgments)
+
+
+@pytest.mark.asyncio
+async def test_live_bounded_route_too_big_transitions_to_verified_composite() -> None:
+    """Routing D must not make the sole live bounce path unreachable."""
+
+    executor, _store, events = _executor(enable_decomposition=True)
+    node = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    decision = replace(
+        _split_decision(node_identity=node),
+        source=DecompositionSource.BOUNCE,
+        cause=BounceCause.TOO_BIG,
+    )
+    route_calls = 0
+
+    async def failed_atomic_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal route_calls
+        route_calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="The parent has multiple unfinished scopes.",
+                messages=(AgentMessage(type="tool", content="attempted", tool_name="Read"),),
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=VerifierVerdict(
+                    passed=False,
+                    reasons=("unfinished independent scopes",),
+                    failure_class=FailureClass.SCOPE_CREEP.value,
+                    retry_admission=RetryAdmission.REDISPATCH,
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    child_results = (
+        ACExecutionResult(
+            ac_index=0,
+            ac_content=decision.children[0].description,
+            success=True,
+            final_message="first complete",
+            depth=1,
+        ),
+        ACExecutionResult(
+            ac_index=1,
+            ac_content=decision.children[1].description,
+            success=True,
+            final_message="second complete",
+            depth=1,
+        ),
+    )
+    composite = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        final_message="composite complete",
+        is_decomposed=True,
+        sub_results=child_results,
+        decomposition_decision=decision,
+    )
+    executor._execute_ac_batch = failed_atomic_batch  # type: ignore[method-assign]
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
+    executor._try_decompose_ac = AsyncMock(return_value=decision)  # type: ignore[method-assign]
+    executor._execute_decomposition_children = AsyncMock(  # type: ignore[method-assign]
+        return_value=composite
+    )
+
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert route_calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].success and results[0].is_decomposed
+    executor._request_bounce_classification.assert_awaited_once()
+    executor._try_decompose_ac.assert_awaited_once()  # type: ignore[attr-defined]
+    executor._execute_decomposition_children.assert_awaited_once()  # type: ignore[attr-defined]
+    event_types = [event.type for event in events]
+    assert "execution.decomposition.bounce_classified" in event_types
+    assert "execution.decomposition.decision_finalized" in event_types
+    assert "execution.ac.composite_completed" in event_types
+    assert "execution.ac.route_observed" not in event_types
 
 
 @pytest.mark.asyncio

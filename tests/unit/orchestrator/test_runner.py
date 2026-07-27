@@ -6471,6 +6471,88 @@ class TestOrchestratorRunner:
         assert captured_init["decomposition_mode"] == "bounce_only"
 
     @pytest.mark.asyncio
+    async def test_legacy_preflight_resume_reaches_executor_as_bounce_only(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """An old durable run migrates before the resumed executor is built."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        legacy_contract = copy.deepcopy(runner._build_execution_contract(seed=sample_seed))
+        legacy_contract["execution_semantics"]["decomposition_mode"] = "preflight"
+        legacy_contract["frugality_proof"]["execution_semantics_fingerprint"] = (
+            runner._execution_semantics_fingerprint(legacy_contract["execution_semantics"])
+        )
+        changed, migrated_contract = runner._restore_execution_contract_snapshot(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract},
+            seed=sample_seed,
+        )
+        assert changed is True
+
+        tracker = SessionTracker.create("exec_preflight_resume", sample_seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=True,
+                    final_message="done",
+                ),
+            ),
+            success_count=1,
+            failure_count=0,
+            total_messages=1,
+        )
+        captured_init: dict[str, Any] = {}
+
+        class _FakeParallelExecutor:
+            def __init__(self, **kwargs: Any) -> None:
+                captured_init.update(kwargs)
+
+            async def execute_parallel(self, **_kwargs: Any) -> ParallelExecutionResult:
+                return parallel_result
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                _FakeParallelExecutor,
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                execution_contract=migrated_contract,
+            )
+
+        assert result.is_ok
+        assert captured_init["decomposition_mode"] == "bounce_only"
+        assert migrated_contract["execution_semantics"]["decomposition_mode"] == "bounce_only"
+
+    @pytest.mark.asyncio
     async def test_execute_parallel_passes_fat_harness_mode_to_executor(
         self,
         mock_adapter: MagicMock,

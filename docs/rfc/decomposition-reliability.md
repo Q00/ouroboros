@@ -28,12 +28,13 @@ So this RFC does two things: **delete the dead modules** (repairing fabricated
 fields in code nothing calls is motion, not progress), and **re-aim the
 decomposition discipline at `parallel_executor.py`'s actual split path**.
 
-The live default is now `bounce_only`. Stored `preflight` configuration is
-migrated to that mode, so new production runs cannot perform a decomposition
-provider effect before an evidence-backed `TOO_BIG` bounce. The historical
-`PREFLIGHT` enum remains readable only for durable-record compatibility; both
-live runner and executor constructors reject a direct `preflight` override, and
-the decomposition provider entry itself refuses any call that is not bound to a
+The live default is now `bounce_only`. Stored `preflight` configuration and an
+exact, fingerprint-valid current-format execution contract are migrated once to
+that mode, so new production runs cannot perform a decomposition provider effect
+before an evidence-backed `TOO_BIG` bounce. The historical `PREFLIGHT` enum
+remains readable only for durable-record compatibility; both live runner and
+executor constructors reject a direct `preflight` override, and the
+decomposition provider entry itself refuses any call that is not bound to a
 `TOO_BIG` bounce.
 
 The bounce trace is a typed projection, not a redacted transcript: it contains
@@ -46,8 +47,19 @@ child contract required to execute and replay the split.
 Both `bounce_classified` and `decision_finalized` are required persistence
 boundaries, not best-effort telemetry. Failure to append the bounce prevents the
 decomposition provider call; failure to append the finalized decision prevents
-child dispatch. A forced-atomic/escalated compromise therefore cannot continue
-without its required event.
+child dispatch. Before any resumed effect, the executor strictly replays the
+exact finalized-event population and then permits checkpoints/composite records
+to confirm—but never replace or contradict—the same canonical decision.
+Malformed, truncated, unknown-field, duplicated, or conflicting durable
+decisions fail closed. A historical non-split `PREFLIGHT` record may transition
+once to a new `BOUNCE` record; a finalized live bounce decision is immutable. A
+forced-atomic/escalated compromise therefore cannot continue without its
+required event.
+
+When Routing D is active, its bounded loop offers each failed atomic result to
+this gate before selecting a successor route. A trustworthy `TOO_BIG` split
+transfers the root to the durable composite completion/pause owner; all other
+failures remain atomic and continue through the finite route set.
 
 ## Context
 

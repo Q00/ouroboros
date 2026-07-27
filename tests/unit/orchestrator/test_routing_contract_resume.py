@@ -743,14 +743,31 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
-def test_current_execution_semantics_rejects_retired_preflight_authority() -> None:
+def test_current_execution_semantics_migrates_retired_preflight_authority_once() -> None:
     persisted = copy.deepcopy(_runner()._build_execution_contract())
     persisted["execution_semantics"]["decomposition_mode"] = "preflight"
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
     )
 
-    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    migrated = resumed._execution_contract
+    assert migrated["execution_semantics"]["decomposition_mode"] == "bounce_only"
+    assert migrated["frugality_proof"]["execution_semantics_fingerprint"] == (
+        OrchestratorRunner._execution_semantics_fingerprint(migrated["execution_semantics"])
+    )
+    assert resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: migrated}) is False
+
+
+def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+
+    with pytest.raises(OrchestratorError, match="invalid legacy preflight contract"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 

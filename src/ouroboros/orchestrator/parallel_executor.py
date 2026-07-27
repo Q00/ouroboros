@@ -412,6 +412,72 @@ def _composite_completion_event_sentinel(root_ac_count: int) -> int:
     return root_ac_count + 1
 
 
+def _decomposition_decision_event_sentinel(root_ac_count: int) -> int:
+    """Return the max-plus-one durable decision population for one Seed.
+
+    A historical PREFLIGHT atomic decision may transition once to the live
+    BOUNCE decision after migration. No other finalized decision can change.
+    """
+
+    if type(root_ac_count) is not int or root_ac_count < 0:
+        raise ValueError("decomposition decision root population is invalid")
+    node_population = root_ac_count * (MAX_DECOMPOSITION_REPLAY_NODES + 1)
+    return node_population * 2 + 1
+
+
+_DECOMPOSITION_DECISION_RECORD_KEYS = frozenset(
+    {
+        "schema_version",
+        "node_id",
+        "source",
+        "disposition",
+        "cause",
+        "reasons",
+        "evidence_refs",
+        "children",
+        "structural_status",
+        "semantic_status",
+        "repair_count",
+        "trustworthy",
+        "compromise_reason",
+    }
+)
+_DECOMPOSITION_DECISION_EVENT_KEYS = frozenset(
+    {
+        "identity_model",
+        "schema_version",
+        "node_id",
+        "parent_node_id",
+        "legacy_node_id",
+        "legacy_parent_node_id",
+        "legacy_node_aliases",
+        "legacy_parent_node_aliases",
+        "root_ac_index",
+        "root_ac_number",
+        "path",
+        "display_path",
+        "depth",
+        "ordinal",
+        "node_kind",
+        "execution_id",
+        "session_id",
+        "mode",
+        "child_count",
+        "source",
+        "disposition",
+        "cause",
+        "reasons",
+        "evidence_refs",
+        "children",
+        "structural_status",
+        "semantic_status",
+        "repair_count",
+        "trustworthy",
+        "compromise_reason",
+    }
+)
+
+
 _PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
     {
         "schema_version",
@@ -3953,6 +4019,15 @@ class ParallelACExecutor:
         resume_from_level = 0
         recoverable_route_pause = False
 
+        # ``decision_finalized`` is the mandatory persistence boundary. Restore
+        # it before checkpoints, route projections, or any provider entrance so
+        # a crash after finalization cannot redispatch the parent/decomposer.
+        await self._restore_finalized_decomposition_decisions(
+            seed=seed,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
             try:
@@ -4031,14 +4106,10 @@ class ParallelACExecutor:
                         saved_contexts = cp.state.get("level_contexts", [])
                         if saved_contexts:
                             level_contexts = deserialize_level_contexts(saved_contexts)
-                        raw_decisions = cp.state.get("decomposition_decisions", {})
-                        if isinstance(raw_decisions, Mapping):
-                            for raw_node_id, raw_record in raw_decisions.items():
-                                if not isinstance(raw_node_id, str):
-                                    continue
-                                restored = DecompositionDecisionRecord.from_dict(raw_record)
-                                if restored is not None and restored.node_id == raw_node_id:
-                                    self._decomposition_decisions[raw_node_id] = restored
+                        self._restore_checkpoint_decomposition_decisions(
+                            checkpoint_state.get("decomposition_decisions", {}),
+                            root_ac_count=total_acs,
+                        )
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -4132,6 +4203,11 @@ class ParallelACExecutor:
                             session_id=session_id,
                             execution_id=execution_id,
                         )
+            except RuntimeError:
+                # A matching checkpoint is durable execution authority.  Once
+                # recognized, malformed state must stop before provider entry;
+                # treating it as a cache miss would redispatch completed work.
+                raise
             except Exception as e:
                 log.warning(
                     "parallel_executor.recovery.failed",
@@ -5523,16 +5599,174 @@ class ParallelACExecutor:
                 reasons=("decomposition_decision_identity_mismatch",),
             )
         previous = self._decomposition_decisions.get(node_identity.node_id)
-        if previous != decision:
-            await self._event_emitter.emit_decomposition_decision_finalized(
-                execution_id=execution_id,
-                session_id=session_id,
-                mode=self._decomposition_mode,
-                node_identity=node_identity,
-                decision=decision,
+        if (
+            previous is not None
+            and previous != decision
+            and not self._is_valid_decision_transition(
+                previous,
+                decision,
             )
+        ):
+            raise RuntimeError("a finalized decomposition decision cannot change")
+        if previous == decision:
+            return decision
+        await self._event_emitter.emit_decomposition_decision_finalized(
+            execution_id=execution_id,
+            session_id=session_id,
+            mode=self._decomposition_mode,
+            node_identity=node_identity,
+            decision=decision,
+        )
         self._decomposition_decisions[node_identity.node_id] = decision
         return decision
+
+    @staticmethod
+    def _is_valid_decision_transition(
+        previous: DecompositionDecisionRecord,
+        current: DecompositionDecisionRecord,
+    ) -> bool:
+        """Admit only the one historical-to-live migration transition."""
+
+        return bool(
+            previous.node_id == current.node_id
+            and previous.source is DecompositionSource.PREFLIGHT
+            and previous.disposition is not DecompositionDisposition.SPLIT
+            and current.source is DecompositionSource.BOUNCE
+        )
+
+    def _publish_replayed_decomposition_decision(
+        self,
+        decision: DecompositionDecisionRecord,
+    ) -> None:
+        """Publish one replayed decision without permitting source conflicts."""
+
+        previous = self._decomposition_decisions.get(decision.node_id)
+        if previous is not None and previous != decision:
+            raise RuntimeError("durable decomposition decisions conflict")
+        self._decomposition_decisions[decision.node_id] = decision
+
+    async def _restore_finalized_decomposition_decisions(
+        self,
+        *,
+        seed: Seed,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Replay the mandatory decision event before any resumed effect.
+
+        Checkpoints and composite projections are caches of this authority, not
+        substitutes for it.  Historical PREFLIGHT decisions remain consumable,
+        while the live constructor still exposes no preflight producer path.
+        """
+
+        event_limit = _decomposition_decision_event_sentinel(len(seed.acceptance_criteria))
+        raw_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.decomposition.decision_finalized",
+            limit=event_limit,
+        )
+        try:
+            events = list(raw_events)
+        except TypeError as exc:
+            raise RuntimeError(
+                "decomposition decision replay returned a non-iterable page"
+            ) from exc
+        if len(events) >= event_limit:
+            raise RuntimeError("decomposition decision replay exceeds the admitted node population")
+        seen: dict[str, DecompositionDecisionRecord] = {}
+        for event in sorted(events, key=lambda item: (item.timestamp, item.id)):
+            if event.type != "execution.decomposition.decision_finalized":
+                continue
+            data = event.data
+            if not _mapping_has_exact_keys(data, _DECOMPOSITION_DECISION_EVENT_KEYS):
+                raise RuntimeError("decomposition decision replay has an invalid event envelope")
+            if data.get("session_id") != session_id:
+                continue
+            raw_path = data.get("path")
+            root_ac_index = data.get("root_ac_index")
+            if (
+                data.get("execution_id") != execution_id
+                or data.get("identity_model") != "execution_node_v1"
+                or type(root_ac_index) is not int
+                or not 0 <= root_ac_index < len(seed.acceptance_criteria)
+                or type(raw_path) is not list
+                or not raw_path
+                or len(raw_path) > self._max_decomposition_depth + 1
+                or any(type(ordinal) is not int or ordinal < 0 for ordinal in raw_path)
+                or raw_path[0] != root_ac_index
+                or any(ordinal >= MAX_DECOMPOSITION_CHILDREN for ordinal in raw_path[1:])
+            ):
+                raise RuntimeError("decomposition decision replay has invalid execution identity")
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id or session_id,
+                ac_index=root_ac_index,
+            )
+            for ordinal in raw_path[1:]:
+                node_identity = node_identity.child(ordinal)
+            raw_decision = {key: data[key] for key in _DECOMPOSITION_DECISION_RECORD_KEYS}
+            decision = DecompositionDecisionRecord.from_dict(raw_decision)
+            mode = data.get("mode")
+            expected_source = (
+                DecompositionSource.PREFLIGHT
+                if mode == "preflight"
+                else DecompositionSource.BOUNCE
+                if mode == "bounce_only"
+                else None
+            )
+            if (
+                decision is None
+                or decision.node_id != node_identity.node_id
+                or decision.source is not expected_source
+                or data.get("child_count") != len(decision.children)
+                or (
+                    decision.disposition is DecompositionDisposition.SPLIT
+                    and node_identity.depth >= self._max_decomposition_depth
+                )
+            ):
+                raise RuntimeError("decomposition decision replay has invalid decision authority")
+            expected_payload = {
+                **node_identity.to_event_metadata(),
+                **decision.to_dict(),
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "mode": mode,
+                "child_count": len(decision.children),
+            }
+            if data != expected_payload:
+                raise RuntimeError("decomposition decision replay is not canonical")
+            previous = seen.get(decision.node_id)
+            if previous is not None:
+                if not self._is_valid_decision_transition(previous, decision):
+                    raise RuntimeError("decomposition decision replay has an invalid transition")
+                self._decomposition_decisions[decision.node_id] = decision
+            else:
+                self._publish_replayed_decomposition_decision(decision)
+            seen[decision.node_id] = decision
+
+    def _restore_checkpoint_decomposition_decisions(
+        self,
+        raw_decisions: object,
+        *,
+        root_ac_count: int,
+    ) -> None:
+        """Strictly merge the checkpoint cache into event-owned replay state."""
+
+        if type(raw_decisions) is not dict:
+            raise RuntimeError("checkpoint decomposition decisions are malformed")
+        max_population = root_ac_count * (MAX_DECOMPOSITION_REPLAY_NODES + 1)
+        if len(raw_decisions) > max_population:
+            raise RuntimeError("checkpoint decomposition decisions exceed their bound")
+        for raw_node_id, raw_record in raw_decisions.items():
+            if type(raw_node_id) is not str:
+                raise RuntimeError("checkpoint decomposition decision id is malformed")
+            restored = DecompositionDecisionRecord.from_dict(raw_record)
+            if (
+                restored is None
+                or restored.node_id != raw_node_id
+                or restored.to_dict() != raw_record
+            ):
+                raise RuntimeError("checkpoint decomposition decision is non-canonical")
+            self._publish_replayed_decomposition_decision(restored)
 
     async def _execute_decomposition_children(
         self,
@@ -10623,6 +10857,71 @@ Respond with either ATOMIC or the structured JSON object only.
                 if not isinstance(value, ACExecutionResult):
                     self._parallel_route_resumes.pop(ac_idx, None)
                     continue
+                if (
+                    not value.is_decomposed
+                    and not value.success
+                    and not _has_usage_limit_pause(value)
+                    and value.outcome
+                    not in {ACExecutionOutcome.BLOCKED, ACExecutionOutcome.INVALID}
+                ):
+                    # A classified TOO_BIG result changes the root from an
+                    # atomic route episode into a verified composite.  Own that
+                    # transition here, before route escalation can skip the sole
+                    # live decomposition path.  Once finalized, the composite
+                    # branch below owns child replay and no top-level successor
+                    # route is admitted for this result.
+                    criterion = seed.acceptance_criteria[ac_idx]
+                    semantic_ac_key = (
+                        criterion.semantic_ac_key
+                        if isinstance(criterion, AcceptanceCriterionSpec)
+                        and criterion.semantic_ac_key is not None
+                        else derive_semantic_ac_key(criterion)
+                    )
+                    node_identity = ExecutionNodeIdentity.root(
+                        execution_context_id=execution_id or session_id,
+                        ac_index=ac_idx,
+                    )
+                    (
+                        bounce_result,
+                        bounce_decision,
+                    ) = await self._maybe_recover_with_bounce_decomposition(
+                        result=value,
+                        ac_index=ac_idx,
+                        ac_content=ac_text(criterion),
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed.goal,
+                        depth=0,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        execution_counters=execution_counters,
+                        node_identity=node_identity,
+                        ac_spec=(
+                            criterion if isinstance(criterion, AcceptanceCriterionSpec) else None
+                        ),
+                        start_time=datetime.now(UTC),
+                        semantic_ac_key=semantic_ac_key,
+                        investment_spec=(
+                            criterion.investment
+                            if isinstance(criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
+                    )
+                    if bounce_decision is not None:
+                        value = replace(
+                            value,
+                            decomposition_decision=bounce_decision,
+                            decomposition_depth_warning=(
+                                value.decomposition_depth_warning
+                                or bounce_decision.compromise_reason == "depth_cap_forced_atomic"
+                            ),
+                        )
+                    if bounce_result is not None:
+                        value = bounce_result
+                    results[positions[ac_idx]] = value
                 if value.is_decomposed:
                     if (
                         recoverable_pause_seen
@@ -11145,7 +11444,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 decomposition_decision=decision,
             )
             composite_results[root_ac_index] = restored
-            self._decomposition_decisions[decision.node_id] = decision
+            self._publish_replayed_decomposition_decision(decision)
         partial_states: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
         prior_frame_states: dict[tuple[int, str], _PartialCompositeResumeState] = {}
         prior_paths: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
@@ -11336,7 +11635,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     raise RuntimeError("partial composite replay conflicts with completion")
                 continue
             for state in states:
-                self._decomposition_decisions[state.decision.node_id] = state.decision
+                self._publish_replayed_decomposition_decision(state.decision)
                 self._partial_composite_resumes[state.decision.node_id] = state
         grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices

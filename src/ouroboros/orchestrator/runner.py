@@ -3846,6 +3846,25 @@ class OrchestratorRunner:
             and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
         )
 
+    @staticmethod
+    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
+        """Recognize only the retired current-schema preflight snapshot.
+
+        The migration changes one authority bit (``preflight`` to
+        ``bounce_only``); every other effect-bearing field must already satisfy
+        the exact current schema.  This helper never feeds a live constructor.
+        """
+
+        if (
+            not isinstance(value, Mapping)
+            or value.get("decomposition_mode") != "preflight"
+            or value.get("enable_decomposition") is not True
+        ):
+            return False
+        migrated = dict(value)
+        migrated["decomposition_mode"] = "bounce_only"
+        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
+
     def _execution_semantics_snapshot(
         self,
         execution_contract: Mapping[str, Any] | None,
@@ -6032,6 +6051,33 @@ class OrchestratorRunner:
                 },
             )
 
+        migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
+            raw_execution_semantics
+        )
+        if migrate_preflight_contract:
+            persisted_legacy_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_legacy_fingerprint, str
+            ) or persisted_legacy_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid legacy preflight contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_semantics = migrated_contract["execution_semantics"]
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_semantics, dict)
+            assert isinstance(migrated_proof, dict)
+            migrated_semantics["decomposition_mode"] = "bounce_only"
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_semantics
+
         # Version 2 predates effort/Route B fields; version 3 predates the
         # independent requested-tier field; version 4 predates the complete
         # executor-semantics snapshot. Only those exact shapes migrate.
@@ -6492,6 +6538,9 @@ class OrchestratorRunner:
             if authority_generation is None:
                 replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
             self._execution_contract = replacement
+            return True
+        if migrate_preflight_contract:
+            self._execution_contract = dict(raw_contract)
             return True
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
