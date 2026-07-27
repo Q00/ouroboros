@@ -6,12 +6,14 @@ from collections.abc import AsyncIterator
 import copy
 from datetime import UTC, datetime, timedelta
 import hashlib
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ouroboros.core.errors import ConfigError, PersistenceError
+from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -2901,11 +2903,61 @@ class TestOrchestratorRunner:
                 runtime_backend=runner._adapter.runtime_backend,
                 llm_backend=runner._adapter.llm_backend,
                 execution_contract=runner._execution_contract,
+                project_identity=resolve_project_identity(runner._adapter.working_directory),
             )
         finally:
             runner._retire_process_local_authority(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_publishes_matching_project_anchor_and_contract(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        workspace = repo_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        (repo_root / ".git").mkdir()
+        mock_adapter.working_directory = str(workspace)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(workspace),
+        )
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-project-anchor",
+            session_id="orch-project-anchor",
+        )
+
+        try:
+            assert result.is_ok
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            identity = resolve_project_identity(workspace)
+            assert {
+                key: start.data[key] for key in ("project_id", "project_root", "workspace_path")
+            } == identity.to_event_data()
+            proof = start.data["execution_contract"]["frugality_proof"]
+            assert {
+                "project_root": proof["project_root"],
+                "workspace_path": proof["workspace_path"],
+            } == identity.to_workspace_data()
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-project-anchor",
+                execution_id="exec-project-anchor",
             )
 
     @pytest.mark.asyncio

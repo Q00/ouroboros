@@ -29,6 +29,7 @@ replayable execution contract on your choice of runtime backend.
 - [Routing B — Route Admission](./rfc/routing-b-route-admission.md) - Deterministic, provider-neutral route contract and Admission Kernel
 - [Routing C — Compatibility Projection](./rfc/routing-c-route-compat.md) - Bridge existing model/effort routing into the Admission Kernel
 - [Routing D — Bounded Escalation](./rfc/routing-d-bounded-escalation.md) - Route observations and finite next-route decisions
+- [Project Map V1](./rfc/project-map-v1.md) - Canonical project identity and cross-run read-projection contract
 - [Interview Milestone Lateral Contract](./rfc/interview-milestone-lateral-contract.md) - Proposed contract for bounded lateral review at ambiguity milestone transitions
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables

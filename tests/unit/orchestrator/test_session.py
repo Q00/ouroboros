@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.session import (
     SessionRepository,
@@ -202,6 +203,29 @@ class TestSessionRepository:
         assert result.is_ok
         event = mock_event_store.append.call_args[0][0]
         assert event.data["seed_goal"] == "Ship the OpenCode runtime"
+
+    @pytest.mark.asyncio
+    async def test_create_session_persists_project_identity_atomically(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        identity = ProjectIdentity.from_root(
+            "/tmp/project-map",
+            workspace_path="packages/app",
+        )
+
+        result = await repository.create_session(
+            execution_id="exec_123",
+            seed_id="seed_456",
+            project_identity=identity,
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert {
+            key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
+        } == identity.to_event_data()
 
     @pytest.mark.asyncio
     async def test_create_session_with_custom_id(

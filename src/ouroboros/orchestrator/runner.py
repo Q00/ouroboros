@@ -53,6 +53,7 @@ from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
+from ouroboros.core.project_identity import ProjectIdentity, resolve_project_identity
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -3177,42 +3178,85 @@ class OrchestratorRunner:
         return str(Path(value).expanduser().resolve(strict=False))
 
     @classmethod
-    def _task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Return the stable source identity encoded by a managed workspace."""
-        project_root = cls._canonical_path(workspace.repo_root)
-        original_cwd = cls._canonical_path(workspace.original_cwd)
-        try:
-            relative_workspace = Path(original_cwd).relative_to(project_root)
-            workspace_path = relative_workspace.as_posix() or "."
-        except ValueError:
-            # Corrupted/legacy workspace metadata must not collapse onto a
-            # broad identity. Keep the canonical absolute source cwd instead.
-            workspace_path = original_cwd
-        return {
-            "project_root": project_root,
-            "workspace_path": workspace_path,
-        }
+    def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
+        """Resolve a managed worktree against its durable source checkout."""
+        return resolve_project_identity(
+            workspace.effective_cwd,
+            source_root=workspace.repo_root,
+            source_workspace=workspace.original_cwd,
+        )
 
-    def _proof_workspace_identity(self) -> dict[str, str] | None:
+    @classmethod
+    def _task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
+        """Return the existing nested source identity for compatibility."""
+        return cls._task_workspace_project_identity(workspace).to_workspace_data()
+
+    def _project_identity(self) -> ProjectIdentity | None:
+        """Return the single canonical identity shared by event and contract."""
+        if self._task_workspace is not None:
+            return self._task_workspace_project_identity(self._task_workspace)
+        effective_cwd = self._effective_cwd()
+        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
+            return None
+        return resolve_project_identity(effective_cwd)
+
+    def _proof_workspace_identity(
+        self,
+        project_identity: ProjectIdentity | None = None,
+    ) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
 
         Managed task worktrees have a different checkout path for every session,
         so cohort identity is anchored to their persisted source repository and
-        source-relative cwd. Non-worktree callers use their canonical effective
-        cwd as a conservative project/workspace identity; this may split cohorts
-        launched from different subdirectories, but can never mix projects.
+        source-relative cwd. Direct Git callers resolve the nearest checkout,
+        preserve a relative workspace scope, and join provable linked worktrees
+        to their primary source root. Non-Git callers retain the conservative
+        canonical effective-cwd identity.
         """
+        resolved = project_identity if project_identity is not None else self._project_identity()
+        return resolved.to_workspace_data() if resolved is not None else None
+
+    def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
+        """Reproduce the pre-Project-Map V1 nested workspace representation."""
         if self._task_workspace is not None:
             return self._task_workspace_identity(self._task_workspace)
-
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None
-        canonical_cwd = self._canonical_path(effective_cwd)
         return {
-            "project_root": canonical_cwd,
+            "project_root": self._canonical_path(effective_cwd),
             "workspace_path": ".",
         }
+
+    @staticmethod
+    def _project_start_identity(
+        progress: Mapping[str, Any],
+    ) -> tuple[bool, ProjectIdentity | None]:
+        """Parse the all-or-none immutable Project Map session anchor."""
+        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+        if not isinstance(raw_start_identity, Mapping):
+            return False, None
+        project_keys = frozenset({"project_id", "project_root", "workspace_path"})
+        present_keys = {key for key in project_keys if key in raw_start_identity}
+        if not present_keys:
+            return False, None
+        if present_keys != project_keys:
+            raise OrchestratorError(
+                message="Cannot resume with a partial project identity anchor",
+                details={"invalid": "project_identity_anchor"},
+            )
+        try:
+            identity = ProjectIdentity(
+                project_id=raw_start_identity["project_id"],
+                project_root=raw_start_identity["project_root"],
+                workspace_path=raw_start_identity["workspace_path"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid project identity anchor",
+                details={"invalid": "project_identity_anchor"},
+            ) from exc
+        return True, identity
 
     @classmethod
     def _task_resume_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
@@ -5418,6 +5462,7 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
+        project_identity: ProjectIdentity | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -5467,7 +5512,7 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        workspace_identity = self._proof_workspace_identity()
+        workspace_identity = self._proof_workspace_identity(project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint
@@ -5504,6 +5549,21 @@ class OrchestratorRunner:
         if frozenset(contract) != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
             raise AssertionError("execution contract v9 builder emitted a non-canonical shape")
         return contract
+
+    def _build_new_session_contract(
+        self,
+        *,
+        seed: Seed,
+        authority_generation: _ProcessLocalAuthorityGeneration,
+    ) -> tuple[dict[str, Any], ProjectIdentity | None]:
+        """Resolve one project identity and bind it to both publication surfaces."""
+        project_identity = self._project_identity()
+        contract = self._build_execution_contract(
+            seed=seed,
+            authority_generation=authority_generation,
+            project_identity=project_identity,
+        )
+        return contract, project_identity
 
     async def _emit_run_configuration_resolved(
         self,
@@ -6239,7 +6299,6 @@ class OrchestratorRunner:
         current_seed_fingerprint = (
             self._seed_semantics_fingerprint(seed) if seed is not None else None
         )
-        active_workspace = self._proof_workspace_identity()
         persisted_workspace = (
             None
             if persisted_project_root is None and persisted_workspace_path is None
@@ -6248,6 +6307,36 @@ class OrchestratorRunner:
                 "workspace_path": persisted_workspace_path,
             }
         )
+        has_project_anchor, start_project_identity = self._project_start_identity(progress)
+        if has_project_anchor:
+            assert start_project_identity is not None
+            active_project_identity = self._project_identity()
+            if (
+                persisted_workspace != start_project_identity.to_workspace_data()
+                or active_project_identity != start_project_identity
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with conflicting project identity",
+                    details={
+                        "persisted_workspace": persisted_workspace,
+                        "start_project_identity": start_project_identity.to_event_data(),
+                        "current_project_identity": (
+                            active_project_identity.to_event_data()
+                            if active_project_identity is not None
+                            else None
+                        ),
+                    },
+                )
+            active_workspace = active_project_identity.to_workspace_data()
+        else:
+            # Historical v9 session starts predate the additive project anchor.
+            # Preserve their exact direct-cwd representation rather than
+            # rewriting durable resume authority under the new resolver.
+            active_workspace = (
+                self._proof_workspace_identity()
+                if prepared_live_execution
+                else self._legacy_proof_workspace_identity()
+            )
         if active_workspace != persisted_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different project workspace",
@@ -8323,8 +8412,8 @@ class OrchestratorRunner:
                 )
 
         try:
-            execution_contract = await asyncio.to_thread(
-                self._build_execution_contract,
+            execution_contract, project_identity = await asyncio.to_thread(
+                self._build_new_session_contract,
                 seed=seed,
                 authority_generation=authority_generation,
             )
@@ -8377,6 +8466,8 @@ class OrchestratorRunner:
             "llm_backend": getattr(self._adapter, "llm_backend", None),
             "execution_contract": execution_contract,
         }
+        if project_identity is not None:
+            create_session_kwargs["project_identity"] = project_identity
         try:
             if (
                 "acceptance_root_indices"

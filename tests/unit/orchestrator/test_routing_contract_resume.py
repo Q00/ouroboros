@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.core.project_identity import project_id_for_root
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -1901,6 +1902,155 @@ def test_managed_worktrees_share_canonical_source_workspace_identity(tmp_path: P
     assert len(first_proof["seed_fingerprint"]) == 64
 
 
+def test_direct_nested_checkout_uses_same_project_identity_contract(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+    runner = _runner(cwd=str(workspace))
+
+    identity = runner._project_identity()
+    proof = runner._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )["frugality_proof"]
+
+    assert identity is not None
+    assert identity.project_id == project_id_for_root(repo_root)
+    assert proof["project_root"] == identity.project_root
+    assert proof["workspace_path"] == identity.workspace_path == "packages/app"
+
+
+def test_pre_anchor_nested_contract_resumes_with_legacy_cwd_identity(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+    original = _runner(cwd=str(workspace))
+    persisted = original._build_execution_contract(seed=_seed())
+    persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
+    persisted["frugality_proof"]["workspace_path"] = "."
+    resumed = _runner(cwd=str(workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "legacy-exec",
+                "seed_id": "seed-routing-contract",
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+
+
+def test_project_anchor_binds_nested_contract_and_current_workspace(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    (repo_root / ".git").mkdir()
+    original = _runner(cwd=str(workspace))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    resumed = _runner(cwd=str(workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "anchored-exec",
+                "seed_id": "seed-routing-contract",
+                **identity.to_event_data(),
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+
+
+@pytest.mark.parametrize(
+    "start_identity",
+    [
+        {"project_id": "project_0123456789abcdef0123456789abcdef"},
+        {
+            "project_id": "project_invalid",
+            "project_root": "/tmp/project",
+            "workspace_path": ".",
+        },
+    ],
+)
+def test_project_anchor_rejects_partial_or_invalid_identity(
+    start_identity: dict[str, str],
+) -> None:
+    runner = _runner()
+    persisted = runner._build_execution_contract(seed=_seed())
+
+    with pytest.raises(OrchestratorError, match="project identity anchor"):
+        runner._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: start_identity,
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_nested_contract_conflict(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    runner = _runner(cwd=str(repo_root))
+    identity = runner._project_identity()
+    assert identity is not None
+    persisted = runner._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    persisted["frugality_proof"]["workspace_path"] = "packages/other"
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        runner._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_current_project_change(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    (first_root / ".git").mkdir()
+    (second_root / ".git").mkdir()
+    original = _runner(cwd=str(first_root))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    resumed = _runner(cwd=str(second_root))
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        resumed._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_start_event_contract_is_resume_fallback_without_progress_row() -> None:
     runner = _runner()
@@ -1970,6 +2120,44 @@ async def test_legacy_start_identity_survives_progress_replay() -> None:
         "runtime_backend": "claude",
         "llm_backend": "anthropic",
     }
+
+
+@pytest.mark.asyncio
+async def test_project_start_anchor_survives_progress_replay() -> None:
+    start = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="project-start-identity",
+        data={
+            "execution_id": "project-exec",
+            "seed_id": "seed-routing-contract",
+            "project_id": "project_0123456789abcdef0123456789abcdef",
+            "project_root": "/tmp/project",
+            "workspace_path": "packages/app",
+        },
+    )
+    overwrite_attempt = BaseEvent(
+        type="orchestrator.progress.updated",
+        aggregate_type="session",
+        aggregate_id="project-start-identity",
+        data={
+            "progress": {
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "project_id": "project_tampered",
+                    "project_root": "/tmp/other",
+                    "workspace_path": ".",
+                }
+            }
+        },
+    )
+    store = AsyncMock()
+    store.replay.return_value = [start, overwrite_attempt]
+    store.query_session_related_events.return_value = []
+
+    result = await SessionRepository(store).reconstruct_session("project-start-identity")
+
+    assert result.is_ok
+    assert result.value.progress[SESSION_START_IDENTITY_PROGRESS_KEY] == start.data
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
 from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
@@ -53,6 +54,8 @@ def create_session_started_event(
     execution_id: str,
     seed_id: str,
     seed_goal: str,
+    *,
+    project_identity: ProjectIdentity | None = None,
 ) -> BaseEvent:
     """Create session started event.
 
@@ -61,20 +64,26 @@ def create_session_started_event(
         execution_id: Associated workflow execution ID.
         seed_id: ID of the seed being executed.
         seed_goal: Goal from the seed specification.
+        project_identity: Optional canonical Project Map V1 anchor. Historical
+            and low-level callers may omit it; runner-owned new sessions supply
+            it whenever a working directory is available.
 
     Returns:
         BaseEvent for session start.
     """
+    data = {
+        "execution_id": execution_id,
+        "seed_id": seed_id,
+        "seed_goal": seed_goal,
+        "start_time": datetime.now(UTC).isoformat(),
+    }
+    if project_identity is not None:
+        data.update(project_identity.to_event_data())
     return BaseEvent(
         type="orchestrator.session.started",
         aggregate_type="session",
         aggregate_id=session_id,
-        data={
-            "execution_id": execution_id,
-            "seed_id": seed_id,
-            "seed_goal": seed_goal,
-            "start_time": datetime.now(UTC).isoformat(),
-        },
+        data=data,
     )
 
 

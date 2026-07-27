@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ouroboros.core.errors import PersistenceError
+from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 from ouroboros.observability.logging import get_logger
@@ -677,6 +678,7 @@ class SessionRepository:
         llm_backend: str | None = None,
         execution_contract: Mapping[str, Any] | None = None,
         acceptance_root_indices: Iterable[int] | None = None,
+        project_identity: ProjectIdentity | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -695,6 +697,8 @@ class SessionRepository:
             acceptance_root_indices: Immutable root AC indices persisted before
                 the session is exposed, so pre-execution terminalization cannot
                 lose undecided roots.
+            project_identity: Canonical cross-run project/workspace anchor. It
+                is additive metadata only and grants no execution authority.
 
         Returns:
             Result containing new SessionTracker.
@@ -716,6 +720,8 @@ class SessionRepository:
             event_data["runtime_backend"] = runtime_backend
         if llm_backend:
             event_data["llm_backend"] = llm_backend
+        if project_identity is not None:
+            event_data.update(project_identity.to_event_data())
         if execution_contract is not None:
             event_data["execution_contract"] = sanitize_event_data_for_persistence(
                 dict(execution_contract)
@@ -1174,6 +1180,9 @@ class SessionRepository:
                     "seed_goal",
                     "runtime_backend",
                     "llm_backend",
+                    "project_id",
+                    "project_root",
+                    "workspace_path",
                 )
                 if key in start_event.data
             }
