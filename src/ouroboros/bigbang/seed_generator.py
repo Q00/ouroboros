@@ -502,6 +502,91 @@ def _parse_ontology_fields(raw_value: object, *, strict: bool = False) -> tuple[
     return tuple(fields)
 
 
+def _parse_context_references(
+    raw_value: object, *, strict: bool = False
+) -> tuple[ContextReference, ...]:
+    """Parse CONTEXT_REFERENCES from JSON object arrays or the legacy pipe list.
+
+    Mirrors the other #1729 object-array parsers: the extraction format
+    requests a single-line JSON array of ``{"path", "role", "summary"}``
+    objects — ``summary`` is optional and defaults to empty — so colons in
+    paths (e.g. Windows drives) and colons/pipes in summaries survive as
+    data. Strict mode raises on anything else so the retry path reformats;
+    lenient mode keeps the historical ``path:role:summary`` split where the
+    summary absorbs further colons, skips malformed entries, and never
+    raises.
+    """
+    field_label = "CONTEXT_REFERENCES"
+
+    def _build(entry: object) -> ContextReference | None:
+        if isinstance(entry, ContextReference):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            summary = entry.get("summary", "")
+            if not isinstance(summary, str):
+                raise ValueError(
+                    f"{field_label} entry field 'summary' must be a string; got {summary!r}."
+                )
+            return ContextReference(
+                path=_require_object_string(entry, "path", field_label=field_label),
+                role=_require_object_string(entry, "role", field_label=field_label),
+                summary=summary.strip(),
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[ContextReference, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    references: list[ContextReference] = []
+    for ref_str in text.split("|"):
+        ref_str = ref_str.strip()
+        if not ref_str:
+            continue
+        parts = ref_str.split(":")
+        if len(parts) < 2:
+            continue
+        path = parts[0].strip()
+        role = parts[1].strip()
+        if not path or not role:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        references.append(
+            ContextReference(
+                path=path,
+                role=role,
+                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
+            )
+        )
+    return tuple(references)
+
+
 def _parse_acceptance_criteria_contracts(
     raw_value: object,
 ) -> tuple[AcceptanceCriterionSpec | str, ...]:
@@ -1046,7 +1131,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             return "PROJECT_TYPE: greenfield"
         return (
             "PROJECT_TYPE: brownfield\n"
-            "CONTEXT_REFERENCES: <path>:<role primary|reference>:<summary> | ...\n"
+            'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
             'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
             'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
             "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
@@ -1267,6 +1352,10 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             requirements["ontology_fields"] = _parse_ontology_fields(
                 requirements["ontology_fields"], strict=True
             )
+        if "context_references" in requirements:
+            requirements["context_references"] = _parse_context_references(
+                requirements["context_references"], strict=True
+            )
 
         return requirements
 
@@ -1314,22 +1403,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         brownfield_context = BrownfieldContext()
         project_type = requirements.get("project_type", "greenfield").strip().lower()
         if project_type == "brownfield":
-            # Parse context references: path:role:summary | ...
-            context_refs: list[ContextReference] = []
-            if "context_references" in requirements and requirements["context_references"]:
-                for ref_str in requirements["context_references"].split("|"):
-                    ref_str = ref_str.strip()
-                    if not ref_str:
-                        continue
-                    parts = ref_str.split(":")
-                    if len(parts) >= 2:
-                        context_refs.append(
-                            ContextReference(
-                                path=parts[0].strip(),
-                                role=parts[1].strip() if len(parts) > 1 else "reference",
-                                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
-                            )
-                        )
+            # Parse context references (JSON object arrays preferred; legacy
+            # colon/pipe lists supported for stored requirements)
+            context_refs = _parse_context_references(requirements.get("context_references"))
 
             # Parse existing patterns (lenient: stored data has no retry path)
             existing_patterns = _parse_string_array_values(

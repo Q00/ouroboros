@@ -65,7 +65,7 @@ Format: single-line JSON array of objects with "name", "description", and "crite
 ### 7. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
-- **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
+- **CONTEXT_REFERENCES**: single-line JSON array of objects with "path", "role" (primary or reference), and optional "summary"
 - **EXISTING_PATTERNS**: Key patterns that must be followed (single-line JSON array of strings)
 - **EXISTING_DEPENDENCIES**: Key dependencies to reuse (single-line JSON array of strings)
 
@@ -85,7 +85,7 @@ ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|objec
 EVALUATION_PRINCIPLES: [{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}, ...]
 EXIT_CONDITIONS: [{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}, ...]
 PROJECT_TYPE: greenfield|brownfield
-CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
+CONTEXT_REFERENCES: [{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}, ...]
 EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]
 EXISTING_DEPENDENCIES: ["<dep 1>", "<dep 2>", ...]
 ```

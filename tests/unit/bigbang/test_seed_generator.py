@@ -21,6 +21,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _parse_context_references,
     _parse_evaluation_principles,
     _parse_exit_conditions,
     _parse_ontology_fields,
@@ -32,6 +33,7 @@ from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
+    ContextReference,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -1568,6 +1570,60 @@ class TestObjectArrayExtractionContract:
             '[{"name": "x", "description": "d", "weight": -1e999}]', strict=True
         )
         assert json_neg_strict[0].weight == 0.0
+
+    def test_context_refs_strict_parses_json_with_colons_in_paths(self) -> None:
+        refs = _parse_context_references(
+            '[{"path": "C:/repos/api", "role": "primary",'
+            ' "summary": "API layer: handlers | middleware"}]',
+            strict=True,
+        )
+        assert refs == (
+            ContextReference(
+                path="C:/repos/api",
+                role="primary",
+                summary="API layer: handlers | middleware",
+            ),
+        )
+        no_summary = _parse_context_references(
+            '[{"path": "/repo/lib", "role": "reference"}]', strict=True
+        )
+        assert no_summary[0].summary == ""
+
+    def test_context_refs_strict_rejects_legacy_and_malformed(self) -> None:
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_context_references("/repo/api:primary:API layer", strict=True)
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_context_references("", strict=True)
+        assert _parse_context_references("[]", strict=True) == ()
+        malformed = (
+            '["not an object"]',
+            '[{"role": "primary"}]',
+            '[{"path": "/repo", "role": "  "}]',
+            '[{"path": "/repo", "role": "primary", "summary": 42}]',
+        )
+        for case in malformed:
+            with pytest.raises(ValueError, match="CONTEXT_REFERENCES"):
+                _parse_context_references(case, strict=True)
+
+    def test_context_refs_lenient_keeps_legacy_split_and_never_raises(self) -> None:
+        legacy = _parse_context_references(
+            "/repo/api:primary:API layer: v2 | /repo/lib:reference | :primary:bad | x"
+        )
+        assert legacy == (
+            ContextReference(path="/repo/api", role="primary", summary="API layer: v2"),
+            ContextReference(path="/repo/lib", role="reference", summary=""),
+        )
+        stored_json = _parse_context_references(
+            '[{"path": "/a", "role": "primary", "summary": "s | t"}, {"role": "x"}, 7]'
+        )
+        assert len(stored_json) == 1
+        assert stored_json[0].summary == "s | t"
+        # Bracket-led malformed JSON falls back to the legacy split (junk
+        # tolerated, never raises) — same contract as the other parsers.
+        assert isinstance(_parse_context_references('[{"path":]'), tuple)
+        assert _parse_context_references(None) == ()
+        model = ContextReference(path="/m", role="reference", summary="")
+        assert _parse_context_references([model]) == (model,)
 
     def test_ontology_strict_parses_json_object_arrays(self) -> None:
         fields = _parse_ontology_fields(
