@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+from xml.parsers.expat import ExpatError
 
 ZCODE_SCRIPT_SUFFIXES = (".cjs", ".js", ".mjs")
 ZCODE_NODE_BUNDLE_METADATA = ".node-bundle-meta.json"
@@ -66,7 +67,7 @@ def resolve_zcode_electron_node_path(cli_path: str | Path | None) -> str | None:
     try:
         with info_plist.open("rb") as stream:
             bundle_info = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException) as exc:
+    except (OSError, plistlib.InvalidFileException, ExpatError) as exc:
         msg = f"ZCode app bundle metadata is present but {info_plist} is unreadable: {exc}"
         raise RuntimeError(msg) from exc
 

@@ -145,6 +145,12 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
     try:
         with open(config_path, "rb") as f:
             return tomllib.load(f)
+    except OSError as e:
+        # ``exists()`` above does not guarantee the file is readable: an unreadable
+        # mode, a directory in its place, or a delete between the two calls all raise
+        # here. Fall back to built-in defaults so the docstring's contract holds.
+        log.warning("mechanical.toml_read_error", path=str(config_path), error=str(e))
+        return None
     except tomllib.TOMLDecodeError as e:
         log.warning("mechanical.toml_parse_error", path=str(config_path), error=str(e))
         return None

@@ -122,6 +122,16 @@ def test_app_bundle_non_dictionary_plist_fails_closed(tmp_path: Path) -> None:
         resolve_zcode_electron_node_path(cli_path)
 
 
+def test_app_bundle_malformed_plist_xml_fails_closed(tmp_path: Path) -> None:
+    """Malformed plist XML surfaces the actionable RuntimeError, not a raw parser error."""
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    info_plist = cli_path.parents[2] / "Info.plist"
+    info_plist.write_bytes(b"<?xml version='1.0'?><plist><dict>")
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
 @pytest.mark.parametrize("executable_name", ["../ZCode", "nested/ZCode", r"..\ZCode", ".."])
 def test_app_bundle_rejects_executable_path_traversal(
     tmp_path: Path,

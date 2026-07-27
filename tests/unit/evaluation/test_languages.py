@@ -197,3 +197,17 @@ class TestBuildMechanicalConfigFromToml:
         config = build_mechanical_config(tmp_path)
         # TOML parse failed → fall back to empty defaults, not crash.
         assert config.lint_command is None
+
+    def test_unreadable_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Existing but unopenable toml falls back to defaults instead of raising.
+
+        A directory in the config's place reproduces the general case — an
+        unreadable mode, or a delete racing the ``exists()`` probe — without
+        depending on the privileges of the user running the suite.
+        """
+        ouroboros_dir = tmp_path / ".ouroboros"
+        ouroboros_dir.mkdir(exist_ok=True)
+        (ouroboros_dir / "mechanical.toml").mkdir()
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+        assert config.test_command is None
