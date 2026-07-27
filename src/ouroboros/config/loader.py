@@ -143,6 +143,23 @@ _RUNTIME_CONTROL_ENV_KEYS = {
 }
 
 
+def _is_assignable_env_key(key: str) -> bool:
+    """Return whether `key` can be written to ``os.environ`` at all.
+
+    python-dotenv's grammar is wider than the environment's. A quoted
+    left-hand side such as ``'BROKEN=KEY'=value`` parses to the key
+    ``BROKEN=KEY``, and CPython rejects any name containing ``=`` or NUL with
+    ``ValueError: illegal environment variable name``.
+
+    This module runs ``_load_env_file`` at import, so an unhandled rejection
+    there would stop every Ouroboros command from starting -- a denial of
+    service reachable from a cloned repository's ``.env``. Skipping the entry
+    keeps startup alive and matches the previous parser, which also refused
+    keys containing whitespace.
+    """
+    return bool(key) and not any(ch == "=" or ch == "\0" or ch.isspace() for ch in key)
+
+
 def _is_placeholder_api_key(value: str) -> bool:
     """Treat common template placeholders as unset."""
     candidate = value.strip()
@@ -339,6 +356,9 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
         if not key or parsed_value is None:
             continue
 
+        if not _is_assignable_env_key(key):
+            continue
+
         if not trusted and _is_untrusted_env_denied_key(key):
             # Untrusted project-directory .env must not redirect which
             # binary Ouroboros executes (remote code execution guard).
@@ -349,7 +369,14 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
 
         current_value = os.environ.get(key)
         if current_value is None or _is_placeholder_api_key(current_value):
-            os.environ[key] = parsed_value
+            try:
+                os.environ[key] = parsed_value
+            except ValueError:
+                # Defence in depth. `_is_assignable_env_key` already rejects
+                # everything CPython refuses, but this module is imported at
+                # startup: a future parser change must degrade to skipping one
+                # entry, never to an unstartable process.
+                continue
 
 
 # The project-directory .env travels with whatever repository the user

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
-from ouroboros.config.loader import _UNTRUSTED_ENV_DENYLIST, _load_env_file
+from ouroboros.config.loader import (
+    _UNTRUSTED_ENV_DENYLIST,
+    _is_assignable_env_key,
+    _load_env_file,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -486,3 +492,79 @@ class TestEnvValueGrammar:
         _load_env_file(env_file, trusted=False)
 
         assert os.environ[denied] == "original"
+
+
+class TestHostileEnvCannotBlockStartup:
+    """`_load_env_file` runs at module import, so it must never raise.
+
+    python-dotenv's grammar is wider than the environment's: a quoted
+    left-hand side like `'BROKEN=KEY'=value` parses to the key `BROKEN=KEY`,
+    which CPython refuses with `ValueError: illegal environment variable
+    name`. Unhandled, that turns a cloned repository's `.env` into a denial of
+    service against every Ouroboros command.
+    """
+
+    HOSTILE = "'BROKEN=KEY'=value\n"
+
+    def test_key_containing_equals_is_skipped(self, tmp_path: Path, monkeypatch) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(self.HOSTILE, encoding="utf-8")
+
+        _load_env_file(env_file, trusted=True)
+
+        assert "BROKEN=KEY" not in os.environ
+
+    def test_hostile_key_does_not_stop_later_entries(self, tmp_path: Path, monkeypatch) -> None:
+        """One bad line must cost one entry, not the rest of the file."""
+        monkeypatch.delenv("SURVIVOR", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text(self.HOSTILE + "SURVIVOR=ok\n", encoding="utf-8")
+
+        _load_env_file(env_file, trusted=True)
+
+        assert os.environ.get("SURVIVOR") == "ok"
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("BROKEN=KEY", id="equals"),
+            pytest.param("HAS SPACE", id="space"),
+            pytest.param("HAS\tTAB", id="tab"),
+            pytest.param("", id="empty"),
+            pytest.param("NUL\0KEY", id="nul"),
+        ],
+    )
+    def test_unassignable_keys_are_rejected(self, key: str) -> None:
+        assert _is_assignable_env_key(key) is False
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("PLAIN", id="plain"),
+            pytest.param("WITH_UNDERSCORE", id="underscore"),
+            pytest.param("MiXeD123", id="mixed-case-digits"),
+            pytest.param("OUROBOROS_RUNTIME_BACKEND", id="real-key"),
+        ],
+    )
+    def test_ordinary_keys_are_accepted(self, key: str) -> None:
+        assert _is_assignable_env_key(key) is True
+
+    def test_import_survives_a_hostile_project_env(self, tmp_path: Path) -> None:
+        """The regression the blocker describes: startup, not just this function.
+
+        Imports the loader in a fresh interpreter whose cwd holds the hostile
+        `.env`, because the module-level `_load_env_file(Path(".env"))` call is
+        what a crash would take down.
+        """
+        (tmp_path / ".env").write_text(self.HOSTILE, encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, "-c", "import ouroboros.config.loader; print('started')"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "started" in result.stdout
+        assert "illegal environment variable name" not in result.stderr
