@@ -231,9 +231,7 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "rev-parse",
         "--is-bare-repository",
     )
-    if common_bare == b"true\n":
-        return common_dir if _git_head_is_valid(common_dir) else None
-    if common_bare != b"false\n":
+    if common_bare not in {b"true\n", b"false\n"}:
         return None
 
     output = _run_git(
@@ -246,15 +244,23 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
     )
     if output is None:
         return None
-    first_record = output.split(b"\x00", 1)[0]
     prefix = b"worktree "
-    if not first_record.startswith(prefix):
-        return None
     try:
-        raw_root = first_record.removeprefix(prefix).decode("utf-8", errors="strict")
-        main_worktree = _canonical_directory(raw_root)
+        worktrees = tuple(
+            _canonical_directory(record.removeprefix(prefix).decode("utf-8", errors="strict"))
+            for record in output.split(b"\x00")
+            if record.startswith(prefix)
+        )
     except (UnicodeError, ProjectIdentityError):
         return None
+    if not worktrees:
+        return None
+    if common_bare == b"true\n":
+        active_is_common = start == common_dir or common_dir in start.parents
+        owned = checkout_root is None or checkout_root in worktrees or active_is_common
+        return common_dir if owned and _git_head_is_valid(common_dir) else None
+
+    main_worktree = worktrees[0]
     # ``worktree list`` identifies the primary checkout, while rev-parse asks
     # Git's own config parser to apply an explicit ``core.worktree`` owner.
     # It fails for a bare primary, where the worktree-list path is the desired
@@ -267,9 +273,15 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--path-format=absolute",
         "--show-toplevel",
     )
-    if top_level is None:
-        return main_worktree
-    return _git_path(top_level)
+    project_root = main_worktree if top_level is None else _git_path(top_level)
+    if project_root is None:
+        return None
+    # Git accepting an explicit --git-dir does not prove that the active
+    # checkout owns it.  Membership must come from Git's worktree population or
+    # from Git's own configured top-level decision (an explicit core.worktree).
+    if checkout_root is not None and checkout_root not in (*worktrees, project_root):
+        return None
+    return project_root
 
 
 def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
