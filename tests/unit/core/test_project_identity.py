@@ -276,6 +276,69 @@ def test_worktree_config_owner_joins_direct_linked_and_managed_identity(
     assert direct_identity.workspace_path == "packages/app"
 
 
+def test_tilde_core_worktree_is_literal_and_independent_of_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        "[core]\n\tbare = false\n\tworktree = ~\n",
+        encoding="utf-8",
+    )
+    literal_owner = common_git / "~"
+    owner_workspace = literal_owner / "packages" / "app"
+    owner_workspace.mkdir(parents=True)
+    (literal_owner / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "generated" / "packages" / "app"
+    generated.mkdir(parents=True)
+
+    home_aliases = (tmp_path / "home-one", tmp_path / "home-two")
+    for home_alias in home_aliases:
+        home_alias.mkdir()
+        (home_alias / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+
+    identities_by_home: list[tuple[ProjectIdentity, ProjectIdentity, ProjectIdentity]] = []
+    alias_identities: list[ProjectIdentity] = []
+    for home_alias in home_aliases:
+        monkeypatch.setenv("HOME", str(home_alias))
+        identities_by_home.append(
+            (
+                resolve_project_identity(owner_workspace),
+                resolve_project_identity(linked_workspace),
+                resolve_project_identity(
+                    generated,
+                    source_root=linked,
+                    source_workspace=linked_workspace,
+                ),
+            )
+        )
+        alias_identities.append(resolve_project_identity(home_alias))
+
+    expected = identities_by_home[0][0]
+    assert all(identity == expected for group in identities_by_home for identity in group)
+    assert expected.project_root == str(literal_owner.resolve())
+    assert expected.workspace_path == "packages/app"
+    assert [identity.project_root for identity in alias_identities] == [
+        str(home_alias.resolve()) for home_alias in home_aliases
+    ]
+    assert all(identity.project_id != expected.project_id for identity in alias_identities)
+
+
 def test_continued_section_header_cannot_claim_linked_or_managed_identity(
     tmp_path: Path,
 ) -> None:
