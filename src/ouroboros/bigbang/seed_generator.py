@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
@@ -150,6 +151,10 @@ def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> floa
     of falling back to 1.0 on anything unparseable.
     """
     if raw_weight is None:
+        if strict:
+            raise ValueError(
+                f"{field_label} entry field 'weight' must be omitted or a number; got null."
+            )
         return 1.0
     if isinstance(raw_weight, bool) or not isinstance(raw_weight, int | float):
         if strict:
@@ -237,9 +242,13 @@ def _parse_evaluation_principles(
             return EvaluationPrinciple(
                 name=_require_object_string(entry, "name", field_label=field_label),
                 description=_require_object_string(entry, "description", field_label=field_label),
-                weight=_clamp_weight(entry.get("weight"), field_label=field_label, strict=strict),
+                weight=(
+                    _clamp_weight(entry["weight"], field_label=field_label, strict=strict)
+                    if "weight" in entry
+                    else 1.0
+                ),
             )
-        except ValueError:
+        except (ValueError, TypeError, PydanticValidationError):
             if strict:
                 raise
             return None
@@ -253,6 +262,8 @@ def _parse_evaluation_principles(
         return ()
     text = raw_value.strip()
     if not text:
+        if strict:
+            raise ValueError(f"{field_label} must be an explicit JSON array; got a blank value.")
         return ()
     decoded = _decode_object_array(text, field_label=field_label, strict=strict)
     if decoded is not None:
@@ -266,10 +277,14 @@ def _parse_evaluation_principles(
         parts = principle_str.split(":")
         if len(parts) < 2:
             continue
+        name = parts[0].strip()
+        description = parts[1].strip()
+        if not name or not description:
+            continue
         principles.append(
             EvaluationPrinciple(
-                name=parts[0].strip(),
-                description=parts[1].strip(),
+                name=name,
+                description=description,
                 weight=_clamp_weight(
                     parts[2].strip() if len(parts) >= 3 else None,
                     field_label=field_label,
@@ -312,7 +327,7 @@ def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[
                     aliases=("evaluation_criteria",),
                 ),
             )
-        except ValueError:
+        except (ValueError, TypeError, PydanticValidationError):
             if strict:
                 raise
             return None
@@ -326,6 +341,8 @@ def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[
         return ()
     text = raw_value.strip()
     if not text:
+        if strict:
+            raise ValueError(f"{field_label} must be an explicit JSON array; got a blank value.")
         return ()
     decoded = _decode_object_array(text, field_label=field_label, strict=strict)
     if decoded is not None:
@@ -339,11 +356,16 @@ def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[
         parts = condition_str.split(":")
         if len(parts) < 3:
             continue
+        name = parts[0].strip()
+        description = parts[1].strip()
+        criteria = ":".join(parts[2:]).strip()
+        if not name or not description or not criteria:
+            continue
         conditions.append(
             ExitCondition(
-                name=parts[0].strip(),
-                description=parts[1].strip(),
-                evaluation_criteria=":".join(parts[2:]).strip(),
+                name=name,
+                description=description,
+                evaluation_criteria=criteria,
             )
         )
     return tuple(conditions)
