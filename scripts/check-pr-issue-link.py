@@ -1,158 +1,114 @@
 #!/usr/bin/env python3
-"""Extract the issue numbers a pull request body visibly references.
+"""Extract the issues a rendered pull request body links to.
 
 Per Q00/ouroboros#1777, every non-exempt PR must be traceable to an issue.
 A board audit on 2026-07-28 closed 11 issues, 6 of which were already fully
 implemented on `main` -- the work had landed but no PR linked back.
 
-This script owns one half of that gate: *which numbers does a reader of the
-rendered body actually see?* It deliberately does not decide whether those
-numbers exist or whether they are issues rather than pull requests --
-`#N` is a shared namespace, and only GitHub can resolve it. The workflow
-does that resolution on the numbers reported here, and separately consults
-GitHub's own ``closingIssuesReferences`` for sidebar-linked issues.
+The question this answers is "what does a reader of the rendered body see?",
+so the input is GitHub's own rendering of the body (``POST /markdown`` with
+``mode=gfm`` and a repository ``context``), not its Markdown source. The
+workflow renders; this script reads the anchors out.
 
-Why this is not a one-line grep:
-    ``.github/PULL_REQUEST_TEMPLATE.md`` mentions ``#1234``, ``#1256``, and
-    ``#1258`` inside HTML comments as instructions to the author. A naive
-    scan therefore passes an *unedited template*, which defeats the gate for
-    exactly the PRs it exists to catch. Non-rendered regions must be removed
-    before scanning, so the check sees what a reviewer sees.
+Why not scan the source text:
+    Four review rounds on the original regex approach each found another
+    construct that looks like ``#N`` but renders as something else: HTML
+    comments closed and unclosed, fenced and indented and blockquoted code,
+    inline code, URL fragments, character entities, raw-text HTML blocks,
+    link reference definitions, and inline link destinations. Markdown
+    context is not a regular language, and GitHub's renderer is the only
+    authority on what GitHub shows.
 
-Stripped before scanning, in this order:
-    - HTML comments ``<!-- ... -->`` (the template's instructions live here)
-    - raw-text HTML blocks ``<pre>``/``<code>``/``<script>``/``<style>``,
-      content included -- ``<pre>#4242</pre>`` renders as a literal
-    - fenced code blocks ``` / ~~~ (sample diffs, logs, shell transcripts)
-    - indented code blocks (four spaces or a tab), e.g. a pasted traceback
-    - inline code spans ``` `...` `` (e.g. a literal ``#1234`` in prose)
-    - autolinks and URLs (``.../pull/1234#issuecomment-...`` fragments)
-    - remaining HTML tags, then HTML entities -- ``&#1234;`` is a character
-      reference, not an issue reference, and its digits must not survive
+Delegating also settles two questions the scanner could not answer at all:
 
-A reference is any ``#<digits>`` that survives. Both ``Closes #123`` and
-``Part of #123`` qualify: most PRs here are slices of an epic and must not
-auto-close their parent, so the gate requires a trail, not a closure.
+    * `#N` is a shared namespace. GitHub renders an issue as
+      ``/{owner}/{repo}/issues/N`` and a pull request as ``.../pull/N``, so
+      "See PR #1735" no longer counts as an issue trail.
+    * GitHub autolinks only numbers that exist. ``#0`` and ``#999999`` render
+      as plain text, so a typo cannot satisfy the gate.
 
 Run locally:
-    python3 scripts/check-pr-issue-link.py --body-file body.md
+    gh api -X POST /markdown --input - <<< '{"text": "...", "mode": "gfm",
+        "context": "Q00/ouroboros"}' > rendered.html
+    python3 scripts/check-pr-issue-link.py --rendered-file rendered.html \
+        --owner Q00 --repo ouroboros
 
 CI:
     .github/workflows/pr-hygiene.yml runs this on every PR.
 
 Output:
-    One candidate issue number per line on stdout, ascending, deduplicated.
+    One linked issue number per line on stdout, ascending, deduplicated.
 
 Exit codes:
-    0 -- at least one candidate reference is visible
-    1 -- none
+    0 -- the rendered body links to at least one issue in this repository
+    1 -- it does not
 """
 
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 import sys
 
-# Order matters. Raw-text HTML blocks and fences are removed with their
-# content before inline spans, so a backtick inside a fence cannot split an
-# unrelated span. Entities are removed last, after tags, because stripping
-# `<...>` first would otherwise leave a bare `&#1234;` looking like prose.
-_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-# An unterminated `<!--` comments out the remainder of the document, so
-# `<!-- Refs #1777` with no closing marker renders nothing at all.
-_UNCLOSED_HTML_COMMENT = re.compile(r"<!--.*\Z", re.DOTALL)
-# `> ` markers are removed before code detection so that a blockquoted code
-# block (`>     trace #1777`) is recognized as code. Quoted *prose* is visible
-# and keeps counting, which is why the prefix is stripped rather than the line.
-# Anchored at line start, so `->` and `=>` in prose are untouched.
-_BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+", re.MULTILINE)
-# A link reference definition is metadata: it renders only where the label is
-# used, and `[hidden]: #1777` with no `[hidden]` usage renders nothing.
-_LINK_REFERENCE_DEFINITION = re.compile(r"^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$", re.MULTILINE)
-_RAW_TEXT_HTML = re.compile(
-    r"<(pre|code|script|style|kbd|samp)\b[^>]*>.*?</\1\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
-_UNCLOSED_RAW_TEXT_HTML = re.compile(
-    r"<(pre|code|script|style|kbd|samp)\b[^>]*>.*\Z",
-    re.DOTALL | re.IGNORECASE,
-)
-_FENCED_BLOCK = re.compile(
-    r"^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)", re.DOTALL | re.MULTILINE
-)
-# A line indented by four spaces or a tab renders as code in Markdown. This is
-# intentionally conservative: it can also swallow a reference buried in a
-# deeply indented list, which costs a contributor one body edit. The opposite
-# error -- a pasted traceback silently satisfying the gate -- costs the gate.
-_INDENTED_CODE = re.compile(r"^(?: {4,}|\t).*$", re.MULTILINE)
-_INLINE_CODE = re.compile(r"(`+)(?:.|\n)*?\1")
-# Any http(s) token, so `#123` appearing as a URL fragment is not a reference.
-_URL = re.compile(r"<?https?://\S+>?")
-_HTML_TAG = re.compile(r"<[^>\n]{1,200}>")
-# Numeric (`&#1234;`), hex (`&#x4d2;`), and named (`&amp;`) character
-# references. The numeric form is why this matters: its digits follow a `#`.
-_HTML_ENTITY = re.compile(r"&#?[0-9A-Za-z]{1,32};")
 
-# `#123` not preceded by a word character, `/`, `&`, or another `#`. The `/`
-# guard drops leftovers like `owner/repo#12`; `#` drops Markdown headings; `&`
-# is belt-and-braces for an entity that somehow escaped _HTML_ENTITY.
-_ISSUE_REF = re.compile(r"(?<![0-9A-Za-z_/#&])#(\d+)")
+class _IssueLinkCollector(HTMLParser):
+    """Collect issue numbers from ``<a href>`` targets in rendered HTML."""
+
+    def __init__(self, owner: str, repo: str) -> None:
+        super().__init__(convert_charrefs=True)
+        # Anchored and repo-scoped on purpose: a link into another repository
+        # is not local traceability, and `/pull/N` is not an issue.
+        self._pattern = re.compile(
+            rf"^(?:https?://github\.com)?/{re.escape(owner)}/{re.escape(repo)}/issues/(\d+)(?:[#?].*)?$"
+        )
+        self.issue_numbers: set[int] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for name, value in attrs:
+            if name == "href" and value:
+                match = self._pattern.match(value)
+                if match:
+                    self.issue_numbers.add(int(match.group(1)))
 
 
-def visible_text(body: str) -> str:
-    """Return `body` with every region a reader would not see as prose removed."""
-    text = _HTML_COMMENT.sub(" ", body)
-    text = _UNCLOSED_HTML_COMMENT.sub(" ", text)
-    text = _RAW_TEXT_HTML.sub(" ", text)
-    text = _UNCLOSED_RAW_TEXT_HTML.sub(" ", text)
-    text = _BLOCKQUOTE_PREFIX.sub("", text)
-    text = _FENCED_BLOCK.sub(" ", text)
-    text = _INDENTED_CODE.sub(" ", text)
-    text = _LINK_REFERENCE_DEFINITION.sub(" ", text)
-    text = _INLINE_CODE.sub(" ", text)
-    text = _URL.sub(" ", text)
-    text = _HTML_TAG.sub(" ", text)
-    text = _HTML_ENTITY.sub(" ", text)
-    return text
-
-
-def find_issue_references(body: str) -> list[int]:
-    """Return every candidate issue number visible to a reader, ascending.
-
-    "Candidate" is precise: `#N` cannot distinguish an issue from a pull
-    request, and this function does not know which numbers exist. Resolving
-    that is the workflow's job.
-    """
-    seen = {int(match.group(1)) for match in _ISSUE_REF.finditer(visible_text(body))}
-    return sorted(seen)
+def find_linked_issues(rendered_html: str, *, owner: str, repo: str) -> list[int]:
+    """Return the repository issues the rendered body links to, ascending."""
+    collector = _IssueLinkCollector(owner, repo)
+    collector.feed(rendered_html)
+    collector.close()
+    return sorted(collector.issue_numbers)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--body-file", type=Path, help="file holding the PR body")
-    source.add_argument("--body", help="PR body as a literal string")
+    source.add_argument("--rendered-file", type=Path, help="file holding the rendered HTML")
+    source.add_argument("--rendered", help="rendered HTML as a literal string")
+    parser.add_argument("--owner", required=True, help="repository owner")
+    parser.add_argument("--repo", required=True, help="repository name")
     args = parser.parse_args()
 
-    if args.body_file is not None:
-        body = args.body_file.read_text(encoding="utf-8")
+    if args.rendered_file is not None:
+        rendered = args.rendered_file.read_text(encoding="utf-8")
     else:
-        body = args.body
+        rendered = args.rendered
 
-    references = find_issue_references(body)
-    if references:
-        sys.stdout.write("".join(f"{number}\n" for number in references))
+    issues = find_linked_issues(rendered, owner=args.owner, repo=args.repo)
+    if issues:
+        sys.stdout.write("".join(f"{number}\n" for number in issues))
         return 0
 
     sys.stderr.write(
-        "pr-issue-link: no visible issue reference in the PR body.\n"
+        "pr-issue-link: the rendered PR body links to no issue in this repository.\n"
         "\n"
-        "References inside HTML comments, code (fenced, indented, or inline),\n"
-        "raw-text HTML, URLs, or character entities do not count -- the\n"
-        "unedited PR template contains several such examples, and accepting\n"
-        "them would let any template-created PR pass.\n"
+        "GitHub autolinks `#N` only where it renders as prose and only when N\n"
+        "exists, so a number inside a comment, a code block, a link target, or\n"
+        "a reference definition does not count -- and neither does a pull\n"
+        "request number, which renders as /pull/N rather than /issues/N.\n"
     )
     return 1
 

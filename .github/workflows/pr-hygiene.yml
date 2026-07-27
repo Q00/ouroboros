@@ -12,10 +12,10 @@ name: PR Hygiene
 # auto-close their parent; forcing `Closes` on them would produce false closures.
 # Closing remains a human decision — this gate only guarantees the trail exists.
 #
-# Body scanning lives in scripts/check-pr-issue-link.py, which strips HTML
-# comments, code fences, inline code, and URLs first. Without that step the
-# unedited PULL_REQUEST_TEMPLATE.md — whose instructions mention #1234, #1256,
-# and #1258 inside comments — would satisfy the gate on its own.
+# The body half is answered from GitHub's own rendering of the PR body rather
+# than from its Markdown source: only the renderer knows whether a `#N` lands in
+# prose, a comment, a code block, or a link target. scripts/check-pr-issue-link.py
+# reads the issue anchors out of that rendering.
 
 on:
   pull_request:
@@ -95,54 +95,50 @@ jobs:
             exit 0
           fi
 
-          # --- signal 2: a visible reference in the body ----------------------
-          # The title is not accepted: `fix(#1638): ...` reads like a link but
-          # creates no GitHub reference, and treating it as one is how the
-          # audited PRs looked linked while leaving their issues orphaned.
+          # --- signal 2: an issue link in the *rendered* body ----------------
+          # Render with GitHub's own engine rather than scanning the Markdown
+          # source. Four review rounds on a regex scanner each found another
+          # construct that looks like `#N` but renders as something else --
+          # HTML comments, fenced/indented/blockquoted code, inline code, URL
+          # fragments, character entities, raw-text HTML, link reference
+          # definitions, inline link destinations. Markdown context is not a
+          # regular language; the renderer is the only authority on what a
+          # reviewer sees.
+          #
+          # Delegating also settles two things a scanner cannot: GitHub emits
+          # /issues/N for an issue and /pull/N for a pull request, and it
+          # autolinks only numbers that exist -- so `See PR #1735`, `#0`, and
+          # a typo all stop counting.
           printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
 
-          candidates=$(python3 scripts/check-pr-issue-link.py \
-            --body-file "${RUNNER_TEMP}/pr-body.md" || true)
+          if ! jq -n --rawfile text "${RUNNER_TEMP}/pr-body.md" \
+                --arg context "${OWNER}/${REPO}" \
+                '{text: $text, mode: "gfm", context: $context}' \
+              | gh api -X POST /markdown --input - > "${RUNNER_TEMP}/rendered.html"; then
+            # A GitHub API outage is not the contributor's problem. Fail open
+            # and say so, rather than blocking a merge on infrastructure.
+            echo "::warning::Could not render the PR body (GitHub API error); skipping the issue-link check."
+            exit 0
+          fi
 
-          # `#N` is a shared namespace: issues and pull requests draw from it,
-          # and nothing stops an author writing `Refs #0` or `See PR #1735`.
-          # A number that is missing, or that resolves to a pull request, is
-          # not an issue trail. Resolve each candidate before accepting it.
-          # Capped so a body full of numbers cannot fan out into API calls.
-          checked=0
-          for number in ${candidates}; do
-            if [ "${checked}" -ge 10 ]; then
-              echo "::warning::More than 10 candidate references; stopped resolving after 10."
-              break
-            fi
-            checked=$((checked + 1))
-
-            if ! payload=$(gh api "repos/${OWNER}/${REPO}/issues/${number}" 2>/dev/null); then
-              echo "  #${number}: no such issue or pull request in this repository"
-              continue
-            fi
-            # The REST issues endpoint also serves pull requests; only a pull
-            # request carries a `pull_request` object.
-            if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
-              echo "  #${number}: resolves to a pull request, not an issue"
-              continue
-            fi
-
-            echo "OK: body references issue #${number}."
+          if python3 scripts/check-pr-issue-link.py \
+              --rendered-file "${RUNNER_TEMP}/rendered.html" \
+              --owner "${OWNER}" --repo "${REPO}"; then
             echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
             exit 0
-          done
+          fi
 
           # --- fail ------------------------------------------------------------
-          if [ -n "${candidates}" ]; then
-            echo "::error::The PR body mentions $(printf '%s' "${candidates}" | wc -w | tr -d ' ') number(s), but none resolve to an issue in this repository."
-          fi
           echo "::error::No issue link found. Do one of the following:"
           echo "::error::  1. Add 'Closes #123' to the PR body (this PR completes the issue)."
           echo "::error::  2. Add 'Refs #123' or 'Part of #123' (this PR is one slice of it)."
           echo "::error::  3. Apply the 'no-issue' label if this PR genuinely has no issue."
           echo "::error::"
+          echo "::error::The number must render as prose. GitHub does not autolink inside"
+          echo "::error::comments, code blocks, link targets, or reference definitions, and"
+          echo "::error::a pull request number does not count as an issue trail."
+          echo "::error::"
           echo "::error::Editing the PR body re-runs this check automatically. Linking through"
-          echo "::error::the Development sidebar does NOT — GitHub fires no pull_request event"
+          echo "::error::the Development sidebar does NOT -- GitHub fires no pull_request event"
           echo "::error::for it, so re-run this job from the Checks tab afterwards."
           exit 1
