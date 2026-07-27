@@ -1505,6 +1505,56 @@ class TestSessionRelatedEvents:
         assert "other-execution-child" not in aggregate_ids
         assert "sess-related-only" not in aggregate_ids
 
+    async def test_execution_payload_filter_is_applied_before_limit(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """Unrelated same-type rows cannot crowd a bounded contract stream."""
+
+        execution_id = "exec-payload-filter"
+        session_id = "sess-payload-filter"
+        timestamp = datetime.now(UTC)
+        route_aware = BaseEvent(
+            type="execution.ac.attempt_judged",
+            timestamp=timestamp,
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "route_contract_version": 1,
+            },
+        )
+        legacy = BaseEvent(
+            type="execution.ac.attempt_judged",
+            timestamp=timestamp + timedelta(seconds=1),
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "execution_id": execution_id,
+                "session_id": session_id,
+            },
+        )
+        await event_store.append_batch([route_aware, legacy])
+
+        unfiltered = await event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.attempt_judged",
+            limit=1,
+        )
+        filtered = await event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.attempt_judged",
+            limit=1,
+            payload_equals={
+                "route_contract_version": 1,
+                "session_id": session_id,
+            },
+        )
+
+        assert [event.id for event in unfiltered] == [legacy.id]
+        assert [event.id for event in filtered] == [route_aware.id]
+
     async def test_latest_execution_job_status_follows_linked_job_stream(
         self,
         event_store: EventStore,

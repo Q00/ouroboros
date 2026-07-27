@@ -1209,7 +1209,10 @@ class TestRuntimeHelperLookups:
 
         assert get_usage_limit_pause_seconds() == 5400
 
-    @pytest.mark.parametrize("env_value", ["0", "-1", "five", "nan", "inf", "-inf"])
+    @pytest.mark.parametrize(
+        "env_value",
+        ["0", "-1", "five", "nan", "inf", "-inf", "8761", "1e308"],
+    )
     def test_get_usage_limit_pause_seconds_rejects_invalid_env(
         self,
         env_value: str,
@@ -1292,7 +1295,10 @@ class TestRuntimeHelperLookups:
         ):
             assert get_usage_limit_pause_seconds() == 18000
 
-    @pytest.mark.parametrize("config_value", ["0", "five", "nan", "inf", "-inf"])
+    @pytest.mark.parametrize(
+        "config_value",
+        ["0", "five", "nan", "inf", "-inf", "8761", "1e308"],
+    )
     def test_get_usage_limit_pause_seconds_rejects_invalid_config_key(
         self,
         config_value: str,

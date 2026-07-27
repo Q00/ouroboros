@@ -866,7 +866,7 @@ class TestCodexCliRuntime:
         assert message.resume_handle.metadata == seeded_handle.metadata
 
     def test_convert_command_execution_event(self) -> None:
-        """Converts command execution items to Bash tool messages."""
+        """Completed-only command items synthesize a Bash start+result pair."""
         runtime = CodexCliRuntime(cli_path="codex")
 
         messages = runtime._convert_event(
@@ -877,10 +877,14 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert len(messages) == 1
-        message = messages[0]
-        assert message.tool_name == "Bash"
-        assert message.data["tool_input"]["command"] == "pytest -q"
+        assert len(messages) == 2
+        start, result = messages
+        assert start.tool_name == "Bash"
+        assert start.data["tool_input"]["command"] == "pytest -q"
+        assert start.data.get("subtype") is None
+        assert result.tool_name == "Bash"
+        assert result.data["tool_input"]["command"] == "pytest -q"
+        assert result.data["subtype"] == "tool_result"
 
     def test_convert_command_execution_preserves_output_metadata(self) -> None:
         """Command output must remain available for fat-harness verification."""
@@ -899,12 +903,13 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert len(messages) == 1
-        message = messages[0]
-        assert message.tool_name == "Bash"
-        assert message.data["tool_input"]["command"] == "pytest"
-        assert message.data["output"] == "1 passed in 0.01s"
-        assert message.data["exit_code"] == 0
+        assert len(messages) == 2
+        result = messages[1]
+        assert result.tool_name == "Bash"
+        assert result.data["tool_input"]["command"] == "pytest"
+        assert result.data["output"] == "1 passed in 0.01s"
+        assert result.data["exit_code"] == 0
+        assert result.data["is_error"] is False
 
     def test_convert_command_execution_preserves_aggregated_output_metadata(self) -> None:
         """Current Codex JSONL aggregated output remains available to the verifier."""
@@ -924,11 +929,12 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert len(messages) == 1
-        message = messages[0]
-        assert message.data["output"] == ". [100%]\n1 passed in 0.01s"
-        assert message.data["exit_code"] == 0
-        assert message.data["status"] == "completed"
+        assert len(messages) == 2
+        result = messages[1]
+        assert result.data["output"] == ". [100%]\n1 passed in 0.01s"
+        assert result.data["exit_code"] == 0
+        assert result.data["status"] == "completed"
+        assert result.data["is_error"] is False
 
     def test_convert_command_execution_preserves_nested_output_metadata(self) -> None:
         """Codex command result fields may arrive under nested output/result objects."""
@@ -950,19 +956,22 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert len(messages) == 1
-        message = messages[0]
-        assert message.tool_name == "Bash"
-        assert message.data["tool_input"]["command"] == (
+        assert len(messages) == 2
+        result = messages[1]
+        assert result.tool_name == "Bash"
+        assert result.data["tool_input"]["command"] == (
             "/bin/zsh -lc 'python -m pytest test_hello.py'"
         )
-        assert message.data["stdout"] == "1 passed in 0.01s"
-        assert message.data["exit_code"] == 0
-        assert message.data["status"] == "completed"
-        assert message.data["subtype"] == "success"
+        assert result.data["stdout"] == "1 passed in 0.01s"
+        assert result.data["exit_code"] == 0
+        assert result.data["status"] == "completed"
+        # The explicit success signal is carried by the tri-state is_error
+        # instead of a "success" subtype (fail-closed, #1692 blocker 1).
+        assert result.data["subtype"] == "tool_result"
+        assert result.data["is_error"] is False
 
     def test_convert_file_change_event_emits_each_changed_file(self) -> None:
-        """Multi-file Codex changes should create one proof message per path."""
+        """Multi-file Codex changes should create one start+result pair per path."""
         runtime = CodexCliRuntime(cli_path="codex")
 
         messages = runtime._convert_event(
@@ -979,13 +988,23 @@ class TestCodexCliRuntime:
             current_handle=None,
         )
 
-        assert [message.tool_name for message in messages] == ["Edit", "Edit"]
+        assert [message.tool_name for message in messages] == ["Edit"] * 4
         assert [message.data["tool_input"]["file_path"] for message in messages] == [
             "/tmp/project/hello.py",
+            "/tmp/project/hello.py",
+            "/tmp/project/test_hello.py",
             "/tmp/project/test_hello.py",
         ]
-        assert all(message.data["subtype"] == "success" for message in messages)
-        assert all(message.data["runtime_event_type"] == "tool.completed" for message in messages)
+        results = [message for message in messages if message.data.get("subtype") == "tool_result"]
+        assert len(results) == 2
+        # A completion without an explicit status must never be stamped
+        # success (fail-closed, #1692 blocker 1): no success subtype, no
+        # is_error verdict, no hardcoded tool.completed lifecycle stamp.
+        assert all(message.data.get("subtype") != "success" for message in messages)
+        assert all("is_error" not in message.data for message in results)
+        assert all(
+            message.data.get("runtime_event_type") != "tool.completed" for message in messages
+        )
 
     def test_convert_turn_completed_with_usage_emits_system_usage_message(self) -> None:
         """turn.completed with token usage surfaces a non-final system message."""

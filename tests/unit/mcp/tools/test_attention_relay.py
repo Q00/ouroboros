@@ -57,6 +57,80 @@ def test_recovery_exhaustion_and_model_escalation_are_closed_attention() -> None
     assert all(relay["recommended_host_actions"][0]["kind"] == "host_verify" for relay in attention)
 
 
+def test_route_progress_and_exhaustion_surface_to_the_human() -> None:
+    escalated = _event(
+        1,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "cheap",
+                "failure_class": "EVIDENCE_MISSING",
+            },
+            "decision": {
+                "action": "escalate_route",
+                "selected_route": {"route_id": "standard"},
+                "reason": "classified_failure",
+            },
+            "human_handoff_required": False,
+        },
+    )
+    exhausted = _event(
+        2,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "frontier",
+                "failure_class": "EVIDENCE_MISSING",
+            },
+            "decision": {
+                "action": "blocked",
+                "selected_route": None,
+                "attempted_route_ids": ["cheap", "standard", "frontier"],
+                "reason": "routes_exhausted",
+            },
+            "human_handoff_required": True,
+        },
+    )
+
+    relays = classify_relay_events([escalated, exhausted], job_id="job_1")
+
+    progress = next(relay for relay in relays if relay.get("subtype") == "route_escalated")
+    assert progress["evidence"]["from_route_id"] == "cheap"
+    assert progress["evidence"]["to_route_id"] == "standard"
+    attention = next(relay for relay in relays if relay.get("trigger") == "route_exhausted")
+    assert attention["engine_ownership"]["state"] == "closed"
+    assert attention["evidence"]["reason"] == "routes_exhausted"
+
+
+def test_hard_block_is_not_mislabeled_as_route_exhaustion() -> None:
+    blocked = _event(
+        1,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "cheap",
+                "failure_class": "BLOCKED",
+            },
+            "decision": {
+                "action": "blocked",
+                "selected_route": None,
+                "attempted_route_ids": ["cheap"],
+                "remaining_route_ids": ["standard", "frontier"],
+                "reason": "human_handoff_required",
+            },
+            "human_handoff_required": True,
+        },
+    )
+
+    relays = classify_relay_events([blocked], job_id="job_1")
+
+    attention = next(relay for relay in relays if relay.get("trigger") == "route_blocked")
+    assert attention["evidence"]["reason"] == "human_handoff_required"
+
+
 def test_mutating_action_menu_requires_both_successor_and_audit_tools() -> None:
     exhausted = _event(
         1,

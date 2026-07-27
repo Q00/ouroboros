@@ -39,9 +39,11 @@ SENSITIVE_FIELD_NAMES = frozenset(
         "secret",
         "token",
         "credential",
+        "credentials",
         "auth",
         "key",
         "private",
+        "passwd",
         "bearer",
         "authorization",
     }
@@ -57,6 +59,327 @@ SENSITIVE_PREFIXES = (
     "secret_",
     "AIza",
 )
+
+_CREDENTIAL_SHAPE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # GitHub PAT/app/OAuth tokens and other opaque provider tokens.
+    re.compile(r"^gh[oprsu]_"),
+    re.compile(r"^github_pat_"),
+    re.compile(r"^sk-"),
+    re.compile(r"^sk_(?:live|test)_"),
+    re.compile(r"^rk_(?:live|test)_"),
+    re.compile(r"^pk-"),
+    re.compile(r"^api-"),
+    re.compile(r"^xox[bpa]-"),
+    re.compile(r"^xapp-"),
+    re.compile(r"^npm_"),
+    re.compile(r"^pypi-"),
+    re.compile(r"^glpat-"),
+    re.compile(r"^hf_"),
+    # SendGrid API keys and HashiCorp Vault service tokens.
+    re.compile(r"^SG\.[A-Za-z0-9]{22}\.[A-Za-z0-9]{43}$"),
+    re.compile(r"^hvs\.[A-Za-z0-9_-]{16,}$"),
+    # Google API keys, AWS access-key IDs, and JWT-shaped bearer values.
+    re.compile(r"^AIza[A-Za-z0-9_-]{35,}$"),
+    re.compile(r"^AKIA[0-9A-Z]{16}$"),
+    re.compile(r"^ASIA[0-9A-Z]{16}$"),
+    re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$"),
+)
+
+# The stable authority grammar permits ``-`` and ``_`` inside a descriptor,
+# so anchored provider patterns must also be checked at every non-alphanumeric
+# boundary.  Otherwise ``runtime:prod-ghp_...`` and ``runtime:prod-hvs....``
+# would evade the segment-based checks below.
+_EMBEDDED_CREDENTIAL_SHAPES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?<![A-Za-z0-9])gh[oprsu]_"),
+    re.compile(r"(?<![A-Za-z0-9])github_pat_"),
+    re.compile(r"(?<![A-Za-z0-9])sk-"),
+    re.compile(r"(?<![A-Za-z0-9])sk_(?:live|test)_"),
+    re.compile(r"(?<![A-Za-z0-9])rk_(?:live|test)_"),
+    re.compile(r"(?<![A-Za-z0-9])pk-"),
+    re.compile(r"(?<![A-Za-z0-9])api-"),
+    re.compile(r"(?<![A-Za-z0-9])xox[bpa]-"),
+    re.compile(r"(?<![A-Za-z0-9])xapp-"),
+    re.compile(r"(?<![A-Za-z0-9])npm_"),
+    re.compile(r"(?<![A-Za-z0-9])pypi-"),
+    re.compile(r"(?<![A-Za-z0-9])glpat-"),
+    re.compile(r"(?<![A-Za-z0-9])hf_"),
+    re.compile(r"(?<![A-Za-z0-9])SG\.[A-Za-z0-9]{22}\.[A-Za-z0-9]{43}"),
+    re.compile(r"(?<![A-Za-z0-9])hvs\.[A-Za-z0-9_-]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35,}"),
+    re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"),
+    re.compile(r"(?<![A-Za-z0-9])ASIA[0-9A-Z]{16}"),
+    re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+
+_CREDENTIAL_NAMESPACE_LABELS = frozenset(
+    (
+        *SENSITIVE_FIELD_NAMES,
+        "access_token",
+        "client_secret",
+    )
+)
+_COMPACT_CREDENTIAL_NAMESPACE_LABELS = frozenset(
+    {
+        "apikey",
+        "accesstoken",
+        "clientsecret",
+        "accesskey",
+        "privatekey",
+        "password",
+        "passwd",
+    }
+)
+_COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS = frozenset(
+    {"secret", "token", "credential", "credentials", "authorization", "key", "private", "bearer"}
+)
+_COMPACT_AUTH_CREDENTIAL_PREFIXES = (
+    "authbearer",
+    "authcredential",
+    "authkey",
+    "authopaque",
+    "authpassword",
+    "authsecret",
+    "authtoken",
+    "authvalue",
+)
+_SAFE_COMPACT_AUTHORITY_IDENTIFIERS = frozenset({"keycloak", "tokenizer", "privateer"})
+_SAFE_CREDENTIAL_LABEL_SUFFIXES = frozenset({"budget", "default", "id", "name", "plane", "scope"})
+
+_CREDENTIAL_COMPOUND_PREFIX = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?:password|api[-_]?key|apikey|secret|access[-_]?token|client[-_]?secret|"
+    r"token|credential|credentials|auth|authorization|key|private|bearer|passwd)"
+    r"[-_]"
+    # A known-safe descriptor suffix (``token-budget`` or ``auth-plane``)
+    # remains usable as metadata. Any other suffix is treated as an opaque
+    # value, including embedded provider prefixes such as ``api-key-sk-...``.
+    r"(?!(?:budget|default|id|name|plane|scope)(?:$|[-_:/\.]))"
+)
+
+# Authority identities are short typed descriptors, not opaque runtime values.
+# Bound both their namespace and their label structure so an allowlisted prefix
+# cannot be used as a container for an unenumerated provider token.
+_STABLE_AUTHORITY_NAMESPACES = (
+    "authority",
+    "execution",
+    "workspace",
+    "process",
+    "project",
+    "runtime",
+    "session",
+    "system",
+    "tenant",
+    "default",
+)
+_STABLE_AUTHORITY_SEPARATORS = frozenset("-_:/.")
+_STABLE_AUTHORITY_LABELS = frozenset(
+    {
+        "a",
+        "auth",
+        "b",
+        "budget",
+        "claude",
+        "cli",
+        "code",
+        "codex",
+        "copilot",
+        "default",
+        "gemini",
+        "gjc",
+        "goose",
+        "hermes",
+        "keycloak",
+        "kiro",
+        "litellm",
+        "local",
+        "mcp",
+        "opencode",
+        "ourocode",
+        "pi",
+        "plane",
+        "primary",
+        "privateer",
+        "project",
+        "secondary",
+        "shared",
+        "token",
+        "tokenizer",
+        "worker",
+        "zcode",
+    }
+)
+_MAX_STABLE_AUTHORITY_SEGMENTS = 4
+_MAX_STABLE_AUTHORITY_SEGMENT_CHARS = 32
+_MAX_STABLE_AUTHORITY_ORDINAL_CHARS = 10
+
+
+def _has_stable_authority_grammar(value: str) -> bool:
+    """Validate a bounded typed descriptor with one linear scan."""
+
+    namespace = next(
+        (candidate for candidate in _STABLE_AUTHORITY_NAMESPACES if value.startswith(candidate)),
+        None,
+    )
+    if namespace is None:
+        return False
+    tail = value[len(namespace) :]
+    if not tail:
+        return True
+    if tail[0] not in _STABLE_AUTHORITY_SEPARATORS:
+        return False
+
+    segments: list[str] = []
+    segment_chars: list[str] = []
+    for character in tail[1:]:
+        if character in _STABLE_AUTHORITY_SEPARATORS:
+            if not segment_chars:
+                return False
+            segments.append("".join(segment_chars))
+            if len(segments) >= _MAX_STABLE_AUTHORITY_SEGMENTS:
+                return False
+            segment_chars = []
+            continue
+        if not ("a" <= character <= "z" or "0" <= character <= "9"):
+            return False
+        segment_chars.append(character)
+        if len(segment_chars) > _MAX_STABLE_AUTHORITY_SEGMENT_CHARS:
+            return False
+    if not segment_chars:
+        return False
+    segments.append("".join(segment_chars))
+    return all(
+        segment in _STABLE_AUTHORITY_LABELS
+        or (segment.isdecimal() and len(segment) <= _MAX_STABLE_AUTHORITY_ORDINAL_CHARS)
+        for segment in segments
+    )
+
+
+def _is_credential_namespace_label(value: str) -> bool:
+    """Return whether a namespace segment labels a credential-bearing value."""
+
+    label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
+    label = label.lower().replace("-", "_")
+    compact_label = label.replace("_", "")
+    if compact_label.startswith(_COMPACT_AUTH_CREDENTIAL_PREFIXES):
+        return True
+    # Providers commonly omit separators in labels (``clientsecret``,
+    # ``accesstoken``, ``privatekey``).  Treat those aliases like their
+    # delimiter-bearing forms before any opaque payload can be serialized.
+    for compact_credential_label in _COMPACT_CREDENTIAL_NAMESPACE_LABELS:
+        if compact_label == compact_credential_label:
+            return True
+        # ``compact_label`` has separators removed, so a direct value suffix
+        # must be checked without looking for an underscore.  For example,
+        # ``accesstokenabc123`` and ``password123`` are credential-labelled
+        # values even though no delimiter separates the label from its value.
+        if compact_label.startswith(compact_credential_label):
+            suffix = compact_label[len(compact_credential_label) :]
+            safe_suffixes = {
+                safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+            }
+            return suffix not in safe_suffixes
+    # Generic one-word labels overlap with ordinary identifiers (``keycloak``
+    # and ``tokenizer``). Treat them as compact credentials only when the
+    # suffix has the stronger opaque-value signal of a digit.
+    for compact_credential_label in _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS:
+        if compact_label.startswith(compact_credential_label):
+            suffix = compact_label[len(compact_credential_label) :]
+            if suffix and any(character.isdigit() for character in suffix):
+                return True
+    if label in _CREDENTIAL_NAMESPACE_LABELS or label.endswith(
+        ("_key", "_token", "_secret", "_credential")
+    ):
+        return True
+    for credential_label in _CREDENTIAL_NAMESPACE_LABELS:
+        prefix = f"{credential_label}_"
+        if label.startswith(prefix):
+            suffix = label[len(prefix) :]
+            return suffix not in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+    return False
+
+
+def _has_strict_compact_authority_label(value: str) -> bool:
+    """Reject alphabetic compact credential labels at the authority boundary.
+
+    Logging detection intentionally keeps a narrower heuristic to avoid
+    redacting ordinary words. Authority identities are a fail-closed contract,
+    so generic compact labels are rejected there unless they are explicitly
+    recognized ordinary identifiers or safe metadata suffixes.
+    """
+
+    safe_suffixes = {
+        safe_suffix.replace("_", "") for safe_suffix in _SAFE_CREDENTIAL_LABEL_SUFFIXES
+    }
+    for part in re.split(r"[:/.]", value):
+        label = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", part.strip()).lower()
+        compact_label = label.replace("-", "").replace("_", "")
+        if compact_label in _SAFE_COMPACT_AUTHORITY_IDENTIFIERS:
+            continue
+        for credential_label in _COMPACT_CREDENTIAL_LABELS_WITH_VALUE_DIGITS:
+            if compact_label.startswith(credential_label):
+                suffix = compact_label[len(credential_label) :]
+                if suffix and suffix not in safe_suffixes:
+                    return True
+    return False
+
+
+def is_credential_shaped(value: str) -> bool:
+    """Return whether a string matches a high-confidence credential shape.
+
+    This is deliberately shape-based rather than a validity check. It protects
+    canonical metadata boundaries from copying opaque credentials while still
+    allowing ordinary route and authority identifiers through.
+    """
+
+    if type(value) is not str:
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if _CREDENTIAL_COMPOUND_PREFIX.search(normalized):
+        return True
+    if any(pattern.search(normalized) for pattern in _EMBEDDED_CREDENTIAL_SHAPES):
+        return True
+    candidates = [normalized]
+    # Preserve the opaque payload after a stable namespace delimiter so a
+    # descriptor such as ``runtime:SG.<id>.<secret>`` cannot hide a credential
+    # from the shape matcher when the namespace is split below.
+    candidates.extend(
+        normalized.split(delimiter, 1)[1]
+        for delimiter in (":", "/", ".")
+        if delimiter in normalized
+    )
+    namespace_parts = [part for part in re.split(r"[:/.]", normalized) if part]
+    candidates.extend(namespace_parts)
+    if any(_is_credential_namespace_label(part) for part in namespace_parts):
+        return True
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered.startswith(("bearer ", "token ", "secret_")):
+            return True
+        if any(pattern.match(candidate) for pattern in _CREDENTIAL_SHAPE_PATTERNS):
+            return True
+    return False
+
+
+def is_stable_authority_identity(value: str) -> bool:
+    """Return whether ``value`` is an allowlisted non-secret descriptor.
+
+    Route authority identities intentionally use a small, stable namespace
+    vocabulary (``runtime:claude``, ``session-a``, ``authority-default``).  A
+    free-form opaque token is not accepted merely because it is not yet known
+    to the credential denylist; it must first match this descriptor grammar and
+    then pass the shared credential-shape guard.
+    """
+
+    if type(value) is not str:
+        return False
+    normalized = value.strip()
+    return (
+        _has_stable_authority_grammar(normalized)
+        and not is_credential_shaped(normalized)
+        and not _has_strict_compact_authority_label(normalized)
+    )
 
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:
@@ -154,7 +477,9 @@ def is_sensitive_value(value: Any) -> bool:
         return False
 
     value_lower = value.lower()
-    return any(value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES)
+    return is_credential_shaped(value) or any(
+        value_lower.startswith(prefix.lower()) for prefix in SENSITIVE_PREFIXES
+    )
 
 
 def mask_sensitive_value(value: Any, field_name: str | None = None) -> str:

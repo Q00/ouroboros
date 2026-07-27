@@ -39,6 +39,7 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    _atomic_write_text,
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
@@ -98,6 +99,11 @@ extract structured product requirements. Preserve uncertainty explicitly: do not
 turn uncertain, stakeholder-dependent, or unknown answers into confirmed
 requirements. Put tentative claims in assumptions and unresolved choices in
 decide_later_items.
+
+A PRD is a contract between the PM and the developers: success_criteria are the
+behavior and policy the PM must observe in the delivered feature to accept it as
+built. Post-launch outcomes mentioned in the transcript are the PM's follow-up
+work, not contract terms — record them under assumptions or decide_later_items.
 
 Respond ONLY with valid JSON in this exact format:
 {
@@ -1180,7 +1186,14 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        filepath.write_text(json_content, encoding="utf-8")
+        durability_confirmed = _atomic_write_text(filepath, json_content)
+
+        if not durability_confirmed:
+            log.warning(
+                "pm.seed_save_durability_uncertain",
+                path=str(filepath),
+                pm_id=seed.pm_id,
+            )
 
         log.info(
             "pm.seed_saved",

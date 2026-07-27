@@ -11,6 +11,8 @@ Tests cover:
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+
 import pytest
 
 from ouroboros.orchestrator.adapter import (
@@ -26,7 +28,9 @@ from ouroboros.orchestrator.coordinator import (
     _build_review_prompt,
     _collect_file_modifications,
     _parse_review_response,
+    build_coordinator_started_payload,
     derive_coordinator_tools,
+    validate_coordinator_started_payload,
 )
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
@@ -151,6 +155,336 @@ class TestCoordinatorReview:
             "artifact_type": "coordinator_review",
         }
 
+    @staticmethod
+    def _completed_payload() -> tuple[dict[str, object], FileConflict]:
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        review = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=(conflict,),
+            review_summary="Reconciled shared.py",
+            fixes_applied=("Merged edits",),
+            warnings_for_next_level=("Verify integration",),
+            duration_seconds=1.0,
+            session_id="coordinator-native-session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            final_output="coordinator final output",
+        )
+        return (
+            review.to_completed_event_payload(
+                execution_id="exec",
+                session_id="session",
+            ),
+            conflict,
+        )
+
+    def test_completed_artifact_producer_and_parser_share_one_closed_schema(self) -> None:
+        payload, conflict = self._completed_payload()
+
+        restored = CoordinatorReview.from_artifact_payload(
+            payload,
+            level_number=1,
+            expected_conflicts=(conflict,),
+            execution_id="exec",
+            session_id="session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+        )
+
+        assert restored.review_summary == "Reconciled shared.py"
+        assert restored.conflicts_detected == (conflict,)
+
+    @pytest.mark.parametrize(
+        ("field", "oversized"),
+        (
+            ("artifact", "x" * 256_001),
+            ("review_summary", "x" * 64_001),
+            ("coordinator_session_id", "x" * 1_025),
+            ("fixes_applied", ["x"] * 1_025),
+            ("warnings_for_next_level", ["x"] * 1_025),
+            ("fixes_applied", ["x" * 8_193]),
+        ),
+    )
+    def test_completed_artifact_text_and_list_populations_are_bounded(
+        self,
+        field: str,
+        oversized: object,
+    ) -> None:
+        payload, conflict = self._completed_payload()
+        payload[field] = oversized
+
+        with pytest.raises(ValueError):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+
+    def test_completed_artifact_conflict_rows_and_indices_are_bounded(self) -> None:
+        payload, conflict = self._completed_payload()
+        conflict_row = payload["conflicts_detected"][0]
+        payloads = []
+
+        too_many_rows = dict(payload)
+        too_many_rows["conflicts_detected"] = [conflict_row] * 4_097
+        payloads.append(too_many_rows)
+
+        too_many_indices = dict(payload)
+        too_many_indices["conflicts_detected"] = [
+            {
+                **conflict_row,
+                "ac_indices": list(range(4_097)),
+            }
+        ]
+        payloads.append(too_many_indices)
+
+        for candidate in payloads:
+            with pytest.raises(ValueError):
+                CoordinatorReview.from_artifact_payload(
+                    candidate,
+                    level_number=1,
+                    expected_conflicts=(conflict,),
+                    execution_id="exec",
+                    session_id="session",
+                    session_scope_id="exec:l0:coord",
+                    session_state_path="execution/exec/level-0/coordinator.json",
+                )
+
+    def test_completed_artifact_key_inspection_is_finite(self) -> None:
+        payload, conflict = self._completed_payload()
+
+        class EndlessMapping(Mapping[str, object]):
+            def __init__(self) -> None:
+                self.iterations = 0
+
+            def __getitem__(self, key: str) -> object:
+                return payload[key]
+
+            def __iter__(self) -> Iterator[str]:
+                for key in payload:
+                    self.iterations += 1
+                    yield key
+                while True:
+                    self.iterations += 1
+                    yield "extra"
+
+            def __len__(self) -> int:
+                return len(payload) + 1
+
+        endless = EndlessMapping()
+        with pytest.raises(ValueError):
+            CoordinatorReview.from_artifact_payload(
+                endless,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+        assert endless.iterations == len(payload) + 1
+
+    def test_completed_conflict_key_inspection_is_finite(self) -> None:
+        payload, conflict = self._completed_payload()
+        raw_conflict = payload["conflicts_detected"][0]
+
+        class EndlessConflictMapping(Mapping[str, object]):
+            def __init__(self) -> None:
+                self.iterations = 0
+
+            def __getitem__(self, key: str) -> object:
+                return raw_conflict[key]
+
+            def __iter__(self) -> Iterator[str]:
+                for key in raw_conflict:
+                    self.iterations += 1
+                    yield key
+                while True:
+                    self.iterations += 1
+                    yield "extra"
+
+            def __len__(self) -> int:
+                return len(raw_conflict) + 1
+
+        endless = EndlessConflictMapping()
+        payload["conflicts_detected"] = [endless]
+        with pytest.raises(ValueError):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+        assert endless.iterations == len(raw_conflict) + 1
+
+    def test_started_artifact_uses_the_same_bounded_conflict_population(self) -> None:
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        payload = build_coordinator_started_payload(
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            conflicts=[conflict],
+        )
+
+        validate_coordinator_started_payload(
+            payload,
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            expected_conflicts=(conflict,),
+        )
+        payload["conflicts"] = [{"file_path": "src/shared.py", "ac_indices": list(range(4_097))}]
+        with pytest.raises(ValueError):
+            validate_coordinator_started_payload(
+                payload,
+                execution_id="exec",
+                session_id="session",
+                level_number=1,
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+                expected_conflicts=(conflict,),
+            )
+
+    def test_4097_production_conflicts_round_trip_with_population_derived_bounds(self) -> None:
+        """Accepted result paths define the exact durable parser population."""
+
+        paths = (
+            "src/" + "p" * 4_097,
+            *(f"src/generated_{index}.py" for index in range(4_096)),
+        )
+        results = [
+            ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=f"AC {ac_index}",
+                success=True,
+                conflict_files=paths,
+            )
+            for ac_index in (0, 1)
+        ]
+        conflicts = LevelCoordinator.detect_file_conflicts(results)
+        assert len(conflicts) == len(paths)
+
+        started = build_coordinator_started_payload(
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            conflicts=conflicts,
+        )
+        validate_coordinator_started_payload(
+            started,
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            expected_conflicts=tuple(conflicts),
+        )
+
+        completed = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=tuple(conflicts),
+            review_summary="Population reviewed",
+            duration_seconds=1.0,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            final_output="coordinator final output",
+        ).to_completed_event_payload(execution_id="exec", session_id="session")
+        restored = CoordinatorReview.from_artifact_payload(
+            completed,
+            level_number=1,
+            expected_conflicts=tuple(conflicts),
+            execution_id="exec",
+            session_id="session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+        )
+
+        assert len(started["conflicts"]) == len(paths)
+        assert restored.conflicts_detected == tuple(conflicts)
+
+    def test_4097_writer_population_round_trips_one_shared_conflict(self) -> None:
+        """Per-conflict writer indices use the admitted result population as their bound."""
+
+        results = [
+            ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=f"AC {ac_index}",
+                success=True,
+                conflict_files=("src/shared.py",),
+            )
+            for ac_index in range(4_097)
+        ]
+        conflicts = LevelCoordinator.detect_file_conflicts(results)
+        assert conflicts == [
+            FileConflict(file_path="src/shared.py", ac_indices=tuple(range(4_097)))
+        ]
+
+        started = build_coordinator_started_payload(
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            conflicts=conflicts,
+        )
+        validate_coordinator_started_payload(
+            started,
+            execution_id="exec",
+            session_id="session",
+            level_number=1,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            expected_conflicts=tuple(conflicts),
+        )
+
+        completed = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=tuple(conflicts),
+            review_summary="Writer population reviewed",
+            duration_seconds=1.0,
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+            final_output="coordinator final output",
+        ).to_completed_event_payload(execution_id="exec", session_id="session")
+        restored = CoordinatorReview.from_artifact_payload(
+            completed,
+            level_number=1,
+            expected_conflicts=tuple(conflicts),
+            execution_id="exec",
+            session_id="session",
+            session_scope_id="exec:l0:coord",
+            session_state_path="execution/exec/level-0/coordinator.json",
+        )
+
+        assert restored.conflicts_detected == tuple(conflicts)
+
+    def test_conflict_paths_keep_a_finite_per_item_bound(self) -> None:
+        """Population-derived counts do not make each durable item unbounded."""
+
+        conflict = FileConflict(file_path="p" * 32_769, ac_indices=(0, 1))
+        with pytest.raises(ValueError, match="durable bounds"):
+            build_coordinator_started_payload(
+                execution_id="exec",
+                session_id="session",
+                level_number=1,
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+                conflicts=[conflict],
+            )
+
     def test_frozen(self):
         review = CoordinatorReview(level_number=1)
         with pytest.raises(AttributeError):
@@ -227,6 +561,7 @@ class _StubCoordinatorRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.calls.append(
             {
@@ -235,6 +570,7 @@ class _StubCoordinatorRuntime:
                 "system_prompt": system_prompt,
                 "resume_handle": resume_handle,
                 "resume_session_id": resume_session_id,
+                "reasoning_effort": reasoning_effort,
             }
         )
         for message in self._messages:
@@ -334,9 +670,9 @@ def test_derive_coordinator_tools_matches_policy_envelope() -> None:
 
     def test_decomposed_sub_acs_inherit_parent_index(self):
         """Sub-AC modifications are attributed to the parent AC index."""
-        sub_result = ACExecutionResult(
-            ac_index=100,  # Sub-AC index (parent * 100 + sub)
-            ac_content="Sub-AC 1",
+        grandchild = ACExecutionResult(
+            ac_index=10000,
+            ac_content="Nested Sub-AC",
             success=True,
             messages=(
                 AgentMessage(
@@ -346,6 +682,13 @@ def test_derive_coordinator_tools_matches_policy_envelope() -> None:
                     data={"tool_input": {"file_path": "src/shared.py"}},
                 ),
             ),
+        )
+        sub_result = ACExecutionResult(
+            ac_index=100,  # Sub-AC index (parent * 100 + sub)
+            ac_content="Sub-AC 1",
+            success=True,
+            is_decomposed=True,
+            sub_results=(grandchild,),
         )
         results = [
             _make_result(0, sub_results=[sub_result]),
@@ -397,9 +740,9 @@ class TestCollectFileModifications:
         assert acc == {"a.py": {0}, "b.py": {0}}
 
     def test_nested_sub_results(self):
-        sub = ACExecutionResult(
-            ac_index=100,
-            ac_content="sub",
+        grandchild = ACExecutionResult(
+            ac_index=10000,
+            ac_content="grandchild",
             success=True,
             messages=(
                 AgentMessage(
@@ -409,6 +752,13 @@ class TestCollectFileModifications:
                     data={"tool_input": {"file_path": "deep.py"}},
                 ),
             ),
+        )
+        sub = ACExecutionResult(
+            ac_index=100,
+            ac_content="sub",
+            success=True,
+            is_decomposed=True,
+            sub_results=(grandchild,),
         )
         parent = _make_result(0, [("Write", "top.py")], sub_results=[sub])
         acc: dict[str, set[int]] = {}
@@ -648,6 +998,60 @@ class TestRunReview:
             == "execution.workflows.exec_level_scope.levels.level_1."
             "coordinator_reconciliation_session"
         )
+
+    @pytest.mark.asyncio
+    async def test_frozen_reasoning_effort_survives_fresh_and_resumed_conflict_review(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A current config change cannot alter either coordinator provider effect."""
+
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            kind="level_coordinator",
+            native_session_id="coord-effort-session",
+            cwd="/tmp/project",
+        )
+        runtime = _StubCoordinatorRuntime(
+            (
+                AgentMessage(
+                    type="result",
+                    content=(
+                        '{"review_summary":"Resolved","fixes_applied":[],'
+                        '"warnings_for_next_level":[],"conflicts_resolved":[]}'
+                    ),
+                    data={"subtype": "success"},
+                    resume_handle=runtime_handle,
+                ),
+            )
+        )
+        runtime.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+        )
+        monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+        coordinator = LevelCoordinator(runtime, reasoning_effort="low")
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        level_context = LevelContext(level_number=1, completed_acs=())
+
+        first = await coordinator.run_review(
+            execution_id="exec_effort",
+            conflicts=[conflict],
+            level_context=level_context,
+            level_number=1,
+        )
+        await coordinator.run_review(
+            execution_id="exec_effort",
+            conflicts=[conflict],
+            level_context=level_context,
+            level_number=1,
+            previous_review=first,
+        )
+
+        assert [call["reasoning_effort"] for call in runtime.calls] == ["low", "low"]
+        assert runtime.calls[1]["resume_handle"].native_session_id == "coord-effort-session"
 
 
 # =============================================================================

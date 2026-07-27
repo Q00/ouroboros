@@ -13,7 +13,6 @@ from ouroboros.config import get_default_config
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, ParamSupport
-from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -40,6 +39,15 @@ def _write_guidance(root: Path, guidance_id: str, text: str) -> Path:
     return path
 
 
+def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
+    """Treat a unit-test tracker as the durable snapshot for mocked stores."""
+
+    async def reconstruct(tracker: SessionTracker):
+        return Result.ok(tracker)
+
+    runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
+
+
 def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[OrchestratorRunner, AsyncMock]:
     adapter = MagicMock()
     adapter.runtime_backend = "opencode"
@@ -52,11 +60,14 @@ def _runner(root: Path, guidance_ids: tuple[str, ...] = ()) -> tuple[Orchestrato
     event_store = AsyncMock()
     event_store.append = AsyncMock()
     event_store.replay = AsyncMock(return_value=[])
+    event_store.query_execution_related_events = AsyncMock(return_value=[])
     config = get_default_config()
     execution = config.execution.model_copy(update={"project_guidance": guidance_ids})
     config = config.model_copy(update={"execution": execution})
     with patch("ouroboros.config.load_config", return_value=config):
-        return OrchestratorRunner(adapter, event_store, MagicMock()), event_store
+        runner = OrchestratorRunner(adapter, event_store, MagicMock())
+    _allow_mocked_precreated_durable_state(runner)
+    return runner, event_store
 
 
 def test_empty_guidance_preserves_prompt_bytes() -> None:
@@ -210,15 +221,14 @@ async def test_each_new_run_reloads_declared_guidance(tmp_path: Path) -> None:
         )
 
 
-def test_legacy_contract_resumes_without_newly_configured_guidance(tmp_path: Path) -> None:
+def test_legacy_contract_cannot_reconstruct_guidance_or_effect_inputs(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, _store = _runner(tmp_path, ("team",))
 
-    changed = runner._restore_execution_contract({}, seed=_seed())
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        runner._restore_execution_contract({}, seed=_seed())
 
-    assert changed is True
-    assert runner._execution_guidance is not None
-    assert runner._execution_guidance.refs == ()
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
 
 
 @pytest.mark.asyncio
@@ -328,7 +338,6 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         )
 
     runner._adapter.execute_task = execute_task
-    tool_catalog = assemble_session_tool_catalog(["Read"])
     with (
         patch.object(
             runner._session_repo,
@@ -349,7 +358,7 @@ async def test_execute_seed_delivers_guidance_to_adapter_system_prompt(tmp_path:
         patch.object(
             runner,
             "_get_merged_tools",
-            AsyncMock(return_value=(["Read"], None, tool_catalog)),
+            AsyncMock(wraps=runner._get_merged_tools),
         ),
         patch.object(runner, "_evaluate_frugality_proof", AsyncMock()),
     ):
@@ -389,6 +398,12 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
         execution_contract=contract,
         generation=generation,
     )
+    runner._seal_process_local_prepared_contract(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        generation=generation,
+        execution_contract=contract,
+    )
     tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
     expected = Result.ok(
         OrchestratorResult(
@@ -397,15 +412,13 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
             execution_id=tracker.execution_id,
         )
     )
-    tool_catalog = assemble_session_tool_catalog(["Read"])
-
     try:
         with (
             patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -520,7 +533,6 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
         )
 
     resumed._adapter.execute_task = execute_task
-    tool_catalog = assemble_session_tool_catalog(["Read"])
     try:
         with (
             patch.object(
@@ -541,7 +553,7 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
             patch.object(
                 resumed,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, tool_catalog)),
+                AsyncMock(wraps=resumed._get_merged_tools),
             ),
             patch.object(resumed, "_evaluate_frugality_proof", AsyncMock()),
         ):
@@ -562,3 +574,59 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
     ]
     assert len(guidance_events) == 1
     assert guidance_events[0].data["injection_key"] == "resume:0"
+
+
+@pytest.mark.asyncio
+async def test_guided_resume_rejects_missing_guidance_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    _write_guidance(tmp_path, "team", "Preserve project conventions.\n")
+    runner, event_store = _runner(tmp_path, ("team",))
+    seed = _seed()
+    generation = runner._begin_process_local_authority_generation()
+    malformed_contract = runner._build_execution_contract(
+        seed=seed,
+        authority_generation=generation,
+    )
+    del malformed_contract["guidance"]
+    tracker = SessionTracker.create(
+        "exec-guidance-missing",
+        seed.metadata.seed_id,
+        session_id="sess-guidance-missing",
+    ).with_status(SessionStatus.PAUSED)
+    tracker = tracker.with_progress(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: malformed_contract,
+            "messages_processed": 0,
+        }
+    )
+    runner._register_process_local_authority(
+        session_id=tracker.session_id,
+        execution_id=tracker.execution_id,
+        execution_contract=malformed_contract,
+        generation=generation,
+    )
+    provider = MagicMock(side_effect=AssertionError("provider must not run"))
+    runner._adapter.execute_task = provider
+
+    try:
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(tracker)),
+        ):
+            result = await runner.resume_session(tracker.session_id, seed)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    assert result.is_err
+    assert result.error.details["invalid"] == "top_level_schema"
+    assert result.error.details["missing"] == ["guidance"]
+    provider.assert_not_called()
+    assert all(
+        call.args[0].type != "orchestrator.guidance.injected"
+        for call in event_store.append.await_args_list
+    )

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+import json
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -14,7 +19,11 @@ from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
     _resolve_model_tier_request,
 )
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import (
+    ParamSupport,
+    RuntimeCapabilities,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 from ouroboros.orchestrator.model_routing import (
@@ -24,9 +33,11 @@ from ouroboros.orchestrator.model_routing import (
 )
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
+    EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS,
     FRUGALITY_PROOF_PROTOCOL_VERSION,
     OrchestratorError,
     OrchestratorRunner,
+    build_system_prompt,
 )
 from ouroboros.orchestrator.session import (
     SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
@@ -63,7 +74,7 @@ def _runner(
     )
 
 
-def _frontier_custom_router() -> ModelRouter:
+def _frontier_custom_router(*, base_tier: str = "frontier") -> ModelRouter:
     return ModelRouter(
         tier_models={
             "frugal": "custom-haiku",
@@ -72,9 +83,36 @@ def _frontier_custom_router() -> ModelRouter:
         },
         runtime_backend="claude",
         child_tier="frugal",
-        base_tier="frontier",
+        base_tier=base_tier,
         escalation_retry_threshold=7,
     )
+
+
+def _frontier_custom_economics() -> EconomicsConfig:
+    return EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=7,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[ModelConfig(provider="anthropic", model="custom-haiku")],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[ModelConfig(provider="anthropic", model="custom-opus")],
+            ),
+        },
+    )
+
+
+def _use_frontier_custom_routing(runner: OrchestratorRunner) -> None:
+    runner._route_economics = _frontier_custom_economics()
+    runner._model_router = _frontier_custom_router()
+    runner._requested_model_tier = "frontier"
 
 
 def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing survives") -> Seed:
@@ -119,6 +157,22 @@ def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_router_contract_round_trips_custom_frontier_policy() -> None:
     router = _frontier_custom_router()
+
+    recognized, restored = deserialize_model_router(serialize_model_router(router))
+
+    assert recognized is True
+    assert restored == router
+
+
+def test_router_contract_preserves_exact_model_whitespace() -> None:
+    router = _frontier_custom_router()
+    router = ModelRouter(
+        tier_models={**router.tier_models, "standard": " exact-model "},
+        runtime_backend=router.runtime_backend,
+        child_tier=router.child_tier,
+        base_tier=router.base_tier,
+        escalation_retry_threshold=router.escalation_retry_threshold,
+    )
 
     recognized, restored = deserialize_model_router(serialize_model_router(router))
 
@@ -175,17 +229,674 @@ def test_router_contract_rejects_semantically_invalid_ladder(router_payload: dic
 
 def test_resume_restores_persisted_custom_frontier_router() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner()
-    assert resumed._model_router is not None
-    assert resumed._model_router.base_tier == "standard"
+    resumed._route_economics = _frontier_custom_economics()
+    resumed._model_router = _frontier_custom_router()
+    resumed._requested_model_tier = "frontier"
 
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is False
     assert resumed._model_router == _frontier_custom_router()
+
+
+@pytest.mark.parametrize(
+    "schema_mutation",
+    [
+        "version",
+        "foundation_a_authority",
+        "execution_preferences",
+        "execution_semantics",
+        "execution_inputs",
+        "model_routing",
+        "frugality_proof",
+        "guidance",
+        "resume",
+        "unknown_top_level_key",
+    ],
+)
+def test_v9_resume_rejects_every_inexact_top_level_shape_before_effects(
+    schema_mutation: str,
+) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    assert frozenset(persisted) == EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
+    if schema_mutation == "unknown_top_level_key":
+        persisted[schema_mutation] = "not part of v9"
+        expected_missing: list[str] = []
+        expected_unknown = [schema_mutation]
+    else:
+        del persisted[schema_mutation]
+        expected_missing = [schema_mutation]
+        expected_unknown = []
+
+    resumed = _runner()
+    provider = MagicMock(side_effect=AssertionError("provider must not run"))
+    guidance_restore = MagicMock(side_effect=AssertionError("restoration must not start"))
+    resumed._adapter.execute_task = provider
+    resumed._restore_guidance_contract = guidance_restore
+
+    error_match = (
+        "invalid execution contract" if schema_mutation == "version" else "top-level schema"
+    )
+    with pytest.raises(OrchestratorError, match=error_match) as exc_info:
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    if schema_mutation == "version":
+        assert exc_info.value.details == {"contract_version": None}
+    else:
+        assert exc_info.value.details == {
+            "contract_version": persisted.get("version"),
+            "invalid": "top_level_schema",
+            "missing": expected_missing,
+            "unknown": expected_unknown,
+        }
+    provider.assert_not_called()
+    guidance_restore.assert_not_called()
+
+
+def test_resume_rejects_router_policy_that_validates_its_own_projection() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    router = routing["router"]
+    projection = routing["route_compat"]["projection"]
+    router["escalation_retry_threshold"] = 999
+    projection["escalation_retry_threshold"] = 999
+    routing_fingerprint = OrchestratorRunner._routing_fingerprint(routing)
+    persisted["frugality_proof"]["routing_fingerprint"] = routing_fingerprint
+
+    with pytest.raises(OrchestratorError, match="changed model-routing policy"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_pre_admission_v2_contract_fails_closed_without_complete_effect_inputs() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 2
+    routing = persisted["model_routing"]
+    del routing["reasoning_effort"]
+    del routing["route_compat"]
+    del routing["requested_model_tier"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_pre_requested_tier_v3_contract_fails_closed_without_complete_effect_inputs() -> None:
+    original = _runner(base_model_tier="frontier")
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effect_inputs() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted["version"] = 4
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    del persisted["execution_inputs"]
+    del persisted["frugality_proof"]["execution_inputs_fingerprint"]
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+@pytest.mark.parametrize("legacy_version", [5, 6, 7, 8])
+def test_recent_contracts_without_complete_effect_inputs_fail_closed(
+    legacy_version: int,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted["version"] = legacy_version
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["contract_version"] == legacy_version
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
+
+
+def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() -> None:
+    runner = _runner(fat_harness_mode=True)
+    contract = runner._build_execution_contract(seed=_seed())
+
+    strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
+    inputs = contract["execution_inputs"]
+
+    assert "consolidated evidence contract" in strategy.get_system_prompt_fragment()
+    assert strategy.get_tools() == ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
+    assert inputs["allowed_tools"] == strategy.get_tools()
+    assert '"name":"Read"' in inputs["tool_catalog_json"]
+    assert len(inputs["tool_catalog_fingerprint"]) == 64
+
+
+def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capabilities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+    monkeypatch.delenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", raising=False)
+    manifest = tmp_path / "pyproject.toml"
+    manifest.write_text(
+        '[project]\nname = "frozen-app"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    inherited = RuntimeHandle(
+        backend="claude",
+        native_session_id="original-parent",
+        metadata={"fork_session": True},
+    )
+    runner = _runner(cwd=str(tmp_path), inherited_runtime_handle=inherited)
+    seed = _seed()
+    contract = runner._build_execution_contract(seed=seed)
+
+    inputs = contract["execution_inputs"]
+    semantics = contract["execution_semantics"]
+    assert inputs["schema_version"] == 2
+    assert semantics["version"] == 3
+    assert semantics["usage_limit_pause_seconds"] == 18000
+    assert semantics["runtime_effect_capabilities"]["version"] == 1
+    assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
+    persisted_profile = runner._execution_profile_snapshot(contract, require_bound=True)
+    persisted_handle = runner._execution_inherited_runtime_handle_snapshot(
+        contract,
+        require_bound=True,
+    )
+    assert persisted_profile is not None
+    assert persisted_profile.profile == "code"
+    assert persisted_handle is not None
+    assert persisted_handle.native_session_id == "original-parent"
+
+    manifest.write_text(
+        '[project]\nname = "frozen-app"\nversion = "9.9.9"\n',
+        encoding="utf-8",
+    )
+    frozen_prompt = build_system_prompt(
+        seed,
+        strategy=runner._execution_strategy_snapshot(contract, require_bound=True),
+        repo_root=tmp_path,
+        context_pack_enabled=True,
+        resolved_context_pack_fragment=runner._execution_context_pack_fragment_snapshot(
+            contract,
+            require_bound=True,
+        ),
+    )
+    current_prompt = build_system_prompt(
+        seed,
+        repo_root=tmp_path,
+        context_pack_enabled=True,
+    )
+
+    assert "frozen-app 1.0.0" in frozen_prompt
+    assert "frozen-app 9.9.9" not in frozen_prompt
+    assert "frozen-app 9.9.9" in current_prompt
+
+
+def test_execution_inputs_reject_noncanonical_parent_handle_before_publication() -> None:
+    runner = _runner(
+        inherited_runtime_handle=RuntimeHandle(
+            backend="claude",
+            metadata={"non_finite": float("nan")},
+        )
+    )
+
+    with pytest.raises(OrchestratorError, match="non-canonical execution effect inputs"):
+        runner._build_execution_contract(seed=_seed())
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "context_pack_fragment",
+        "execution_profile_json",
+        "inherited_runtime_handle_json",
+    ],
+)
+def test_current_execution_inputs_require_complete_effect_population(field: str) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    del persisted["execution_inputs"][field]
+    persisted["frugality_proof"]["execution_inputs_fingerprint"] = (
+        OrchestratorRunner._execution_inputs_fingerprint(persisted["execution_inputs"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_persisted_research_strategy_does_not_gain_edit_on_resume() -> None:
+    runner = _runner()
+    research_seed = _seed().model_copy(update={"task_type": "research"})
+    contract = runner._build_execution_contract(seed=research_seed)
+
+    strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
+
+    assert "Edit" not in strategy.get_tools()
+    assert "research" in strategy.get_system_prompt_fragment().lower()
+
+
+def test_complete_tool_catalog_drift_is_rejected_before_resume_dispatch() -> None:
+    from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+    runner = _runner()
+    research_seed = _seed().model_copy(update={"task_type": "research"})
+    contract = runner._build_execution_contract(seed=research_seed)
+    drifted_catalog = assemble_session_tool_catalog(
+        ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    )
+
+    with pytest.raises(OrchestratorError, match="changed prompt/tool authority"):
+        runner._bind_execution_tool_authority(
+            contract,
+            merged_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+            tool_catalog=drifted_catalog,
+        )
+
+
+def test_malformed_v3_contract_does_not_bypass_effect_input_version_gate() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted["version"] = 3
+    routing = persisted["model_routing"]
+    del routing["requested_model_tier"]
+    del routing["reasoning_effort"]
+    del persisted["execution_semantics"]
+    del persisted["frugality_proof"]["execution_semantics_fingerprint"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_execution_semantics_change_contract_without_changing_route_identity() -> None:
+    runner = _runner()
+    baseline = runner._build_execution_contract()
+    baseline_routing_fingerprint = baseline["frugality_proof"]["routing_fingerprint"]
+
+    runner._run_verify_commands = False
+    runner._verify_command_timeout_seconds = 7
+    runner._ac_retry_attempts = 9
+    runner._enable_decomposition = False
+    runner._decomposition_mode = "off"
+    runner._max_decomposition_depth = 7
+    runner._fat_harness_mode = True
+    changed = runner._build_execution_contract()
+
+    assert changed["model_routing"] == baseline["model_routing"]
+    assert changed["frugality_proof"]["routing_fingerprint"] == baseline_routing_fingerprint
+    assert changed["execution_semantics"] != baseline["execution_semantics"]
+    assert (
+        changed["frugality_proof"]["execution_semantics_fingerprint"]
+        != (baseline["frugality_proof"]["execution_semantics_fingerprint"])
+    )
+
+
+def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> None:
+    original = _runner(fat_harness_mode=True, max_decomposition_depth=4)
+    original._run_verify_commands = True
+    original._verify_command_timeout_seconds = 600
+    original._ac_retry_attempts = 2
+    persisted = original._build_execution_contract(seed=_seed())
+
+    resumed = _runner(enable_decomposition=False, fat_harness_mode=False)
+    resumed._run_verify_commands = False
+    resumed._verify_command_timeout_seconds = 1
+    resumed._ac_retry_attempts = 0
+    resumed._max_decomposition_depth = 0
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_context_pack_and_effective_concurrency_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prompt mode and resolved fan-out are durable pre-provider semantics."""
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+    monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "1")
+    original = _runner(max_parallel_workers=3)
+    persisted = original._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["context_pack_enabled"] is True
+    assert persisted["execution_semantics"]["effective_parallel_workers"] == 1
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "0")
+    monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "3")
+    resumed = _runner(max_parallel_workers=3)
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_backend_rate_and_pacing_owner_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rate gate consumes the same durable resolved backend snapshot."""
+    monkeypatch.setenv("OUROBOROS_CLAUDE_RPM", "10")
+    original = _runner(max_parallel_workers=3)
+    original._adapter.self_governs_rate_limit = False
+    persisted = original._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["backend_requests_per_minute"] == 10
+    assert persisted["execution_semantics"]["backend_self_governs_rate_limit"] is False
+
+    monkeypatch.setenv("OUROBOROS_CLAUDE_RPM", "20")
+    resumed = _runner(max_parallel_workers=3)
+    resumed._adapter.self_governs_rate_limit = True
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_resume_rejects_usage_limit_pause_policy_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery timing is immutable execution authority, not live resume config."""
+
+    monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+    persisted = _runner()._build_execution_contract(seed=_seed())
+    assert persisted["execution_semantics"]["usage_limit_pause_seconds"] == 3600
+
+    monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+@pytest.mark.parametrize(
+    "resumed_capabilities",
+    [
+        RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.IGNORED,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        ),
+        RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        ),
+    ],
+)
+def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
+    resumed_capabilities: RuntimeCapabilities,
+) -> None:
+    """Provider kwargs cannot be recomputed from a changed runtime declaration."""
+    original = _runner()
+    original._reasoning_effort = "high"
+    original._adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        reasoning_effort_support=ParamSupport.NATIVE,
+        enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+        model_override_support=ParamSupport.NATIVE,
+    )
+    persisted = original._build_execution_contract(seed=_seed())
+    assert (
+        persisted["execution_semantics"]["runtime_effect_capabilities"]["reasoning_effort_support"]
+        == "native"
+    )
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+    resumed._adapter.capabilities = resumed_capabilities
+
+    with pytest.raises(OrchestratorError, match="changed execution semantics"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_verify_commands",
+        "verify_command_timeout_seconds",
+        "ac_retry_attempts",
+        "cross_harness_redispatch",
+        "enable_decomposition",
+        "decomposition_mode",
+        "max_decomposition_depth",
+        "max_parallel_workers",
+        "effective_parallel_workers",
+        "fat_harness_mode",
+        "shadow_replay_enabled",
+        "checkpoint_store_enabled",
+        "session_signal_hub_enabled",
+        "context_pack_enabled",
+        "backend_limits_backend",
+        "backend_max_concurrency",
+        "backend_requests_per_minute",
+        "backend_tokens_per_minute",
+        "backend_self_governs_rate_limit",
+        "usage_limit_pause_seconds",
+        "runtime_effect_capabilities",
+    ],
+)
+def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    del persisted["execution_semantics"][field]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "targeted_resume",
+        "reasoning_effort_support",
+        "enforceable_reasoning_efforts",
+        "model_override_support",
+        "session_signals",
+    ],
+)
+def test_current_runtime_effect_capabilities_require_complete_exact_population(
+    field: str,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    del persisted["execution_semantics"]["runtime_effect_capabilities"][field]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("pause_seconds", [True, 0, 31_536_001])
+def test_current_execution_semantics_rejects_unbounded_pause_policy(
+    pause_seconds: object,
+) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["usage_limit_pause_seconds"] = pause_seconds
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+@pytest.mark.parametrize("missing", ["reasoning_effort", "route_compat", "requested_model_tier"])
+def test_current_contract_missing_admission_field_is_not_treated_as_legacy(
+    missing: str,
+) -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    del routing[missing]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
+    huge = 10**5000
+    economics = _frontier_custom_economics()
+    tiers = dict(economics.tiers)
+    tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": huge})
+    economics = economics.model_copy(update={"tiers": tiers, "escalation_threshold": huge})
+    router = _frontier_custom_router()
+    router = ModelRouter(
+        tier_models=router.tier_models,
+        runtime_backend=router.runtime_backend,
+        child_tier=router.child_tier,
+        base_tier=router.base_tier,
+        escalation_retry_threshold=huge,
+    )
+    original = _runner()
+    original._route_economics = economics
+    original._model_router = router
+    original._requested_model_tier = "frontier"
+
+    persisted = original._build_execution_contract()
+    encoded = json.dumps(persisted, sort_keys=True)
+    assert isinstance(encoded, str)
+    routing = persisted["model_routing"]
+    assert routing["router"]["escalation_retry_threshold"] == "1" + "0" * 5000
+    projection = routing["route_compat"]["projection"]
+    assert projection["escalation_retry_threshold"] == "1" + "0" * 5000
+    assert projection["registry"]["candidates"][1]["cost_units"] == "1" + "0" * 5000
+
+    resumed = _runner()
+    resumed._route_economics = economics
+    resumed._model_router = router
+    resumed._requested_model_tier = "frontier"
+    assert (
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: json.loads(encoded)})
+        is False
+    )
+
+
+def test_contract_serialization_ignores_constrained_python_digit_limit() -> None:
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("Python integer digit limits are unavailable")
+    previous_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(640)
+        huge = 10**1000
+        economics = _frontier_custom_economics().model_copy(update={"escalation_threshold": huge})
+        tiers = dict(economics.tiers)
+        tiers["standard"] = tiers["standard"].model_copy(update={"cost_factor": huge})
+        economics = economics.model_copy(update={"tiers": tiers})
+        router = replace(_frontier_custom_router(), escalation_retry_threshold=huge)
+        runner = _runner()
+        runner._route_economics = economics
+        runner._model_router = router
+        runner._requested_model_tier = "frontier"
+
+        contract = runner._build_execution_contract()
+
+        assert json.dumps(contract, sort_keys=True)
+        assert contract["model_routing"]["router"]["escalation_retry_threshold"] == (
+            "1" + "0" * 1000
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+
+@pytest.mark.parametrize("requested_tier", ["frugal", "frontier"])
+def test_resume_without_argument_preserves_persisted_non_default_tier(
+    requested_tier: str,
+) -> None:
+    original = _runner(base_model_tier=requested_tier)
+    persisted = original._build_execution_contract()
+    assert persisted["model_routing"]["requested_model_tier"] == requested_tier
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is False
+    assert resumed._requested_model_tier == requested_tier
+    assert resumed._model_router is not None
+    assert resumed._model_router.base_tier == requested_tier
+
+
+@pytest.mark.parametrize(
+    ("persisted_effort", "current_effort"),
+    [("low", "high"), ("high", None), (None, "low")],
+)
+def test_resume_rejects_base_reasoning_effort_transition(
+    persisted_effort: str | None,
+    current_effort: str | None,
+) -> None:
+    original = _runner()
+    original._reasoning_effort = persisted_effort
+    persisted = original._build_execution_contract()
+    route_compat = persisted["model_routing"]["route_compat"]
+    assert route_compat["projection"]["effort"] == persisted_effort
+
+    resumed = _runner()
+    resumed._reasoning_effort = current_effort
+
+    with pytest.raises(OrchestratorError, match="changed route compatibility catalog"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_resume_restores_persisted_kill_switch() -> None:
@@ -201,18 +912,91 @@ def test_resume_restores_persisted_kill_switch() -> None:
     assert resumed._model_router is None
 
 
+def test_dormant_model_routing_still_rejects_reasoning_effort_drift() -> None:
+    original = _runner()
+    original._model_router = None
+    original._reasoning_effort = "low"
+    persisted = original._build_execution_contract()
+    routing = persisted["model_routing"]
+    assert routing["route_compat"] == {"version": 1, "enabled": False}
+    assert routing["reasoning_effort"] == "low"
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+
+    with pytest.raises(OrchestratorError, match="changed reasoning-effort contract"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
-    original._model_router = _frontier_custom_router()
+    _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract()
 
     resumed = _runner(base_model_tier="standard")
+    resumed._route_economics = _frontier_custom_economics()
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
     changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
     assert changed is True
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
-    assert resumed._model_router.tier_models != _frontier_custom_router().tier_models
+    assert resumed._model_router.tier_models == _frontier_custom_router().tier_models
+
+
+def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
+    original = _runner()
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract()
+
+    resumed = _runner(base_model_tier="standard")
+    changed_economics = _frontier_custom_economics()
+    tiers = dict(changed_economics.tiers)
+    tiers["standard"] = TierConfig(
+        cost_factor=999,
+        models=[ModelConfig(provider="anthropic", model="custom-sonnet")],
+    )
+    resumed._route_economics = EconomicsConfig(
+        default_tier=changed_economics.default_tier,
+        escalation_threshold=changed_economics.escalation_threshold,
+        tiers=tiers,
+    )
+    resumed._model_router = _frontier_custom_router(base_tier="standard")
+
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    replacement = resumed._execution_contract
+    assert replacement is not None
+    projection = replacement["model_routing"]["route_compat"]["projection"]
+    assert projection["registry"]["candidates"][1]["cost_units"] == "999"
+
+
+def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
+    original = _runner()
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    routing["route_compat"] = {"version": 1, "enabled": False}
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="enabled route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_dormant_current_contract_requires_explicit_route_compat() -> None:
+    original = _runner()
+    original._model_router = None
+    persisted = copy.deepcopy(original._build_execution_contract())
+    routing = persisted["model_routing"]
+    del routing["route_compat"]
+    persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
+        routing
+    )
+
+    with pytest.raises(OrchestratorError, match="explicit route compatibility"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
 def test_present_malformed_resume_contract_fails_closed() -> None:
@@ -890,14 +1674,14 @@ def test_seed_fingerprint_ignores_identity_but_tracks_semantics() -> None:
     )
 
 
-def test_first_legacy_resume_migrates_resolved_contract() -> None:
+def test_contractless_legacy_resume_fails_closed_without_effect_inputs() -> None:
     runner = _runner()
 
-    changed = runner._restore_execution_contract({}, seed=_seed())
+    with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
+        runner._restore_execution_contract({}, seed=_seed())
 
-    assert changed is True
-    assert runner._execution_contract is not None
-    assert "seed_fingerprint" in runner._execution_contract["frugality_proof"]
+    assert exc_info.value.details["contract_version"] is None
+    assert exc_info.value.details["resume_blocked"] == "execution_inputs_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1785,7 @@ def test_legacy_resume_rejects_persisted_workspace_mismatch(tmp_path: Path) -> N
     )
     runner = _runner(task_workspace=current_workspace)
 
-    with pytest.raises(OrchestratorError, match="different project workspace"):
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
         runner._restore_execution_contract(
             {
                 SESSION_START_IDENTITY_PROGRESS_KEY: {
@@ -1015,31 +1799,25 @@ def test_legacy_resume_rejects_persisted_workspace_mismatch(tmp_path: Path) -> N
         )
 
 
-def test_legacy_resume_migrates_to_forced_bypass_permission() -> None:
+def test_legacy_resume_cannot_reconstruct_forced_permission_or_effect_inputs() -> None:
     runner = _runner()
 
-    changed = runner._restore_execution_contract(
-        {
-            SESSION_START_IDENTITY_PROGRESS_KEY: {
-                "seed_id": "seed-routing-contract",
-                "seed_goal": "Prove durable routing",
-                "runtime_backend": "claude",
-                "llm_backend": "anthropic",
+    with pytest.raises(OrchestratorError, match="without durable effect inputs"):
+        runner._restore_execution_contract(
+            {
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "seed_id": "seed-routing-contract",
+                    "seed_goal": "Prove durable routing",
+                    "runtime_backend": "claude",
+                    "llm_backend": "anthropic",
+                },
+                "runtime": {
+                    "backend": "claude",
+                    "approval_mode": "acceptEdits",
+                },
             },
-            "runtime": {
-                "backend": "claude",
-                "approval_mode": "acceptEdits",
-            },
-        },
-        seed=_seed(),
-    )
-
-    assert changed is True
-    assert runner._execution_contract is not None
-    assert runner._execution_contract["model_routing"]["permission_mode"] == {
-        "observed": True,
-        "mode": "bypassPermissions",
-    }
+            seed=_seed(),
+        )
 
 
 def test_mcp_model_tier_omission_remains_distinguishable_from_explicit_medium() -> None:

@@ -34,7 +34,11 @@ from ouroboros.core.worktree import (
     maybe_restore_task_workspace,
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
-from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
+from ouroboros.orchestrator.decomposition_limits import (
+    DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    MAX_DURABLE_DECOMPOSITION_DEPTH,
+    validate_max_decomposition_depth,
+)
 
 
 def _resolve_execution_model(runtime_backend: str | None) -> str | None:
@@ -342,23 +346,40 @@ def _coerce_positive_int(value: object, *, source: str) -> int:
 def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int | None) -> int:
     """Resolve decomposition depth from CLI, env, seed config, then default."""
     if cli_value is not None:
-        return _coerce_non_negative_int(cli_value, source="--max-decomposition-depth")
+        return _coerce_max_decomposition_depth(
+            cli_value,
+            source="--max-decomposition-depth",
+        )
 
     env_value = os.environ.get("OUROBOROS_MAX_DECOMPOSITION_DEPTH", "").strip()
     if env_value:
-        return _coerce_non_negative_int(
+        return _coerce_max_decomposition_depth(
             env_value,
             source="OUROBOROS_MAX_DECOMPOSITION_DEPTH",
         )
 
     orchestrator_config = seed_data.get("orchestrator")
     if isinstance(orchestrator_config, dict) and "max_decomposition_depth" in orchestrator_config:
-        return _coerce_non_negative_int(
+        return _coerce_max_decomposition_depth(
             orchestrator_config.get("max_decomposition_depth"),
             source="seed.orchestrator.max_decomposition_depth",
         )
 
-    return DEFAULT_MAX_DECOMPOSITION_DEPTH
+    return validate_max_decomposition_depth(
+        DEFAULT_MAX_DECOMPOSITION_DEPTH,
+        source="default max_decomposition_depth",
+    )
+
+
+def _coerce_max_decomposition_depth(value: object, *, source: str) -> int:
+    """Parse every public depth source through the shared live/replay gate."""
+
+    parsed = _coerce_non_negative_int(value, source=source)
+    try:
+        return validate_max_decomposition_depth(parsed, source=source)
+    except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(1) from exc
 
 
 def _load_skip_completed_markers(
@@ -877,7 +898,9 @@ def workflow(
             min=0,
             help=(
                 "Maximum recursive AC decomposition depth. "
-                "0 disables decomposition; 1 allows one split; default 2."
+                "0 disables decomposition; default 2. "
+                f"Depths above {MAX_DURABLE_DECOMPOSITION_DEPTH} use the historical "
+                "legacy non-resumable path."
             ),
         ),
     ] = None,

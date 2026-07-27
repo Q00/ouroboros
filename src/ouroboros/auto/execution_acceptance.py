@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import re
 
-from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+    derive_semantic_ac_key,
+)
 
 _AUTO_WRAPPER_CRITERIA = frozenset(
     {
@@ -157,6 +163,16 @@ _AUTORESEARCH_CANONICAL_AC = (
     "The final report artifact includes baseline val_bpb, each attempted experiment result, final best val_bpb, and the keep/discard reason for every candidate.",
 )
 
+
+def _autoresearch_canonical_position(text: str) -> int | None:
+    """Return the fixed canonical index of ``text``, or None if not canonical."""
+    stripped = text.strip()
+    for index, canonical in enumerate(_AUTORESEARCH_CANONICAL_AC):
+        if canonical.strip() == stripped:
+            return index
+    return None
+
+
 _AUTORESEARCH_NON_GOALS = (
     "Do not edit prepare.py.",
     "Do not edit files outside train.py unless scope_widening_ledger explicitly widens scope.",
@@ -209,23 +225,444 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     return normalized_seed
 
 
+def _has_explicit_semantic_key(criterion: AcceptanceCriterionSpec) -> bool:
+    """Return whether a criterion's semantic key was explicitly supplied.
+
+    ``Seed`` auto-derives a key for every criterion from its description and
+    contract, so a key that equals ``derive_semantic_ac_key`` carries no author
+    intent.  A key that *differs* from the derived value is an explicit identity
+    that runtime routing and recovery correlate events on — canonicalization
+    must never destroy it.
+    """
+    return (
+        criterion.semantic_ac_key is not None
+        and criterion.semantic_ac_key != derive_semantic_ac_key(criterion)
+    )
+
+
+def _carries_explicit_contract(criterion: AcceptanceCriterionInput) -> bool:
+    """Return whether a criterion holds authority a rewrite must never drop.
+
+    ``Seed`` materializes every criterion — including legacy strings — into an
+    ``AcceptanceCriterionSpec`` with an auto-derived ``semantic_ac_key``.  That
+    derived key is not, on its own, a contract.  But an explicit verification
+    command/artifact/assertion, a declared investment, *or* an explicitly
+    supplied semantic identity all carry authority a canonicalizing rewrite
+    would silently discard.
+    """
+    return isinstance(criterion, AcceptanceCriterionSpec) and (
+        criterion.has_success_contract
+        or criterion.investment is not None
+        or _has_explicit_semantic_key(criterion)
+    )
+
+
+def _identity_signature(criterion: AcceptanceCriterionSpec) -> tuple[object, ...]:
+    """Return the full identity a collapse must not conflate.
+
+    Two contract-bearing sources are safe to collapse only when both their
+    verification contract *and* their explicit identity match; either differing
+    makes them independent criteria.
+    """
+    return (
+        criterion.verify_command,
+        criterion.expected_artifacts,
+        criterion.output_assertion,
+        criterion.investment,
+        criterion.semantic_ac_key if _has_explicit_semantic_key(criterion) else None,
+    )
+
+
 def _restore_surviving_acceptance_specs(
     filtered: tuple[str, ...],
     original: tuple[tuple[AcceptanceCriterionInput, str], ...],
 ) -> tuple[AcceptanceCriterionInput, ...]:
-    """Keep structured contracts for criteria that survive normalization unchanged."""
-    original_by_text: dict[str, list[AcceptanceCriterionInput]] = {}
-    for criterion, text in original:
-        original_by_text.setdefault(text, []).append(criterion)
+    """Reattach structured contracts to canonicalized criteria without loss.
 
-    restored: list[AcceptanceCriterionInput] = []
-    for text in filtered:
-        matches = original_by_text.get(text)
-        if matches:
-            restored.append(matches.pop(0))
-        else:
-            restored.append(text)
-    return tuple(restored)
+    Normalization rewrites known-equivalent criteria to a canonical text.  That
+    rewrite must never conflate, drop, or reorder a criterion's verification
+    evidence or explicit identity.  The restoration therefore preserves three
+    properties simultaneously:
+
+    - **Identity** — a source carrying an explicit contract or an explicitly
+      supplied ``semantic_ac_key`` is never merged away or stripped.  A canonical
+      text that would conflate *distinct* identities refuses the collapse and
+      keeps each source verbatim.  Bare/legacy equivalents (auto-derived keys,
+      no contract) still collapse to one plain string.
+    - **Order** — every emitted criterion is anchored to its originating source
+      position and re-sorted, so a refused collapse or an autoresearch
+      replacement can never move a contract ahead of or behind its siblings
+      (sequential execution reads tuple order as stage order).
+    - **Loss-free** — a caller-authored criterion is never deleted to satisfy a
+      downstream constraint. Two criteria that arrive sharing a description keep
+      both contracts; a canonical text seen twice never manufactures a phantom
+      contractless duplicate.
+    """
+    remaining_indices = list(range(len(original)))
+
+    def _pop(index: int) -> tuple[AcceptanceCriterionInput, str]:
+        remaining_indices.remove(index)
+        return original[index]
+
+    # Emissions carry a ``(tier, position)`` sort key drawn from ONE coordinate
+    # system so injected and sourced anchors never mix:
+    #   tier 0 = normalizer-injected criteria (e.g. the fixed autoresearch
+    #            canonical ACs), ordered by their filtered position so the
+    #            canonical baseline/experiment sequence is never reordered;
+    #   tier 1 = source-derived criteria, ordered by their originating source
+    #            index so caller order is preserved.
+    # Injected criteria therefore always precede source-only criteria, and a
+    # contract transferred onto an injected canonical AC keeps that AC's tier-0
+    # position rather than jumping into the source coordinate space.
+    _SortKey = tuple[int, float]
+    emissions: list[tuple[_SortKey, AcceptanceCriterionInput]] = []
+    emitted_source_texts: set[str] = set()
+
+    def _emit(key: _SortKey, item: AcceptanceCriterionInput) -> None:
+        emissions.append((key, item))
+        emitted_source_texts.add(ac_text(item).strip())
+
+    for filtered_pos, text in enumerate(filtered):
+        canonical_indices = [
+            index
+            for index in remaining_indices
+            if isinstance(original[index][0], AcceptanceCriterionSpec)
+            and _structured_criterion_normalizes_to(original[index][1], text)
+        ]
+        if canonical_indices:
+            identity_specs = [
+                original[index][0]
+                for index in canonical_indices
+                if _carries_explicit_contract(original[index][0])
+            ]
+            distinct_identities = {
+                _identity_signature(spec)  # type: ignore[arg-type]
+                for spec in identity_specs
+            }
+            if len(distinct_identities) > 1:
+                # Conflating distinct identities would strand every command but
+                # the first behind one canonical description.  Refuse the
+                # collapse and keep EVERY source verbatim at its own position —
+                # both the distinct contracts and the bare requirement the
+                # canonical text would otherwise represent.  Dropping a bare
+                # sibling here silently deletes a caller-authorized requirement.
+                for index in list(canonical_indices):
+                    criterion, _text = _pop(index)
+                    _emit((1, float(index)), criterion)
+                continue
+            anchor = float(min(canonical_indices))
+            specs = [_pop(index)[0] for index in canonical_indices]
+            _emit(
+                (1, anchor),
+                _collapse_canonical_acceptance_specs(
+                    specs,  # type: ignore[arg-type]
+                    description=text,
+                ),
+            )
+            continue
+
+        exact_indices = [index for index in remaining_indices if original[index][1] == text]
+        if exact_indices:
+            # Group EVERY source with this exact text, not just the first, so
+            # byte-identical repeats collapse into one execution AC (one command,
+            # one key) while genuinely distinct identities each survive.  A source
+            # whose text IS an autoresearch canonical AC anchors to the fixed
+            # canonical sequence (tier 0); otherwise it stays in source order.
+            specs = [_pop(index)[0] for index in exact_indices]
+            canonical_position = _autoresearch_canonical_position(text)
+            key: tuple[int, float] = (
+                (0, float(canonical_position))
+                if canonical_position is not None
+                else (1, float(min(exact_indices)))
+            )
+            for item in _collapse_exact_match_criteria(specs):
+                _emit(key, item)
+            continue
+
+        # A filtered text with no remaining source.  Either the normalizer
+        # injected it (e.g. an autoresearch canonical AC) or it repeats a text an
+        # earlier iteration already consumed and emitted.  Emit it only when it
+        # is genuinely new — repeating an already-emitted description here would
+        # manufacture a phantom contractless duplicate for the same requirement.
+        if text.strip() in emitted_source_texts:
+            continue
+        _emit((0, float(filtered_pos)), text)
+
+    # Never let a canonicalization path drop an explicit contract/identity: any
+    # source a normalizer replaced or dropped (e.g. the autoresearch rewrite the
+    # matcher above does not model) is restored at its source anchor.
+    autoresearch = bool(filtered) and _AUTORESEARCH_CANONICAL_AC[0] in filtered
+    for index in list(remaining_indices):
+        criterion, source_text = original[index]
+        if not _carries_explicit_contract(criterion):
+            continue
+        if autoresearch:
+            subject = _unwrap_seed_repairer_original_requirement(source_text).strip()
+            covered, canonical_index = _autoresearch_coverage(subject)
+            # A structured source subsumed by a canonical AC transfers its contract
+            # ONTO that canonical criterion; otherwise the string normalizer already
+            # emitted the source's unwrapped requirement (bare), so the contract is
+            # transferred onto THAT emission — never appended as a second copy.
+            # Either way the requirement runs exactly once, contracted.
+            if covered and canonical_index is not None:
+                target = _AUTORESEARCH_CANONICAL_AC[canonical_index]
+            else:
+                target = subject
+            _pop(index)
+            if not _place_transferred_onto_emission(
+                emissions,
+                target,
+                _build_transferred_spec(criterion, target),  # type: ignore[arg-type]
+            ):
+                # The target is occupied by a distinct contract (or absent):
+                # emit the source under its OWN unwrapped description so it stays
+                # uniquely reachable rather than colliding on the target text.
+                emissions.append(
+                    ((1, float(index)), _build_transferred_spec(criterion, subject))  # type: ignore[arg-type]
+                )
+            continue
+        _pop(index)
+        emissions.append(((1, float(index)), criterion))
+
+    # Reconcile atomically: multiple passes (exact-canonical, canonicalizing
+    # collapse, contract transfer) can emit the same description more than once.
+    # Group by description and keep one criterion per DISTINCT identity so the
+    # result is loss-free, has no duplicate execution units, and is idempotent
+    # under re-normalization.
+    emissions = _reconcile_emissions(emissions)
+    emissions.sort(key=lambda item: item[0])
+    # Normalization is loss-free: it never deletes a distinct caller-authorized
+    # contract to force description uniqueness. Two criteria that arrive sharing
+    # a description keep both contracts; the description-keyed evaluation map is
+    # a pre-existing boundary limitation for such inputs, not something to fix by
+    # discarding a valid Seed contract here.
+    return tuple(emission for _key, emission in emissions)
+
+
+def _reconcile_emissions(
+    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
+) -> list[tuple[tuple[int, float], AcceptanceCriterionInput]]:
+    """Keep one emission per (description, distinct identity), earliest position.
+
+    Restoration resolves equivalence across several passes, so the same
+    description can be emitted more than once (an exact-canonical source and a
+    canonicalizing component; a transfer and a passthrough).  Grouping by
+    description and collapsing byte-identical identities here — after every pass
+    — guarantees no duplicate execution unit shares an identity, while genuinely
+    distinct identities survive.  Choosing the earliest position per identity
+    makes the result stable and idempotent under re-normalization.
+    """
+    order: list[str] = []
+    groups: dict[str, list[tuple[tuple[int, float], AcceptanceCriterionInput]]] = {}
+    for entry in emissions:
+        description = ac_text(entry[1]).strip()
+        if description not in groups:
+            groups[description] = []
+            order.append(description)
+        groups[description].append(entry)
+
+    reconciled: list[tuple[tuple[int, float], AcceptanceCriterionInput]] = []
+    for description in order:
+        group = groups[description]
+        contract_entries = [entry for entry in group if _carries_explicit_contract(entry[1])]
+        if not contract_entries:
+            # All bare: one representative at the earliest position.
+            min_key = min(key for key, _item in group)
+            reconciled.append((min_key, group[0][1]))
+            continue
+        signatures: list[tuple[object, ...]] = []
+        chosen: list[tuple[tuple[int, float], AcceptanceCriterionInput]] = []
+        for key, item in contract_entries:
+            signature = _identity_signature(item)  # type: ignore[arg-type]
+            existing = next(
+                (i for i, s in enumerate(signatures) if s == signature),
+                None,
+            )
+            if existing is None:
+                signatures.append(signature)
+                chosen.append((key, item))
+            elif key < chosen[existing][0]:
+                chosen[existing] = (key, chosen[existing][1])
+        reconciled.extend(chosen)
+    return reconciled
+
+
+def _collapse_exact_match_criteria(
+    specs: list[AcceptanceCriterionInput],
+) -> list[AcceptanceCriterionInput]:
+    """Collapse same-description sources into one AC per distinct identity.
+
+    All inputs share one description.  Byte-identical full identities (same
+    contract and explicit key) collapse to a single execution AC — otherwise the
+    same command would dispatch twice under one shared key.  A bare source (no
+    contract, no explicit identity) is subsumed once any contract-bearing source
+    is present, since the contracted criterion is the richer form of the same
+    requirement.  Genuinely distinct identities are each preserved.
+    """
+    contract_specs = [spec for spec in specs if _carries_explicit_contract(spec)]
+    if not contract_specs:
+        # All bare: one representative AC for the shared requirement.
+        return [specs[0]]
+    result: list[AcceptanceCriterionInput] = []
+    seen_signatures: list[tuple[object, ...]] = []
+    for spec in contract_specs:
+        signature = _identity_signature(spec)  # type: ignore[arg-type]
+        if signature not in seen_signatures:
+            seen_signatures.append(signature)
+            result.append(spec)
+    return result
+
+
+def _build_transferred_spec(
+    source: AcceptanceCriterionSpec,
+    description: str,
+) -> AcceptanceCriterionSpec:
+    """Return the source's contract under ``description`` with a safe identity.
+
+    The spec keeps the source's verification evidence and investment authority;
+    an explicitly-supplied ``semantic_ac_key`` is preserved (routing/recovery
+    correlate on it), while an auto-derived key is dropped so ``Seed`` re-derives
+    a fresh one from ``description`` rather than persisting a stale source key.
+    """
+    explicit_key = (
+        source.semantic_ac_key
+        if source.semantic_ac_key is not None
+        and source.semantic_ac_key != derive_semantic_ac_key(source)
+        else None
+    )
+    return AcceptanceCriterionSpec(
+        description=description,
+        semantic_ac_key=explicit_key,
+        verify_command=source.verify_command,
+        expected_artifacts=source.expected_artifacts,
+        output_assertion=source.output_assertion,
+        investment=source.investment,
+    )
+
+
+def _place_transferred_onto_emission(
+    emissions: list[tuple[tuple[int, float], AcceptanceCriterionInput]],
+    target_text: str,
+    transferred: AcceptanceCriterionSpec,
+) -> bool:
+    """Attach a contract onto the already-emitted criterion for ``target_text``.
+
+    Returns whether the source is now represented by an existing emission (so the
+    caller may drop it).  The target — a canonical AC or the string normalizer's
+    unwrapped passthrough of this same requirement — keeps its description and
+    position and gains the contract, so the executor sees exactly one contracted
+    AC instead of a bare requirement plus a duplicate contracted copy.
+
+    ALL emissions sharing ``target_text`` are scanned: if any already carries an
+    equivalent identity the source collapses onto it; otherwise a bare emission
+    (if any) is enriched with the contract.  Only when every same-text emission
+    carries a *distinct* contract does this return False, so the caller can
+    preserve the source under its own description rather than colliding on one.
+    Comparison is on explicit identity — an auto-derived key is not intended
+    identity, so two equivalent contracts differing only in a derived key still
+    collapse once.
+    """
+    target = target_text.strip()
+    bare_position: int | None = None
+    for position, (_key, item) in enumerate(emissions):
+        if ac_text(item).strip() != target:
+            continue
+        if isinstance(item, AcceptanceCriterionSpec) and _carries_explicit_contract(item):
+            if _autoresearch_identity_matches(item, transferred):
+                return True
+            continue
+        if bare_position is None:
+            bare_position = position
+    if bare_position is not None:
+        key, _item = emissions[bare_position]
+        emissions[bare_position] = (key, transferred)
+        return True
+    return False
+
+
+def _explicit_semantic_key(criterion: AcceptanceCriterionSpec) -> str | None:
+    """Return the criterion's key only when it is an explicit (non-derived) one."""
+    return criterion.semantic_ac_key if _has_explicit_semantic_key(criterion) else None
+
+
+def _autoresearch_identity_matches(
+    existing: AcceptanceCriterionSpec,
+    candidate: AcceptanceCriterionSpec,
+) -> bool:
+    """Return whether two canonical-AC criteria carry an equivalent identity.
+
+    Compares the verification contract plus the *explicit* semantic identity; a
+    materialized auto-derived key is not intended identity, so two equivalent
+    contracts that differ only in a derived key are still equivalent and collapse
+    once rather than dispatching the same command twice.
+    """
+    return (
+        existing.verify_command == candidate.verify_command
+        and existing.expected_artifacts == candidate.expected_artifacts
+        and existing.output_assertion == candidate.output_assertion
+        and existing.investment == candidate.investment
+        and _explicit_semantic_key(existing) == _explicit_semantic_key(candidate)
+    )
+
+
+def _collapse_canonical_acceptance_specs(
+    specs: list[AcceptanceCriterionSpec],
+    *,
+    description: str,
+) -> AcceptanceCriterionInput:
+    """Collapse sources with an equivalent identity into one canonical AC.
+
+    Callers guarantee the sources hold at most one distinct explicit
+    contract/identity, so this never merges conflicting evidence.  The lone
+    contract (if any) is kept under the canonical description and its own
+    semantic identity; ``expected_artifacts`` are an order-preserving union so
+    equivalent contracts stay byte-identical.
+
+    A collapse of purely bare legacy strings — no contract, no explicit identity
+    on the *source* — degrades to a plain string so ``Seed`` re-derives a fresh
+    key from the canonical description.  The degrade decision is made on the
+    original identity, not the rewritten copy: changing the description would
+    otherwise make an auto-derived key diverge from its derived value and be
+    mistaken for an explicit identity, persisting a stale key.
+
+    When a contract IS kept under the canonical description, an auto-derived key
+    is re-derived from that description (an explicitly-supplied key is preserved),
+    so canonical identity never depends on the collapsed source's wording.
+    """
+    identity = next(
+        (spec for spec in specs if _carries_explicit_contract(spec)),
+        specs[0],
+    )
+    if not _carries_explicit_contract(identity):
+        return description
+    artifacts: list[str] = []
+    for spec in specs:
+        for artifact in spec.expected_artifacts:
+            if artifact not in artifacts:
+                artifacts.append(artifact)
+    rewritten = identity.model_copy(
+        update={"description": description, "expected_artifacts": tuple(artifacts)}
+    )
+    if _has_explicit_semantic_key(identity):
+        return rewritten
+    return rewritten.model_copy(update={"semantic_ac_key": derive_semantic_ac_key(rewritten)})
+
+
+def _structured_criterion_normalizes_to(original_text: str, normalized_text: str) -> bool:
+    """Return whether one structured hello_auto AC became ``normalized_text``."""
+    subject = _unwrap_seed_repairer_original_requirement(original_text).strip()
+    normalized_subject = _normalize_known_observation_execution_line(subject)
+    # ``_normalize_known_observation_execution_line`` returns its input unchanged
+    # for anything it does not recognize as a hello_auto line.  Requiring an
+    # actual transformation avoids a false identity match — e.g. an autoresearch
+    # canonical AC equal to its own ``normalized_text`` must NOT be treated as a
+    # hello collapse (which would route it into the source coordinate space and
+    # invert the canonical sequence).
+    if normalized_subject != subject and normalized_subject == normalized_text:
+        return True
+    return normalized_text.startswith(
+        "Create `hello_auto.py` and `tests/test_hello_auto.py` so "
+    ) and _is_hello_auto_observation_unit_line(original_text)
 
 
 def normalize_observation_execution_criteria(
@@ -400,23 +837,79 @@ def _extract_autoresearch_repository_path(context_text: str) -> str:
     return ""
 
 
+# Demonstrable equivalence, not fuzzy matching: each entry is the *exact*
+# normalized text (via ``_criterion_key``) of a standard autoresearch
+# requirement restatement, mapped to the canonical AC (index into
+# ``_AUTORESEARCH_CANONICAL_AC``) that provably expresses the same requirement,
+# or ``None`` when it is folded into the Seed's runtime-context extras.  Token
+# membership cannot establish equivalence — "record a baseline after every
+# experiment" contradicts the canonical before-edit baseline while using only
+# in-domain words — so only these exact phrasings collapse.  Any variation,
+# added clause, or contradiction is not equivalent and is preserved verbatim.
+_AUTORESEARCH_KNOWN_COVERED: dict[str, int | None] = {
+    "seed has explicit runtime context, non-goals, and acceptance criteria "
+    "as first-class content for the autoresearch contract": None,
+    "seed preserves explicit runtime context, non-goals, and acceptance criteria "
+    "as first-class content for the autoresearch contract": None,
+    "seed requires execution to record a baseline uv run train.py result "
+    "before any experiment changes evaluated": 0,
+    # Spans experiment count (canonical index 1) AND sequential keep/revert
+    # semantics (canonical index 2); no single canonical AC is one-to-one
+    # equivalent, so a contracted source is preserved verbatim rather than
+    # transferred onto the narrower count-only AC.  A bare restatement is still
+    # covered — the canonical set collectively expresses it.
+    "seed requires up to two post-baseline experiments to selected sequentially "
+    "from the current best state, with improvements kept and all non-improvements "
+    "reverted before the next attempt": None,
+    "seed requires every baseline and experiment ledger entry to report command, "
+    "changed files, diff summary, observed val_bpb, memory, status, and "
+    "keep/discard conclusion": 3,
+    "seed requires final kept changes to limited to train.py unless explicit scope "
+    "widening recorded in the ledger": 4,
+    "seed defines discard behavior for ties, regressions, invalid runs, missing "
+    "val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and "
+    "unauthorized file changes": 2,
+}
+
+
+def _autoresearch_coverage(subject: str) -> tuple[bool, int | None]:
+    """Classify an autoresearch source against the canonical contract.
+
+    Returns ``(is_covered, canonical_index)``.  A source is covered only when its
+    normalized text *exactly* matches a known standard requirement restatement,
+    so a canonical AC demonstrably expresses the same requirement.  Anything
+    else — an added clause, reworded or contradicting requirement, or a novel
+    requirement — is not equivalent and is preserved.  ``canonical_index`` is the
+    AC that subsumes a covered source, letting a structured source transfer its
+    verification contract onto that canonical criterion rather than being dropped
+    (losing evidence) or duplicated.
+    """
+    key = _criterion_key(subject)
+    if key in _AUTORESEARCH_KNOWN_COVERED:
+        return (True, _AUTORESEARCH_KNOWN_COVERED[key])
+    return (False, None)
+
+
+# Exact normalized text of the seed-repairer's generic placeholder fallbacks.
+# Matching by substring instead would delete distinct requirements that merely
+# open with the same proof phrase (e.g. "... while preserving the raw stderr
+# log"), so only these exact placeholders are treated as generic.
+_AUTORESEARCH_GENERIC_FALLBACKS: frozenset[str] = frozenset(
+    {
+        "a command/api check returns stable observable output or artifacts proving the task goal",
+        "a command/api check returns stable observable output or artifacts",
+    }
+)
+
+
 def _is_autoresearch_generic_or_covered(criterion: str) -> bool:
     key = _criterion_key(criterion)
     if key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
         return True
-    if "command/api check returns stable observable output" in key:
+    if key in _AUTORESEARCH_GENERIC_FALLBACKS:
         return True
-    covered_phrases = (
-        "seed has explicit runtime context",
-        "seed preserves explicit runtime context",
-        "seed requires execution to record a baseline",
-        "execution records baseline val_bpb before train.py experiments",
-        "seed requires up to two post-baseline experiments",
-        "seed requires every baseline and experiment ledger entry",
-        "seed requires final kept changes to limited to train.py",
-        "seed defines discard behavior for ties, regressions, invalid runs, missing val_bpb, missing memory, timeouts, memory-heavy behavior, nonzero exits, and unauthorized file changes",
-    )
-    return any(key.startswith(phrase) for phrase in covered_phrases)
+    covered, _canonical_index = _autoresearch_coverage(criterion)
+    return covered
 
 
 def _is_library_default_acceptance(criterion: str) -> bool:
@@ -497,8 +990,31 @@ def _is_observation_report_wrapper(criterion: str) -> bool:
     return "observation report" in key or "plain chat summary" in key
 
 
+# Case-insensitive, whitespace-tolerant matcher for the seed-repairer wrapper
+# prefix.  Stripping via this regex (rather than the case-folded criterion key)
+# preserves the original casing of the wrapped requirement — a repaired
+# requirement referencing case-sensitive identifiers like ``RawStderr.LOG`` or
+# ``VAL_BPB`` must round-trip verbatim, not lowercased.
+_SEED_REPAIRER_WRAPPER_RE = re.compile(
+    r"^\s*"
+    + re.escape(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX.strip()).replace(r"\ ", r"\s+")
+    + r"\s+",
+    re.IGNORECASE,
+)
+
+
 def _unwrap_seed_repairer_original_requirement(criterion: str) -> str:
-    key = _criterion_key(criterion)
-    if not key.startswith(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX):
-        return criterion
-    return key.removeprefix(_SEED_REPAIRER_ORIGINAL_REQUIREMENT_PREFIX)
+    """Strip every nested seed-repairer wrapper, preserving the inner casing.
+
+    The repairer can wrap an already-wrapped criterion, so unwrapping must
+    recurse until the innermost requirement is exposed; otherwise a nested
+    wrapper is later matched as a generic placeholder and the real requirement
+    it carries is deleted.  Casing is preserved so case-sensitive identifiers
+    survive round-trip.
+    """
+    text = criterion.strip()
+    while True:
+        stripped = _SEED_REPAIRER_WRAPPER_RE.sub("", text, count=1).strip()
+        if stripped == text:
+            return text
+        text = stripped

@@ -21,7 +21,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
-    _parse_constraint_values,
+    _parse_string_array_values,
     load_seed,
     save_seed_sync,
 )
@@ -554,33 +554,39 @@ class TestSeedGeneratorExtraction:
         )
         for malformed in malformed_cases:
             with pytest.raises(ValueError, match="JSON array"):
-                _parse_constraint_values(malformed, strict=True)
+                _parse_string_array_values(malformed, field_label="CONSTRAINTS", strict=True)
 
     def test_strict_rejects_non_string_json_entries(self) -> None:
         """Strict mode: JSON arrays must contain only strings."""
         for malformed in ("[null]", '[1, "x"]'):
             with pytest.raises(ValueError, match="only strings"):
-                _parse_constraint_values(malformed, strict=True)
+                _parse_string_array_values(malformed, field_label="CONSTRAINTS", strict=True)
 
     def test_lenient_keeps_legacy_bracket_prose_split(self) -> None:
         """Lenient (stored-data) mode: bracket prose keeps the historical split."""
-        assert _parse_constraint_values("[P0] Must work offline | [P1] Fast startup") == (
+        assert _parse_string_array_values(
+            "[P0] Must work offline | [P1] Fast startup", field_label="CONSTRAINTS"
+        ) == (
             "[P0] Must work offline",
             "[P1] Fast startup",
         )
-        assert _parse_constraint_values("[v2.1-rc] Must ship | [2026-01] Later") == (
+        assert _parse_string_array_values(
+            "[v2.1-rc] Must ship | [2026-01] Later", field_label="CONSTRAINTS"
+        ) == (
             "[v2.1-rc] Must ship",
             "[2026-01] Later",
         )
 
     def test_lenient_never_raises_on_malformed_json(self) -> None:
         """Lenient mode: stored data has no retry path, so it pipe-splits instead."""
-        assert _parse_constraint_values('["--lang ko|en",]') == (
+        assert _parse_string_array_values('["--lang ko|en",]', field_label="CONSTRAINTS") == (
             '["--lang ko',
             'en",]',
         )
-        assert _parse_constraint_values("[null]") == ("None",)
-        assert _parse_constraint_values("Python 3.14+ | No external database") == (
+        assert _parse_string_array_values("[null]", field_label="CONSTRAINTS") == ("None",)
+        assert _parse_string_array_values(
+            "Python 3.14+ | No external database", field_label="CONSTRAINTS"
+        ) == (
             "Python 3.14+",
             "No external database",
         )

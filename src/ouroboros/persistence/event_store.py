@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -2053,13 +2054,26 @@ class EventStore:
         event_type: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        payload_equals: dict[str, str | int | float | bool | None] | None = None,
+        *,
+        chronological: bool = False,
+        cursor_after: tuple[datetime, str] | None = None,
+        cursor_through: tuple[datetime, str] | None = None,
     ) -> list[BaseEvent]:
         """Query events for an execution and its child/runtime scopes.
 
         This is the execution-only counterpart to
         :meth:`query_session_related_events`: it includes the root execution
         aggregate plus events whose payload links back through ``execution_id``
-        or ``parent_execution_id``.
+        or ``parent_execution_id``. Optional top-level payload equality filters
+        are applied in SQL before ordering, offset, and limit so a bounded query
+        cannot be crowded out by unrelated events of the same type. Set
+        ``chronological`` for deterministic oldest-first pagination; both orders
+        include the event ID as a tie-breaker so page boundaries cannot skip or
+        duplicate equal-timestamp events. ``cursor_after`` and
+        ``cursor_through`` provide an inclusive high-water snapshot with an
+        exclusive keyset cursor, avoiding both offset drift and unbounded
+        materialization for replay callers.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -2079,11 +2093,78 @@ class EventStore:
                     select(events_table)
                     .where(events_table.c.aggregate_type == "execution")
                     .where(or_(*conditions))
-                    .order_by(events_table.c.timestamp.desc())
+                )
+
+                query = query.order_by(
+                    *(
+                        (events_table.c.timestamp.asc(), events_table.c.id.asc())
+                        if chronological
+                        else (events_table.c.timestamp.desc(), events_table.c.id.desc())
+                    )
                 )
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
+
+                if cursor_after is not None or cursor_through is not None:
+                    if not chronological:
+                        raise ValueError("execution event cursors require chronological order")
+                    for cursor_name, cursor in (
+                        ("cursor_after", cursor_after),
+                        ("cursor_through", cursor_through),
+                    ):
+                        if cursor is not None and (
+                            type(cursor) is not tuple
+                            or len(cursor) != 2
+                            or not isinstance(cursor[0], datetime)
+                            or type(cursor[1]) is not str
+                            or not cursor[1]
+                        ):
+                            raise ValueError(f"{cursor_name} is invalid")
+                    if cursor_after is not None:
+                        after_timestamp, after_id = cursor_after
+                        query = query.where(
+                            or_(
+                                events_table.c.timestamp > after_timestamp,
+                                and_(
+                                    events_table.c.timestamp == after_timestamp,
+                                    events_table.c.id > after_id,
+                                ),
+                            )
+                        )
+                    if cursor_through is not None:
+                        through_timestamp, through_id = cursor_through
+                        query = query.where(
+                            or_(
+                                events_table.c.timestamp < through_timestamp,
+                                and_(
+                                    events_table.c.timestamp == through_timestamp,
+                                    events_table.c.id <= through_id,
+                                ),
+                            )
+                        )
+
+                if payload_equals:
+                    if type(payload_equals) is not dict or len(payload_equals) > 8:
+                        raise ValueError(
+                            "execution-related payload filters require a bounded built-in dict"
+                        )
+                    for field, value in payload_equals.items():
+                        if (
+                            type(field) is not str
+                            or not field
+                            or not field.isascii()
+                            or (not field[0].isalpha() and field[0] != "_")
+                            or not field.replace("_", "").isalnum()
+                            or (value is not None and type(value) not in {str, int, float, bool})
+                        ):
+                            raise ValueError(
+                                "execution-related payload filters require "
+                                "top-level ASCII identifier keys and JSON scalar values"
+                            )
+                        query = query.where(
+                            func.json_extract(events_table.c.payload, f"$.{field}") == value
+                        )
 
                 if limit is not None:
                     query = query.limit(limit).offset(offset)
@@ -2103,6 +2184,10 @@ class EventStore:
                     "event_type": event_type,
                     "limit": limit,
                     "offset": offset,
+                    "payload_equals": dict(payload_equals or {}),
+                    "chronological": chronological,
+                    "cursor_after": cursor_after,
+                    "cursor_through": cursor_through,
                 },
             ) from e
 

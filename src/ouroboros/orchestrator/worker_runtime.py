@@ -75,6 +75,9 @@ class LeaderDrivenWorkerTransport(Protocol):
         """Canonical backend id stamped into the emitted ``RuntimeHandle``."""
         ...
 
+    @property
+    def cli_path(self) -> str | None: ...
+
     async def spawn(
         self,
         *,
@@ -157,6 +160,10 @@ class LeaderDrivenWorkerRuntime:
     @property
     def llm_backend(self) -> str | None:
         return self._llm_backend
+
+    @property
+    def cli_path(self) -> str | None:
+        return self._transport.cli_path
 
     @property
     def working_directory(self) -> str | None:

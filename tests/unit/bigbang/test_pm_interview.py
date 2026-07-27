@@ -79,6 +79,12 @@ class TestPMSuccessCriteriaBoundary:
         assert "Post-launch outcomes" in prefix
         assert "no place in this contract" in prefix
 
+    def test_extraction_routes_post_launch_outcomes_outside_success_criteria(self) -> None:
+        prompt = " ".join(_EXTRACTION_SYSTEM_PROMPT.split())
+        assert "contract between the PM and the developers" in prompt
+        assert "accept it as built" in prompt
+        assert "record them under assumptions or decide_later_items" in prompt
+
 
 class TestPMSteeringPromptBudget:
     """Regression: steering is charged against the prompt budget, not stacked on top.

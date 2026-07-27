@@ -1369,8 +1369,12 @@ class ACRuntimeHandleManager:
 
     @staticmethod
     def _is_resumable_runtime_handle(runtime_handle: RuntimeHandle | None) -> bool:
-        """Return True when the handle can reconnect to an existing backend session."""
-        return ACRuntimeHandleManager._runtime_resume_session_id(runtime_handle) is not None
+        """Return True only for a live backend session that can be reconnected."""
+        return bool(
+            runtime_handle is not None
+            and runtime_handle.can_resume
+            and not runtime_handle.is_terminal
+        )
 
     @staticmethod
     def _runtime_resume_session_id(runtime_handle: RuntimeHandle | None) -> str | None:

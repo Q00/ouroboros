@@ -579,6 +579,7 @@ def _tool_completed_event(
     event_id: str,
     tool_name: str,
     tool_call_id: str,
+    output: str | None = None,
 ) -> BaseEvent:
     return BaseEvent(
         id=event_id,
@@ -586,11 +587,16 @@ def _tool_completed_event(
         aggregate_type="execution",
         aggregate_id=identity.ac_id,
         data={
-            **identity.to_metadata(),
-            "execution_id": execution_id,
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "tool_result": {"is_error": False},
+            key: value
+            for key, value in {
+                **identity.to_metadata(),
+                "execution_id": execution_id,
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "tool_result": {"is_error": False},
+                "output": output,
+            }.items()
+            if value is not None
         },
     )
 
@@ -626,6 +632,14 @@ class TestDeliverVerdict:
                 tool_name="Bash",
                 tool_input={"command": command},
                 runtime_cwd=str(tmp_path),
+            ),
+            _tool_completed_event(
+                identity=identity,
+                execution_id="exec_frugal",
+                event_id="evt-test-completed",
+                tool_name="Bash",
+                tool_call_id="evt-test",
+                output="1 passed in 0.01s",
             ),
             # Same command from a different failed attempt must not make the
             # accepted attempt ambiguous.

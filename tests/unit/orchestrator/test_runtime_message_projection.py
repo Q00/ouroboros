@@ -13,6 +13,23 @@ from ouroboros.orchestrator.runtime_message_projection import project_runtime_me
 class TestRuntimeMessageProjection:
     """Tests for transcript/event projection of runtime messages."""
 
+    def test_message_event_type_precedes_resumed_handle_event_type(self) -> None:
+        message = AgentMessage(
+            type="tool_result",
+            content="completed",
+            tool_name="Bash",
+            data={"runtime_event_type": "tool.completed"},
+            resume_handle=RuntimeHandle(
+                backend="codex",
+                native_session_id="session-1",
+                metadata={"runtime_event_type": "run.completed"},
+            ),
+        )
+
+        projected = project_runtime_message(message)
+
+        assert projected.runtime_metadata["runtime_event_type"] == "tool.completed"
+
     def test_projects_opencode_session_started_metadata_into_standard_signal(self) -> None:
         """Session-start lifecycle updates should stay system-scoped and resumable."""
         message = AgentMessage(

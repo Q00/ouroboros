@@ -66,8 +66,8 @@ Format: name:description:criteria (pipe-separated)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
 - **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
-- **EXISTING_PATTERNS**: Key patterns that must be followed (pipe-separated)
-- **EXISTING_DEPENDENCIES**: Key dependencies to reuse (pipe-separated)
+- **EXISTING_PATTERNS**: Key patterns that must be followed (single-line JSON array of strings)
+- **EXISTING_DEPENDENCIES**: Key dependencies to reuse (single-line JSON array of strings)
 
 ## OUTPUT FORMAT
 
@@ -86,8 +86,8 @@ EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
 EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 PROJECT_TYPE: greenfield|brownfield
 CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
-EXISTING_PATTERNS: <pattern 1> | <pattern 2> | ...
-EXISTING_DEPENDENCIES: <dep 1> | <dep 2> | ...
+EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]
+EXISTING_DEPENDENCIES: ["<dep 1>", "<dep 2>", ...]
 ```
 
 Field types should be one of: string, number, boolean, array, object

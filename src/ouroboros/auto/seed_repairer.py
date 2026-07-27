@@ -14,7 +14,13 @@ from uuid import uuid4
 from ouroboros.auto.grading import VAGUE_TERMS, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.seed_reviewer import ReviewFinding, SeedReview, SeedReviewer
-from ouroboros.core.seed import AcceptanceCriterionInput, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionInput,
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+    derive_semantic_ac_key,
+)
 
 
 def _review_accepts_closure_mode(review_callable: Callable[..., Any]) -> bool:
@@ -151,9 +157,11 @@ class SeedRepairer:
                 index = _target_index(finding.target)
                 if index is not None and index < len(acceptance):
                     if index not in repaired_acceptance_indices:
-                        acceptance[index] = _observable_preserving_replacement(
-                            ac_text(acceptance[index]), index=index
+                        criterion = acceptance[index]
+                        replacement = _observable_preserving_replacement(
+                            ac_text(criterion), index=index
                         )
+                        acceptance[index] = _repair_criterion_description(criterion, replacement)
                         repaired_acceptance_indices.add(index)
                 else:
                     acceptance.append(
@@ -194,7 +202,13 @@ class SeedRepairer:
                 {
                     "goal": goal,
                     "constraints": tuple(dict.fromkeys(constraints)),
-                    "acceptance_criteria": tuple(dict.fromkeys(acceptance)),
+                    # Preserve AC order, multiplicity, semantic identity, and
+                    # structured verification evidence exactly as repaired, but
+                    # drop criteria that became byte-for-byte identical — the
+                    # executor would dispatch each duplicate separately.  Only
+                    # fully-equal specs collapse; any difference in description,
+                    # contract, or identity keeps the criterion distinct.
+                    "acceptance_criteria": tuple(_dedupe_identical_criteria(acceptance)),
                     "metadata": seed.metadata.model_copy(
                         update={
                             "seed_id": f"seed_{uuid4().hex[:12]}",
@@ -300,6 +314,48 @@ class SeedRepairer:
             _check_cancelled()
             review = self.reviewer.review(current, **review_kwargs)
         return current, review, history
+
+
+def _repair_criterion_description(
+    criterion: AcceptanceCriterionInput,
+    replacement: str,
+) -> AcceptanceCriterionInput:
+    """Rewrite a criterion's description, refreshing only auto-derived identity.
+
+    A structured criterion keeps its verification evidence, but its semantic key
+    must stay consistent with the repaired contract.  An auto-derived key (equal
+    to what derivation produces) is re-derived from the new description so it is
+    not mistaken for an explicit identity downstream; an explicitly-supplied key
+    (one that differs from the derived value) is preserved verbatim.
+    """
+    if not isinstance(criterion, AcceptanceCriterionSpec):
+        return replacement
+    rewritten = criterion.model_copy(update={"description": replacement})
+    explicit_key = (
+        criterion.semantic_ac_key is not None
+        and criterion.semantic_ac_key != derive_semantic_ac_key(criterion)
+    )
+    if explicit_key:
+        return rewritten
+    return rewritten.model_copy(update={"semantic_ac_key": derive_semantic_ac_key(rewritten)})
+
+
+def _dedupe_identical_criteria(
+    criteria: list[AcceptanceCriterionInput],
+) -> list[AcceptanceCriterionInput]:
+    """Drop only byte-for-byte identical criteria, preserving order/multiplicity.
+
+    Repairing two equal legacy criteria yields two identical repaired ACs that
+    the executor would dispatch separately and event consumers may conflate.
+    Equality here is total — an ``AcceptanceCriterionSpec`` compares every field
+    (description, verification contract, semantic identity), so any real
+    difference in wording, contract, or identity keeps the criterion distinct.
+    """
+    deduped: list[AcceptanceCriterionInput] = []
+    for criterion in criteria:
+        if all(criterion != kept for kept in deduped):
+            deduped.append(criterion)
+    return deduped
 
 
 def _observable_preserving_replacement(criterion: str, *, index: int) -> str:

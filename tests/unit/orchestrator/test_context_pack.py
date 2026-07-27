@@ -269,6 +269,28 @@ class TestSystemPromptInjection:
         prompt = build_system_prompt(_sample_seed(), repo_root=tmp_path)
         assert "## Project Context (auto-detected facts)" not in prompt
 
+    def test_explicit_contract_mode_outranks_later_environment_change(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_fixture_repo(tmp_path)
+        monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "0")
+        enabled_prompt = build_system_prompt(
+            _sample_seed(),
+            repo_root=tmp_path,
+            context_pack_enabled=True,
+        )
+        monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+        disabled_prompt = build_system_prompt(
+            _sample_seed(),
+            repo_root=tmp_path,
+            context_pack_enabled=False,
+        )
+
+        assert "## Project Context (auto-detected facts)" in enabled_prompt
+        assert "## Project Context (auto-detected facts)" not in disabled_prompt
+
     def test_pack_absent_for_empty_dir(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
         prompt = build_system_prompt(_sample_seed(), repo_root=tmp_path)
