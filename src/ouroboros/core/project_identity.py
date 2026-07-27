@@ -8,6 +8,8 @@ repository while retaining a repository-relative workspace filter.
 
 from __future__ import annotations
 
+from configparser import Error as ConfigError
+from configparser import RawConfigParser
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from uuid import NAMESPACE_URL, uuid5
@@ -15,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_POINTER_LENGTH = 4096
+_MAX_GIT_CONFIG_LENGTH = 65_536
 
 
 class ProjectIdentityError(ValueError):
@@ -131,37 +134,123 @@ def _read_bounded_first_line(path: Path) -> str | None:
     return value.strip()
 
 
-def _linked_worktree_source_root(checkout_root: Path) -> Path:
-    """Resolve a linked worktree to its primary source checkout when provable.
-
-    A normal repository has a ``.git`` directory and is already its source
-    root.  A linked worktree has a ``.git`` pointer to a per-worktree gitdir;
-    that directory's bounded ``commondir`` pointer resolves to the primary
-    ``.git`` directory.  Submodules also use ``.git`` files but normally have
-    no ``commondir`` file, so they correctly remain their own project root.
-    Malformed metadata degrades conservatively to the active checkout root.
-    """
+def _git_pointer_target(checkout_root: Path) -> Path | None:
+    """Return the bounded gitdir target named by a checkout's gitfile."""
     marker = checkout_root / ".git"
     if not marker.is_file():
-        return checkout_root
-
+        return None
     pointer = _read_bounded_first_line(marker)
     if pointer is None or not pointer.startswith("gitdir: "):
-        return checkout_root
+        return None
     raw_git_dir = pointer.removeprefix("gitdir: ").strip()
     if not raw_git_dir:
-        return checkout_root
+        return None
     try:
         git_dir = Path(raw_git_dir).expanduser()
         if not git_dir.is_absolute():
             git_dir = checkout_root / git_dir
         git_dir = git_dir.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
+        return None
+    return git_dir if git_dir.is_dir() else None
+
+
+@dataclass(frozen=True, slots=True)
+class _GitCoreConfig:
+    bare: bool
+    worktree: Path | None
+
+
+def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
+    """Read only the bounded core fields needed to prove a common-dir root."""
+    config_path = git_dir / "config"
+    try:
+        with config_path.open(encoding="utf-8", errors="strict") as stream:
+            raw_config = stream.read(_MAX_GIT_CONFIG_LENGTH + 1)
+    except (OSError, UnicodeError):
+        return None
+    if len(raw_config) > _MAX_GIT_CONFIG_LENGTH or "\x00" in raw_config:
+        return None
+    parser = RawConfigParser(interpolation=None, strict=False, allow_no_value=True)
+    try:
+        parser.read_string(raw_config)
+        core_section = next(
+            (section for section in parser.sections() if section.casefold() == "core"),
+            None,
+        )
+        if core_section is None:
+            return None
+        bare = parser.getboolean(core_section, "bare", fallback=None)
+        if bare is None:
+            return None
+        raw_worktree = parser.get(core_section, "worktree", fallback=None)
+    except (ConfigError, ValueError):
+        return None
+    if raw_worktree is None:
+        return _GitCoreConfig(bare=bare, worktree=None)
+    if not isinstance(raw_worktree, str) or not raw_worktree.strip():
+        return None
+    try:
+        worktree = Path(raw_worktree.strip()).expanduser()
+        if not worktree.is_absolute():
+            worktree = git_dir / worktree
+        worktree = _canonical_directory(worktree)
+    except ProjectIdentityError:
+        return None
+    return _GitCoreConfig(bare=bare, worktree=worktree)
+
+
+def _common_git_source_root(common_dir: Path) -> Path | None:
+    """Return one source identity root positively owned by a common gitdir."""
+    if common_dir.name == ".git":
+        normal_checkout = common_dir.parent
+        try:
+            if (normal_checkout / ".git").resolve(strict=False) == common_dir:
+                return normal_checkout.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    core = _read_git_core_config(common_dir)
+    if core is None or core.bare:
+        return None
+    if core.worktree is not None:
+        return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
+
+    # ``git init --separate-git-dir`` does not persist the primary worktree
+    # path.  Its non-bare common directory is therefore the only stable root
+    # that both the primary gitfile and every linked worktree can prove.
+    if (
+        _read_bounded_first_line(common_dir / "HEAD")
+        and (common_dir / "objects").is_dir()
+        and (common_dir / "refs").is_dir()
+    ):
+        return common_dir
+    return None
+
+
+def _linked_worktree_source_root(checkout_root: Path) -> Path:
+    """Resolve a gitfile checkout to one common source root when provable.
+
+    A normal repository has a ``.git`` directory and is already its source
+    root.  A linked worktree has a ``.git`` pointer to a per-worktree gitdir;
+    that directory's bounded ``commondir`` pointer and backlink prove shared
+    ownership.  Standard repositories use the primary checkout; submodules
+    use their configured worktree; repositories created with an external Git
+    directory use that common directory because Git stores no primary-worktree
+    path for peers to recover.  Malformed metadata degrades conservatively to
+    the active checkout root.
+    """
+    marker = checkout_root / ".git"
+    if not marker.is_file():
+        return checkout_root
+
+    git_dir = _git_pointer_target(checkout_root)
+    if git_dir is None:
         return checkout_root
 
     raw_common_dir = _read_bounded_first_line(git_dir / "commondir")
     if not raw_common_dir:
-        return checkout_root
+        return _common_git_source_root(git_dir) or checkout_root
     try:
         common_dir = Path(raw_common_dir).expanduser()
         if not common_dir.is_absolute():
@@ -169,7 +258,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
         common_dir = common_dir.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return checkout_root
-    if common_dir.name != ".git" or not common_dir.is_dir():
+    if not common_dir.is_dir():
         return checkout_root
     worktrees_dir = common_dir / "worktrees"
     try:
@@ -190,7 +279,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
         return checkout_root
     if not backlink_matches:
         return checkout_root
-    return common_dir.parent.resolve(strict=False)
+    return _common_git_source_root(common_dir) or checkout_root
 
 
 def _relative_workspace_path(workspace: Path, checkout_root: Path) -> str:
