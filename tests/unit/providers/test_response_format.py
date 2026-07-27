@@ -180,3 +180,58 @@ class TestMalformedSchemaNoLongerCrashes:
 
         assert isinstance(reason, str)
         assert reason.startswith("invalid JSON schema:")
+
+
+UNRESOLVABLE_REF_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {"schema": {"$ref": "#/$defs/missing"}},
+}
+
+
+class TestUnresolvableReferenceIsReported:
+    """A `$ref` pointing at nothing is structurally valid but cannot validate.
+
+    `check_schema` passes, then `validate` raises `_WrappedReferencingError`,
+    whose MRO is `_RefResolutionError -> referencing.exceptions.Unresolvable ->
+    Exception`. It is neither a `SchemaError` nor a `ValidationError`, so it
+    escaped both clauses -- including in the one copy that already had the
+    `check_schema` guard.
+    """
+
+    def test_shared_validator_reports_instead_of_raising(self) -> None:
+        reason = validate_response_format_payload('{"a": 1}', UNRESOLVABLE_REF_SCHEMA)
+        assert reason is not None
+        assert reason.startswith("could not validate against JSON schema:")
+
+    def test_a_resolvable_ref_still_validates(self) -> None:
+        """The guard must not swallow schemas whose `$ref` does resolve."""
+        schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "schema": {
+                    "$defs": {"positive": {"type": "integer", "minimum": 1}},
+                    "$ref": "#/$defs/positive",
+                }
+            },
+        }
+        assert validate_response_format_payload("5", schema) is None
+        assert validate_response_format_payload("0", schema) is not None
+
+    @pytest.mark.parametrize(
+        ("module_name", "class_name"),
+        [
+            pytest.param("pi_llm_adapter", "PiLLMAdapter", id="pi"),
+            pytest.param("gjc_llm_adapter", "GjcLLMAdapter", id="gjc"),
+            pytest.param("ourocode_llm_adapter", "OurocodeLLMAdapter", id="ourocode"),
+            pytest.param("goose_cli_adapter", "GooseCliLLMAdapter", id="goose"),
+            pytest.param("zcode_cli_adapter", "ZcodeCliLLMAdapter", id="zcode"),
+        ],
+    )
+    def test_adapter_reports_unresolvable_reference(
+        self, module_name: str, class_name: str
+    ) -> None:
+        reason = TestMalformedSchemaNoLongerCrashes._validate(
+            module_name, class_name, '{"a": 1}', UNRESOLVABLE_REF_SCHEMA
+        )
+        assert isinstance(reason, str)
+        assert reason.startswith("could not validate against JSON schema:")

@@ -79,10 +79,15 @@ def validate_response_format_payload(
     a human-readable reason. This function reports problems by returning them;
     it does not raise for bad input.
 
-    ``check_schema`` runs before validation because a schema that is itself
-    invalid makes ``Draft202012Validator(...).validate(...)`` raise
-    ``UnknownType`` -- which is not a ``ValidationError`` and so escaped the
-    ``except`` clause in four of the five original copies (#1785).
+    Two failure modes are easy to miss, both of which raise from inside
+    ``jsonschema`` without being a ``ValidationError``:
+
+    * a schema that is itself invalid (``{"type": "not-a-real-type"}``) makes
+      ``validate`` raise ``UnknownType``, which escaped the ``except`` clause
+      in four of the five original copies;
+    * a ``$ref`` pointing at nothing passes ``check_schema`` and then raises
+      ``_WrappedReferencingError`` during ``validate`` -- which every copy
+      missed, including the one that had the ``check_schema`` guard.
     """
     try:
         parsed = json.loads(payload)
@@ -105,6 +110,19 @@ def validate_response_format_payload(
             return f"invalid JSON schema: {exc.message}"
         except JsonSchemaValidationError as exc:
             return exc.message
+        except Exception as exc:  # noqa: BLE001 - the contract is to report, never raise
+            # `jsonschema` raises outside its own exception hierarchy. A `$ref`
+            # pointing at nothing is structurally valid, so `check_schema`
+            # passes and `validate` raises `_WrappedReferencingError`, whose
+            # MRO is `_RefResolutionError -> referencing.exceptions.Unresolvable
+            # -> Exception` -- neither a `SchemaError` nor a `ValidationError`.
+            #
+            # Catching that one class by name would mean importing
+            # `referencing`, an undeclared transitive dependency of
+            # `jsonschema`, and would leave the next such class uncovered. The
+            # caller-visible contract is that this function reports rather than
+            # raises, so it is enforced here rather than enumerated.
+            return f"could not validate against JSON schema: {type(exc).__name__}: {exc}"
 
     return None
 
