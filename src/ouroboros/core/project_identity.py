@@ -123,15 +123,33 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
     return None
 
 
-def _read_bounded_first_line(path: Path) -> str | None:
+def _read_bounded_utf8(path: Path, *, max_bytes: int) -> str | None:
+    """Return one complete, bounded UTF-8 file or ``None`` when untrusted."""
     try:
-        with path.open(encoding="utf-8", errors="strict") as stream:
-            value = stream.readline(_MAX_GIT_POINTER_LENGTH + 1)
-    except (OSError, UnicodeError):
+        with path.open("rb") as stream:
+            raw_value = stream.read(max_bytes + 1)
+    except OSError:
         return None
-    if len(value) > _MAX_GIT_POINTER_LENGTH:
+    if len(raw_value) > max_bytes or b"\x00" in raw_value:
         return None
-    return value.strip()
+    try:
+        return raw_value.decode("utf-8", errors="strict")
+    except UnicodeError:
+        return None
+
+
+def _read_bounded_record(path: Path) -> str | None:
+    """Read one complete Git pointer record with an optional final newline."""
+    value = _read_bounded_utf8(path, max_bytes=_MAX_GIT_POINTER_LENGTH)
+    if value is None:
+        return None
+    if value.endswith("\r\n"):
+        value = value[:-2]
+    elif value.endswith(("\r", "\n")):
+        value = value[:-1]
+    if not value or "\r" in value or "\n" in value or value != value.strip():
+        return None
+    return value
 
 
 def _git_pointer_target(checkout_root: Path) -> Path | None:
@@ -139,7 +157,7 @@ def _git_pointer_target(checkout_root: Path) -> Path | None:
     marker = checkout_root / ".git"
     if not marker.is_file():
         return None
-    pointer = _read_bounded_first_line(marker)
+    pointer = _read_bounded_record(marker)
     if pointer is None or not pointer.startswith("gitdir: "):
         return None
     raw_git_dir = pointer.removeprefix("gitdir: ").strip()
@@ -163,13 +181,11 @@ class _GitCoreConfig:
 
 def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     """Read only the bounded core fields needed to prove a common-dir root."""
-    config_path = git_dir / "config"
-    try:
-        with config_path.open(encoding="utf-8", errors="strict") as stream:
-            raw_config = stream.read(_MAX_GIT_CONFIG_LENGTH + 1)
-    except (OSError, UnicodeError):
-        return None
-    if len(raw_config) > _MAX_GIT_CONFIG_LENGTH or "\x00" in raw_config:
+    raw_config = _read_bounded_utf8(
+        git_dir / "config",
+        max_bytes=_MAX_GIT_CONFIG_LENGTH,
+    )
+    if raw_config is None:
         return None
     parser = RawConfigParser(interpolation=None, strict=False, allow_no_value=True)
     try:
@@ -202,6 +218,18 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
 
 def _common_git_source_root(common_dir: Path) -> Path | None:
     """Return one source identity root positively owned by a common gitdir."""
+    core = _read_git_core_config(common_dir)
+    if core is not None and core.bare:
+        if core.worktree is not None:
+            return None
+        if (
+            _read_bounded_record(common_dir / "HEAD")
+            and (common_dir / "objects").is_dir()
+            and (common_dir / "refs").is_dir()
+        ):
+            return common_dir
+        return None
+
     if common_dir.name == ".git":
         normal_checkout = common_dir.parent
         try:
@@ -210,8 +238,7 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
         except (OSError, RuntimeError, ValueError):
             return None
 
-    core = _read_git_core_config(common_dir)
-    if core is None or core.bare:
+    if core is None:
         return None
     if core.worktree is not None:
         return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
@@ -220,7 +247,7 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
     # path.  Its non-bare common directory is therefore the only stable root
     # that both the primary gitfile and every linked worktree can prove.
     if (
-        _read_bounded_first_line(common_dir / "HEAD")
+        _read_bounded_record(common_dir / "HEAD")
         and (common_dir / "objects").is_dir()
         and (common_dir / "refs").is_dir()
     ):
@@ -236,9 +263,9 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
     that directory's bounded ``commondir`` pointer and backlink prove shared
     ownership.  Standard repositories use the primary checkout; submodules
     use their configured worktree; repositories created with an external Git
-    directory use that common directory because Git stores no primary-worktree
-    path for peers to recover.  Malformed metadata degrades conservatively to
-    the active checkout root.
+    directory and bare repositories that own worktrees use the validated common
+    directory because no primary worktree exists for peers to recover.
+    Malformed metadata degrades conservatively to the active checkout root.
     """
     marker = checkout_root / ".git"
     if not marker.is_file():
@@ -248,7 +275,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
     if git_dir is None:
         return checkout_root
 
-    raw_common_dir = _read_bounded_first_line(git_dir / "commondir")
+    raw_common_dir = _read_bounded_record(git_dir / "commondir")
     if not raw_common_dir:
         return _common_git_source_root(git_dir) or checkout_root
     try:
@@ -267,7 +294,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
         return checkout_root
     if len(git_dir_relative.parts) != 1 or not git_dir.is_dir():
         return checkout_root
-    raw_checkout_marker = _read_bounded_first_line(git_dir / "gitdir")
+    raw_checkout_marker = _read_bounded_record(git_dir / "gitdir")
     if not raw_checkout_marker:
         return checkout_root
     try:

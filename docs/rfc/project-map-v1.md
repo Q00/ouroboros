@@ -27,7 +27,7 @@ One V1 identity contains:
 | Field | Contract |
 | --- | --- |
 | `project_id` | `project_` plus the full 32-character UUIDv5 hex digest |
-| `project_root` | canonical, absolute, symlink-resolved identity root; normally the source checkout, or the external common Git directory for `--separate-git-dir` repositories |
+| `project_root` | canonical, absolute, symlink-resolved identity root; normally the source checkout, or a validated common Git directory for external-gitdir and bare-owned worktree topologies |
 | `workspace_path` | canonical POSIX path relative to the active checkout root; `.` at root |
 
 The exact ID algorithm is:
@@ -47,14 +47,21 @@ source checkout only when its bounded `.git` pointer, `commondir`, worktree
 record, and backlink prove the relationship. Submodules use their configured
 worktree and therefore remain separate projects.
 
+Each Git pointer is parsed as one complete UTF-8 record bounded to 4,096 bytes,
+with only one optional final line ending. Extra records, oversized content,
+NULs, invalid UTF-8, or surrounding whitespace invalidate the topology proof;
+a valid first line cannot hide malformed trailing data.
+
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir`. In that topology the validated external
 common Git directory is the only root that both the primary gitfile and every
 linked-worktree record can prove, so it becomes `project_root`; the
-`workspace_path` is still relative to each active checkout. Malformed or
-unproven metadata stays scoped to the active checkout. Non-Git directories
-remain valid local-first projects and use their canonical cwd with
-`workspace_path="."`.
+`workspace_path` is still relative to each active checkout. A bare common
+repository that positively owns linked worktrees likewise has no primary
+checkout, so its validated common directory becomes their shared
+`project_root`. Malformed or unproven metadata stays scoped to the active
+checkout. Non-Git directories remain valid local-first projects and use their
+canonical cwd with `workspace_path="."`.
 
 ### Managed task worktrees
 
