@@ -3024,6 +3024,24 @@ class TestOrchestratorRunner:
         assert runner._effective_cwd() == str(launch_cwd)
         assert runner._project_identity() == resolve_project_identity(launch_cwd)
 
+    def test_unavailable_process_cwd_does_not_override_adapter_cwd(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_adapter.working_directory = str(tmp_path)
+
+        with patch(
+            "ouroboros.orchestrator.runner.os.getcwd",
+            side_effect=FileNotFoundError,
+        ):
+            runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        assert runner._effective_cwd() == str(tmp_path)
+        assert runner._project_identity() == resolve_project_identity(tmp_path)
+
     @pytest.mark.asyncio
     async def test_prepare_session_rejects_resolved_project_identity_absence(
         self,

@@ -934,7 +934,10 @@ class OrchestratorRunner:
                 bounded signals to exact active AC attempts.
         """
         self._adapter = adapter
-        self._launch_cwd = os.getcwd()
+        try:
+            self._launch_cwd: str | None = os.getcwd()
+        except OSError:
+            self._launch_cwd = None
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
         self._checkpoint_store = checkpoint_store

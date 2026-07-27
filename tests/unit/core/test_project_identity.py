@@ -461,6 +461,34 @@ def test_git_invocation_strips_overrides_and_uses_no_shell(
         assert call.kwargs["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
 
 
+def test_top_level_query_stays_bound_to_validated_common_directory(tmp_path: Path) -> None:
+    ancestor = tmp_path / "unrelated-ancestor"
+    common_git = ancestor / "external-git-storage"
+    primary = ancestor / "reported-primary-without-marker"
+    linked = tmp_path / "linked"
+    for directory in (common_git, primary, linked):
+        directory.mkdir(parents=True)
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        command = args[0]
+        output = kwargs["stdout"]
+        if "--git-common-dir" in command:
+            value = f"{common_git}\n".encode()
+        elif "--is-bare-repository" in command:
+            value = b"false\n"
+        elif "worktree" in command:
+            value = f"worktree {primary}\0worktree {linked}\0".encode()
+        elif f"--git-dir={common_git}" in command:
+            value = f"{primary}\n".encode()
+        else:
+            value = f"{ancestor}\n".encode()
+        output.write(value)  # type: ignore[union-attr]
+        return subprocess.CompletedProcess(command, 0)
+
+    with patch("ouroboros.core.project_identity.subprocess.run", side_effect=fake_run):
+        assert _git_project_root(linked, linked) == primary.resolve()
+
+
 def test_git_output_is_bounded(tmp_path: Path) -> None:
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         output = kwargs["stdout"]
