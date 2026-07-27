@@ -174,6 +174,19 @@ def _git_pointer_target(checkout_root: Path) -> Path | None:
     return git_dir if git_dir.is_dir() else None
 
 
+def _checkout_owns_git_dir(checkout_root: Path, git_dir: Path) -> bool:
+    """Return whether one checkout points to an exact, regular Git directory."""
+    marker = checkout_root / ".git"
+    try:
+        if marker.is_symlink():
+            return False
+        if marker.is_dir():
+            return marker.resolve(strict=False) == git_dir
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return _git_pointer_target(checkout_root) == git_dir
+
+
 @dataclass(frozen=True, slots=True)
 class _GitCoreConfig:
     bare: bool
@@ -482,7 +495,7 @@ def _direct_gitfile_source_root(checkout_root: Path, git_dir: Path) -> Path | No
     core = _read_git_core_config(git_dir)
     if core is None or core.bare or core.worktree != checkout_root:
         return None
-    return checkout_root if _git_pointer_target(checkout_root) == git_dir else None
+    return checkout_root if _checkout_owns_git_dir(checkout_root, git_dir) else None
 
 
 def _common_git_source_root(common_dir: Path) -> Path | None:
@@ -499,11 +512,12 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
             return common_dir
         return None
 
-    # An explicit, positively proven owner outranks directory naming.  An
-    # external common directory may itself be named ``.git`` without being the
-    # metadata directory of its parent checkout.
+    # An explicit, positively proven owner outranks directory naming.  Its
+    # checkout may use either a bounded gitfile or the standard regular ``.git``
+    # directory representation.  An external common directory may itself be
+    # named ``.git`` without being the metadata directory of its parent checkout.
     if core is not None and core.worktree is not None:
-        return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
+        return core.worktree if _checkout_owns_git_dir(core.worktree, common_dir) else None
 
     if common_dir.name == ".git":
         normal_checkout = common_dir.parent

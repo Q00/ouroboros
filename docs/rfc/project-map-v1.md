@@ -76,6 +76,9 @@ relative values, including a leading `~` component, resolve from the Git
 directory without consulting process `HOME`. A positively proven explicit
 owner is evaluated before the common directory's basename; an external common
 directory named `.git` therefore cannot be mistaken for its parent checkout.
+The explicit owner must point back to the common directory through either a
+bounded regular gitfile or its exact regular, non-symlink `.git` directory;
+both standard and external Git-directory representations therefore converge.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without
