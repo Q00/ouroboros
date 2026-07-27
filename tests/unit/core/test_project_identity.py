@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
@@ -13,6 +14,16 @@ from ouroboros.core.project_identity import (
     project_id_for_root,
     resolve_project_identity,
 )
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_project_id_is_full_uuid5_of_canonical_root(tmp_path: Path) -> None:
@@ -109,6 +120,68 @@ def test_external_git_directory_joins_primary_and_linked_checkouts(tmp_path: Pat
     assert primary_identity.workspace_path == "packages/web"
 
 
+def test_bare_common_repository_joins_direct_and_managed_worktrees(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    common_git = tmp_path / "common.git"
+    direct_a = tmp_path / "direct-a"
+    direct_b = tmp_path / "direct-b"
+    generated = tmp_path / "generated" / "packages" / "app"
+
+    _git("init", "-q", str(source))
+    _git(
+        "-c",
+        "user.name=Project Identity Test",
+        "-c",
+        "user.email=project-identity@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=source,
+    )
+    _git("clone", "-q", "--bare", str(source), str(common_git))
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "direct-a",
+        str(direct_a),
+        "HEAD",
+    )
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "direct-b",
+        str(direct_b),
+        "HEAD",
+    )
+    workspace_a = direct_a / "packages" / "app"
+    workspace_b = direct_b / "packages" / "app"
+    workspace_a.mkdir(parents=True)
+    workspace_b.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    direct_identity_a = resolve_project_identity(workspace_a)
+    direct_identity_b = resolve_project_identity(workspace_b)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=direct_a,
+        source_workspace=workspace_a,
+    )
+
+    assert direct_identity_a == direct_identity_b == managed_identity
+    assert direct_identity_a.project_root == str(common_git.resolve())
+    assert direct_identity_a.workspace_path == "packages/app"
+
+
 def test_unproven_worktree_pointer_cannot_join_another_project(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source_git = source / ".git"
@@ -130,6 +203,39 @@ def test_unproven_worktree_pointer_cannot_join_another_project(tmp_path: Path) -
 
     assert identity.project_root == str(forged.resolve())
     assert identity.project_id == project_id_for_root(forged)
+
+
+@pytest.mark.parametrize("record_name", ["marker", "commondir", "backlink"])
+@pytest.mark.parametrize(
+    "trailing_data",
+    ["unexpected-second-record\n", "x" * 4097],
+    ids=["trailing-record", "oversized-content"],
+)
+def test_incomplete_pointer_record_cannot_join_another_project(
+    tmp_path: Path,
+    record_name: str,
+    trailing_data: str,
+) -> None:
+    source = tmp_path / "source"
+    source_git = source / ".git"
+    source_git.mkdir(parents=True)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = source_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    records = {
+        "marker": (linked / ".git", f"gitdir: {linked_git_dir}\n"),
+        "commondir": (linked_git_dir / "commondir", "../..\n"),
+        "backlink": (linked_git_dir / "gitdir", f"{linked / '.git'}\n"),
+    }
+    for name, (path, valid_value) in records.items():
+        suffix = trailing_data if name == record_name else ""
+        path.write_text(valid_value + suffix, encoding="utf-8")
+
+    identity = resolve_project_identity(linked)
+
+    assert identity.project_root == str(linked.resolve())
+    assert identity.project_id == project_id_for_root(linked)
 
 
 def test_git_file_without_commondir_remains_its_own_project(tmp_path: Path) -> None:
