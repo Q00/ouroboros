@@ -7,6 +7,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+import shlex
+import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,6 +73,10 @@ from ouroboros.orchestrator.verifier import VerifierVerdict
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
+def _trusted_python_c(source: str) -> str:
+    return shlex.join([sys.executable, "-I", "-c", source])
+
+
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
     """The default stall watchdog should not kill long quiet test commands too early."""
     assert STALL_TIMEOUT_SECONDS == 900.0
@@ -127,8 +133,8 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
 @pytest.mark.parametrize(
     "command",
     (
-        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
-        "python3 -c \"from pathlib import Path; Path('src/generated.py').write_bytes(b'x')\"",
+        _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_text('x')"),
+        _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_bytes(b'x')"),
     ),
 )
 def test_python_c_pathlib_static_proof_accepts_direct_top_level_write(tmp_path, command) -> None:
@@ -162,6 +168,9 @@ def test_python_c_pathlib_static_proof_accepts_direct_top_level_write(tmp_path, 
         "PAYLOAD=x python -c \"from pathlib import Path; Path('src/generated.py').write_text('$PAYLOAD')\"",
         "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\" | cat",
         "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')",
+        "/tmp/fake/python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        "./python3 -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path('other.py') . write_text('x')\"",
         'python -c ""',
         "python -c from pathlib import Path",
         'python -c "' + ("(" * 5000) + '"',
@@ -2714,7 +2723,9 @@ def test_files_touched_resolves_python_c_pathlib_against_command_cwd(tmp_path) -
         tool_name="Bash",
         data={
             "tool_input": {
-                "command": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\"",
+                "command": _trusted_python_c(
+                    "from pathlib import Path; Path('generated.py').write_text('x')"
+                ),
                 "cwd": str(subdir),
             },
             "exit_code": 0,
@@ -2762,8 +2773,19 @@ def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tm
 @pytest.mark.parametrize(
     "tool_input",
     (
-        {"cmd": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\""},
-        {"cmd": ["python", "-c", "from pathlib import Path; Path('generated.py').write_text('x')"]},
+        {
+            "cmd": _trusted_python_c(
+                "from pathlib import Path; Path('generated.py').write_text('x')"
+            )
+        },
+        {
+            "cmd": [
+                sys.executable,
+                "-I",
+                "-c",
+                "from pathlib import Path; Path('generated.py').write_text('x')",
+            ]
+        },
     ),
 )
 def test_files_touched_accepts_python_c_pathlib_goose_cmd_shapes(tmp_path, tool_input) -> None:
@@ -7000,7 +7022,9 @@ class TestParallelACExecutor:
         generated_file = tmp_path / "src" / "generated.py"
         generated_file.parent.mkdir()
         generated_file.write_text("VALUE = 1\n", encoding="utf-8")
-        command = "python -c \"from pathlib import Path; Path('src/generated.py').write_text('VALUE = 2')\""
+        command = _trusted_python_c(
+            "from pathlib import Path; Path('src/generated.py').write_text('VALUE = 2')"
+        )
         evidence_json = json.dumps(
             {
                 "files_touched": ["src/generated.py"],
@@ -7072,17 +7096,14 @@ class TestParallelACExecutor:
     @pytest.mark.parametrize(
         "command_factory",
         (
-            lambda _tmp_path: (
-                'python -c "from pathlib import Path; '
-                "Path('./src/generated.py').write_text('VALUE = 2')\""
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; Path('./src/generated.py').write_text('VALUE = 2')"
             ),
-            lambda _tmp_path: (
-                'python -c "from pathlib import Path; '
-                "(Path('src') / 'generated.py').write_text('VALUE = 2')\""
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; (Path('src') / 'generated.py').write_text('VALUE = 2')"
             ),
-            lambda tmp_path: (
-                'python -c "from pathlib import Path; '
-                f"Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')\""
+            lambda tmp_path: _trusted_python_c(
+                f"from pathlib import Path; Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')"
             ),
         ),
     )
@@ -7435,7 +7456,7 @@ class TestParallelACExecutor:
         other_file.write_text("VALUE = 2\n", encoding="utf-8")
         command = (
             'python -c "from pathlib import Path; # touch claimed.py\n'
-            "Path('other.py').write_text('VALUE = 3')\""
+            "Path('other.py') . write_text('VALUE = 3')\""
         )
         evidence_json = json.dumps(
             {
@@ -7577,6 +7598,172 @@ class TestParallelACExecutor:
         assert result.success is False
         assert result.error is not None
         assert "files_touched: generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "/tmp/fake/python -c \"from pathlib import Path; Path('claimed.py').write_text('x')\"",
+            "./python3 -c \"from pathlib import Path; Path('claimed.py').write_text('x')\"",
+        ),
+    )
+    async def test_fat_harness_verifier_rejects_untrusted_python_executable(
+        self, tmp_path, command
+    ) -> None:
+        """A Python-looking executable path is not an authenticated interpreter."""
+        claimed_file = tmp_path / "claimed.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_nonisolated_local_pathlib_shadow(
+        self, tmp_path
+    ) -> None:
+        """Bare Python can import a workspace pathlib.py, so it is not static proof."""
+        claimed_file = tmp_path / "claimed.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "pathlib.py").write_text(
+            "class Path:\n"
+            "    def __init__(self, value):\n"
+            "        self.value = value\n"
+            "    def write_text(self, value):\n"
+            "        return None\n",
+            encoding="utf-8",
+        )
+        command = "python -c \"from pathlib import Path; Path('claimed.py').write_text('x')\""
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
         evidence_event = next(
             event
             for event in appended_events

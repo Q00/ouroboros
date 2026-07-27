@@ -6,6 +6,7 @@ import ast
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
@@ -525,12 +526,22 @@ def _python_c_pathlib_write_reference_match(
     python_index = _python_c_argv_index(argv)
     if python_index is None:
         return None
-    if len(argv) <= python_index + 2 or argv[python_index + 1] != "-c":
+    if len(argv) <= python_index + 2 or "-c" not in argv[python_index + 1 :]:
         return None
-    source = argv[python_index + 2]
+    source_index = argv.index("-c", python_index + 1) + 1
+    if len(argv) <= source_index:
+        return None
+    source = argv[source_index]
     if not _source_mentions_pathlib_write(source):
         return None
-    if python_index != 0 or len(argv) != python_index + 3 or _source_needs_shell_expansion(source):
+    if (
+        python_index != 0
+        or source_index != 3
+        or len(argv) != 4
+        or argv[1] != "-I"
+        or not _trusted_python_executable(argv[0])
+        or _source_needs_shell_expansion(source)
+    ):
         return False
     try:
         tree = ast.parse(source)
@@ -560,13 +571,20 @@ def _python_c_argv_index(argv: list[str]) -> int | None:
     return None
 
 
+def _trusted_python_executable(value: str) -> bool:
+    try:
+        return Path(value).resolve() == Path(sys.executable).resolve()
+    except (OSError, ValueError):
+        return False
+
+
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
     lowered = command.lower()
     return "python" in lowered and " -c" in lowered and _source_mentions_pathlib_write(command)
 
 
 def _source_mentions_pathlib_write(source: str) -> bool:
-    return ".write_text" in source or ".write_bytes" in source
+    return re.search(r"\bwrite_(?:text|bytes)\b", source) is not None
 
 
 def _source_needs_shell_expansion(source: str) -> bool:
