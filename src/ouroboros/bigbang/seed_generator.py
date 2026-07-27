@@ -420,6 +420,87 @@ def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[
     return tuple(conditions)
 
 
+def _parse_ontology_fields(raw_value: object, *, strict: bool = False) -> tuple[OntologyField, ...]:
+    """Parse ONTOLOGY_FIELDS from JSON object arrays or the legacy pipe list.
+
+    Mirrors the evaluation-principle and exit-condition parsers (#1729): the
+    extraction format requests a single-line JSON array of ``{"name", "type",
+    "description"}`` objects (the model field spelling ``field_type`` is
+    accepted too, and an optional boolean ``required`` is honored) so colons
+    and pipes inside the data survive. Strict mode raises on anything else so
+    the retry path reformats; lenient mode keeps the historical
+    ``name:type:description`` split where the description absorbs any further
+    colons, skips malformed entries, and never raises.
+    """
+    field_label = "ONTOLOGY_FIELDS"
+
+    def _build(entry: object) -> OntologyField | None:
+        if isinstance(entry, OntologyField):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            required = entry.get("required", True)
+            if not isinstance(required, bool):
+                raise ValueError(
+                    f"{field_label} entry field 'required' must be a boolean; got {required!r}."
+                )
+            return OntologyField(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                field_type=_require_object_string(
+                    entry, "type", field_label=field_label, aliases=("field_type",)
+                ),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                required=required,
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[OntologyField, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    fields: list[OntologyField] = []
+    for field_str in text.split("|"):
+        field_str = field_str.strip()
+        if not field_str:
+            continue
+        parts = field_str.split(":")
+        if len(parts) < 3:
+            continue
+        name = parts[0].strip()
+        field_type = parts[1].strip()
+        description = ":".join(parts[2:]).strip()
+        if not name or not field_type or not description:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        fields.append(OntologyField(name=name, field_type=field_type, description=description))
+    return tuple(fields)
+
+
 def _parse_acceptance_criteria_contracts(
     raw_value: object,
 ) -> tuple[AcceptanceCriterionSpec | str, ...]:
@@ -946,7 +1027,7 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
@@ -1053,7 +1134,7 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
@@ -1181,6 +1262,10 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             requirements["exit_conditions"] = _parse_exit_conditions(
                 requirements["exit_conditions"], strict=True
             )
+        if "ontology_fields" in requirements:
+            requirements["ontology_fields"] = _parse_ontology_fields(
+                requirements["ontology_fields"], strict=True
+            )
 
         return requirements
 
@@ -1206,22 +1291,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                 requirements["acceptance_criteria"]
             )
 
-        # Parse ontology fields
-        ontology_fields: list[OntologyField] = []
-        if "ontology_fields" in requirements and requirements["ontology_fields"]:
-            for field_str in requirements["ontology_fields"].split("|"):
-                field_str = field_str.strip()
-                if not field_str:
-                    continue
-                parts = field_str.split(":")
-                if len(parts) >= 3:
-                    ontology_fields.append(
-                        OntologyField(
-                            name=parts[0].strip(),
-                            field_type=parts[1].strip(),
-                            description=":".join(parts[2:]).strip(),
-                        )
-                    )
+        # Parse ontology fields (JSON object arrays preferred; legacy
+        # colon/pipe lists supported for stored requirements)
+        ontology_fields = _parse_ontology_fields(requirements.get("ontology_fields"))
 
         # Build ontology schema
         ontology_schema = OntologySchema(

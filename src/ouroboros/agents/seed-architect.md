@@ -50,7 +50,7 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 The data structure/domain model for this work:
 - **ONTOLOGY_NAME**: A name for the domain model
 - **ONTOLOGY_DESCRIPTION**: What the ontology represents
-- **ONTOLOGY_FIELDS**: Key fields in format: name:type:description (pipe-separated)
+- **ONTOLOGY_FIELDS**: Key fields as a single-line JSON array of objects with "name", "type" (string, number, boolean, array, object), and "description"
 
 Field types should be one of: string, number, boolean, array, object
 
@@ -81,7 +81,7 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
 EVALUATION_PRINCIPLES: [{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}, ...]
 EXIT_CONDITIONS: [{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}, ...]
 PROJECT_TYPE: greenfield|brownfield

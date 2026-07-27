@@ -23,6 +23,7 @@ from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
     _parse_evaluation_principles,
     _parse_exit_conditions,
+    _parse_ontology_fields,
     _parse_string_array_values,
     load_seed,
     save_seed_sync,
@@ -62,7 +63,10 @@ def create_valid_extraction_response(
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
     ontology_description: str = "Task management domain model",
-    ontology_fields: str = "tasks:array:List of task objects | projects:array:List of project objects",
+    ontology_fields: str = (
+        '[{"name": "tasks", "type": "array", "description": "List of task objects"},'
+        ' {"name": "projects", "type": "array", "description": "List of project objects"}]'
+    ),
     evaluation_principles: str = (
         '[{"name": "completeness", "description": "All requirements implemented",'
         ' "weight": 0.4},'
@@ -811,7 +815,10 @@ class TestSeedGeneratorExtraction:
         extraction_response = create_valid_extraction_response(
             ontology_name="TaskManager",
             ontology_description="Domain model for task management",
-            ontology_fields="tasks:array:List of tasks | status:string:Task status",
+            ontology_fields=(
+                '[{"name": "tasks", "type": "array", "description": "List of tasks"},'
+                ' {"name": "status", "type": "string", "description": "Task status"}]'
+            ),
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -1561,6 +1568,93 @@ class TestObjectArrayExtractionContract:
             '[{"name": "x", "description": "d", "weight": -1e999}]', strict=True
         )
         assert json_neg_strict[0].weight == 0.0
+
+    def test_ontology_strict_parses_json_object_arrays(self) -> None:
+        fields = _parse_ontology_fields(
+            '[{"name": "ratio", "type": "string",'
+            ' "description": "A 1:1 request:response mapping | primary"}]',
+            strict=True,
+        )
+        assert fields == (
+            OntologyField(
+                name="ratio",
+                field_type="string",
+                description="A 1:1 request:response mapping | primary",
+            ),
+        )
+        aliased = _parse_ontology_fields(
+            '[{"name": "n", "field_type": "number", "description": "d", "required": false}]',
+            strict=True,
+        )
+        assert aliased[0].field_type == "number"
+        assert aliased[0].required is False
+
+    def test_ontology_strict_rejects_legacy_and_malformed(self) -> None:
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_ontology_fields("tasks:array:List of tasks", strict=True)
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_ontology_fields("", strict=True)
+        assert _parse_ontology_fields("[]", strict=True) == ()
+        malformed = (
+            '["not an object"]',
+            '[{"type": "string", "description": "missing name"}]',
+            '[{"name": "x", "description": "no type"}]',
+            '[{"name": "x", "type": " ", "description": "blank type"}]',
+            '[{"name": "x", "type": "string", "description": "d", "required": "yes"}]',
+        )
+        for case in malformed:
+            with pytest.raises(ValueError, match="ONTOLOGY_FIELDS"):
+                _parse_ontology_fields(case, strict=True)
+
+    def test_ontology_lenient_keeps_legacy_split_and_never_raises(self) -> None:
+        legacy = _parse_ontology_fields(
+            "tasks:array:List of tasks | status:string:Status: open or closed | :string:d | x::d"
+        )
+        assert legacy == (
+            OntologyField(name="tasks", field_type="array", description="List of tasks"),
+            OntologyField(name="status", field_type="string", description="Status: open or closed"),
+        )
+        stored_json = _parse_ontology_fields(
+            '[{"name": "a", "type": "string", "description": "d | note"},'
+            ' {"name": "bad", "required": "yes"}, 42]'
+        )
+        assert len(stored_json) == 1
+        assert stored_json[0].description == "d | note"
+        assert _parse_ontology_fields('[{"name": "x",]') == ()
+        assert _parse_ontology_fields(None) == ()
+        model = OntologyField(name="m", field_type="string", description="d")
+        assert _parse_ontology_fields((model,)) == (model,)
+
+    @pytest.mark.asyncio
+    async def test_ontology_json_fields_reach_seed_and_legacy_retries(self) -> None:
+        malformed = create_valid_extraction_response(ontology_fields="tasks:array:List of tasks")
+        reformatted = create_valid_extraction_response(
+            ontology_fields=(
+                '[{"name": "tasks", "type": "array",'
+                ' "description": "Tasks with a 1:1 owner mapping | primary"}]'
+            )
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        fields = result.value.ontology_schema.fields
+        assert fields[0].description == "Tasks with a 1:1 owner mapping | primary"
 
     def test_lenient_null_weight_defaults_without_raising(self) -> None:
         principles = _parse_evaluation_principles(
