@@ -62,8 +62,10 @@ The bounded core parser accepts Git section comments, valueless boolean
 shorthand, empty boolean values, quoted values, documented escapes, inline
 comments, variable-value backslash continuations, and Git's signed 32-bit
 numeric boolean forms, including octal, hexadecimal, and `k`/`m`/`g` scaling.
-Section headers cannot
-span physical lines and fail closed before continuation folding. Includes fail
+Boolean tokens are ASCII-bounded before case normalization. Section headers
+cannot span physical lines and fail closed before continuation folding, while a
+same-line section assignment may continue its value after the closing bracket.
+Includes fail
 closed because they escape the bounded config file used for identity proof.
 
 When the common config enables `extensions.worktreeConfig`, the resolver reads
