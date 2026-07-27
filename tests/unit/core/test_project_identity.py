@@ -90,7 +90,9 @@ def test_linked_worktree_reuses_primary_source_identity(tmp_path: Path) -> None:
     assert linked_identity.workspace_path == "packages/web"
 
 
-def test_external_git_directory_joins_primary_and_linked_checkouts(tmp_path: Path) -> None:
+def test_external_git_directory_without_owner_keeps_direct_checkout_separate(
+    tmp_path: Path,
+) -> None:
     external_git = tmp_path / "storage.git"
     (external_git / "objects").mkdir(parents=True)
     (external_git / "refs").mkdir()
@@ -115,9 +117,57 @@ def test_external_git_directory_joins_primary_and_linked_checkouts(tmp_path: Pat
     primary_identity = resolve_project_identity(primary_workspace)
     linked_identity = resolve_project_identity(linked_workspace)
 
-    assert primary_identity == linked_identity
-    assert primary_identity.project_root == str(external_git.resolve())
+    assert primary_identity.project_root == str(primary.resolve())
+    assert linked_identity.project_root == str(external_git.resolve())
+    assert primary_identity.project_id != linked_identity.project_id
     assert primary_identity.workspace_path == "packages/web"
+    assert linked_identity.workspace_path == "packages/web"
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_case_variant_core_sections_use_later_git_value(
+    tmp_path: Path,
+    line_ending: str,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    first = tmp_path / "first"
+    first.mkdir()
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    (first / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        line_ending.join(
+            (
+                "[core]",
+                "\tbare = false",
+                f"\tworktree = {first}",
+                "[CORE]",
+                f"\tworktree = {primary}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+
+    primary_identity = resolve_project_identity(primary)
+    linked_identity = resolve_project_identity(linked)
+
+    assert primary_identity == linked_identity
+    assert primary_identity.project_root == str(primary.resolve())
 
 
 def test_bare_common_repository_joins_direct_and_managed_worktrees(
@@ -203,6 +253,48 @@ def test_unproven_worktree_pointer_cannot_join_another_project(tmp_path: Path) -
 
     assert identity.project_root == str(forged.resolve())
     assert identity.project_id == project_id_for_root(forged)
+
+
+def test_direct_gitfile_cannot_claim_an_unowned_dot_git_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source_git = source / ".git"
+    source_git.mkdir(parents=True)
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {source_git}\n", encoding="utf-8")
+
+    identity = resolve_project_identity(forged)
+
+    assert identity.project_root == str(forged.resolve())
+    assert identity.project_id == project_id_for_root(forged)
+
+
+def test_direct_alias_cannot_claim_configured_submodule_gitdir(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent_git = parent / ".git"
+    parent_git.mkdir(parents=True)
+    submodule = parent / "vendor" / "child"
+    submodule.mkdir(parents=True)
+    module_git_dir = parent_git / "modules" / "vendor" / "child"
+    module_git_dir.mkdir(parents=True)
+    (module_git_dir / "config").write_text(
+        "[core]\n\tbare = false\n\tworktree = ../../../../vendor/child\n",
+        encoding="utf-8",
+    )
+    (submodule / ".git").write_text(
+        "gitdir: ../../.git/modules/vendor/child\n",
+        encoding="utf-8",
+    )
+    alias = tmp_path / "alias"
+    alias.mkdir()
+    (alias / ".git").write_text(f"gitdir: {module_git_dir}\n", encoding="utf-8")
+
+    submodule_identity = resolve_project_identity(submodule)
+    alias_identity = resolve_project_identity(alias)
+
+    assert submodule_identity.project_root == str(submodule.resolve())
+    assert alias_identity.project_root == str(alias.resolve())
+    assert alias_identity.project_id != submodule_identity.project_id
 
 
 @pytest.mark.parametrize("record_name", ["marker", "commondir", "backlink"])

@@ -12,12 +12,17 @@ from configparser import Error as ConfigError
 from configparser import RawConfigParser
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+import re
 from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_POINTER_LENGTH = 4096
 _MAX_GIT_CONFIG_LENGTH = 65_536
+_CORE_SECTION_HEADER = re.compile(
+    r"^(?P<indent>[ \t]*)\[[ \t]*core[ \t]*\](?P<trailing>[ \t]*)(?P<cr>\r?)$",
+    flags=re.IGNORECASE | re.MULTILINE,
+)
 
 
 class ProjectIdentityError(ValueError):
@@ -190,6 +195,13 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     )
     if raw_config is None:
         return None
+    # Git section names are case-insensitive.  Canonicalizing only an exact
+    # ``core`` header lets ConfigParser retain file order and later-value wins
+    # semantics across repeated ``[core]`` / ``[CORE]`` sections.
+    raw_config = _CORE_SECTION_HEADER.sub(
+        lambda match: f"{match.group('indent')}[core]{match.group('trailing')}{match.group('cr')}",
+        raw_config,
+    )
     parser = RawConfigParser(interpolation=None, strict=False, allow_no_value=True)
     try:
         parser.read_string(raw_config)
@@ -219,6 +231,14 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     return _GitCoreConfig(bare=bare, worktree=worktree)
 
 
+def _direct_gitfile_source_root(checkout_root: Path, git_dir: Path) -> Path | None:
+    """Return a direct gitfile owner only when the target names it explicitly."""
+    core = _read_git_core_config(git_dir)
+    if core is None or core.bare or core.worktree != checkout_root:
+        return None
+    return checkout_root if _git_pointer_target(checkout_root) == git_dir else None
+
+
 def _common_git_source_root(common_dir: Path) -> Path | None:
     """Return one source identity root positively owned by a common gitdir."""
     core = _read_git_core_config(common_dir)
@@ -246,9 +266,8 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
     if core.worktree is not None:
         return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
 
-    # ``git init --separate-git-dir`` does not persist the primary worktree
-    # path.  Its non-bare common directory is therefore the only stable root
-    # that both the primary gitfile and every linked worktree can prove.
+    # Without an explicit core.worktree, only callers that already proved a
+    # common-dir worktree record and backlink may use this stable common root.
     if (
         _read_bounded_record(common_dir / "HEAD")
         and (common_dir / "objects").is_dir()
@@ -280,7 +299,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
 
     raw_common_dir = _read_bounded_record(git_dir / "commondir")
     if not raw_common_dir:
-        return _common_git_source_root(git_dir) or checkout_root
+        return _direct_gitfile_source_root(checkout_root, git_dir) or checkout_root
     try:
         common_dir = Path(raw_common_dir)
         if not common_dir.is_absolute():

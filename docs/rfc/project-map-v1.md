@@ -27,7 +27,7 @@ One V1 identity contains:
 | Field | Contract |
 | --- | --- |
 | `project_id` | `project_` plus the full 32-character UUIDv5 hex digest |
-| `project_root` | canonical, absolute, symlink-resolved identity root; normally the source checkout, or a validated common Git directory for external-gitdir and bare-owned worktree topologies |
+| `project_root` | canonical, absolute, symlink-resolved identity root; normally the source checkout, or a validated common Git directory for positively proven linked peers with no primary owner |
 | `workspace_path` | canonical POSIX path relative to the active checkout root; `.` at root |
 
 The exact ID algorithm is:
@@ -53,16 +53,23 @@ NULs, invalid UTF-8, target-leading or surrounding whitespace, and symlinked
 records invalidate the topology proof; a valid first line cannot hide malformed
 trailing data, and pointer paths never receive shell-style `~` expansion.
 
+A direct gitfile without `commondir` proves ownership only when its bounded Git
+core config names the active checkout as `core.worktree` and that checkout
+points back to the same Git directory. An alias to another checkout `.git` or
+configured submodule Git directory therefore stays separate. Core section names
+are interpreted case-insensitively with later values winning, matching Git.
+
 Git does not persist the primary working-tree path for a non-bare repository
-created with `--separate-git-dir`. In that topology the validated external
-common Git directory is the only root that both the primary gitfile and every
-linked-worktree record can prove, so it becomes `project_root`; the
-`workspace_path` is still relative to each active checkout. A bare common
-repository that positively owns linked worktrees likewise has no primary
-checkout, so its validated common directory becomes their shared
-`project_root`. Malformed or unproven metadata stays scoped to the active
-checkout. Non-Git directories remain valid local-first projects and use their
-canonical cwd with `workspace_path="."`.
+created with `--separate-git-dir` unless `core.worktree` is configured. Without
+that owner, the direct checkout stays scoped to itself; copying its gitfile
+cannot claim a durable identity. Linked peers that separately prove membership
+through `commondir`, one worktree record, and a backlink may share the validated
+external common directory. When `core.worktree` is configured, the direct and
+linked paths share that explicit owner. A bare common repository that positively
+owns linked worktrees likewise uses its common directory for those peers.
+Malformed or unproven metadata stays scoped to the active checkout. Non-Git
+directories remain valid local-first projects and use their canonical cwd with
+`workspace_path="."`.
 
 ### Managed task worktrees
 

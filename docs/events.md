@@ -50,7 +50,7 @@ Emitted when a new orchestrator session begins execution.
 | `seed_id` | `string` | Seed specification being executed |
 | `start_time` | `string` | ISO 8601 timestamp of session start |
 | `project_id` | `string` | Optional Project Map V1 join key (`project_` + full UUIDv5 hex); present on runner-owned new sessions |
-| `project_root` | `string` | Optional canonical identity root used to derive `project_id`; normally the source checkout, or a validated common Git directory for external-gitdir and bare-owned worktree topologies |
+| `project_root` | `string` | Optional canonical identity root used to derive `project_id`; normally the source checkout, or a validated common Git directory for positively proven linked peers with no primary owner |
 | `workspace_path` | `string` | Optional canonical POSIX workspace scope relative to the active checkout root |
 
 The three project fields are one additive identity anchor and must be consumed
