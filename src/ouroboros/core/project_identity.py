@@ -499,6 +499,12 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
             return common_dir
         return None
 
+    # An explicit, positively proven owner outranks directory naming.  An
+    # external common directory may itself be named ``.git`` without being the
+    # metadata directory of its parent checkout.
+    if core is not None and core.worktree is not None:
+        return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
+
     if common_dir.name == ".git":
         normal_checkout = common_dir.parent
         try:
@@ -509,8 +515,6 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
 
     if core is None:
         return None
-    if core.worktree is not None:
-        return core.worktree if _git_pointer_target(core.worktree) == common_dir else None
 
     # Without an explicit core.worktree, only callers that already proved a
     # common-dir worktree record and backlink may use this stable common root.
@@ -605,7 +609,9 @@ def resolve_project_identity(
     effective = _canonical_directory(effective_cwd)
     if source_root is not None:
         checkout_root = _canonical_directory(source_root)
-        workspace = _canonical_directory(source_workspace or source_root)
+        workspace = _canonical_directory(
+            source_root if source_workspace is None else source_workspace
+        )
         workspace_path = _relative_workspace_path(workspace, checkout_root)
         project_root = _linked_worktree_source_root(checkout_root)
         return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
