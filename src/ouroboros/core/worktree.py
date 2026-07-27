@@ -113,7 +113,16 @@ def _worktrees_enabled() -> bool:
 
 def _worktree_cleanup_policy() -> str:
     config = _orchestrator_config()
-    return getattr(config, "worktree_cleanup", "keep")
+    return getattr(config, "worktree_cleanup", "remove")
+
+
+def _worktree_retention() -> timedelta | None:
+    """Retention window for abandoned worktrees; ``None`` when the sweep is off."""
+    config = _orchestrator_config()
+    hours = getattr(config, "worktree_retention_hours", 24)
+    if hours <= 0:
+        return None
+    return timedelta(hours=hours)
 
 
 def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -569,6 +578,60 @@ def discover_managed_workspaces(root: Path | None = None) -> list[TaskWorkspace]
                 )
             )
     return workspaces
+
+
+def sweep_stale_workspaces(
+    *,
+    retention: timedelta | None = None,
+    root: Path | None = None,
+) -> list[TaskWorkspace]:
+    """Reclaim managed auto worktrees that no live session is using anymore.
+
+    ``release_task_workspace`` only runs on the orderly completion path, so a
+    session that crashes, is killed, or loses its host leaves its worktree on
+    disk forever. This sweep is the backstop: it removes ``auto_*`` worktrees
+    whose lock is gone or stale and that have not been touched within the
+    retention window.
+
+    Safety comes from ``cleanup_task_workspace(policy="remove")`` — a dirty
+    checkout is never removed, and a branch is deleted only when Git accepts a
+    merged-branch delete, so unmerged commits survive on their ``ooo/*`` branch.
+    """
+    window = retention if retention is not None else _worktree_retention()
+    if window is None:
+        return []
+
+    now = datetime.now(UTC)
+    reclaimed: list[TaskWorkspace] = []
+    for workspace in discover_managed_workspaces(root):
+        if not workspace.durable_id.startswith("auto_"):
+            continue
+        lock_path = Path(workspace.lock_path)
+        if lock_path.exists() and not lock_file_is_stale(lock_path):
+            continue
+        worktree_path = Path(workspace.worktree_path)
+        try:
+            touched = datetime.fromtimestamp(worktree_path.stat().st_mtime, UTC)
+        except OSError:
+            continue
+        if now - touched < window:
+            continue
+        try:
+            removed = cleanup_task_workspace(workspace, policy="remove")
+        except WorktreeError as exc:
+            log.warning(
+                "worktree.sweep_failed",
+                durable_id=workspace.durable_id,
+                worktree_path=workspace.worktree_path,
+                error=str(exc),
+            )
+            continue
+        if removed:
+            lock_path.unlink(missing_ok=True)
+            reclaimed.append(workspace)
+    if reclaimed:
+        log.info("worktree.swept", count=len(reclaimed))
+    return reclaimed
 
 
 def prepare_task_workspace(

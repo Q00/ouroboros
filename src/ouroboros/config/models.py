@@ -576,12 +576,18 @@ class OrchestratorConfig(BaseModel, frozen=True):
         worktree_root: Root directory for managed task worktrees
         worktree_cleanup: Cleanup policy for managed task worktrees applied when
             an auto session completes:
-            - ``keep`` (default): never remove anything (legacy behavior)
+            - ``remove`` (default): remove clean worktrees; delete the branch only
+              when Git accepts a safe merged-branch deletion, so unmerged commits
+              survive on their ``ooo/*`` branch
             - ``prune-merged``: remove the worktree + ``ooo/*`` branch only when
               the branch is fully merged and the worktree checkout is clean
-            - ``remove``: remove clean worktrees; delete the branch only when
-              Git accepts a safe merged-branch deletion
+            - ``keep``: never remove anything (legacy behavior — worktrees
+              accumulate until ``ouroboros cleanup`` is run by hand)
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
+        worktree_retention_hours: How long an abandoned managed worktree may sit
+            unused before the next auto session reclaims it. Sessions that crash
+            or are killed never run their release path, so the completion-time
+            policy alone cannot bound disk growth. ``0`` disables the sweep
         pm_snapshot_worktrees: Whether PM brownfield exploration reads from
             persistent detached worktrees pinned to the remote default branch
             (``origin/HEAD``) instead of the developer's live checkout. The
@@ -652,8 +658,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
     usage_limit_pause_hours: float = Field(default=5.0, gt=0.0)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
-    worktree_cleanup: Literal["keep", "remove", "prune-merged"] = "keep"
+    worktree_cleanup: Literal["keep", "remove", "prune-merged"] = "remove"
     worktree_lock_stale_after_minutes: int = Field(default=60, ge=1)
+    worktree_retention_hours: int = Field(default=24, ge=0)
     pm_snapshot_worktrees: bool = True
     pm_snapshot_root: str = "~/.ouroboros/pm-snapshots"
 

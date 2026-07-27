@@ -573,10 +573,14 @@ ouroboros cleanup
 ouroboros cleanup --force
 ```
 
-Related: the `orchestrator.worktree_cleanup` config field (`keep` | `remove` |
-`prune-merged`, default `keep`) controls automatic cleanup when a session
-releases its worktree; `ooo cleanup` handles residue from sessions that ended
-before this policy existed, were cancelled, or ran with `keep`.
+Related: the `orchestrator.worktree_cleanup` config field (`remove` |
+`prune-merged` | `keep`, default `remove`) controls automatic cleanup when a
+session releases its worktree, and `orchestrator.worktree_retention_hours`
+(default `24`, `0` disables) lets the next auto session reclaim worktrees left
+behind by sessions that crashed and never reached their release path. Neither
+touches a dirty checkout or force-deletes a branch, so unmerged commits survive
+on their `ooo/*` branch. `ooo cleanup` remains the manual entry point for
+residue older than these policies or from sessions that ran with `keep`.
 
 ---
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
 import subprocess
 
 from ouroboros.auto.state import AutoPipelineState, AutoWorktreePolicy
@@ -69,6 +71,31 @@ def test_coding_auto_policy_reuses_persisted_managed_worktree(tmp_path, monkeypa
         assert second.worktree_path == first.worktree_path
         assert second.branch == first.branch
         assert state.managed_worktree is not None
+    finally:
+        release_auto_worktree(second)
+
+
+def test_resume_reprovisions_after_previous_worktree_was_reclaimed(tmp_path, monkeypatch) -> None:
+    """A reclaimed worktree leaves `state.cwd` dangling — resume must not skip."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(repo))
+    state.active_domain_profile_name = "coding"
+    state.worktree_policy = AutoWorktreePolicy.AUTO
+
+    first = ensure_auto_worktree(state)
+    assert first is not None
+    release_auto_worktree(first)
+    # The default `remove` policy reclaims the checkout; state.cwd now dangles.
+    shutil.rmtree(first.worktree_path, ignore_errors=True)
+    assert not Path(state.cwd).exists()
+
+    second = ensure_auto_worktree(state)
+    try:
+        assert second is not None
+        assert Path(second.worktree_path).is_dir()
+        assert state.cwd == second.effective_cwd
     finally:
         release_auto_worktree(second)
 

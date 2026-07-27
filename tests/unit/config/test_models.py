@@ -615,6 +615,17 @@ class TestOrchestratorConfig:
         with pytest.raises(ValidationError):
             OrchestratorConfig(worktree_cleanup="delete")  # type: ignore[arg-type]
 
+    def test_orchestrator_config_bounds_worktree_growth_by_default(self) -> None:
+        """Defaults reclaim worktrees; `keep` + no retention grew unbounded."""
+        config = OrchestratorConfig()
+        assert config.worktree_cleanup == "remove"
+        assert config.worktree_retention_hours == 24
+
+    def test_orchestrator_config_rejects_negative_worktree_retention(self) -> None:
+        """Retention window cannot be negative (0 disables the sweep)."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(worktree_retention_hours=-1)
+
     def test_orchestrator_config_expands_codex_cli_path(self) -> None:
         """Expands ~ in codex_cli_path."""
         config = OrchestratorConfig(runtime_backend="codex", codex_cli_path="~/bin/codex")

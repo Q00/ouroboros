@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+import os
 from pathlib import Path
 import subprocess
+import time
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +23,7 @@ from ouroboros.core.worktree import (
     release_lock,
     release_task_workspace,
     restore_task_workspace,
+    sweep_stale_workspaces,
 )
 
 
@@ -476,3 +480,122 @@ class TestWorktreeHardening:
         assert Path(workspace.worktree_path).exists()
         assert not Path(workspace.lock_path).exists()
         assert _branch_exists(repo_root, workspace.branch)
+
+
+class TestSweepStaleWorkspaces:
+    """Backstop reclaim for sessions that died before releasing their worktree."""
+
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        return TestWorktreeHardening._git(repo, *args)
+
+    @classmethod
+    def _init_repo(cls, repo: Path) -> None:
+        TestWorktreeHardening._init_repo(repo)
+
+    @staticmethod
+    def _abandon(workspace: TaskWorkspace, *, age: timedelta) -> None:
+        """Drop the lock and backdate the worktree as an abandoned session would."""
+        Path(workspace.lock_path).unlink(missing_ok=True)
+        past = time.time() - age.total_seconds()
+        os.utime(workspace.worktree_path, (past, past))
+
+    def test_sweep_reclaims_abandoned_worktree_and_keeps_unmerged_branch(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "auto_abandoned")
+            worktree_path = Path(workspace.worktree_path)
+            (worktree_path / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self._git(worktree_path, "add", "feature.txt")
+            self._git(worktree_path, "commit", "-m", "feature")
+            self._abandon(workspace, age=timedelta(hours=48))
+
+            reclaimed = sweep_stale_workspaces(retention=timedelta(hours=24))
+
+        assert [w.durable_id for w in reclaimed] == ["auto_abandoned"]
+        assert not Path(workspace.worktree_path).exists()
+        # The session's commits survive on their branch — only the checkout goes.
+        assert _branch_exists(repo_root, workspace.branch)
+
+    def test_sweep_keeps_worktree_inside_retention_window(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "auto_recent")
+            self._abandon(workspace, age=timedelta(hours=1))
+
+            reclaimed = sweep_stale_workspaces(retention=timedelta(hours=24))
+
+        assert reclaimed == []
+        assert Path(workspace.worktree_path).exists()
+
+    def test_sweep_keeps_worktree_held_by_a_live_lock(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "auto_live")
+            past = time.time() - timedelta(hours=48).total_seconds()
+            os.utime(workspace.worktree_path, (past, past))
+
+            try:
+                reclaimed = sweep_stale_workspaces(retention=timedelta(hours=24))
+            finally:
+                release_lock(workspace.lock_path)
+
+        assert reclaimed == []
+        assert Path(workspace.worktree_path).exists()
+
+    def test_sweep_keeps_dirty_worktree(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "auto_dirty")
+            (Path(workspace.worktree_path) / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            self._abandon(workspace, age=timedelta(hours=48))
+
+            reclaimed = sweep_stale_workspaces(retention=timedelta(hours=24))
+
+        assert reclaimed == []
+        assert Path(workspace.worktree_path).exists()
+
+    def test_sweep_ignores_non_auto_workspaces(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root):
+            workspace = prepare_task_workspace(repo_root, "orch_manual")
+            self._abandon(workspace, age=timedelta(hours=48))
+
+            reclaimed = sweep_stale_workspaces(retention=timedelta(hours=24))
+
+        assert reclaimed == []
+        assert Path(workspace.worktree_path).exists()
+
+    def test_sweep_disabled_when_retention_is_zero(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        worktree_root = tmp_path / "worktrees"
+        self._init_repo(repo_root)
+
+        with (
+            patch("ouroboros.core.worktree._worktree_root", return_value=worktree_root),
+            patch("ouroboros.core.worktree._worktree_retention", return_value=None),
+        ):
+            workspace = prepare_task_workspace(repo_root, "auto_disabled")
+            self._abandon(workspace, age=timedelta(hours=48))
+
+            reclaimed = sweep_stale_workspaces()
+
+        assert reclaimed == []
+        assert Path(workspace.worktree_path).exists()
