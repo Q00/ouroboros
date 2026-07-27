@@ -465,9 +465,10 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     if raw_worktree is None or not raw_worktree:
         return None
     try:
+        # Git stores ``core.worktree`` verbatim.  Relative values, including
+        # leading ``~`` components, are resolved from the Git directory and
+        # never through the process environment.
         worktree = Path(raw_worktree)
-        if raw_worktree.startswith("~"):
-            worktree = worktree.expanduser()
         if not worktree.is_absolute():
             worktree = git_dir / worktree
         worktree = _canonical_directory(worktree)

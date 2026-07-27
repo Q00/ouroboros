@@ -71,6 +71,9 @@ common `config`, matching Git's later-value override order for `core.bare` and
 oversized, or including worktree config cannot prove an identity owner. This
 keeps direct, positively proven linked, and managed paths on the same explicit
 main-worktree owner when Git stores that owner outside the common config.
+`core.worktree` is interpreted verbatim: absolute values stay absolute and all
+relative values, including a leading `~` component, resolve from the Git
+directory without consulting process `HOME`.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without
