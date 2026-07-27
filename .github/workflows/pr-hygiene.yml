@@ -11,9 +11,15 @@ name: PR Hygiene
 # not just a closing keyword. Most PRs here are slices of an epic and must NOT
 # auto-close their parent; forcing `Closes` on them would produce false closures.
 # Closing remains a human decision — this gate only guarantees the trail exists.
+#
+# Body scanning lives in scripts/check-pr-issue-link.py, which strips HTML
+# comments, code fences, inline code, and URLs first. Without that step the
+# unedited PULL_REQUEST_TEMPLATE.md — whose instructions mention #1234, #1256,
+# and #1258 inside comments — would satisfy the gate on its own.
 
 on:
   pull_request:
+    branches: [main]
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 permissions:
@@ -26,6 +32,13 @@ jobs:
     name: Issue link present
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.12"
+
       - name: Check for a linked or referenced issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,7 +55,7 @@ jobs:
           # --- exemptions -----------------------------------------------------
           # Written as a runtime check rather than a job-level `if` so that an
           # exempt PR still reports a green check instead of "skipped", which
-          # would block a required-status-check branch protection rule.
+          # would deadlock a required-status-check branch protection rule.
           case ",${PR_LABELS}," in
             *,no-issue,*)
               echo "Exempt: 'no-issue' label present."
@@ -64,7 +77,7 @@ jobs:
 
           # --- signal 1: GitHub's own closing link ----------------------------
           # Covers both `Closes #123` in the body and issues linked manually
-          # through the Development sidebar, which no body regex can see.
+          # through the Development sidebar, which no body scan can see.
           closing=$(gh api graphql \
             -f query='
               query($owner:String!, $repo:String!, $pr:Int!) {
@@ -82,20 +95,24 @@ jobs:
             exit 0
           fi
 
-          # --- signal 2: a plain reference in the body ------------------------
-          # Body only. The title is not accepted: `fix(#1638): ...` reads like a
-          # link but creates no GitHub reference, and treating it as one is how
-          # the audited PRs looked linked while leaving their issues orphaned.
-          if printf '%s' "${PR_BODY}" | grep -qE '(^|[^[:alnum:]_/])#[0-9]+'; then
-            echo "OK: issue reference found in the PR body (no closing link)."
+          # --- signal 2: a visible reference in the body ----------------------
+          # The title is not accepted: `fix(#1638): ...` reads like a link but
+          # creates no GitHub reference, and treating it as one is how the
+          # audited PRs looked linked while leaving their issues orphaned.
+          printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
+
+          if python3 scripts/check-pr-issue-link.py --body-file "${RUNNER_TEMP}/pr-body.md"; then
             echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
             exit 0
           fi
 
           # --- fail ------------------------------------------------------------
           echo "::error::No issue link found. Do one of the following:"
-          echo "::error::  1. Add 'Closes #123' to the PR body (the PR completes the issue)."
-          echo "::error::  2. Add 'Refs #123' or 'Part of #123' (the PR is one slice of it)."
-          echo "::error::  3. Link the issue via the Development sidebar."
-          echo "::error::  4. Apply the 'no-issue' label if this PR genuinely has no issue."
+          echo "::error::  1. Add 'Closes #123' to the PR body (this PR completes the issue)."
+          echo "::error::  2. Add 'Refs #123' or 'Part of #123' (this PR is one slice of it)."
+          echo "::error::  3. Apply the 'no-issue' label if this PR genuinely has no issue."
+          echo "::error::"
+          echo "::error::Editing the PR body re-runs this check automatically. Linking through"
+          echo "::error::the Development sidebar does NOT — GitHub fires no pull_request event"
+          echo "::error::for it, so re-run this job from the Checks tab afterwards."
           exit 1
