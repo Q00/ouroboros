@@ -237,13 +237,23 @@ def _git_config_logical_lines(raw_config: str) -> tuple[str, ...] | None:
             # Git permits continuations for variable values, but explicitly
             # forbids section headers from spanning physical lines.  Check the
             # accumulated candidate before discarding the newline so malformed
-            # ``[co\\\nre]`` cannot become a trusted ``[core]`` section.
-            if candidate.lstrip(" \t").startswith("["):
+            # ``[co\\\nre]`` cannot become a trusted ``[core]`` section.  A
+            # closed same-line header may already contain a continued assignment.
+            stripped_candidate = candidate.lstrip(" \t")
+            if (
+                stripped_candidate.startswith("[")
+                and _parse_git_config_section(stripped_candidate) is None
+            ):
                 return None
             current = candidate[:-1]
             continuation_pending = True
             continue
-        if continuation_pending and candidate.lstrip(" \t").startswith("["):
+        stripped_candidate = candidate.lstrip(" \t")
+        if (
+            continuation_pending
+            and stripped_candidate.startswith("[")
+            and _parse_git_config_section(stripped_candidate) is None
+        ):
             return None
         logical_lines.append(candidate)
         current = ""
@@ -447,6 +457,8 @@ def _parse_git_numeric_boolean(value: str) -> bool | None:
 def _parse_git_boolean(value: str | None) -> bool | None:
     if value is None:
         return True
+    if not value.isascii():
+        return None
     normalized = value.casefold()
     if not normalized:
         return False
