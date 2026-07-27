@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -8,6 +9,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.attention_relay import classify_relay_events
 
 _BASE = datetime(2026, 7, 13, tzinfo=UTC)
+Relay = dict[str, Any]
 
 
 def _event(index: int, event_type: str, data: dict[str, object]) -> BaseEvent:
@@ -46,7 +48,7 @@ def test_recovery_exhaustion_and_model_escalation_are_closed_attention() -> None
         },
     )
 
-    relays = classify_relay_events([routed, exhausted], job_id="job_1")
+    relays = cast(list[Relay], classify_relay_events([routed, exhausted], job_id="job_1"))
     attention = [relay for relay in relays if relay["kind"] == "attention_required"]
 
     assert {relay["trigger"] for relay in attention} == {
@@ -71,17 +73,23 @@ def test_mutating_action_menu_requires_both_successor_and_audit_tools() -> None:
         },
     )
 
-    without_audit = classify_relay_events(
-        [exhausted],
-        available_tools={"ouroboros_start_execute_seed"},
-    )[0]
-    with_both = classify_relay_events(
-        [exhausted],
-        available_tools={
-            "ouroboros_start_execute_seed",
-            "ouroboros_record_conductor_decision",
-        },
-    )[0]
+    without_audit = cast(
+        Relay,
+        classify_relay_events(
+            [exhausted],
+            available_tools={"ouroboros_start_execute_seed"},
+        )[0],
+    )
+    with_both = cast(
+        Relay,
+        classify_relay_events(
+            [exhausted],
+            available_tools={
+                "ouroboros_start_execute_seed",
+                "ouroboros_record_conductor_decision",
+            },
+        )[0],
+    )
 
     assert not any(
         action["kind"] == "mcp_tool" for action in without_audit["recommended_host_actions"]
@@ -113,7 +121,7 @@ def test_rejected_streak_is_read_only_until_recovery_closes() -> None:
         },
     )
 
-    relays = classify_relay_events([first, second], job_id="job_1")
+    relays = cast(list[Relay], classify_relay_events([first, second], job_id="job_1"))
     relay = next(
         item for item in relays if item.get("trigger") == "deliver_verdict_rejected_streak"
     )
@@ -198,7 +206,10 @@ def test_proactive_relay_has_no_action_menu_and_deduplicates_unchanged_route() -
         update={"id": "event_03", "timestamp": _BASE + timedelta(seconds=3)}
     )
 
-    relays = classify_relay_events([plan, route_one, route_same], job_id="job_1")
+    relays = cast(
+        list[Relay],
+        classify_relay_events([plan, route_one, route_same], job_id="job_1"),
+    )
 
     proactive = [relay for relay in relays if relay["kind"] != "attention_required"]
     assert all("recommended_host_actions" not in relay for relay in proactive)
@@ -219,7 +230,7 @@ def test_synapse_completed_relay_carries_only_bounded_reply_summary() -> None:
         },
     )
 
-    relay = classify_relay_events([completed], job_id="job_1")[0]
+    relay = cast(Relay, classify_relay_events([completed], job_id="job_1")[0])
 
     assert relay["kind"] == "progress_advanced"
     assert relay["subtype"] == "synapse_delivery"

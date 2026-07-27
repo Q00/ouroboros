@@ -3572,7 +3572,7 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3634,7 +3634,7 @@ class TestOrchestratorRunner:
             single_ac_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3695,7 +3695,7 @@ class TestOrchestratorRunner:
             investment_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3754,7 +3754,7 @@ class TestOrchestratorRunner:
             investment_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3818,7 +3818,7 @@ class TestOrchestratorRunner:
             investment_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3869,7 +3869,7 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -3910,7 +3910,7 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,

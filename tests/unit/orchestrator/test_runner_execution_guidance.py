@@ -360,7 +360,7 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
         generation=generation,
     )
     tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
-    expected = Result.ok(
+    expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
         OrchestratorResult(
             success=True,
             session_id=tracker.session_id,

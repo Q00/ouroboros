@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -92,7 +93,7 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
         )
     )
     executor._execute_atomic_ac = execute_atomic_ac
-    executor._test_single_ac_calls = []
+    executor._test_single_ac_calls: list[dict[str, Any]] = []
 
     result = await executor._execute_single_ac(
         ac_index=depth + 1,
@@ -111,7 +112,8 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
     assert result.depth == depth
     executor._try_decompose_ac.assert_awaited_once()
     execute_atomic_ac.assert_awaited_once()
-    assert [call["depth"] for call in executor._test_single_ac_calls] == [depth]
+    single_ac_calls: list[dict[str, Any]] = executor._test_single_ac_calls
+    assert [call["depth"] for call in single_ac_calls] == [depth]
 
 
 class _CapturingDecompositionRuntime:
