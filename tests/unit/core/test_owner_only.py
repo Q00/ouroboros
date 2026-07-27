@@ -538,3 +538,54 @@ def test_native_windows_degrades_loudly_instead_of_refusing(
     assert len(degradations) == 1, "the degradation must be stated exactly once per process"
     # Atomic on that platform too: no temporary survives.
     assert [path.name for path in tmp_path.iterdir()] == ["secret.json"]
+
+
+def test_fanout_registry_register_is_owner_only(tmp_path: Path) -> None:
+    """A fan-out record carries the producer's request verbatim.
+
+    ``synthesizer_input`` is the code-investigation request or the persona
+    panel entries the transcript produced, so the record is the same artifact
+    class and takes the same writer. This site was still on ``write_text`` and
+    produced 0644 under a 022 umask.
+    """
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_CODE_INVESTIGATION, FanoutRegistry
+
+    registry = FanoutRegistry(tmp_path / "fanout")
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_CODE_INVESTIGATION,
+        session_id="sess-mode",
+        correlation_key="context.lane_id",
+        expected_keys=["code_facts"],
+        synthesizer_input={"request": {"question": "which module owns auth?"}},
+    )
+    saved = tmp_path / "fanout" / f"{fanout_id}.json"
+
+    assert _mode(saved) == 0o600
+    assert registry.load(fanout_id) is not None
+
+
+def test_fanout_registry_narrows_a_record_left_at_0644(tmp_path: Path) -> None:
+    """A record written before this change is narrowed on the next write."""
+    from ouroboros.mcp.tools.subagent import FANOUT_KIND_CODE_INVESTIGATION, FanoutRegistry
+
+    registry = FanoutRegistry(tmp_path / "fanout")
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_CODE_INVESTIGATION,
+        session_id="sess-narrow",
+        correlation_key="context.lane_id",
+        expected_keys=["code_facts"],
+        synthesizer_input={},
+    )
+    saved = tmp_path / "fanout" / f"{fanout_id}.json"
+    saved.chmod(0o644)
+
+    registry.register(
+        kind=FANOUT_KIND_CODE_INVESTIGATION,
+        session_id="sess-narrow",
+        correlation_key="context.lane_id",
+        expected_keys=["code_facts"],
+        synthesizer_input={},
+        fanout_id=fanout_id,
+    )
+
+    assert _mode(saved) == 0o600
