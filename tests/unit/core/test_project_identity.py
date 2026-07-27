@@ -170,6 +170,36 @@ def test_case_variant_core_sections_use_later_git_value(
     assert primary_identity.project_root == str(primary.resolve())
 
 
+def test_same_line_section_assignment_matches_git_grammar(tmp_path: Path) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[core] bare = false\n\tworktree = {primary}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+
+    direct_identity = resolve_project_identity(primary)
+    linked_identity = resolve_project_identity(linked)
+
+    assert direct_identity == linked_identity
+    assert direct_identity.project_root == str(primary.resolve())
+
+
 def test_valueless_bare_config_joins_direct_and_linked_identity(tmp_path: Path) -> None:
     common_git = tmp_path / "common.git"
     (common_git / "objects").mkdir(parents=True)
@@ -247,6 +277,48 @@ def test_worktree_config_owner_joins_direct_linked_and_managed_identity(
     (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
     (common_git / "config.worktree").write_text(
         f'[core]\n\tworktree = "{primary}"\n',
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "generated" / "packages" / "app"
+    generated.mkdir(parents=True)
+
+    direct_identity = resolve_project_identity(primary_workspace)
+    linked_identity = resolve_project_identity(linked_workspace)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked_workspace,
+    )
+
+    assert direct_identity == linked_identity == managed_identity
+    assert direct_identity.project_root == str(primary.resolve())
+    assert direct_identity.workspace_path == "packages/app"
+
+
+def test_external_dot_git_explicit_owner_joins_direct_linked_and_managed_identity(
+    tmp_path: Path,
+) -> None:
+    common_git = tmp_path / "storage" / ".git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[core]\n\tbare = false\n\tworktree = {primary}\n",
         encoding="utf-8",
     )
     linked = tmp_path / "linked"
@@ -689,6 +761,20 @@ def test_managed_workspace_outside_source_root_fails_closed(tmp_path: Path) -> N
             generated,
             source_root=source,
             source_workspace=outside,
+        )
+
+
+def test_managed_workspace_empty_source_workspace_fails_closed(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    with pytest.raises(ProjectIdentityError, match="path"):
+        resolve_project_identity(
+            generated,
+            source_root=source,
+            source_workspace="",
         )
 
 

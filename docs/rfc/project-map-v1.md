@@ -73,7 +73,9 @@ keeps direct, positively proven linked, and managed paths on the same explicit
 main-worktree owner when Git stores that owner outside the common config.
 `core.worktree` is interpreted verbatim: absolute values stay absolute and all
 relative values, including a leading `~` component, resolve from the Git
-directory without consulting process `HOME`.
+directory without consulting process `HOME`. A positively proven explicit
+owner is evaluated before the common directory's basename; an external common
+directory named `.git` therefore cannot be mistaken for its parent checkout.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without
@@ -94,6 +96,9 @@ the durable source paths. Project identity uses `repo_root` plus the
 source-relative `original_cwd`, never the generated `worktree_path`. Two task
 worktrees for the same source/workspace therefore join one project. A source
 workspace outside its declared root fails before session publication.
+Omission of `source_workspace` intentionally selects the source root, while an
+explicit empty or otherwise malformed workspace value fails validation instead
+of silently widening scope to `workspace_path="."`.
 
 ## Durable session anchor
 
