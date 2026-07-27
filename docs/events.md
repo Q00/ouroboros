@@ -49,6 +49,13 @@ Emitted when a new orchestrator session begins execution.
 | `execution_id` | `string` | Unique execution identifier |
 | `seed_id` | `string` | Seed specification being executed |
 | `start_time` | `string` | ISO 8601 timestamp of session start |
+| `project_id` | `string` | Optional Project Map V1 join key (`project_` + full UUIDv5 hex); present on runner-owned new sessions |
+| `project_root` | `string` | Optional canonical source repository root used to derive `project_id` |
+| `workspace_path` | `string` | Optional canonical POSIX workspace scope relative to the active checkout root |
+
+The three project fields are one additive identity anchor and must be consumed
+together. Historical events may omit all three. They grant no execution or
+acceptance authority; see [Project Map V1](./rfc/project-map-v1.md).
 
 ### orchestrator.session.completed
 

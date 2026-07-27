@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.events import (
     create_guidance_injected_event,
@@ -44,6 +47,25 @@ class TestSessionEvents:
         assert event.data["seed_id"] == "seed_789"
         assert event.data["seed_goal"] == "Build a CLI tool"
         assert "start_time" in event.data
+
+    def test_create_session_started_event_adds_project_anchor(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        workspace = project / "packages" / "app"
+        workspace.mkdir(parents=True)
+        (project / ".git").mkdir()
+        identity = resolve_project_identity(workspace)
+
+        event = create_session_started_event(
+            session_id="sess_123",
+            execution_id="exec_456",
+            seed_id="seed_789",
+            seed_goal="Build a project map",
+            project_identity=identity,
+        )
+
+        assert {
+            key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
+        } == identity.to_event_data()
 
     def test_create_policy_capabilities_evaluated_event_batches_decisions(self) -> None:
         """Batched policy events should preserve per-capability decisions."""
