@@ -82,6 +82,9 @@ A standard checkout and its linked worktrees use Git's primary configured top
 level. An explicit `core.worktree` owner therefore wins for direct, linked, and
 managed callers. A bare repository and its linked worktrees use the absolute
 common directory, including when that directory is literally named `.git`.
+Git is asked whether the active directory is bare before an enclosing checkout
+marker is adopted, so a markerless bare repository nested inside another
+checkout remains a separate project and still joins its registered worktrees.
 Bare attribution additionally requires Git to validate `HEAD` as either a
 symbolic/unborn ref (`symbolic-ref HEAD`) or a detached object
 (`rev-parse --verify HEAD^{object}`); an arbitrary nonempty record cannot join

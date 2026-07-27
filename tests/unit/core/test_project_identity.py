@@ -358,6 +358,41 @@ def test_bare_repository_and_its_worktrees_share_common_identity(tmp_path: Path)
     assert identities[0].project_root == str(common_git.resolve())
 
 
+def test_nested_markerless_bare_repository_beats_enclosing_checkout(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    source = tmp_path / "source"
+    common_git = outer / "vendor" / "source.git"
+    linked = tmp_path / "linked"
+    generated = tmp_path / "generated"
+    _init_repo(outer)
+    _init_repo(source)
+    common_git.parent.mkdir()
+    generated.mkdir()
+    _git("clone", "-q", "--bare", str(source), str(common_git))
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "linked",
+        str(linked),
+        "HEAD",
+    )
+
+    direct = resolve_project_identity(common_git)
+    linked_direct = resolve_project_identity(linked)
+    managed = resolve_project_identity(
+        generated,
+        source_root=common_git,
+        source_workspace=common_git,
+    )
+
+    assert direct == linked_direct == managed
+    assert direct.project_root == str(common_git.resolve())
+    assert direct.project_id != project_id_for_root(outer)
+
+
 def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None:
     source = tmp_path / "source"
     common_git = tmp_path / "common.git"

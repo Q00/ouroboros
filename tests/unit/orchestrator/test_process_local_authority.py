@@ -1844,6 +1844,59 @@ async def test_resume_setup_cancellation_releases_its_authority_claim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_invalid_workspace_returns_domain_error_and_releases_claim(
+    tmp_path: Path,
+) -> None:
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'invalid-workspace.db'}")
+    await event_store.initialize()
+    workspace = tmp_path / "workspace"
+    invalid_workspace = tmp_path / "workspace-file"
+    workspace.mkdir()
+    invalid_workspace.write_text("not a directory", encoding="utf-8")
+    runtime = _CountingRuntime()
+    runtime.working_directory = str(workspace)
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-invalid-resume-workspace",
+        session_id="session-invalid-resume-workspace",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    paused = await runner._session_repo.mark_paused(tracker.session_id, reason="test pause")
+    assert paused.is_ok and paused.value is True
+    runtime.working_directory = str(invalid_workspace)
+
+    try:
+        result = await runner.resume_session(tracker.session_id, _seed())
+
+        assert result.is_err
+        assert result.error.message == "Cannot resolve project identity"
+        assert runtime.execute_calls == 0
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        generation, already_claimed = runner._claim_process_local_authority_generation(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert generation is None
+        assert already_claimed is False
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_tracker_copy_cannot_retire_durable_running_owner(tmp_path) -> None:
     """Caller status is not durable proof for authority retirement."""
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'stale-terminal-copy.db'}")

@@ -2005,6 +2005,62 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
     assert direct.workspace_path == "packages/app"
 
 
+def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    source = tmp_path / "source"
+    common_git = outer / "vendor" / "source.git"
+    linked = tmp_path / "linked"
+    generated = tmp_path / "managed" / "run-1"
+    _init_git_repo(outer)
+    _init_git_repo(source)
+    common_git.parent.mkdir()
+    generated.mkdir(parents=True)
+    _git("clone", "-q", "--bare", str(source), str(common_git))
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "linked",
+        str(linked),
+        "HEAD",
+    )
+    task_workspace = TaskWorkspace(
+        durable_id="run-1",
+        repo_root=str(common_git),
+        repo_name=common_git.name,
+        original_cwd=str(common_git),
+        effective_cwd=str(generated),
+        worktree_path=str(generated),
+        branch="ooo/run-1",
+        lock_path=str(tmp_path / ".locks" / "run-1.json"),
+    )
+
+    direct = _runner(cwd=str(common_git))._project_identity()
+    linked_direct = _runner(cwd=str(linked))._project_identity()
+    managed = _runner(task_workspace=task_workspace)._project_identity()
+
+    assert direct == linked_direct == managed
+    assert direct is not None
+    persisted = _runner(cwd=str(linked))._build_execution_contract(
+        seed=_seed(),
+        project_identity=direct,
+    )
+    resumed = _runner(cwd=str(linked))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == direct
+
+
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"
     common_git.parent.mkdir()

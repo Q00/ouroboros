@@ -53,7 +53,11 @@ from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
-from ouroboros.core.project_identity import ProjectIdentity, resolve_project_identity
+from ouroboros.core.project_identity import (
+    ProjectIdentity,
+    ProjectIdentityError,
+    resolve_project_identity,
+)
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -3218,12 +3222,18 @@ class OrchestratorRunner:
 
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
-        if self._task_workspace is not None:
-            return self._task_workspace_project_identity(self._task_workspace)
-        effective_cwd = self._effective_cwd()
-        if not isinstance(effective_cwd, str) or not effective_cwd.strip():
-            return None
-        return resolve_project_identity(effective_cwd)
+        try:
+            if self._task_workspace is not None:
+                return self._task_workspace_project_identity(self._task_workspace)
+            effective_cwd = self._effective_cwd()
+            if not isinstance(effective_cwd, str) or not effective_cwd.strip():
+                return None
+            return resolve_project_identity(effective_cwd)
+        except ProjectIdentityError as exc:
+            raise OrchestratorError(
+                message="Cannot resolve project identity",
+                details={"invalid": "project_identity", "cause": str(exc)},
+            ) from exc
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.

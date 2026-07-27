@@ -298,6 +298,17 @@ def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
 def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
     """Resolve Git-owned topology, conservatively falling back to one checkout."""
     checkout_root = _nearest_git_checkout_root(start)
+    # A markerless bare repository may live inside an ordinary checkout. Ask
+    # Git about the active directory before adopting an ancestor marker.
+    if checkout_root != start and _active_repository_is_bare(start, None):
+        active_git_dir = _git_path(
+            _run_git(start, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+        )
+        if active_git_dir is not None and (
+            active_git_dir == start or active_git_dir in start.parents
+        ):
+            bare_root = _git_project_root(start)
+            return (bare_root, bare_root) if bare_root is not None else (start, start)
     project_root = _git_project_root(start, checkout_root)
     if project_root is None:
         fallback = checkout_root or start
