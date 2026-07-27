@@ -6,6 +6,7 @@ import copy
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -45,6 +46,32 @@ from ouroboros.orchestrator.session import (
     SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionRepository,
 )
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _init_git_repo(root: Path) -> None:
+    _git("init", "-q", str(root))
+    _git(
+        "-c",
+        "user.name=Routing Contract Test",
+        "-c",
+        "user.email=routing-contract@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=root,
+    )
 
 
 def _adapter(
@@ -1955,16 +1982,11 @@ def test_managed_worktrees_share_canonical_source_workspace_identity(tmp_path: P
 
 def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
-    primary_git = primary / ".git"
-    primary_git.mkdir(parents=True)
     linked = tmp_path / "linked"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
-    linked_git_dir = primary_git / "worktrees" / "linked"
-    linked_git_dir.mkdir(parents=True)
-    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
     generated = tmp_path / "managed" / "run-1"
     (generated / "packages" / "app").mkdir(parents=True)
 
@@ -1985,28 +2007,31 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
 
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"
-    (common_git / "objects").mkdir(parents=True)
-    (common_git / "refs").mkdir()
-    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    common_git.parent.mkdir()
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    _git("init", "-q", f"--separate-git-dir={common_git}", str(holder))
+    _git(
+        "-c",
+        "user.name=Routing Contract Test",
+        "-c",
+        "user.email=routing-contract@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=holder,
+    )
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=holder)
     primary = tmp_path / "primary"
     primary_workspace = primary / "packages" / "app"
     primary_workspace.mkdir(parents=True)
     (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
-    (common_git / "config").write_text(
-        f"[core]\n\tbare = false\n\tworktree = {primary}\n",
-        encoding="utf-8",
-    )
-    linked = tmp_path / "linked"
+    _git("config", "core.worktree", str(primary), cwd=holder)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
-    linked_git_dir = common_git / "worktrees" / "linked"
-    linked_git_dir.mkdir(parents=True)
-    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-    (linked_git_dir / "gitdir").write_text(
-        f"{linked / '.git'}\n",
-        encoding="utf-8",
-    )
     generated = tmp_path / "managed" / "run-1"
     (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
@@ -2046,28 +2071,17 @@ def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
 
 
 def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
+    holder = tmp_path / "holder"
+    _init_git_repo(holder)
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=holder)
     primary = tmp_path / "primary"
     primary_workspace = primary / "packages" / "app"
     primary_workspace.mkdir(parents=True)
-    common_git = primary / ".git"
-    (common_git / "objects").mkdir(parents=True)
-    (common_git / "refs").mkdir()
-    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-    (common_git / "config").write_text(
-        f"[core]\n\tbare = false\n\tworktree = {primary}\n",
-        encoding="utf-8",
-    )
-    linked = tmp_path / "linked"
+    (primary / ".git").write_text(f"gitdir: {holder / '.git'}\n", encoding="utf-8")
+    _git("config", "core.worktree", str(primary), cwd=holder)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
-    linked_git_dir = common_git / "worktrees" / "linked"
-    linked_git_dir.mkdir(parents=True)
-    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-    (linked_git_dir / "gitdir").write_text(
-        f"{linked / '.git'}\n",
-        encoding="utf-8",
-    )
     generated = tmp_path / "managed" / "run-1"
     (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(

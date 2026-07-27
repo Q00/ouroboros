@@ -5586,9 +5586,14 @@ class OrchestratorRunner:
         *,
         seed: Seed,
         authority_generation: _ProcessLocalAuthorityGeneration,
-    ) -> tuple[dict[str, Any], ProjectIdentity | None]:
+    ) -> tuple[dict[str, Any], ProjectIdentity]:
         """Resolve one project identity and bind it to both publication surfaces."""
         project_identity = self._project_identity()
+        if project_identity is None:
+            raise OrchestratorError(
+                message="Cannot start a session without a resolved project identity",
+                details={"invalid": "project_identity"},
+            )
         contract = self._build_execution_contract(
             seed=seed,
             authority_generation=authority_generation,
@@ -8509,9 +8514,8 @@ class OrchestratorRunner:
             "runtime_backend": getattr(self._adapter, "runtime_backend", None),
             "llm_backend": getattr(self._adapter, "llm_backend", None),
             "execution_contract": execution_contract,
+            "project_identity": project_identity,
         }
-        if project_identity is not None:
-            create_session_kwargs["project_identity"] = project_identity
         try:
             if (
                 "acceptance_root_indices"

@@ -278,7 +278,9 @@ class MockClaudeAgentAdapter:
 
     @property
     def working_directory(self) -> str | None:
-        return None
+        # Executing adapters must identify the workspace they mutate.  The
+        # production adapters do so; keep the E2E double on the same contract.
+        return str(Path.cwd())
 
     @property
     def permission_mode(self) -> str | None:

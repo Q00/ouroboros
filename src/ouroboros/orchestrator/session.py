@@ -66,6 +66,30 @@ def _normalize_acceptance_root_indices(value: object) -> list[int] | None:
     return sorted(roots)
 
 
+def _validate_project_identity_publication(
+    execution_contract: Mapping[str, Any] | None,
+    project_identity: ProjectIdentity | None,
+) -> None:
+    """Require the immutable top-level and nested project scopes to agree."""
+    raw_proof = (
+        execution_contract.get("frugality_proof")
+        if isinstance(execution_contract, Mapping)
+        else None
+    )
+    proof = raw_proof if isinstance(raw_proof, Mapping) else {}
+    scope_keys = frozenset({"project_root", "workspace_path"})
+    present_scope_keys = scope_keys.intersection(proof)
+    if present_scope_keys and present_scope_keys != scope_keys:
+        raise ValueError("execution_contract contains a partial project identity")
+    nested_identity = {key: proof[key] for key in scope_keys} if present_scope_keys else None
+    if execution_contract is not None and nested_identity is None:
+        raise ValueError("execution contract requires a resolved project identity")
+    if (project_identity is None) != (nested_identity is None):
+        raise ValueError("project identity and execution contract must be published together")
+    if project_identity is not None and nested_identity != project_identity.to_workspace_data():
+        raise ValueError("project identity conflicts with execution contract")
+
+
 _STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {
     "codex": "codex_cli",
     "codex_cli": "codex_cli",
@@ -703,6 +727,7 @@ class SessionRepository:
         Returns:
             Result containing new SessionTracker.
         """
+        _validate_project_identity_publication(execution_contract, project_identity)
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 
         event_data = {

@@ -2965,7 +2965,7 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
-    async def test_prepare_session_preserves_resolved_project_identity_absence(
+    async def test_prepare_session_rejects_resolved_project_identity_absence(
         self,
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
@@ -2982,23 +2982,13 @@ class TestOrchestratorRunner:
                 session_id="orch-project-absent",
             )
 
-        try:
-            assert result.is_ok
-            assert identity_resolver.call_count == 1
-            start = next(
-                call.args[0]
-                for call in mock_event_store.append.await_args_list
-                if call.args[0].type == "orchestrator.session.started"
-            )
-            project_keys = {"project_id", "project_root", "workspace_path"}
-            assert project_keys.isdisjoint(start.data)
-            proof = start.data["execution_contract"]["frugality_proof"]
-            assert {"project_root", "workspace_path"}.isdisjoint(proof)
-        finally:
-            runner._retire_process_local_authority(
-                session_id="orch-project-absent",
-                execution_id="exec-project-absent",
-            )
+        assert result.is_err
+        assert "resolved project identity" in result.error.message
+        assert identity_resolver.call_count == 1
+        assert not any(
+            call.args[0].type == "orchestrator.session.started"
+            for call in mock_event_store.append.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_prepare_session_fails_when_initial_contract_cannot_persist(
