@@ -1387,6 +1387,22 @@ class TestClaudeSetup:
         assert not (claude_dir / "mcp.json.ouroboros-recovery").exists()
         assert "Could not validate" in warning.call_args.args[0]
 
+    def test_setup_claude_recursive_credentials_fail_closed(self, tmp_path: Path) -> None:
+        credentials_path = tmp_path / "credentials.yaml"
+        credentials_path.write_text("providers: {}\n", encoding="utf-8")
+
+        with (
+            patch(
+                "ouroboros.config.loader.load_credentials",
+                side_effect=RecursionError("maximum recursion depth exceeded"),
+            ),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            valid = setup_cmd._validate_existing_credentials_file(credentials_path)
+
+        assert valid is False
+        assert "Could not validate" in warning.call_args.args[0]
+
     def test_setup_cli_exits_when_claude_mcp_registration_fails(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -1909,6 +1925,61 @@ class TestClaudeSetup:
         assert list(claude_dir.glob(f".{claude_config.name}.*.tmp")) == []
         assert not recovery_path.exists()
 
+    def test_mcp_rollback_failure_is_bound_to_recovery_journal(self, tmp_path: Path) -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        original_content = b'{"mcpServers": {}}\n'
+        claude_config.write_bytes(original_content)
+        snapshot = setup_cmd._read_claude_mcp_snapshot(claude_config)
+        assert snapshot is not None
+        backup_path = claude_dir / ".mcp.json.ouroboros-pre.rollback.tmp"
+        staged_content: bytes | None = None
+
+        def fail_promotion(
+            _path: Path,
+            content: bytes,
+            *,
+            expected: setup_cmd._ClaudeSetupFileSnapshot,
+            mode: int,
+            retain_backup_on_failure: bool = True,
+        ) -> None:
+            nonlocal staged_content
+            os.rename(claude_config, backup_path)
+            backup_path.chmod(0o600)
+            staged_content = content
+            claude_config.write_bytes(content)
+            raise setup_cmd._ClaudeSetupPromotionError("rollback failed", backup_path=backup_path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": []},
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._promote_text_cas",
+                side_effect=fail_promotion,
+            ),
+        ):
+            registered = setup_cmd._ensure_claude_mcp_entry()
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        assert registered is False
+        assert recovery_path.exists()
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert manifest["scope"] == "mcp"
+        assert manifest["targets"]["mcp"]["backup"]["path"] == str(backup_path)
+        assert staged_content is not None
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert claude_config.read_bytes() == staged_content
+        assert not backup_path.exists()
+        assert not recovery_path.exists()
+
     def test_setup_claude_rolls_forward_config_after_config_commit_failure(
         self, tmp_path: Path
     ) -> None:
@@ -2170,6 +2241,7 @@ class TestClaudeSetup:
         assert configured is False
         assert claude_config.read_text(encoding="utf-8") == external_mcp
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {}
+        assert list(claude_dir.glob(".mcp.json.ouroboros-pre.*.tmp")) == []
 
     def test_setup_claude_recovery_rebases_external_unrelated_config_edit(
         self, tmp_path: Path
