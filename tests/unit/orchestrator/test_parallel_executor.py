@@ -127,13 +127,42 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
 @pytest.mark.parametrize(
     "command",
     (
+        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        "python3 -c \"from pathlib import Path; Path('src/generated.py').write_bytes(b'x')\"",
+    ),
+)
+def test_python_c_pathlib_static_proof_accepts_direct_top_level_write(tmp_path, command) -> None:
+    """Static pathlib proof accepts only direct top-level pathlib writes."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_pathlib_write_targets_reference(
+            command,
+            reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
         "python -c \"from pathlib import Path as P; P('src/generated.py').write_text('x')\"",
         "python -c \"from pathlib import Path; p = Path('src/generated.py'); p.write_text('x')\"",
         "python -c \"from pathlib import Path; 'src/generated.py'; Path('other.py').write_text('x')\"",
         "python -c \"from pathlib import Path; # Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; raise SystemExit(0); Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path := object; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path.write_text = lambda *args: None; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; import os; os.chdir('src'); Path('generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; other = 1; Path('src/generated.py').write_text('x')\"",
         'python -c ""',
         "python -c from pathlib import Path",
         'python -c "' + ("(" * 5000) + '"',
+        "python -c \"from pathlib import Path; Path('src/\\x00generated.py').write_text('x')\"",
     ),
 )
 def test_python_c_pathlib_static_proof_rejects_alias_variable_and_malformed_payloads(
@@ -154,40 +183,20 @@ def test_python_c_pathlib_static_proof_rejects_alias_variable_and_malformed_payl
     )
 
 
-def test_python_c_pathlib_static_proof_accepts_reimport_after_shadow(tmp_path) -> None:
-    """A later exact pathlib import rebinds Path to the trusted constructor."""
-    generated = tmp_path / "src" / "generated.py"
-    generated.parent.mkdir()
-    generated.write_text("VALUE = 1\n", encoding="utf-8")
-    command = (
-        'python -c "from pathlib import Path; Path = lambda _value: None; '
-        "from pathlib import Path; Path('src/generated.py').write_text('x')\""
-    )
-
-    assert (
-        _python_c_pathlib_write_targets_reference(
-            command,
-            reference="src/generated.py",
-            task_cwd=str(tmp_path),
-        )
-        is True
-    )
-
-
 @pytest.mark.parametrize(
     "command",
     (
-        'python -c "from pathlib import Path; other = 1; '
-        "Path('src/generated.py').write_text('x')\"",
-        'python -c "from pathlib import Path; '
-        "\ndef helper():\n    Path = lambda _value: None\n"
-        "Path('src/generated.py').write_text('x')\"",
+        'python -c "from pathlib import Path; Path = lambda _value: None; '
+        "from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        'python -c "from pathlib import Path; def helper():\n'
+        "    Path = lambda _value: None\nPath('src/generated.py').write_text('x')\"",
     ),
 )
-def test_python_c_pathlib_static_proof_ignores_unrelated_and_nested_bindings(
-    tmp_path, command
+def test_python_c_pathlib_static_proof_rejects_rebinding_and_nested_statements(
+    tmp_path,
+    command,
 ) -> None:
-    """Only top-level Path rebinding breaks trust in pathlib.Path."""
+    """Static pathlib proof rejects broader Python programs that need runtime evidence."""
     generated = tmp_path / "src" / "generated.py"
     generated.parent.mkdir()
     generated.write_text("VALUE = 1\n", encoding="utf-8")
@@ -198,7 +207,7 @@ def test_python_c_pathlib_static_proof_ignores_unrelated_and_nested_bindings(
             reference="src/generated.py",
             task_cwd=str(tmp_path),
         )
-        is True
+        is False
     )
 
 
@@ -2661,6 +2670,136 @@ def test_files_touched_accepts_in_workspace_relative_vs_absolute_edit(tmp_path) 
     assert _runtime_messages_support_file_claim(
         "hello.py",
         (edit, completed),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_unexecuted_python_c_pathlib_write(tmp_path) -> None:
+    """A successful process exit before the write is not mutation evidence."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    'python -c "from pathlib import Path; raise SystemExit(0); '
+                    "Path('generated.py').write_text('x')\""
+                )
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_resolves_python_c_pathlib_against_command_cwd(tmp_path) -> None:
+    """Relative pathlib receivers bind to the actual structured command cwd."""
+    workspace = tmp_path / "work"
+    subdir = workspace / "subdir"
+    subdir.mkdir(parents=True)
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\"",
+                "cwd": str(subdir),
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert _runtime_messages_support_file_claim(
+        "subdir/generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tmp_path) -> None:
+    """An outside command cwd cannot prove a workspace files_touched claim."""
+    workspace = tmp_path / "work"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\"",
+                "cwd": str(outside),
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    (
+        {"cmd": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\""},
+        {"cmd": ["python", "-c", "from pathlib import Path; Path('generated.py').write_text('x')"]},
+    ),
+)
+def test_files_touched_accepts_python_c_pathlib_goose_cmd_shapes(tmp_path, tool_input) -> None:
+    """Goose cmd string and argv list command shapes use the canonical extractor."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={"tool_input": tool_input, "exit_code": 0},
+    )
+
+    assert _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_invalid_python_c_pathlib_literal_without_exception(tmp_path) -> None:
+    """Invalid literal paths fail closed instead of aborting verification."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "python -c \"from pathlib import Path; Path('src/\\x00generated.py').write_text('x')\""
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "src/generated.py",
+        (message,),
         task_cwd=str(workspace),
     )
 
@@ -6942,11 +7081,6 @@ class TestParallelACExecutor:
                 'python -c "from pathlib import Path; '
                 f"Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')\""
             ),
-            lambda _tmp_path: (
-                'python -c "from pathlib import Path; '
-                "Path = lambda _value: None; from pathlib import Path; "
-                "Path('src/generated.py').write_text('VALUE = 2')\""
-            ),
         ),
     )
     async def test_fat_harness_verifier_allows_equivalent_pathlib_receivers(
@@ -7036,6 +7170,9 @@ class TestParallelACExecutor:
             "\nif True:\n    Path('src/generated.py').write_text('VALUE = 2')\"",
             'python -c "from pathlib import Path; '
             "Path = lambda _value: type('Noop', (), {'write_text': lambda self, _text: None})(); "
+            "Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "Path = lambda _value: None; from pathlib import Path; "
             "Path('src/generated.py').write_text('VALUE = 2')\"",
             'python -c "from pathlib import Path; if"',
             'python -c "from pathlib import Path; '

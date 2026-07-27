@@ -101,26 +101,37 @@ def _file_claim_matches_runtime_path(
     runtime_path: str,
     *,
     task_cwd: str | None,
+    runtime_cwd: str | None = None,
 ) -> bool:
     """Return True when a claimed workspace path matches a runtime path value."""
-    claim_path = Path(claim.strip())
+    try:
+        claim_path = Path(claim.strip())
+    except (OSError, ValueError):
+        return False
     if not claim_path or claim_path.is_absolute() or ".." in claim_path.parts:
         return False
 
     if not runtime_path.strip():
         return False
 
-    runtime_candidate = Path(runtime_path)
+    try:
+        runtime_candidate = Path(runtime_path)
+    except (OSError, ValueError):
+        return False
     if task_cwd is not None:
-        base = Path(task_cwd).resolve()
-        claimed_absolute = (base / claim_path).resolve()
-        runtime_absolute = (
-            runtime_candidate if runtime_candidate.is_absolute() else base / runtime_candidate
-        ).resolve()
         try:
+            base = Path(task_cwd).resolve()
+            runtime_base = Path(runtime_cwd).resolve() if runtime_cwd is not None else base
+            runtime_base.relative_to(base)
+            claimed_absolute = (base / claim_path).resolve()
+            runtime_absolute = (
+                runtime_candidate
+                if runtime_candidate.is_absolute()
+                else runtime_base / runtime_candidate
+            ).resolve()
             claimed_absolute.relative_to(base)
             runtime_absolute.relative_to(base)
-        except ValueError:
+        except (OSError, ValueError):
             return False
         return runtime_absolute == claimed_absolute
 
@@ -419,30 +430,55 @@ def _bash_command_mutates_file_reference(
     tool_input = message.data.get("tool_input")
     if not isinstance(tool_input, dict):
         return False
-    command = tool_input.get("command")
-    if not isinstance(command, str):
-        return False
-    normalized_command = command.strip().lower()
-    if not normalized_command:
+    effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
+    if task_cwd is not None and effective_cwd is None:
         return False
     quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
-    if _python_c_pathlib_write_targets_reference(command, reference=reference, task_cwd=task_cwd):
-        return True
-    if not _file_reference_pattern(normalized_reference).search(normalized_command):
-        return False
-    if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
-        return True
-    return bool(
-        re.search(
+    for command in _runtime_message_command_values(message):
+        normalized_command = command.strip().lower()
+        if not normalized_command:
+            continue
+        if _python_c_pathlib_write_targets_reference(
+            command,
+            reference=reference,
+            task_cwd=effective_cwd,
+            claim_cwd=task_cwd,
+        ):
+            return True
+        if not _file_reference_pattern(normalized_reference).search(normalized_command):
+            continue
+        if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
+            return True
+        if re.search(
             rf"(^|[\s;&|])(touch|truncate|tee)\b[^;&|]*\s{quoted_reference}(?=$|[\s;&|])",
             normalized_command,
-        )
-        or re.search(
+        ) or re.search(
             rf"(^|[\s;&|])(sed|perl)\b[^;&|]*\s-[^\s;&|]*i[^;&|]*\s"
             rf"{quoted_reference}(?=$|[\s;&|])",
             normalized_command,
-        )
-    )
+        ):
+            return True
+    return False
+
+
+def _runtime_message_effective_cwd(message: AgentMessage, *, task_cwd: str | None) -> str | None:
+    """Return the command cwd only when it is contained by the task workspace."""
+    if task_cwd is None:
+        return None
+    tool_input = message.data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return task_cwd
+    cwd = tool_input.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return task_cwd
+    try:
+        workspace = Path(task_cwd).resolve()
+        candidate = Path(cwd)
+        effective = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+        effective.relative_to(workspace)
+    except (OSError, ValueError):
+        return None
+    return str(effective)
 
 
 def _python_c_pathlib_write_targets_reference(
@@ -450,6 +486,7 @@ def _python_c_pathlib_write_targets_reference(
     *,
     reference: str,
     task_cwd: str | None,
+    claim_cwd: str | None = None,
 ) -> bool:
     """Return True when a direct Python ``-c`` pathlib write targets the claim."""
     if task_cwd is None:
@@ -469,9 +506,17 @@ def _python_c_pathlib_write_targets_reference(
         tree = ast.parse(argv[2])
     except SyntaxError:
         return False
+    targets = _pathlib_write_targets(tree)
+    if not targets:
+        return False
     return any(
-        _file_claim_matches_runtime_path(reference, target, task_cwd=task_cwd)
-        for target in _pathlib_write_targets(tree)
+        _file_claim_matches_runtime_path(
+            reference,
+            target,
+            task_cwd=claim_cwd or task_cwd,
+            runtime_cwd=task_cwd,
+        )
+        for target in targets
     )
 
 
@@ -493,21 +538,33 @@ def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
             path_imported = True
             continue
         if _binds_name(node, "Path"):
-            path_imported = False
-            continue
+            return ()
         if not path_imported or not isinstance(node, ast.Expr):
-            continue
+            return ()
         call = node.value
         if not isinstance(call, ast.Call):
-            continue
+            return ()
         if not isinstance(call.func, ast.Attribute):
-            continue
+            return ()
         if call.func.attr not in {"write_text", "write_bytes"}:
-            continue
+            return ()
+        if _call_has_side_effecting_arguments(call):
+            return ()
         target = _literal_pathlib_receiver(call.func.value)
-        if target is not None:
-            targets.append(target)
+        if target is None:
+            return ()
+        targets.append(target)
     return tuple(targets)
+
+
+def _call_has_side_effecting_arguments(call: ast.Call) -> bool:
+    return any(
+        isinstance(
+            child, (ast.Call, ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom)
+        )
+        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+        for child in ast.walk(argument)
+    )
 
 
 def _imports_pathlib_path(node: ast.AST) -> bool:
