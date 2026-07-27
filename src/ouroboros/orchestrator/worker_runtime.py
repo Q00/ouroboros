@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import os
+from pathlib import Path
 from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
@@ -117,6 +118,14 @@ class LeaderDrivenWorkerTransport(Protocol):
         ...
 
 
+def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
+    """Resolve one stable worker cwd, preserving absence when cwd is unavailable."""
+    try:
+        return str(Path(cwd).expanduser().resolve(strict=False)) if cwd is not None else os.getcwd()
+    except OSError:
+        return None
+
+
 class LeaderDrivenWorkerRuntime:
     """``AgentRuntime`` that drives any provider's worker session via a transport.
 
@@ -142,7 +151,7 @@ class LeaderDrivenWorkerRuntime:
         self._transport = transport
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
-        self._cwd = os.fspath(cwd) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._permission_mode = permission_mode
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support
@@ -374,4 +383,5 @@ __all__ = [
     "LeaderDrivenWorkerRuntime",
     "LeaderDrivenWorkerTransport",
     "WorkerTurn",
+    "resolve_worker_cwd",
 ]

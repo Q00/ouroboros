@@ -90,6 +90,43 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    @pytest.mark.asyncio
+    async def test_relative_cwd_is_resolved_before_spawn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        runtime = build_codex_mcp_worker_runtime(cwd="workspace")
+        observed: list[str | None] = []
+
+        async def fake_spawn(**kwargs) -> WorkerTurn:
+            observed.append(kwargs["cwd"])
+            return WorkerTurn(text="ok", session_id="thread-1")
+
+        runtime._transport.spawn = fake_spawn  # type: ignore[method-assign]
+        monkeypatch.chdir(later_cwd)
+        _ = [message async for message in runtime.execute_task("run")]
+
+        assert runtime.working_directory == str(workspace)
+        assert observed == [str(workspace)]
+
+    def test_omitted_cwd_survives_unavailable_process_cwd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_cwd() -> str:
+            raise FileNotFoundError
+
+        monkeypatch.setattr("ouroboros.orchestrator.worker_runtime.os.getcwd", unavailable_cwd)
+
+        assert build_codex_mcp_worker_runtime().working_directory is None
+
     def test_exposes_effective_cli_path(self) -> None:
         rt = build_codex_mcp_worker_runtime(cli_path="/tmp/codex", cwd="/tmp")
 

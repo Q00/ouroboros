@@ -121,12 +121,13 @@ partial, or conflicting identity payloads before appending the immutable start
 event. Contract-free utility sessions remain valid; historical events are read
 without being recreated through this API.
 
-Every bundled runtime normalizes its working directory to one absolute path at
-runtime construction, resolving relative inputs against that instant's process
-cwd. The runner captures the same process fallback for valid optional-cwd
-protocol implementations; an unavailable process cwd cannot replace an
-explicit runtime or task cwd. Persistent Claude transport and runtime objects
-share that captured path for both spawn and resume. The resulting concrete
+The shared provider-neutral worker constructor normalizes every Codex, Claude,
+or future leader-driven runtime working directory to one absolute path,
+resolving relative inputs against that instant's process cwd. If an omitted cwd
+is unavailable, the constructor preserves `None`; the runner may still select
+an explicit task/runtime path and raises its domain error only when no usable
+workspace exists. Persistent Claude transport and runtime objects share the
+same normalized value for both spawn and resume. The resulting concrete
 workspace is therefore available before a runner-owned session publishes its
 mandatory identity.
 

@@ -27,6 +27,7 @@ from ouroboros.orchestrator.adapter import CLAUDE_REASONING_EFFORT_LEVELS, Param
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
     WorkerTurn,
+    resolve_worker_cwd,
 )
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -114,7 +115,7 @@ class ClaudeWorkerTransport:
         # Claude sessions are CWD-SCOPED: ``--resume`` finds a conversation only
         # when run from the directory it was created in ("No conversation found"
         # otherwise). The transport pins the cwd so resume targets the same store.
-        self._cwd = cwd or os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._timeout = timeout if timeout and timeout > 0 else None
         # Native passthrough keeps the worker's MCP surface, MINUS these tools
         # (recursion hardening — see _RECURSION_GUARD_DISALLOWED_TOOLS).
@@ -343,7 +344,7 @@ def build_claude_worker_runtime(
     ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
     no-op — the worker command is identical to the pre-C4 invocation.
     """
-    normalized_cwd = str(Path(cwd).expanduser().resolve()) if cwd is not None else os.getcwd()
+    normalized_cwd = resolve_worker_cwd(cwd)
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
             cli_path=cli_path,

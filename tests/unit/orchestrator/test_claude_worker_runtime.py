@@ -104,6 +104,19 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    def test_omitted_cwd_survives_unavailable_process_cwd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_cwd() -> str:
+            raise FileNotFoundError
+
+        monkeypatch.setattr("ouroboros.orchestrator.worker_runtime.os.getcwd", unavailable_cwd)
+
+        runtime = build_claude_worker_runtime(persist_sessions=True)
+        assert runtime.working_directory is None
+        assert runtime._transport._cwd is None
+
     @pytest.mark.parametrize("cwd", [None, "workspace"], ids=["omitted", "relative"])
     @pytest.mark.asyncio
     async def test_cwd_is_resolved_once_and_shared_by_spawn_and_persistent_resume(
