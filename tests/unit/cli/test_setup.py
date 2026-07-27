@@ -1880,6 +1880,16 @@ class TestClaudeSetup:
         claude_config = claude_dir / "mcp.json"
         original_content = '{"mcpServers": {}}\n'
         claude_config.write_text(original_content, encoding="utf-8")
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_fsync_parent = setup_cmd._fsync_parent_dir
+        failed = False
+
+        def fail_post_publish_fsync(path: Path) -> None:
+            nonlocal failed
+            if path == claude_config and not failed:
+                failed = True
+                raise setup_cmd._ParentDirectoryFsyncError("directory fsync failed")
+            real_fsync_parent(path)
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -1887,13 +1897,17 @@ class TestClaudeSetup:
                 "ouroboros.cli.commands.setup._detect_mcp_entry",
                 return_value={"command": "uvx", "args": []},
             ),
-            patch("os.fsync", side_effect=OSError("fsync failed")),
+            patch(
+                "ouroboros.cli.commands.setup._fsync_parent_dir",
+                side_effect=fail_post_publish_fsync,
+            ),
         ):
             registered = setup_cmd._ensure_claude_mcp_entry()
 
         assert registered is False
         assert claude_config.read_text(encoding="utf-8") == original_content
         assert list(claude_dir.glob(f".{claude_config.name}.*.tmp")) == []
+        assert not recovery_path.exists()
 
     def test_setup_claude_rolls_forward_config_after_config_commit_failure(
         self, tmp_path: Path
@@ -2349,12 +2363,14 @@ class TestClaudeSetup:
                 return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
             ),
             patch("pathlib.Path.unlink", fail_recovery_unlink),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
         ):
             configured = setup_cmd._setup_claude("/usr/local/bin/claude")
 
-        assert configured is True
+        assert configured is False
         assert recovery_path.exists()
         assert json.loads(recovery_path.read_text(encoding="utf-8"))["phase"] == "cleanup_pending"
+        success.assert_not_called()
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             recovered = setup_cmd._recover_claude_mcp_activation()
@@ -2551,6 +2567,87 @@ class TestClaudeSetup:
 
         assert recovered is True
         assert not recovery_path.exists()
+
+    @pytest.mark.parametrize("backup_path_kind", ["relative", "outside"])
+    def test_setup_claude_recovery_rejects_forged_backup_path(
+        self, tmp_path: Path, backup_path_kind: str
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="prepared")
+        )
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        mcp_target = targets["mcp"]
+        assert isinstance(mcp_target, dict)
+        pre = mcp_target["pre"]
+        assert isinstance(pre, dict)
+        forged_path = (
+            ".mcp.json.ouroboros-pre.forged.tmp"
+            if backup_path_kind == "relative"
+            else str(tmp_path / ".mcp.json.ouroboros-pre.forged.tmp")
+        )
+        mcp_target["backup"] = {
+            "path": forged_path,
+            "pre_sha256": pre["sha256"],
+            "pre_identity": pre["identity"],
+            "pre_mode": pre["mode"],
+        }
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert "incomplete" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_preserves_backup_for_externally_rebased_config(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, config_path, _credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="mcp_written")
+        )
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        config_target = targets["config"]
+        assert isinstance(config_target, dict)
+        pre = config_target["pre"]
+        assert isinstance(pre, dict)
+        backup_path = config_path.with_name(f".{config_path.name}.ouroboros-pre.operator.tmp")
+        os.rename(config_path, backup_path)
+        external_content = (
+            b"operator:\n  changed: true\n"
+            b"orchestrator:\n  runtime_backend: claude\n"
+            b"  cli_path: /usr/local/bin/claude\n"
+            b"llm:\n  backend: claude\n"
+        )
+        config_path.write_bytes(external_content)
+        config_target["backup"] = {
+            "path": str(backup_path),
+            "pre_sha256": pre["sha256"],
+            "pre_identity": pre["identity"],
+            "pre_mode": pre["mode"],
+        }
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert backup_path.exists()
+        assert config_path.read_bytes() == external_content
+        assert "external changes" in warning.call_args.args[0]
 
     @pytest.mark.parametrize(
         (
@@ -2901,6 +2998,45 @@ class TestClaudeSetup:
         assert raised.value.promoted_snapshot is not None
         assert raised.value.promoted_snapshot.content == b"setup-after"
 
+    @pytest.mark.parametrize(
+        ("name", "operator_content"),
+        [
+            (
+                "mcp.json",
+                b'{"mcpServers":{"ouroboros":{"type":"http","url":"https://example.test",'
+                b'"headers":{"Authorization":"Bearer secret"}}}}',
+            ),
+            ("credentials.yaml", b"providers:\n  openai:\n    api_key: secret\n"),
+        ],
+    )
+    def test_cas_retained_secret_backup_is_private(
+        self, tmp_path: Path, name: str, operator_content: bytes
+    ) -> None:
+        target = tmp_path / name
+        target.write_bytes(operator_content)
+        target.chmod(0o644)
+        snapshot = setup_cmd._read_claude_setup_file_snapshot(target)
+        assert snapshot is not None
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._fsync_parent_dir",
+                side_effect=setup_cmd._ParentDirectoryFsyncError("directory fsync failed"),
+            ),
+            pytest.raises(setup_cmd._ParentDirectoryFsyncError),
+        ):
+            setup_cmd._promote_text_cas(
+                target,
+                b"setup-after",
+                expected=snapshot,
+                mode=0o600,
+            )
+
+        backups = list(tmp_path.glob(f".{target.name}.ouroboros-pre.*.tmp"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == operator_content
+        assert backups[0].stat().st_mode & 0o777 == 0o600
+
     def test_cas_publish_and_restore_failure_preserves_original_backup(
         self, tmp_path: Path
     ) -> None:
@@ -2934,15 +3070,20 @@ class TestClaudeSetup:
         assert len(backups) == 1
         assert backups[0].read_bytes() == b"operator-before"
 
-    def test_setup_claude_parent_fsync_failure_leaves_recovery_pending(
+    def test_setup_claude_recovery_restores_missing_mcp_from_journaled_backup(
         self, tmp_path: Path
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
         claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
         mcp_path = claude_dir / "mcp.json"
+        original_mcp = b'{"mcpServers": {}}\n'
+        mcp_path.write_bytes(original_mcp)
+        mcp_path.chmod(0o644)
         recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
         real_fsync_parent = setup_cmd._fsync_parent_dir
 
@@ -2969,7 +3110,70 @@ class TestClaudeSetup:
         assert configured is False
         assert mcp_path.exists()
         assert recovery_path.exists()
-        assert json.loads(recovery_path.read_text(encoding="utf-8"))["phase"] == "prepared"
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert manifest["phase"] == "prepared"
+        backup_path = Path(manifest["targets"]["mcp"]["backup"]["path"])
+        assert backup_path.read_bytes() == original_mcp
+        assert backup_path.stat().st_mode & 0o777 == 0o600
+        success.assert_not_called()
+
+        mcp_path.unlink()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert mcp_path.read_bytes() == original_mcp
+        assert mcp_path.stat().st_mode & 0o777 == 0o644
+        assert not backup_path.exists()
+        assert not recovery_path.exists()
+
+    def test_setup_claude_journals_backup_after_post_publish_verification_failure(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        original_mcp = b'{"mcpServers": {}}\n'
+        mcp_path.write_bytes(original_mcp)
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_snapshot = setup_cmd._read_claude_setup_file_snapshot
+        mcp_reads = 0
+
+        def fail_promoted_mcp_snapshot(path: Path):
+            nonlocal mcp_reads
+            snapshot = real_snapshot(path)
+            if path == mcp_path:
+                mcp_reads += 1
+                if mcp_reads == 3:
+                    return None
+            return snapshot
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._read_claude_setup_file_snapshot",
+                side_effect=fail_promoted_mcp_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert recovery_path.exists()
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        backup_path = Path(manifest["targets"]["mcp"]["backup"]["path"])
+        assert backup_path.read_bytes() == original_mcp
         success.assert_not_called()
 
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -2977,6 +3181,142 @@ class TestClaudeSetup:
 
         assert recovered is True
         assert not recovery_path.exists()
+        assert not backup_path.exists()
+        assert list(claude_dir.glob(".mcp.json.ouroboros-pre.*.tmp")) == []
+
+    def test_setup_claude_restores_preimage_when_backup_journal_write_fails(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        original_mcp = b'{"mcpServers": {}}\n'
+        mcp_path.write_bytes(original_mcp)
+        mcp_path.chmod(0o644)
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_fsync_parent = setup_cmd._fsync_parent_dir
+        real_write_manifest = setup_cmd._write_claude_mcp_recovery_manifest
+        failed_fsync = False
+        journal_writes = 0
+
+        def fail_mcp_parent_fsync(path: Path) -> None:
+            nonlocal failed_fsync
+            if path == mcp_path and not failed_fsync:
+                failed_fsync = True
+                raise setup_cmd._ParentDirectoryFsyncError("directory fsync failed")
+            real_fsync_parent(path)
+
+        def fail_backup_record(path: Path, manifest: dict[str, object]) -> bool:
+            nonlocal journal_writes
+            journal_writes += 1
+            if journal_writes == 2:
+                return False
+            return real_write_manifest(path, manifest)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._fsync_parent_dir",
+                side_effect=fail_mcp_parent_fsync,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._write_claude_mcp_recovery_manifest",
+                side_effect=fail_backup_record,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert mcp_path.read_bytes() == original_mcp
+        assert mcp_path.stat().st_mode & 0o777 == 0o644
+        assert list(claude_dir.glob(".mcp.json.ouroboros-pre.*.tmp")) == []
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert "backup" not in manifest["targets"]["mcp"]
+        success.assert_not_called()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert not recovery_path.exists()
+
+    def test_setup_claude_recovery_retries_missing_config_from_journaled_backup(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = b"custom:\n  keep: true\n"
+        config_path.write_bytes(original_config)
+        config_path.chmod(0o640)
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        mcp_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "docker",
+                            "args": ["run", "ouroboros-mcp"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_fsync_parent = setup_cmd._fsync_parent_dir
+        failed = False
+
+        def fail_config_parent_fsync(path: Path) -> None:
+            nonlocal failed
+            if path == config_path and not failed:
+                failed = True
+                raise setup_cmd._ParentDirectoryFsyncError("directory fsync failed")
+            real_fsync_parent(path)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._fsync_parent_dir",
+                side_effect=fail_config_parent_fsync,
+            ),
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert manifest["phase"] == "mcp_written"
+        backup_path = Path(manifest["targets"]["config"]["backup"]["path"])
+        assert backup_path.read_bytes() == original_config
+
+        config_path.unlink()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert not backup_path.exists()
+        assert not recovery_path.exists()
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["custom"]["keep"] is True
+        assert config["orchestrator"]["runtime_backend"] == "claude"
+        assert config["llm"]["backend"] == "claude"
+        assert config_path.stat().st_mode & 0o777 == 0o640
 
     def test_mcp_update_preserves_existing_mode(self, tmp_path: Path) -> None:
         claude_dir = tmp_path / ".claude"
