@@ -107,8 +107,7 @@ def _file_claim_matches_runtime_path(
     if not claim_path or claim_path.is_absolute() or ".." in claim_path.parts:
         return False
 
-    runtime_path = runtime_path.strip()
-    if not runtime_path:
+    if not runtime_path.strip():
         return False
 
     runtime_candidate = Path(runtime_path)
@@ -356,7 +355,7 @@ def _runtime_message_supports_file_reference(
         return False
     text = _runtime_message_file_proof_text(message)
     if message.tool_name == "Bash":
-        return _text_supports_file_mutation_reference(text, normalized_reference) or (
+        return (
             allow_bash_command_text
             and _bash_command_mutates_file_reference(
                 message,
@@ -426,12 +425,12 @@ def _bash_command_mutates_file_reference(
     normalized_command = command.strip().lower()
     if not normalized_command:
         return False
+    quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
+    if _python_c_pathlib_write_targets_reference(command, reference=reference, task_cwd=task_cwd):
+        return True
     if not _file_reference_pattern(normalized_reference).search(normalized_command):
         return False
-    quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
     if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
-        return True
-    if _python_c_pathlib_write_targets_reference(command, reference=reference, task_cwd=task_cwd):
         return True
     return bool(
         re.search(
@@ -477,18 +476,78 @@ def _python_c_pathlib_write_targets_reference(
 
 
 def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
+    """Extract static-proof pathlib writes from a Python ``-c`` module.
+
+    This intentionally accepts only inline top-level ``Path(...).write_*``
+    expressions. Aliases, assignments, variables, and guarded/nested blocks are
+    real Python patterns, but static transcript text cannot prove they executed
+    or still bind to ``pathlib.Path``. Those cases need runtime file-change
+    evidence instead.
+    """
     targets: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    path_imported = False
+    for node in getattr(tree, "body", ()):
+        # Static transcript evidence can only prove direct statements. Nested or
+        # guarded writes need runtime file-change evidence instead.
+        if _imports_pathlib_path(node):
+            path_imported = True
             continue
-        if not isinstance(node.func, ast.Attribute):
+        if _binds_name(node, "Path"):
+            path_imported = False
             continue
-        if node.func.attr not in {"write_text", "write_bytes"}:
+        if not path_imported or not isinstance(node, ast.Expr):
             continue
-        target = _literal_pathlib_receiver(node.func.value)
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        if call.func.attr not in {"write_text", "write_bytes"}:
+            continue
+        target = _literal_pathlib_receiver(call.func.value)
         if target is not None:
             targets.append(target)
     return tuple(targets)
+
+
+def _imports_pathlib_path(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.module == "pathlib"
+        and any(alias.name == "Path" and alias.asname is None for alias in node.names)
+    )
+
+
+def _binds_name(node: ast.AST, name: str) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == name
+    if isinstance(node, ast.ImportFrom):
+        for alias in node.names:
+            bound_name = alias.asname or alias.name
+            if bound_name == name and not (node.module == "pathlib" and alias.name == "Path"):
+                return True
+        return False
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+            if bound_name == name:
+                return True
+        return False
+    targets: tuple[ast.AST, ...] = ()
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = tuple(getattr(node, "targets", ())) or (node.target,)
+    elif isinstance(node, (ast.For, ast.AsyncFor)):
+        targets = (node.target,)
+    elif isinstance(node, ast.With):
+        targets = tuple(item.optional_vars for item in node.items if item.optional_vars is not None)
+    return any(_target_binds_name(target, name) for target in targets)
+
+
+def _target_binds_name(target: ast.AST, name: str) -> bool:
+    return any(
+        isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store) and child.id == name
+        for child in ast.walk(target)
+    )
 
 
 def _literal_pathlib_receiver(node: ast.AST) -> str | None:
@@ -511,7 +570,7 @@ def _is_path_constructor(node: ast.AST) -> bool:
 
 def _literal_path_segment(node: ast.AST) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
-        return node.value.strip()
+        return node.value
     return None
 
 

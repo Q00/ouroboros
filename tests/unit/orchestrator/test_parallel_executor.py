@@ -34,7 +34,10 @@ from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, 
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
-from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
+from ouroboros.orchestrator.evidence.claims import (
+    _python_c_pathlib_write_targets_reference,
+    _runtime_messages_support_file_claim,
+)
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
@@ -119,6 +122,84 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_wrapped",)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "python -c \"from pathlib import Path as P; P('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; p = Path('src/generated.py'); p.write_text('x')\"",
+        "python -c \"from pathlib import Path; 'src/generated.py'; Path('other.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; # Path('src/generated.py').write_text('x')\"",
+        'python -c ""',
+        "python -c from pathlib import Path",
+        'python -c "' + ("(" * 5000) + '"',
+    ),
+)
+def test_python_c_pathlib_static_proof_rejects_alias_variable_and_malformed_payloads(
+    tmp_path, command
+) -> None:
+    """Static pathlib proof rejects aliases, variable writes, injections, and bad payloads."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_pathlib_write_targets_reference(
+            command,
+            reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_python_c_pathlib_static_proof_accepts_reimport_after_shadow(tmp_path) -> None:
+    """A later exact pathlib import rebinds Path to the trusted constructor."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+    command = (
+        'python -c "from pathlib import Path; Path = lambda _value: None; '
+        "from pathlib import Path; Path('src/generated.py').write_text('x')\""
+    )
+
+    assert (
+        _python_c_pathlib_write_targets_reference(
+            command,
+            reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'python -c "from pathlib import Path; other = 1; '
+        "Path('src/generated.py').write_text('x')\"",
+        'python -c "from pathlib import Path; '
+        "\ndef helper():\n    Path = lambda _value: None\n"
+        "Path('src/generated.py').write_text('x')\"",
+    ),
+)
+def test_python_c_pathlib_static_proof_ignores_unrelated_and_nested_bindings(
+    tmp_path, command
+) -> None:
+    """Only top-level Path rebinding breaks trust in pathlib.Path."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_pathlib_write_targets_reference(
+            command,
+            reference="src/generated.py",
+            task_cwd=str(tmp_path),
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -6844,6 +6925,281 @@ class TestParallelACExecutor:
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command_factory",
+        (
+            lambda _tmp_path: (
+                'python -c "from pathlib import Path; '
+                "Path('./src/generated.py').write_text('VALUE = 2')\""
+            ),
+            lambda _tmp_path: (
+                'python -c "from pathlib import Path; '
+                "(Path('src') / 'generated.py').write_text('VALUE = 2')\""
+            ),
+            lambda tmp_path: (
+                'python -c "from pathlib import Path; '
+                f"Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')\""
+            ),
+            lambda _tmp_path: (
+                'python -c "from pathlib import Path; '
+                "Path = lambda _value: None; from pathlib import Path; "
+                "Path('src/generated.py').write_text('VALUE = 2')\""
+            ),
+        ),
+    )
+    async def test_fat_harness_verifier_allows_equivalent_pathlib_receivers(
+        self, tmp_path, command_factory
+    ) -> None:
+        """Equivalent pathlib receivers resolve through the workspace path matcher."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        command = command_factory(tmp_path)
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command",
+        (
+            'python -c "from pathlib import Path; '
+            "unused = lambda: Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "\nif False:\n    Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "\nif True:\n    Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "Path = lambda _value: type('Noop', (), {'write_text': lambda self, _text: None})(); "
+            "Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; if"',
+            'python -c "from pathlib import Path; '
+            "Path('src /generated.py').write_text('VALUE = 2')\"",
+            "python -c \"from pathlib import Path; Path('src') / 'generated.py'\"",
+        ),
+    )
+    async def test_fat_harness_verifier_rejects_unexecuted_or_unbound_pathlib_syntax(
+        self, tmp_path, command
+    ) -> None:
+        """Pathlib syntax is not proof unless a top-level pathlib.Path write executed."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_preserves_pathlib_literal_space_identity(
+        self, tmp_path
+    ) -> None:
+        """Literal spaces are part of the pathlib receiver's filesystem identity."""
+        generated_file = tmp_path / "src" / "generated.py"
+        spaced_file = tmp_path / " src" / "generated.py "
+        generated_file.parent.mkdir()
+        spaced_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        spaced_file.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            'python -c "from pathlib import Path; '
+            "Path(' src/generated.py ').write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_pathlib_write_to_different_file(
