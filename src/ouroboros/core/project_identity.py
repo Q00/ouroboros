@@ -220,10 +220,11 @@ def resolve_project_identity(
     """
     effective = _canonical_directory(effective_cwd)
     if source_root is not None:
-        root = _canonical_directory(source_root)
+        checkout_root = _canonical_directory(source_root)
         workspace = _canonical_directory(source_workspace or source_root)
-        workspace_path = _relative_workspace_path(workspace, root)
-        return ProjectIdentity.from_root(root, workspace_path=workspace_path)
+        workspace_path = _relative_workspace_path(workspace, checkout_root)
+        project_root = _linked_worktree_source_root(checkout_root)
+        return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
 
     checkout_root = _nearest_git_checkout_root(effective)
     if checkout_root is None:

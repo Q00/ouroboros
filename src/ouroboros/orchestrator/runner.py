@@ -6346,6 +6346,17 @@ class OrchestratorRunner:
                     "hint": "Resume from the original project/workspace.",
                 },
             )
+        replacement_project_identity = start_project_identity
+        if replacement_project_identity is None and persisted_workspace is not None:
+            # A pre-anchor session owns its historical proof representation in
+            # the persisted contract.  Rebuilding for a routing override must
+            # carry that representation forward; recomputing under the current
+            # resolver would make the following resume disagree with the
+            # immutable, still-unanchored start event.
+            replacement_project_identity = ProjectIdentity.from_root(
+                persisted_workspace["project_root"],
+                workspace_path=persisted_workspace["workspace_path"],
+            )
         active_resume_workspace = self._resume_workspace_identity()
         normalized_persisted_resume_workspace = (
             dict(persisted_resume_workspace)
@@ -6606,6 +6617,7 @@ class OrchestratorRunner:
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
                 execution_inputs_contract=normalized_execution_inputs,
+                project_identity=replacement_project_identity,
             )
             # Only the public resume path reaches this branch with a live,
             # registry-issued generation.  Preserve the persisted diagnostics
@@ -6623,6 +6635,7 @@ class OrchestratorRunner:
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
+                project_identity=replacement_project_identity,
             )
             if authority_generation is None:
                 replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
