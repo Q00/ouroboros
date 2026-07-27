@@ -142,7 +142,7 @@ class LeaderDrivenWorkerRuntime:
         self._transport = transport
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
-        self._cwd = os.fspath(cwd) if cwd is not None else None
+        self._cwd = os.fspath(cwd) if cwd is not None else os.getcwd()
         self._permission_mode = permission_mode
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support

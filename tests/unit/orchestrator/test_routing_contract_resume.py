@@ -2120,6 +2120,30 @@ def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     assert resumed._project_identity() == managed
 
 
+def test_unowned_gitfile_cannot_resume_as_its_target_repository(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    unowned = tmp_path / "unowned"
+    _init_git_repo(owner)
+    unowned.mkdir()
+    (unowned / ".git").write_text(f"gitdir: {owner / '.git'}\n", encoding="utf-8")
+    original = _runner(cwd=str(owner))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        _runner(cwd=str(unowned))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
 def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     primary_git = primary / ".git"

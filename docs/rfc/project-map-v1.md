@@ -61,7 +61,9 @@ global/system config and prompting, and sets a five-second timeout. Only
 complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
 accepted. When a checkout marker is present, it is passed back to Git explicitly
 as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor
-of a parent repository.
+of a parent repository. Acceptance of that argument is not ownership proof:
+the active checkout must also appear in Git's returned worktree population or
+equal Git's configured top level for an explicit `core.worktree` owner.
 
 This deliberately does not reimplement `config.c`. BOM handling, whitespace,
 comments, quoting, continuations, numeric booleans, later-value precedence,
@@ -78,10 +80,13 @@ Bare attribution additionally requires Git to validate `HEAD` as either a
 symbolic/unborn ref (`symbolic-ref HEAD`) or a detached object
 (`rev-parse --verify HEAD^{object}`); an arbitrary nonempty record cannot join
 linked worktrees.
-A non-bare `--separate-git-dir` repository without a recoverable primary owner
-uses its Git-reported common identity. Submodules use their own Git-reported
-top level and remain separate projects. Non-Git directories remain valid
-local-first projects and use their canonical cwd with `workspace_path="."`.
+An initial `--separate-git-dir` checkout without an explicit `core.worktree`
+owner is intentionally not joined: Git records no worktree membership or
+backlink that distinguishes it from an arbitrary redirected gitfile. Registered
+linked worktrees may still join the common bare owner. Submodules use their own
+Git-reported top level and remain separate projects. Non-Git directories remain
+valid local-first projects and use their canonical cwd with
+`workspace_path="."`.
 
 ### Managed task worktrees
 
@@ -111,6 +116,10 @@ also rejects identity-free execution contracts, top-level-only, nested-only,
 partial, or conflicting identity payloads before appending the immutable start
 event. Contract-free utility sessions remain valid; historical events are read
 without being recreated through this API.
+
+Every bundled runtime normalizes an omitted working directory to the process
+cwd at runtime construction. The resulting concrete workspace is therefore
+available before a runner-owned session publishes its mandatory identity.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

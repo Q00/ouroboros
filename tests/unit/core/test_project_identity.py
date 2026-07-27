@@ -138,7 +138,7 @@ def test_standard_linked_and_managed_worktrees_share_primary_identity(tmp_path: 
     assert direct.workspace_path == "packages/app"
 
 
-def test_external_git_directory_uses_gits_common_identity(tmp_path: Path) -> None:
+def test_unowned_separate_git_directory_fails_closed(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     common_git = tmp_path / "metadata.git"
     linked = tmp_path / "linked"
@@ -158,8 +158,12 @@ def test_external_git_directory_uses_gits_common_identity(tmp_path: Path) -> Non
     )
     _add_linked(primary, linked)
 
-    assert resolve_project_identity(primary) == resolve_project_identity(linked)
-    assert resolve_project_identity(linked).project_root == str(common_git.resolve())
+    primary_identity = resolve_project_identity(primary)
+    linked_identity = resolve_project_identity(linked)
+
+    assert primary_identity.project_root == str(primary.resolve())
+    assert linked_identity.project_root == str(common_git.resolve())
+    assert primary_identity != linked_identity
 
 
 def test_explicit_core_worktree_owner_is_resolved_by_git(tmp_path: Path) -> None:
@@ -182,6 +186,44 @@ def test_explicit_core_worktree_owner_is_resolved_by_git(tmp_path: Path) -> None
     assert identities[0] == identities[1] == identities[2]
     assert identities[0].project_root == str(owner.resolve())
     assert identities[0].workspace_path == "packages/app"
+
+
+@pytest.mark.parametrize("bare_owner", [False, True], ids=["standard", "bare"])
+@pytest.mark.parametrize("marker_kind", ["gitfile", "symlink"])
+def test_unowned_git_marker_cannot_adopt_another_repository(
+    tmp_path: Path,
+    marker_kind: str,
+    bare_owner: bool,
+) -> None:
+    owner = tmp_path / "owner"
+    unowned = tmp_path / "unowned"
+    unowned_workspace = unowned / "packages" / "app"
+    generated = tmp_path / "generated"
+    if bare_owner:
+        _git("init", "-q", "--bare", str(owner))
+        owner_git_dir = owner
+    else:
+        _init_repo(owner)
+        owner_git_dir = owner / ".git"
+    unowned_workspace.mkdir(parents=True)
+    generated.mkdir()
+    marker = unowned / ".git"
+    if marker_kind == "gitfile":
+        marker.write_text(f"gitdir: {owner_git_dir}\n", encoding="utf-8")
+    else:
+        marker.symlink_to(owner_git_dir, target_is_directory=True)
+
+    direct = resolve_project_identity(unowned_workspace)
+    managed = resolve_project_identity(
+        generated,
+        source_root=unowned,
+        source_workspace=unowned_workspace,
+    )
+
+    assert direct == managed
+    assert direct.project_root == str(unowned.resolve())
+    assert direct.workspace_path == "packages/app"
+    assert direct.project_id != project_id_for_root(owner)
 
 
 def test_git_owns_bom_tab_and_value_continuation_grammar(tmp_path: Path) -> None:

@@ -65,6 +65,7 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
 )
+from ouroboros.orchestrator.worker_runtime import LeaderDrivenWorkerRuntime
 from ouroboros.persistence.event_store import EventStore
 
 _LONG_WINDOW_429_ENCODINGS = tuple(
@@ -2962,6 +2963,44 @@ class TestOrchestratorRunner:
             runner._retire_process_local_authority(
                 session_id="orch-project-anchor",
                 execution_id="exec-project-anchor",
+            )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_with_unset_leader_runtime_cwd(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        runtime = LeaderDrivenWorkerRuntime(
+            transport=MagicMock(cli_path="/tmp/worker"),
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+        )
+        runner = OrchestratorRunner(runtime, mock_event_store, mock_console)
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-leader-cwd",
+            session_id="orch-leader-cwd",
+        )
+
+        try:
+            assert result.is_ok
+            assert runtime.working_directory == str(tmp_path)
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            assert start.data["project_root"] == str(tmp_path)
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-leader-cwd",
+                execution_id="exec-leader-cwd",
             )
 
     @pytest.mark.asyncio
