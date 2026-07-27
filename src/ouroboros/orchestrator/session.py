@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import math
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -473,17 +474,28 @@ class SessionRepository:
 
     @staticmethod
     def _coerce_positive_seconds(value: object) -> int | None:
-        """Normalize persisted positive-second values from pause metadata."""
+        """Normalize persisted positive-second values from pause metadata.
+
+        Non-finite values are rejected rather than converted, matching
+        ``recoverable_failure._duration_value_to_seconds`` — the sibling parser for
+        this same ``pause_seconds`` key — so persisted ``inf``/``nan`` degrades to
+        "no usable resume metadata" instead of raising out of orphan cleanup.
+        """
         if isinstance(value, bool):
             return None
         if isinstance(value, int | float):
+            if not math.isfinite(value):
+                return None
             seconds = int(value)
             return seconds if seconds > 0 else None
         if isinstance(value, str) and value.strip():
             try:
-                seconds = int(float(value.strip()))
+                parsed = float(value.strip())
             except ValueError:
                 return None
+            if not math.isfinite(parsed):
+                return None
+            seconds = int(parsed)
             return seconds if seconds > 0 else None
         return None
 

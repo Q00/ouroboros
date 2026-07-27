@@ -1397,6 +1397,42 @@ class TestFindOrphanedSessions:
         assert result[0].status == SessionStatus.PAUSED
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("pause_seconds", [float("inf"), float("nan"), "inf", "nan"])
+    async def test_non_finite_pause_seconds_does_not_break_orphan_cleanup(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        pause_seconds: float | str,
+    ) -> None:
+        """Non-finite pause metadata degrades to "no resume window", never raises."""
+        now = datetime.now(UTC)
+        paused_at = now - timedelta(hours=5)
+        start_event = self._make_start_event(
+            "sess_non_finite_pause",
+            timestamp=paused_at - timedelta(minutes=10),
+        )
+        paused_event = self._make_terminal_event(
+            "sess_non_finite_pause",
+            "orchestrator.session.paused",
+            timestamp=paused_at,
+        )
+        # No resume_after: resolution must fall through to paused_at + pause_seconds.
+        paused_event.data = {
+            "reason": "Usage limit reached",
+            "pause_kind": "usage_limit",
+            "pause_seconds": pause_seconds,
+            "paused_at": paused_at.isoformat(),
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, paused_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert len(result) == 1
+        assert result[0].status == SessionStatus.PAUSED
+
+    @pytest.mark.asyncio
     async def test_snapshot_usage_limit_paused_session_before_resume_after_not_orphaned(
         self,
         repository: SessionRepository,
