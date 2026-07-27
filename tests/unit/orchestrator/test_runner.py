@@ -2965,6 +2965,42 @@ class TestOrchestratorRunner:
             )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_preserves_resolved_project_identity_absence(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        later_identity = resolve_project_identity(tmp_path)
+        identity_resolver = MagicMock(side_effect=[None, later_identity])
+
+        with patch.object(runner, "_project_identity", identity_resolver):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec-project-absent",
+                session_id="orch-project-absent",
+            )
+
+        try:
+            assert result.is_ok
+            assert identity_resolver.call_count == 1
+            start = next(
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if call.args[0].type == "orchestrator.session.started"
+            )
+            project_keys = {"project_id", "project_root", "workspace_path"}
+            assert project_keys.isdisjoint(start.data)
+            proof = start.data["execution_contract"]["frugality_proof"]
+            assert {"project_root", "workspace_path"}.isdisjoint(proof)
+        finally:
+            runner._retire_process_local_authority(
+                session_id="orch-project-absent",
+                execution_id="exec-project-absent",
+            )
+
+    @pytest.mark.asyncio
     async def test_prepare_session_fails_when_initial_contract_cannot_persist(
         self,
         runner: OrchestratorRunner,

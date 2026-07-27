@@ -41,11 +41,15 @@ remote-based identity is explicitly deferred.
 
 ### Direct checkouts
 
-The resolver walks from the effective cwd to the nearest `.git` marker. A
-normal checkout uses that root. A linked worktree is joined to its primary
-source checkout only when its bounded `.git` pointer, `commondir`, worktree
-record, and backlink prove the relationship. Submodules use their configured
-worktree and therefore remain separate projects.
+The resolver walks from the effective cwd to the nearest `.git` directory
+entry. Every entry shape is a discovery boundary: a broken symlink or other
+malformed child marker stays scoped to that child instead of inheriting a
+parent repository. A positively proven bare repository is detected before a
+directory literally named `.git` can be interpreted as its parent's marker. A
+normal checkout uses its resolved owner. A linked worktree is joined to its
+primary source checkout only when its bounded `.git` pointer, `commondir`,
+worktree record, and backlink prove the relationship. Submodules use their
+configured worktree and therefore remain separate projects.
 
 Each Git pointer is parsed as one complete UTF-8 record bounded to 4,096 bytes,
 with only one optional final line ending. Extra records, oversized content,
@@ -65,6 +69,10 @@ numeric boolean forms, including octal, hexadecimal, and `k`/`m`/`g` scaling.
 Boolean tokens are ASCII-bounded before case normalization. Section headers
 cannot span physical lines and fail closed before continuation folding, while a
 same-line section assignment may continue its value after the closing bracket.
+Modern subsection suffixes must be consumed completely as one quoted value;
+embedded quotes and backslashes use Git's `\"` and `\\` escapes, while a
+backslash before another character is discarded as Git specifies. Raw interior
+quotes or trailing subsection junk cannot authorize later identity data.
 Includes fail
 closed because they escape the bounded config file used for identity proof.
 
@@ -83,6 +91,8 @@ directory named `.git` therefore cannot be mistaken for its parent checkout.
 The explicit owner must point back to the common directory through either a
 bounded regular gitfile or its exact regular, non-symlink `.git` directory;
 both standard and external Git-directory representations therefore converge.
+A directory-backed checkout passes through this same owner resolver rather than
+receiving an early parent-directory identity.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without
@@ -116,6 +126,10 @@ contract. That same immutable value supplies:
   `orchestrator.session.started`; and
 - the existing nested `execution_contract.frugality_proof.project_root` and
   `.workspace_path` fields.
+
+The unresolved input state and the resolved-absence result are distinct. If a
+runner has no identity, that single result is preserved on both publication
+surfaces and is never interpreted as permission to invoke the resolver again.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

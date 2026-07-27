@@ -67,6 +67,28 @@ def test_symlinked_workspace_canonicalizes_before_identity(tmp_path: Path) -> No
     assert through_alias == direct
 
 
+@pytest.mark.parametrize("target_exists", [False, True], ids=["broken", "live"])
+def test_git_symlink_entry_stops_parent_checkout_discovery(
+    tmp_path: Path,
+    target_exists: bool,
+) -> None:
+    parent = tmp_path / "parent"
+    (parent / ".git").mkdir(parents=True)
+    child = parent / "nested" / "child"
+    workspace = child / "packages" / "app"
+    workspace.mkdir(parents=True)
+    symlink_target = tmp_path / "untrusted-git-entry"
+    if target_exists:
+        symlink_target.write_text("not a Git pointer\n", encoding="utf-8")
+    (child / ".git").symlink_to(symlink_target)
+
+    identity = resolve_project_identity(workspace)
+
+    assert identity.project_root == str(child.resolve())
+    assert identity.project_id == project_id_for_root(child)
+    assert identity.workspace_path == "packages/app"
+
+
 def test_linked_worktree_reuses_primary_source_identity(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source_git = source / ".git"
@@ -226,6 +248,37 @@ def test_valueless_bare_config_joins_direct_and_linked_identity(tmp_path: Path) 
 
     assert direct_identity == linked_identity
     assert direct_identity.project_root == str(common_git.resolve())
+
+
+def test_bare_repository_named_dot_git_joins_direct_linked_and_managed_identity(
+    tmp_path: Path,
+) -> None:
+    common_git = tmp_path / "storage" / ".git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    direct_identity = resolve_project_identity(common_git)
+    linked_identity = resolve_project_identity(linked)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked,
+    )
+
+    assert direct_identity == linked_identity == managed_identity
+    assert direct_identity.project_root == str(common_git.resolve())
+    assert direct_identity.workspace_path == "."
 
 
 @pytest.mark.parametrize(
@@ -458,6 +511,69 @@ def test_same_line_continued_worktree_joins_direct_linked_and_managed_identity(
 
 
 @pytest.mark.parametrize(
+    ("section_header", "valid"),
+    [
+        ('[remote "plain"]', True),
+        (r'[remote "a\"b"]', True),
+        (r'[remote "a\\b"]', True),
+        (r'[remote "a\q"]', True),
+        ('[remote "a]b"]', True),
+        ('[remote "a"junk"b"]', False),
+        ('[remote "a" junk]', False),
+    ],
+    ids=[
+        "plain",
+        "escaped-quote",
+        "escaped-backslash",
+        "dropped-backslash",
+        "quoted-closing-bracket",
+        "raw-inner-quotes",
+        "trailing-junk",
+    ],
+)
+def test_complete_subsection_grammar_controls_identity_claims(
+    tmp_path: Path,
+    section_header: str,
+    valid: bool,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    claimed = tmp_path / "claimed"
+    claimed.mkdir()
+    (claimed / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"{section_header}\n\turl = ignored\n[core]\n\tbare = false\n\tworktree = {claimed}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    direct_identity = resolve_project_identity(claimed)
+    linked_identity = resolve_project_identity(linked)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked,
+    )
+
+    assert managed_identity == linked_identity
+    if valid:
+        assert linked_identity == direct_identity
+    else:
+        assert linked_identity != direct_identity
+        assert linked_identity.project_root == str(linked.resolve())
+
+
+@pytest.mark.parametrize(
     "worktree_config_value",
     ["true", "2"],
     ids=["text-boolean", "numeric-boolean"],
@@ -590,6 +706,51 @@ def test_standard_dot_git_explicit_owner_joins_direct_linked_and_managed_identit
     assert direct_identity == linked_identity == managed_identity
     assert direct_identity.project_root == str(primary.resolve())
     assert direct_identity.workspace_path == "packages/app"
+
+
+def test_directory_marker_honors_explicit_owner_across_all_execution_modes(
+    tmp_path: Path,
+) -> None:
+    metadata_parent = tmp_path / "metadata-parent"
+    metadata_workspace = metadata_parent / "packages" / "app"
+    metadata_workspace.mkdir(parents=True)
+    common_git = metadata_parent / ".git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    owner = tmp_path / "explicit-owner"
+    owner_workspace = owner / "packages" / "app"
+    owner_workspace.mkdir(parents=True)
+    (owner / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[core]\n\tbare = false\n\tworktree = {owner}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "generated" / "packages" / "app"
+    generated.mkdir(parents=True)
+
+    identities = (
+        resolve_project_identity(metadata_workspace),
+        resolve_project_identity(owner_workspace),
+        resolve_project_identity(linked_workspace),
+        resolve_project_identity(
+            generated,
+            source_root=linked,
+            source_workspace=linked_workspace,
+        ),
+    )
+
+    assert all(identity == identities[0] for identity in identities)
+    assert identities[0].project_root == str(owner.resolve())
+    assert identities[0].workspace_path == "packages/app"
 
 
 def test_real_standard_dot_git_explicit_owner_joins_all_execution_modes(

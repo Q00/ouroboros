@@ -254,6 +254,15 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     return False
 
 
+class _UnresolvedProjectIdentity:
+    """Sentinel type separating omitted resolution from resolved absence."""
+
+    __slots__ = ()
+
+
+_UNRESOLVED_PROJECT_IDENTITY = _UnresolvedProjectIdentity()
+
+
 @dataclass(frozen=True, slots=True)
 class _PersistedExecutionStrategy:
     """Effect-bearing prompt/tool strategy restored without live config reads."""
@@ -3212,10 +3221,7 @@ class OrchestratorRunner:
             return None
         return resolve_project_identity(effective_cwd)
 
-    def _proof_workspace_identity(
-        self,
-        project_identity: ProjectIdentity | None = None,
-    ) -> dict[str, str] | None:
+    def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
 
         Managed task worktrees have a different checkout path for every session,
@@ -3225,8 +3231,14 @@ class OrchestratorRunner:
         to their primary source root. Non-Git callers retain the conservative
         canonical effective-cwd identity.
         """
-        resolved = project_identity if project_identity is not None else self._project_identity()
-        return resolved.to_workspace_data() if resolved is not None else None
+        return self._resolved_proof_workspace_identity(self._project_identity())
+
+    @staticmethod
+    def _resolved_proof_workspace_identity(
+        project_identity: ProjectIdentity | None,
+    ) -> dict[str, str] | None:
+        """Project one already-resolved identity without another resolver call."""
+        return project_identity.to_workspace_data() if project_identity is not None else None
 
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
@@ -5474,7 +5486,9 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
-        project_identity: ProjectIdentity | None = None,
+        project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
+            _UNRESOLVED_PROJECT_IDENTITY
+        ),
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -5524,7 +5538,12 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        workspace_identity = self._proof_workspace_identity(project_identity)
+        resolved_project_identity = (
+            self._project_identity()
+            if isinstance(project_identity, _UnresolvedProjectIdentity)
+            else project_identity
+        )
+        workspace_identity = self._resolved_proof_workspace_identity(resolved_project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint

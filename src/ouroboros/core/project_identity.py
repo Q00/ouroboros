@@ -117,9 +117,23 @@ class ProjectIdentity:
 
 def _nearest_git_checkout_root(start: Path) -> Path | None:
     for candidate in (start, *start.parents):
-        marker = candidate / ".git"
-        if marker.is_dir() or marker.is_file():
+        # A positively proven bare repository is itself the checkout boundary,
+        # even when its directory is literally named ``.git``.  Without this
+        # check, resolving ``/storage/.git`` would mistake that repository for
+        # the marker owned by ``/storage``.
+        if candidate.name == ".git" and _is_proven_bare_repository(candidate):
             return candidate
+        marker = candidate / ".git"
+        try:
+            # Any directory entry is a boundary.  Its shape is validated later;
+            # discovery must not skip a broken symlink, socket, or other
+            # malformed child marker and silently inherit a parent repository.
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return candidate
+        return candidate
     return None
 
 
@@ -293,7 +307,7 @@ def _parse_git_config_section(value: str) -> tuple[str, str] | None:
     ):
         return None
     section_suffix = section[len(section_name) :].lstrip(" \t")
-    if section_suffix and not (section_suffix.startswith('"') and section_suffix.endswith('"')):
+    if section_suffix and not _valid_git_config_subsection(section_suffix):
         return None
     folded = section_name.casefold()
     if folded == "core" and not section_suffix:
@@ -305,6 +319,26 @@ def _parse_git_config_section(value: str) -> tuple[str, str] | None:
     else:
         kind = "other"
     return kind, value[closing_index + 1 :]
+
+
+def _valid_git_config_subsection(value: str) -> bool:
+    """Return whether one modern Git subsection consumes its complete suffix."""
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        return False
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character == '"' or character in "\r\n\x00":
+            return False
+        if character == "\\":
+            index += 1
+            # Git preserves ``\"`` and ``\\`` in subsection names and drops
+            # the backslash before every other character.  All are grammatical;
+            # only an incomplete escape can consume the required closing quote.
+            if index >= len(value) - 1:
+                return False
+        index += 1
+    return True
 
 
 def _parse_git_config_value(value: str) -> tuple[bool, str]:
@@ -547,6 +581,19 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     return _GitCoreConfig(bare=bare, worktree=worktree)
 
 
+def _is_proven_bare_repository(git_dir: Path) -> bool:
+    """Return whether one directory positively proves the bounded bare shape."""
+    core = _read_git_core_config(git_dir)
+    return bool(
+        core is not None
+        and core.bare
+        and core.worktree is None
+        and _read_bounded_record(git_dir / "HEAD")
+        and (git_dir / "objects").is_dir()
+        and (git_dir / "refs").is_dir()
+    )
+
+
 def _direct_gitfile_source_root(checkout_root: Path, git_dir: Path) -> Path | None:
     """Return a direct gitfile owner only when the target names it explicitly."""
     core = _read_git_core_config(git_dir)
@@ -559,15 +606,7 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
     """Return one source identity root positively owned by a common gitdir."""
     core = _read_git_core_config(common_dir)
     if core is not None and core.bare:
-        if core.worktree is not None:
-            return None
-        if (
-            _read_bounded_record(common_dir / "HEAD")
-            and (common_dir / "objects").is_dir()
-            and (common_dir / "refs").is_dir()
-        ):
-            return common_dir
-        return None
+        return common_dir if _is_proven_bare_repository(common_dir) else None
 
     # An explicit, positively proven owner outranks directory naming.  Its
     # checkout may use either a bounded gitfile or the standard regular ``.git``
@@ -611,6 +650,18 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
     Malformed metadata degrades conservatively to the active checkout root.
     """
     marker = checkout_root / ".git"
+    try:
+        if marker.is_symlink():
+            return checkout_root
+        if marker.is_dir():
+            # Directory-backed repositories consume the same common-directory
+            # owner resolver as linked worktrees.  This preserves explicit
+            # ``core.worktree`` precedence instead of assuming the parent owns
+            # the Git directory merely from its basename.
+            common_dir = marker.resolve(strict=False)
+            return _common_git_source_root(common_dir) or checkout_root
+    except (OSError, RuntimeError, ValueError):
+        return checkout_root
     if not marker.is_file():
         return checkout_root
 
