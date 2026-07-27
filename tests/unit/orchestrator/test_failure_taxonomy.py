@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+
 import pytest
 
 from ouroboros.orchestrator.evidence_schema import (
@@ -16,6 +18,7 @@ from ouroboros.orchestrator.failure_taxonomy import (
     RecoveryAction,
     classify,
     classify_bounce,
+    classify_hard_precondition,
     policy_for,
     policy_for_attempt,
 )
@@ -124,6 +127,104 @@ class TestClassify:
             ),
         )
         assert classify(attempt) == FailureClass.SCOPE_CREEP
+
+
+class TestHardPreconditionClassification:
+    @pytest.mark.parametrize(
+        ("content", "metadata"),
+        [
+            ("permission denied while opening the repository", {}),
+            ("Access denied by the deployment account", {}),
+            ("provider returned unauthorized", {}),
+            ("authentication required", {}),
+            ("missing required tool terraform", {}),
+            ("Missing access to the deployment account", {}),
+            ("environment variable is not configured", {}),
+            ("", {"failure_class": "BLOCKED"}),
+            ("", {"details": {"status": "FORBIDDEN"}}),
+            ("", {"errorType": "PermissionDenied"}),
+            ("", {"kind": "PermissionDenied"}),
+            ("", {"error_code": "MISSING_TOOL"}),
+            ("", {"cause": {"kind": "MISSING_TOOL"}}),
+            ("", {"reason": "AUTHENTICATION_REQUIRED"}),
+            ("", {"details": {"status": "environment_variable_not_configured"}}),
+            ("", {"status": 401}),
+            ("", {"httpStatusCode": 403}),
+            ("", {"response": {"status_code": "401"}}),
+        ],
+    )
+    def test_complete_compatibility_population_is_blocked(
+        self,
+        content: str,
+        metadata: dict[str, object],
+    ) -> None:
+        assert classify_hard_precondition(content, metadata) is FailureClass.BLOCKED
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "permission check passed but evidence is missing",
+            "configuration migration returned a transient network error",
+            "tool output was incomplete",
+            "processed 401 records successfully",
+        ],
+    )
+    def test_nearby_non_preconditions_remain_retryable(self, content: str) -> None:
+        assert classify_hard_precondition(content, {}) is None
+
+    def test_oversized_metadata_population_fails_closed(self) -> None:
+        metadata: dict[str, object] = {}
+        cursor = metadata
+        for _ in range(33):
+            child: dict[str, object] = {}
+            cursor["details"] = child
+            cursor = child
+
+        assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
+
+    def test_oversized_key_population_fails_closed(self) -> None:
+        metadata = {f"unknown_{index}": index for index in range(33)}
+
+        assert classify_hard_precondition("provider failure", metadata) is FailureClass.BLOCKED
+
+    def test_infinite_mapping_population_is_bounded(self) -> None:
+        class InfiniteMapping(Mapping[str, object]):
+            def __getitem__(self, key: str) -> object:
+                return "transient"
+
+            def __iter__(self) -> Iterator[str]:
+                index = 0
+                while True:
+                    yield f"unknown_{index}"
+                    index += 1
+
+            def __len__(self) -> int:
+                return 2**31
+
+        assert (
+            classify_hard_precondition("provider failure", InfiniteMapping())
+            is FailureClass.BLOCKED
+        )
+
+    def test_mapping_iteration_exception_fails_closed(self) -> None:
+        class ExplodingMapping(Mapping[str, object]):
+            def __getitem__(self, key: str) -> object:
+                return "transient"
+
+            def __iter__(self) -> Iterator[str]:
+                raise RuntimeError("provider mapping iteration failed")
+
+            def __len__(self) -> int:
+                return 1
+
+        assert (
+            classify_hard_precondition("provider failure", ExplodingMapping())
+            is FailureClass.BLOCKED
+        )
+
+    @pytest.mark.parametrize("status", [400, 404, 408, 409, 429, 500, 503])
+    def test_non_authorization_http_statuses_remain_retryable(self, status: int) -> None:
+        assert classify_hard_precondition("provider failure", {"status": status}) is None
 
 
 class TestPolicyTable:

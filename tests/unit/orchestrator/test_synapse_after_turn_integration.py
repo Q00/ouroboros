@@ -90,6 +90,39 @@ class _TwoTurnRuntime:
         )
 
 
+class _QuotaEndingRuntime(_TwoTurnRuntime):
+    async def execute_task(self, **kwargs: Any):
+        prompt = str(kwargs["prompt"])
+        resume_handle = kwargs.get("resume_handle")
+        self.prompts.append(prompt)
+        if len(self.prompts) > 1:  # pragma: no cover - asserted by the regression
+            raise AssertionError("quota pause dispatched a SessionSignal follow-up")
+        handle = RuntimeHandle(
+            backend="codex_mcp",
+            kind="agent_runtime",
+            native_session_id="thread_quota_pause",
+            cwd=self.working_directory,
+            metadata=(dict(resume_handle.metadata) if resume_handle is not None else {}),
+        )
+        self.first_turn_started.set()
+        yield AgentMessage(
+            type="assistant",
+            content="Work reached the provider quota boundary.",
+            resume_handle=handle,
+        )
+        await self.release_first_turn.wait()
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Retry after 2 hours.",
+            data={
+                "subtype": "error",
+                "error_type": "UsageLimitError",
+                "retry_after_seconds": 7200,
+            },
+            resume_handle=handle,
+        )
+
+
 class _ErrorEnvelopeResumeRuntime(_TwoTurnRuntime):
     async def execute_task(self, **kwargs: Any):
         if not self.prompts:
@@ -281,6 +314,65 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
             "control.session.signal.applied",
             "control.session.signal.completed",
         ]
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_ending_turn_rejects_queued_signal_before_follow_up_provider(
+    tmp_path: Path,
+) -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub(event_store=store)
+    runtime = _QuotaEndingRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+    signal = SessionSignal(
+        signal_id="sig_quota_boundary",
+        target_session_scope_id="exec_quota_boundary_ac_1",
+        target_session_attempt_id="exec_quota_boundary_ac_1_attempt_1",
+        expected_execution_id="exec_quota_boundary",
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Apply this only after a non-paused provider turn.",
+        source=SessionSignalSource.USER,
+        reason="Prove quota owns the next-effect boundary.",
+        idempotency_key="quota_boundary_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Stop exactly at quota",
+            session_id="orch_quota_boundary",
+            execution_id="exec_quota_boundary",
+            tools=[],
+            system_prompt="test",
+            seed_goal="Never dispatch after a pause boundary",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        signal_events = await store.replay("session_signal", signal.signal_id)
+
+        assert result.success is False
+        assert len(runtime.prompts) == 1
+        assert "Usage limit reached" in result.messages[-1].content
+        assert project_session_signal(signal_events).state is SessionSignalState.REJECTED
+        assert signal_events[-1].data["rejection_code"] == "target_ended_before_boundary"
     finally:
         if not execution_task.done():
             execution_task.cancel()

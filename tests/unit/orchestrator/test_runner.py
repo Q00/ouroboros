@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import copy
 from datetime import UTC, datetime, timedelta
+import hashlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,12 +34,17 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
-from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
-from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelExecutionResult,
+)
+from ouroboros.orchestrator.profile_loader import SuggestedModelTier
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -52,6 +59,26 @@ from ouroboros.orchestrator.runner import (
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.persistence.event_store import EventStore
+
+_LONG_WINDOW_429_ENCODINGS = tuple(
+    (field, value)
+    for field in (
+        "http_status",
+        "httpStatus",
+        "http_status_code",
+        "httpStatusCode",
+        "status_code",
+        "statusCode",
+        "api_error_status",
+        "apiErrorStatus",
+        "status",
+        "code",
+        "error_code",
+        "errorCode",
+    )
+    for value in (429, "429")
+)
 
 
 def _task_workspace() -> TaskWorkspace:
@@ -65,6 +92,15 @@ def _task_workspace() -> TaskWorkspace:
         branch="ooo/orch_test",
         lock_path="/tmp/worktree/.locks/repo/orch_test.json",
     )
+
+
+def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
+    """Treat a unit-test tracker as the durable snapshot for mocked stores."""
+
+    async def reconstruct(tracker: SessionTracker):
+        return Result.ok(tracker)
+
+    runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
 
 
 def _attach_live_process_local_contract(
@@ -87,7 +123,52 @@ def _attach_live_process_local_contract(
         execution_contract=contract,
         generation=generation,
     )
+    runner._seal_process_local_prepared_contract(
+        session_id=session_id,
+        execution_id=tracker.execution_id,
+        generation=generation,
+        execution_contract=contract,
+    )
+    _allow_mocked_precreated_durable_state(runner)
     return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+
+
+def _enable_direct_bounded_routes(
+    runner: OrchestratorRunner,
+    adapter: MagicMock,
+) -> None:
+    from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+    from ouroboros.orchestrator.model_routing import build_model_router
+
+    economics = EconomicsConfig(  # type: ignore[arg-type]
+        default_tier="frugal",
+        escalation_threshold=2,
+        tiers={
+            "frugal": TierConfig(
+                cost_factor=1,
+                models=[ModelConfig(provider="anthropic", model="haiku-x")],
+            ),
+            "standard": TierConfig(
+                cost_factor=10,
+                models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+            ),
+            "frontier": TierConfig(
+                cost_factor=30,
+                models=[ModelConfig(provider="anthropic", model="opus-x")],
+            ),
+        },
+    )
+    adapter.runtime_backend = "claude"
+    adapter.capabilities = RuntimeCapabilities(
+        skill_dispatch=True,
+        targeted_resume=True,
+        structured_output=True,
+        model_override_support=ParamSupport.NATIVE,
+    )
+    runner._route_economics = economics
+    runner._model_router = build_model_router(economics, runtime_backend="claude")
+    assert runner._model_router is not None
+    _allow_mocked_precreated_durable_state(runner)
 
 
 def test_seed_investment_detection_supports_legacy_string_criteria(sample_seed: Seed) -> None:
@@ -494,6 +575,8 @@ class TestOrchestratorRunner:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
@@ -504,6 +587,7 @@ class TestOrchestratorRunner:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_execution_related_events = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture
@@ -519,7 +603,9 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
         """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
+        return runner
 
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
@@ -566,6 +652,46 @@ class TestOrchestratorRunner:
 
         assert runner._decomposition_mode == "bounce_only"
         assert disabled_runner._decomposition_mode == "off"
+
+    def test_runner_preserves_legacy_depth_above_durable_replay_boundary(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
+        )
+
+        assert runner._max_decomposition_depth == 5
+        runner._model_router = MagicMock()
+        runner._route_economics = MagicMock()
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        assert runner._bounded_route_runtime_active() is False
+        mock_adapter.execute_task.assert_not_called()
+
+    def test_runner_accepts_shared_persistable_maximum_depth(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH,
+        )
+
+        assert runner._max_decomposition_depth == MAX_DECOMPOSITION_DEPTH == 4
 
     @pytest.mark.asyncio
     async def test_route_call_effort_emits_observability_only_event(
@@ -787,6 +913,1943 @@ class TestOrchestratorRunner:
         )
         assert recovery_event.data["pattern"] == "spinning"
         assert recovery_event.data["persona"] == "hacker"
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_direct_walks_bounded_routes_in_fresh_sessions(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+        from ouroboros.orchestrator.model_routing import build_model_router
+
+        economics = EconomicsConfig(  # type: ignore[arg-type]
+            default_tier="frugal",
+            escalation_threshold=2,
+            tiers={
+                "frugal": TierConfig(
+                    cost_factor=1,
+                    models=[ModelConfig(provider="anthropic", model="haiku-x")],
+                ),
+                "standard": TierConfig(
+                    cost_factor=10,
+                    models=[ModelConfig(provider="anthropic", model="sonnet-x")],
+                ),
+                "frontier": TierConfig(
+                    cost_factor=30,
+                    models=[ModelConfig(provider="anthropic", model="opus-x")],
+                ),
+            },
+        )
+        mock_adapter.runtime_backend = "claude"
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
+        runner._route_economics = economics
+        runner._model_router = build_model_router(economics, runtime_backend="claude")
+        assert runner._model_router is not None
+        models: list[str] = []
+        resume_handles: list[RuntimeHandle | None] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            resume_handles.append(kwargs.get("resume_handle"))
+            failed = len(models) < 2
+            yield AgentMessage(
+                type="result",
+                content="failed" if failed else "[TASK_COMPLETE]",
+                data={"subtype": "error" if failed else "success"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id=f"route-{len(models)}",
+                    cwd="/tmp/project",
+                    approval_mode="acceptEdits",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with patch.object(runner._session_repo, "create_session", mock_create_session):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok and result.value.success is True
+        assert models == ["sonnet-x", "opus-x"]
+        assert resume_handles[1:] == [None]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert [event.data["observation"]["route_id"] for event in route_events] == [
+            "compat:claude:standard",
+            "compat:claude:frontier",
+        ]
+        assert all(event.data["final_acceptance_declared"] is False for event in route_events)
+
+    @pytest.mark.asyncio
+    async def test_direct_live_successor_cost_drift_blocks_before_second_provider_effect(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="evidence missing",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def append_and_drift(event: BaseEvent) -> None:
+            if event.type != "execution.ac.route_observed":
+                return
+            assert runner._route_economics is not None
+            tiers = dict(runner._route_economics.tiers)
+            tiers["frontier"] = tiers["frontier"].model_copy(update={"cost_factor": 99})
+            runner._route_economics = runner._route_economics.model_copy(update={"tiers": tiers})
+
+        mock_event_store.append.side_effect = append_and_drift
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert models == ["sonnet-x"]
+        assert result.is_err
+        assert "Route admission became stale" in str(result.error)
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_route_cancellation_never_dispatches_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            for index in range(CANCELLATION_CHECK_INTERVAL + 1):
+                yield AgentMessage(type="assistant", content=f"Message {index}")
+            yield AgentMessage(
+                type="result",
+                content="failed after cancellation",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        cancel_event = create_session_cancelled_event("session-1", "User requested")
+        mock_event_store.query_events = AsyncMock(
+            side_effect=[[], [], [cancel_event], [], [], [], []]
+        )
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("assistant_messages", range(4))
+    async def test_direct_short_final_turn_cancellation_population_stops_before_observation(
+        self,
+        assistant_messages: int,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Every final turn below the five-message poll interval uses the choke-point check."""
+
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        assert assistant_messages + 1 < CANCELLATION_CHECK_INTERVAL
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        session_id = f"session-short-cancel-{assistant_messages}"
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            for index in range(assistant_messages):
+                yield AgentMessage(type="assistant", content=f"Message {index}")
+            await request_cancellation(session_id, reason="short final turn", cancelled_by="test")
+            yield AgentMessage(
+                type="result",
+                content="failed after short-turn cancellation",
+                data={"subtype": "error"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.query_events = AsyncMock(return_value=[])
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-short-cancel",
+                session_id=session_id,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+        assert not await is_cancellation_requested(session_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status_field", "status_value"), _LONG_WINDOW_429_ENCODINGS)
+    async def test_direct_bounded_usage_limit_pause_remains_resume_eligible(
+        self,
+        status_field: str,
+        status_value: object,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="Provider request failed.",
+                data={
+                    "subtype": "error",
+                    status_field: status_value,
+                    "retry_after_seconds": 7_200,
+                },
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="route-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        mark_paused.assert_awaited_once()
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert route_events == []
+        pause_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_paused"
+        ]
+        assert len(pause_events) == 1
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return pause_events if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        resume_state = await runner._direct_resume_route_id(
+            execution_id="execution-1",
+            session_id="session-1",
+        )
+        assert resume_state is not None
+        assert resume_state.candidate.route_id == "compat:claude:standard"
+        runner._retire_process_local_authority(
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_pause_consumes_pre_effect_durable_pause_policy(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A provider cannot change the fallback pause window after contract publication."""
+
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again later.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="durable-pause-policy",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-durable-pause",
+                session_id="session-durable-pause",
+            )
+
+        assert result.is_ok and result.value.success is False
+        mark_paused.assert_awaited_once()
+        assert mark_paused.await_args.kwargs["pause_seconds"] == 3600
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status_field", "status_value"), _LONG_WINDOW_429_ENCODINGS)
+    async def test_parallel_bounded_usage_limit_pauses_without_escalation(
+        self,
+        status_field: str,
+        status_value: object,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        encoding_id = f"{status_field}-{type(status_value).__name__}"
+        tracker = SessionTracker.create(
+            f"execution-parallel-quota-{encoding_id}",
+            seed.metadata.seed_id,
+            session_id=f"session-parallel-quota-{encoding_id}",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        dependency_graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        provider_calls = 0
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            provider_calls += 1
+            yield AgentMessage(
+                type="result",
+                content="Provider request failed.",
+                data={
+                    "subtype": "error",
+                    status_field: status_value,
+                    "retry_after_seconds": 7_200,
+                },
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="parallel-route-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        mark_failed = AsyncMock(return_value=Result.ok(None))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(runner._session_repo, "mark_failed", mark_failed),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert provider_calls == 1
+        mark_paused.assert_awaited_once()
+        mark_failed.assert_not_awaited()
+        emitted_types = {
+            call.args[0].type
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) is not None
+        }
+        assert "execution.ac.route_observed" not in emitted_types
+        assert "execution.ac.attempt_judged" not in emitted_types
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_parallel_pause_consumes_pre_effect_durable_pause_policy(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parallel pause publication consumes the same frozen fallback policy."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-parallel-durable-pause",
+            seed.metadata.seed_id,
+            session_id="session-parallel-durable-pause",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        pause_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again later.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0],
+                    success=False,
+                    messages=(pause_message,),
+                    final_message=pause_message.content,
+                    outcome=ACExecutionOutcome.FAILED,
+                ),
+            ),
+            success_count=0,
+            failure_count=1,
+            recoverable_route_pause=True,
+        )
+
+        async def provider_boundary(**_kwargs: Any) -> ParallelExecutionResult:
+            monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
+            return parallel_result
+
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                side_effect=provider_boundary,
+            ),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok and result.value.success is False
+        mark_paused.assert_awaited_once()
+        assert mark_paused.await_args.kwargs["pause_seconds"] == 3600
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_parallel_route_cancellation_is_terminalized_by_runner_owner(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """The executor signal enters cancellation lifecycle, never failure routing."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+        from ouroboros.orchestrator.parallel_executor import ParallelExecutionCancelled
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        tracker = SessionTracker.create(
+            "execution-parallel-cancel",
+            seed.metadata.seed_id,
+            session_id="session-parallel-cancel",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        cancellation_result = Result.ok(
+            OrchestratorResult(
+                success=False,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                summary={"cancelled": True},
+                messages_processed=7,
+                final_message="cancelled",
+                duration_seconds=0.0,
+            )
+        )
+        handle_cancellation = AsyncMock(return_value=cancellation_result)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "track_progress",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(
+                    side_effect=ParallelExecutionCancelled(
+                        tracker.session_id,
+                        messages_processed=7,
+                    )
+                ),
+            ),
+            patch.object(runner, "_handle_cancellation", handle_cancellation),
+        ):
+            result = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=assemble_session_tool_catalog([]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result is cancellation_result
+        handle_cancellation.assert_awaited_once()
+        assert handle_cancellation.await_args.kwargs["messages_processed"] == 7
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_before_pause", [False, True])
+    async def test_parallel_bounded_pause_resume_uses_original_owner(
+        self,
+        failure_before_pause: bool,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        case_suffix = "successor" if failure_before_pause else "initial"
+        tracker = SessionTracker.create(
+            f"execution-parallel-resume-{case_suffix}",
+            seed.metadata.seed_id,
+            session_id=f"session-parallel-resume-{case_suffix}",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
+            execution_levels=((0,),),
+        )
+        models: list[str] = []
+
+        async def query_events(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            return [
+                call.args[0]
+                for call in mock_event_store.append.await_args_list
+                if getattr(call.args[0], "type", None) == event_type
+            ]
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_events)
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            if failure_before_pause and len(models) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="evidence missing",
+                    data={"subtype": "error"},
+                )
+                return
+            pause_call_number = 2 if failure_before_pause else 1
+            if len(models) == pause_call_number:
+                yield AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="parallel-owner-handle",
+                    ),
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="resumed through parallel owner",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = execute_task
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        mark_completed = AsyncMock(return_value=Result.ok(None))
+        analyze = AsyncMock(return_value=Result.ok(graph))
+        tool_catalog = assemble_session_tool_catalog([])
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                analyze,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(runner._session_repo, "mark_completed", mark_completed),
+            patch("ouroboros.orchestrator.runner.build_system_prompt", return_value="system"),
+            patch.object(
+                runner,
+                "_get_merged_tools",
+                AsyncMock(return_value=([], None, tool_catalog)),
+            ),
+            patch.object(
+                runner,
+                "_bind_execution_tool_authority",
+                return_value=(tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY], False),
+            ),
+            patch.object(
+                runner,
+                "_report_frugality_retrospective",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            first = await runner._execute_parallel(
+                seed=seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=[],
+                tool_catalog=tool_catalog,
+                system_prompt="system",
+                start_time=tracker.start_time,
+                execution_contract=tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+            )
+            assert first.is_ok and first.value.success is False
+
+            paused_tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+                {
+                    "routing_resume_owner": "parallel",
+                    "routing_parallel_force_sequential": False,
+                    "routing_parallel_plan": runner._serialize_parallel_resume_plan(
+                        graph.to_execution_plan()
+                    ),
+                    "routing_parallel_externally_satisfied_acs": {},
+                }
+            )
+            direct_resume = AsyncMock(side_effect=AssertionError("direct owner entered"))
+            parallel_resume = AsyncMock(
+                return_value=Result.ok(
+                    OrchestratorResult(
+                        success=True,
+                        session_id=paused_tracker.session_id,
+                        execution_id=paused_tracker.execution_id,
+                        summary={},
+                        messages_processed=0,
+                        final_message="parallel owner resumed",
+                        duration_seconds=0.0,
+                    )
+                )
+            )
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(paused_tracker)),
+                ),
+                patch.object(runner, "_direct_resume_route_id", direct_resume),
+                patch.object(runner, "_execute_parallel", parallel_resume),
+            ):
+                resumed = await runner.resume_session(paused_tracker.session_id, seed)
+
+        assert resumed.is_ok and resumed.value.success is True
+        assert models == (["sonnet-x", "opus-x"] if failure_before_pause else ["sonnet-x"])
+        direct_resume.assert_not_awaited()
+        parallel_resume.assert_awaited_once()
+        restored_plan = parallel_resume.await_args.kwargs["resume_execution_plan"]
+        assert tuple(node.index for node in restored_plan.nodes) == (0,)
+        assert tuple(stage.ac_indices for stage in restored_plan.stages) == ((0,),)
+        assert analyze.await_count == 1
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_parallel_resume_restores_externally_satisfied_partial_stage_state(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        seed = sample_seed.model_copy(
+            update={
+                "acceptance_criteria": (
+                    sample_seed.acceptance_criteria[0],
+                    AcceptanceCriterionSpec(description="paused sibling"),
+                )
+            }
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        tracker = SessionTracker.create(
+            "execution-external-resume",
+            seed.metadata.seed_id,
+            session_id="session-external-resume",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=ac_texts(seed)[0]),
+                ACNode(index=1, content=ac_texts(seed)[1]),
+            ),
+            execution_levels=((0, 1),),
+        )
+        external = {0: {"reason": "already verified", "commit": "abc123"}}
+        paused_tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+            {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": False,
+                "routing_parallel_plan": runner._serialize_parallel_resume_plan(
+                    graph.to_execution_plan()
+                ),
+                "routing_parallel_externally_satisfied_acs": (
+                    runner._serialize_parallel_external_satisfaction(seed, external)
+                ),
+            }
+        )
+        parallel_resume = AsyncMock(
+            return_value=Result.ok(
+                OrchestratorResult(
+                    success=True,
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    summary={},
+                    messages_processed=0,
+                    final_message="resumed",
+                    duration_seconds=0.0,
+                )
+            )
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(runner, "_execute_parallel", parallel_resume),
+        ):
+            result = await runner.resume_session(paused_tracker.session_id, seed)
+
+        assert result.is_ok
+        assert parallel_resume.await_args.kwargs["externally_satisfied_acs"] == external
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="route-paused",
+        )
+        paused_tracker = SessionTracker.create(
+            "execution-route-resume",
+            sample_seed.metadata.seed_id,
+            session_id="session-route-resume",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = paused_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="session-route-resume",
+        )
+        captured_handles: list[RuntimeHandle | None] = []
+        captured_models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            captured_handles.append(kwargs.get("resume_handle"))
+            captured_models.append(kwargs["model"])
+            yield AgentMessage(
+                type="result",
+                content="Resumed successfully",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        paused_candidate = next(
+            candidate
+            for candidate in projection.registry.candidates
+            if candidate.route_id == "compat:claude:standard"
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id="execution-route-resume",
+            data={
+                "schema_version": 1,
+                "execution_id": "execution-route-resume",
+                "session_id": "session-route-resume",
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": (
+                    "route:" + hashlib.sha256(b"execution-route-resume\0direct").hexdigest()
+                ),
+                "attempt_index": 0,
+                "prior_route_ids": [],
+                "route": paused_candidate.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [pause_event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("session-route-resume", sample_seed)
+
+        assert result.is_ok and result.value.success is True
+        assert len(captured_handles) == 1
+        assert captured_handles[0] is not None
+        assert captured_handles[0].native_session_id == "route-paused"
+        assert captured_models == ["sonnet-x"]
+        resumed_observations = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert len(resumed_observations) == 1
+        assert (
+            resumed_observations[0].data["observation"]["verifier_outcome"] == "attempt_succeeded"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("scenario", "expected_calls"),
+        [
+            ("initial_handleless_pause", 1),
+            ("successor_handleless_pause", 2),
+            ("pause_handle_persistence_failure", 1),
+            ("hard_block", 1),
+        ],
+    )
+    async def test_live_direct_nonreplayable_boundaries_finalize_blocked_without_pause(
+        self,
+        scenario: str,
+        expected_calls: int,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Any,
+    ) -> None:
+        """Every non-replayable direct boundary converges to one durable handoff."""
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'{scenario}.db'}")
+        await store.initialize()
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        provider_calls: list[dict[str, Any]] = []
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            provider_calls.append(dict(kwargs))
+            if scenario == "successor_handleless_pause" and len(provider_calls) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="evidence missing",
+                    data={"subtype": "error"},
+                )
+                return
+            if scenario == "hard_block":
+                yield AgentMessage(
+                    type="result",
+                    content="Permission denied by the host runtime.",
+                    data={"subtype": "error", "error_type": "PermissionError"},
+                )
+                return
+            if scenario == "pause_handle_persistence_failure":
+                yield AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="unpersisted-direct-pause",
+                        cwd=str(tmp_path),
+                    ),
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+            )
+
+        mock_adapter.execute_task = execute_task
+        execution_id = f"execution-{scenario}"
+        session_id = f"session-{scenario}"
+        original_track_progress = runner._session_repo.track_progress
+
+        async def track_progress(
+            tracked_session_id: str,
+            progress: dict[str, Any],
+        ) -> Any:
+            runtime = progress.get("runtime")
+            if (
+                scenario == "pause_handle_persistence_failure"
+                and isinstance(runtime, dict)
+                and runtime.get("native_session_id") == "unpersisted-direct-pause"
+            ):
+                return Result.err(PersistenceError("runtime progress unavailable"))
+            return await original_track_progress(tracked_session_id, progress)
+
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "track_progress",
+                    side_effect=track_progress,
+                ),
+                patch.object(
+                    runner,
+                    "_report_frugality_retrospective",
+                    AsyncMock(return_value=False),
+                ),
+            ):
+                result = await runner.execute_seed(
+                    seed,
+                    parallel=False,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                )
+
+            assert result.is_ok and result.value.success is False
+            assert len(provider_calls) == expected_calls
+            pause_events = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.route_paused",
+                limit=4,
+            )
+            assert pause_events == []
+            session = await runner._session_repo.reconstruct_session(session_id)
+            assert session.is_ok and session.value.status is SessionStatus.FAILED
+
+            finalizations = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.acceptance_finalized",
+                limit=3,
+            )
+            assert len(finalizations) == 1
+            assert finalizations[0].data["outcome"] == "blocked"
+            assert finalizations[0].data["disposition"] == "blocked"
+            assert finalizations[0].data["accepted"] is False
+
+            resumed = await runner.resume_session(session_id, seed)
+            assert resumed.is_err
+            assert len(provider_calls) == expected_calls
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_live_direct_pause_transfers_runtime_handle_without_termination(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Any,
+    ) -> None:
+        """A durable PAUSED owner keeps the exact live provider boundary intact."""
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'direct-live-pause.db'}")
+        await store.initialize()
+        seed = sample_seed.model_copy(
+            update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
+        )
+        runner = OrchestratorRunner(
+            mock_adapter,
+            store,
+            mock_console,
+            enable_decomposition=False,
+        )
+        runner._run_verify_commands = False
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        terminate_calls = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="durable-live-pause",
+            cwd=str(tmp_path),
+        ).bind_controls(terminate_callback=terminate)
+
+        async def execute_task(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=live_handle,
+            )
+
+        mock_adapter.execute_task = execute_task
+        execution_id = "execution-direct-live-pause"
+        session_id = "session-direct-live-pause"
+        try:
+            result = await runner.execute_seed(
+                seed,
+                parallel=False,
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+            assert result.is_ok and result.value.success is False
+            assert terminate_calls == 0
+            session = await runner._session_repo.reconstruct_session(session_id)
+            assert session.is_ok and session.value.status is SessionStatus.PAUSED
+            pauses = await store.query_execution_related_events(
+                execution_id,
+                event_type="execution.ac.route_paused",
+                limit=2,
+            )
+            assert len(pauses) == 1
+        finally:
+            runner._retire_process_local_authority(
+                session_id=session_id,
+                execution_id=execution_id,
+            )
+            runner._unregister_session(execution_id, session_id)
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_resumed_short_turn_cancellation_never_dispatches_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """The resumed-route stream shares the same post-stream cancellation gate."""
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="route-resumed-cancel",
+        )
+        paused_tracker = SessionTracker.create(
+            "execution-route-resume-cancel",
+            sample_seed.metadata.seed_id,
+            session_id="session-route-resume-cancel",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = paused_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id=paused_tracker.session_id,
+        )
+        models: list[str] = []
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            await request_cancellation(
+                paused_tracker.session_id,
+                reason="cancel resumed short turn",
+                cancelled_by="test",
+            )
+            yield AgentMessage(
+                type="result",
+                content="resumed route failed after cancellation",
+                data={"subtype": "error"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = execute_task
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        paused_candidate = next(
+            candidate
+            for candidate in projection.registry.candidates
+            if candidate.route_id == "compat:claude:standard"
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id=paused_tracker.execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": paused_tracker.execution_id,
+                "session_id": paused_tracker.session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": (
+                    "route:"
+                    + hashlib.sha256(f"{paused_tracker.execution_id}\0direct".encode()).hexdigest()
+                ),
+                "attempt_index": 0,
+                "prior_route_ids": [],
+                "route": paused_candidate.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [pause_event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        mock_event_store.query_events = AsyncMock(return_value=[])
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(paused_tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_cancelled",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+            ):
+                result = await runner.resume_session(paused_tracker.session_id, sample_seed)
+        finally:
+            await clear_cancellation(paused_tracker.session_id)
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x"]
+        observations = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert observations == []
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_resumed_failure_escalates_then_seals_success(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="route-resumed-standard",
+        )
+        paused_tracker = SessionTracker.create(
+            "execution-route-resume-failure",
+            sample_seed.metadata.seed_id,
+            session_id="session-route-resume-failure",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = paused_tracker.with_progress({"runtime": runtime_handle.to_dict()})
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id=paused_tracker.session_id,
+        )
+        models: list[str] = []
+        handles: list[RuntimeHandle | None] = []
+        prompts: list[str] = []
+
+        execution_contract = paused_tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+        persisted_strategy = runner._execution_strategy_snapshot(
+            execution_contract,
+            require_bound=False,
+        )
+        persisted_suffix = persisted_strategy.get_task_prompt_suffix()
+
+        from ouroboros.orchestrator import execution_strategy
+        from ouroboros.orchestrator.execution_strategy import CodeStrategy
+
+        class DriftedCodeStrategy(CodeStrategy):
+            def get_task_prompt_suffix(self) -> str:
+                return "MUTATED LIVE REGISTRY SUFFIX"
+
+        monkeypatch.setitem(execution_strategy._STRATEGY_REGISTRY, "code", DriftedCodeStrategy())
+
+        async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            handles.append(kwargs.get("resume_handle"))
+            prompts.append(kwargs["prompt"])
+            if len(models) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="resumed route still lacks evidence",
+                    data={"subtype": "error"},
+                    resume_handle=runtime_handle,
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="frontier successor succeeded",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = execute_task
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        paused_candidate = next(
+            candidate
+            for candidate in projection.registry.candidates
+            if candidate.route_id == "compat:claude:standard"
+        )
+        episode_id = (
+            "route:" + hashlib.sha256(b"execution-route-resume-failure\0direct").hexdigest()
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id=paused_tracker.execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": paused_tracker.execution_id,
+                "session_id": paused_tracker.session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": episode_id,
+                "attempt_index": 0,
+                "prior_route_ids": [],
+                "route": paused_candidate.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            return [pause_event] if kwargs.get("event_type") == "execution.ac.route_paused" else []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session(paused_tracker.session_id, sample_seed)
+
+        assert result.is_ok and result.value.success is True
+        assert models == ["sonnet-x", "opus-x"]
+        assert handles[0] is not None
+        assert handles[0].native_session_id == runtime_handle.native_session_id
+        assert handles[1] is None
+        assert len(prompts) == 2
+        assert all(persisted_suffix in prompt for prompt in prompts)
+        assert all("MUTATED LIVE REGISTRY SUFFIX" not in prompt for prompt in prompts)
+        observations = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        assert [event.data["observation"]["verifier_outcome"] for event in observations] == [
+            "failed",
+            "attempt_succeeded",
+        ]
+        assert observations[0].data["decision"]["selected_route"]["route_id"] == (
+            "compat:claude:frontier"
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_pause_after_escalation_resumes_exact_successor_route(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        models: list[str] = []
+
+        async def mock_execute(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            models.append(kwargs["model"])
+            if len(models) == 1:
+                yield AgentMessage(
+                    type="result",
+                    content="evidence missing",
+                    data={"subtype": "error"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="route-frugal",
+                    ),
+                )
+                return
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="route-standard-paused",
+                ),
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*_args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_paused",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+        ):
+            result = await runner.execute_seed(
+                sample_seed,
+                parallel=False,
+                execution_id="execution-route-escalated-pause",
+                session_id="session-route-escalated-pause",
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert models == ["sonnet-x", "opus-x"]
+        route_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_observed"
+        ]
+        pause_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.route_paused"
+        ]
+        assert len(route_events) == len(pause_events) == 1
+        assert pause_events[0].data["prior_route_ids"] == ["compat:claude:standard"]
+
+        async def query_route_state(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            if kwargs.get("event_type") == "execution.ac.route_observed":
+                return route_events
+            if kwargs.get("event_type") == "execution.ac.route_paused":
+                return pause_events
+            return []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query_route_state)
+        resume_state = await runner._direct_resume_route_id(
+            execution_id="execution-route-escalated-pause",
+            session_id="session-route-escalated-pause",
+        )
+        assert resume_state is not None
+        assert resume_state.candidate.route_id == "compat:claude:frontier"
+        runner._retire_process_local_authority(
+            session_id="session-route-escalated-pause",
+            execution_id="execution-route-escalated-pause",
+        )
+
+    @pytest.mark.asyncio
+    async def test_valid_65_direct_pauses_replay_without_a_total_cap(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+        tmp_path: Any,
+    ) -> None:
+        from ouroboros.orchestrator.route_compat import (
+            admit_compat_escalation_route,
+            build_route_compat_projection,
+        )
+
+        execution_id = "execution-direct-pause-population"
+        session_id = "session-direct-pause-population"
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'direct-pause-population.db'}")
+        await store.initialize()
+        runner = OrchestratorRunner(mock_adapter, store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        initial = admit_compat_escalation_route(projection, effort=None)
+        assert initial.selected is not None
+        episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        pauses = [
+            BaseEvent(
+                type="execution.ac.route_paused",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "episode_id": episode_id,
+                    "attempt_index": 0,
+                    "prior_route_ids": [],
+                    "route": initial.selected.to_contract_data(),
+                    "recoverable_pause": True,
+                    "final_acceptance_declared": False,
+                },
+            )
+            for _pause_number in range(65)
+        ]
+        try:
+            await store.append_batch(pauses)
+            state = await runner._direct_resume_route_id(
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+            assert state is not None
+            assert state.candidate == initial.selected
+            assert state.attempt_index == 0
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_direct_pause_rejects_effort_drift_from_durable_successor(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        from dataclasses import replace
+        import hashlib
+
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationReason,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        execution_id = "execution-direct-effort-drift"
+        session_id = "session-direct-effort-drift"
+        episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+            effort="low",
+        )
+        assert projection is not None
+        requirements = build_compat_escalation_requirements(projection, effort="low")
+        assert requirements is not None
+        current = projection.registry.candidates[0]
+        observation = RouteObservation.from_candidate(
+            current,
+            RouteRequirements(required_capabilities=requirements.required_capabilities),
+            episode_id=episode_id,
+            attempt_index=0,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.CLASSIFIED_FAILURE,
+        )
+        decision = advance_route(
+            projection.registry,
+            requirements,
+            current_route_id=current.route_id,
+            attempted_route_ids=(current.route_id,),
+            failure_class=FailureClass.EVIDENCE_MISSING,
+        )
+        assert decision.selected is not None
+        drifted_pause = replace(decision.selected, effort="high")
+        observation_event = BaseEvent(
+            type="execution.ac.route_observed",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "observation": observation.to_contract_data(),
+                "decision": decision.to_contract_data(),
+                "human_handoff_required": False,
+                "final_acceptance_declared": False,
+            },
+        )
+        pause_event = BaseEvent(
+            type="execution.ac.route_paused",
+            aggregate_type="execution",
+            aggregate_id=execution_id,
+            data={
+                "schema_version": 1,
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "root_ac_index": None,
+                "call_site": "runner",
+                "episode_id": episode_id,
+                "attempt_index": 1,
+                "prior_route_ids": [current.route_id],
+                "route": drifted_pause.to_contract_data(),
+                "recoverable_pause": True,
+                "final_acceptance_declared": False,
+            },
+        )
+
+        async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            if kwargs.get("event_type") == "execution.ac.route_observed":
+                return [observation_event]
+            if kwargs.get("event_type") == "execution.ac.route_paused":
+                return [pause_event]
+            return []
+
+        mock_event_store.query_execution_related_events = AsyncMock(side_effect=query)
+        with pytest.raises(OrchestratorError, match="drifted direct route pause"):
+            await runner._direct_resume_route_id(
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_resume_refuses_blocked_route_replay(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        import hashlib
+
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationAction,
+            EscalationReason,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
+
+        candidate = RouteCandidate(
+            route_id="compat:claude:frontier",
+            model="opus-x",
+            harness="claude",
+            effort=None,
+            cost_units=30,
+            persona="default",
+            tool_policy="default",
+            authority_identity="runtime:claude",
+            ordinal=2,
+        )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id=("route:" + hashlib.sha256(b"execution-1\0direct").hexdigest()),
+            attempt_index=2,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.ROUTES_EXHAUSTED,
+        )
+        decision = RouteEscalationDecision(
+            action=EscalationAction.BLOCKED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            selected=None,
+            attempted_route_ids=(
+                "compat:claude:frugal",
+                "compat:claude:standard",
+                "compat:claude:frontier",
+            ),
+            remaining_route_ids=(),
+            reason=EscalationReason.ROUTES_EXHAUSTED,
+        )
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": decision.to_contract_data(),
+                    "human_handoff_required": True,
+                    "final_acceptance_declared": False,
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="human handoff"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call_site", ["parallel", None])
+    async def test_direct_resume_rejects_non_runner_route_evidence(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+        call_site: str | None,
+    ) -> None:
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": 0,
+                    "call_site": call_site,
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="another call site"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
+
+    @pytest.mark.asyncio
+    async def test_direct_resume_rejects_unknown_observation_envelope_field(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_escalation import (
+            EscalationReason,
+            RouteObservation,
+            VerifierOutcome,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
+
+        candidate = RouteCandidate(
+            route_id="compat:claude:frugal",
+            model="haiku-x",
+            harness="claude",
+            effort=None,
+            cost_units=1,
+            persona="default",
+            tool_policy="default",
+            authority_identity="runtime:claude",
+        )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            RouteRequirements(),
+            episode_id=("route:" + hashlib.sha256(b"execution-1\0direct").hexdigest()),
+            attempt_index=0,
+            verifier_outcome=VerifierOutcome.FAILED,
+            failure_class=FailureClass.EVIDENCE_MISSING,
+            escalation_reason=EscalationReason.CLASSIFIED_FAILURE,
+        )
+        mock_event_store.query_execution_related_events.return_value = [
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id="execution-1",
+                data={
+                    "schema_version": 1,
+                    "execution_id": "execution-1",
+                    "session_id": "session-1",
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": None,
+                    "human_handoff_required": False,
+                    "final_acceptance_declared": False,
+                    "unknown_terminal_semantics": "accepted",
+                },
+            )
+        ]
+
+        with pytest.raises(OrchestratorError, match="invalid direct route observation envelope"):
+            await runner._direct_resume_route_id(
+                execution_id="execution-1",
+                session_id="session-1",
+            )
 
     @pytest.mark.asyncio
     async def test_prepare_session_forwards_seed_goal(
@@ -1522,6 +3585,195 @@ class TestOrchestratorRunner:
         retrospective.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_execute_precreated_rejects_changed_seed_goal_before_effects(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Caller Seed mutations must fail before prompts, tools, or providers run."""
+        tracker = SessionTracker.create(
+            "exec_precreated_seed_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_seed_drift",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        changed_seed = sample_seed.model_copy(update={"goal": f"{sample_seed.goal} changed"})
+        provider = MagicMock(side_effect=AssertionError("provider must not run"))
+        get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
+        execute_parallel = AsyncMock(side_effect=AssertionError("parallel executor must not run"))
+        persist_failure = AsyncMock(return_value=(None, None))
+        mock_adapter.execute_task = provider
+
+        try:
+            with (
+                patch(
+                    "ouroboros.orchestrator.runner.build_system_prompt",
+                    MagicMock(side_effect=AssertionError("system prompt must not be built")),
+                ) as system_prompt,
+                patch(
+                    "ouroboros.orchestrator.runner.build_task_prompt",
+                    MagicMock(side_effect=AssertionError("task prompt must not be built")),
+                ) as task_prompt,
+                patch.object(runner, "_get_merged_tools", get_tools),
+                patch.object(runner, "_execute_parallel", execute_parallel),
+                patch.object(runner, "_persist_failure_and_cleanup", persist_failure),
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=changed_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result.is_err
+            assert result.error.message == "Cannot resume with a modified Seed"
+            system_prompt.assert_not_called()
+            task_prompt.assert_not_called()
+            get_tools.assert_not_awaited()
+            execute_parallel.assert_not_awaited()
+            provider.assert_not_called()
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_precreated_rejects_stale_nested_input_proof_before_effects(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Valid nested input mutations need a matching durable fingerprint."""
+        tracker = SessionTracker.create(
+            "exec_precreated_input_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_input_drift",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        stale_contract = copy.deepcopy(tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+        stale_contract["execution_inputs"]["strategy"]["task_prompt_suffix"] += (
+            "\nPreserve this mutated but otherwise valid suffix."
+        )
+        assert stale_contract["frugality_proof"][
+            "execution_inputs_fingerprint"
+        ] != runner._execution_inputs_fingerprint(stale_contract["execution_inputs"])
+        tracker = tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: stale_contract})
+        provider = MagicMock(side_effect=AssertionError("provider must not run"))
+        get_tools = AsyncMock(side_effect=AssertionError("tool setup must not run"))
+        execute_parallel = AsyncMock(side_effect=AssertionError("parallel executor must not run"))
+        persist_failure = AsyncMock(return_value=(None, None))
+        mock_adapter.execute_task = provider
+
+        try:
+            with (
+                patch(
+                    "ouroboros.orchestrator.runner.build_system_prompt",
+                    MagicMock(side_effect=AssertionError("system prompt must not be built")),
+                ) as system_prompt,
+                patch(
+                    "ouroboros.orchestrator.runner.build_task_prompt",
+                    MagicMock(side_effect=AssertionError("task prompt must not be built")),
+                ) as task_prompt,
+                patch.object(runner, "_get_merged_tools", get_tools),
+                patch.object(runner, "_execute_parallel", execute_parallel),
+                patch.object(runner, "_persist_failure_and_cleanup", persist_failure),
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=sample_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result.is_err
+            assert (
+                result.error.message
+                == "Caller-supplied execution contract does not match the persisted prepared contract"
+            )
+            assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+            system_prompt.assert_not_called()
+            task_prompt.assert_not_called()
+            get_tools.assert_not_awaited()
+            execute_parallel.assert_not_awaited()
+            provider.assert_not_called()
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_execute_precreated_preserves_exact_prepared_state_success(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """The exact prepared v9 state still reaches the existing execution path."""
+        tracker = SessionTracker.create(
+            "exec_precreated_exact",
+            sample_seed.metadata.seed_id,
+            session_id="sess_precreated_exact",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        expected = Result.ok(
+            OrchestratorResult(
+                success=True,
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+        )
+
+        try:
+            with (
+                patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
+                patch.object(
+                    runner,
+                    "_restore_execution_contract_snapshot",
+                    wraps=runner._restore_execution_contract_snapshot,
+                ) as restore_contract,
+                patch.object(
+                    runner, "_execute_parallel", AsyncMock(return_value=expected)
+                ) as execute,
+            ):
+                result = await runner.execute_precreated_session(
+                    seed=sample_seed,
+                    tracker=tracker,
+                    parallel=True,
+                )
+
+            assert result is expected
+            assert (
+                execute.await_args.kwargs["execution_contract"]
+                == tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+            )
+            assert restore_contract.call_count == 2
+            assert all(
+                call.kwargs["prepared_live_execution"] is True
+                for call in restore_contract.call_args_list
+            )
+        finally:
+            runner._retire_process_local_authority(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+            )
+
+    @pytest.mark.asyncio
     async def test_execute_precreated_pause_persistence_failure_preserves_owner(
         self,
         runner: OrchestratorRunner,
@@ -1765,6 +4017,7 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
         tracker = SessionTracker.create(
             "exec_setup",
             sample_seed.metadata.seed_id,
@@ -1822,6 +4075,7 @@ class TestOrchestratorRunner:
             task_workspace=_task_workspace(),
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
         tracker = SessionTracker.create(
             "exec_tools",
             sample_seed.metadata.seed_id,
@@ -2103,7 +4357,17 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_recoverable",
         )
-        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+        terminate_calls = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            native_session_id="thread-123",
+        ).bind_controls(terminate_callback=terminate)
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -2147,6 +4411,7 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is False
         assert result.value.final_message == "Codex rejected the resume command"
+        assert terminate_calls == 0
         mark_paused.assert_awaited_once()
         mark_failed.assert_not_called()
         retrospective.assert_not_awaited()
@@ -2409,12 +4674,42 @@ class TestOrchestratorRunner:
             data={"subtype": "error", "error_type": "CodexCliError"},
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_kind == "usage_limit"
         assert pause.pause_seconds == 18000
         assert pause.resume_after == now + timedelta(hours=5)
+
+    def test_recoverable_failure_bounds_deep_plain_metadata_before_resume_retry(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """The runner must not recurse through a provider-controlled envelope."""
+        data: dict[str, object] = {"subtype": "error"}
+        cursor = data
+        for _ in range(1_200):
+            nested: dict[str, object] = {}
+            cursor["error"] = nested
+            cursor = nested
+        message = AgentMessage(
+            type="result",
+            content="Provider returned malformed nested metadata",
+            data=data,
+        )
+
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            default_pause_seconds=18_000,
+        )
+
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
 
     def test_recoverable_failure_detects_hermes_usage_limit_exit(
         self,
@@ -2436,7 +4731,11 @@ class TestOrchestratorRunner:
             data=classify_subprocess_failure(failure_text, exit_code=1),
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_kind == "usage_limit"
@@ -2498,7 +4797,11 @@ class TestOrchestratorRunner:
             data={"subtype": "error", "error_type": "CodexCliError"},
         )
 
-        pause = runner._recoverable_failure_pause(message, now=now)
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
 
         assert pause is not None
         assert pause.pause_seconds == 5400
@@ -2525,13 +4828,79 @@ class TestOrchestratorRunner:
 
         assert OrchestratorRunner._duration_from_metadata(metadata, now=now) == expected_seconds
 
-    def test_recoverable_failure_propagates_invalid_usage_limit_config(
+    @pytest.mark.parametrize(
+        "retry_after",
+        [
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            "inf",
+            "-inf",
+            "nan",
+            f"{'9' * 400} hours",
+        ],
+    )
+    def test_recoverable_failure_ignores_non_finite_retry_metadata(
+        self,
+        retry_after: object,
+    ) -> None:
+        """Untrusted retry metadata must keep quota classification non-throwing."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_seconds": retry_after},
+                now=now,
+            )
+            is None
+        )
+
+    def test_recoverable_failure_handles_huge_integer_retry_metadata(
         self,
         runner: OrchestratorRunner,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Invalid pause-window config should not be hidden by a fallback."""
-        monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "invalid")
+        huge_retry = 10**1000
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_seconds": huge_retry},
+                now=now,
+            )
+            == huge_retry
+        )
+        assert (
+            OrchestratorRunner._duration_from_metadata(
+                {"retry_after_ms": huge_retry},
+                now=now,
+            )
+            == (huge_retry + 999) // 1000
+        )
+
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached.",
+            data={
+                "subtype": "error",
+                "error_type": "UsageLimitError",
+                "retry_after_seconds": huge_retry,
+            },
+        )
+        pause = runner._recoverable_failure_pause(
+            message,
+            now=now,
+            default_pause_seconds=18_000,
+        )
+
+        assert pause is not None
+        assert pause.pause_seconds == 18000
+        assert pause.resume_after == now + timedelta(hours=5)
+
+    def test_recoverable_failure_requires_durable_usage_limit_policy(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Pause construction cannot reread a live fallback after provider effect."""
         message = AgentMessage(
             type="result",
             content="Usage limit reached. Please try again later.",
@@ -2573,6 +4942,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -2616,6 +4986,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -2663,9 +5034,57 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is None
+
+    def test_bounded_route_pause_preserves_mixed_failure_round_for_resume(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """A typed route pause owns the round even with a pending sibling route."""
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        usage_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        ordinary_message = AgentMessage(
+            type="result",
+            content="Tests failed: expected 2 rows, got 1.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Patch the runner",
+                    success=False,
+                    messages=(usage_message,),
+                    outcome=ACExecutionOutcome.BLOCKED,
+                ),
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="Patch the tests",
+                    success=False,
+                    messages=(ordinary_message,),
+                ),
+            ),
+            success_count=0,
+            failure_count=2,
+            recoverable_route_pause=True,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+            require_all_failures_recoverable=False,
+            default_pause_seconds=18_000,
+        )
+
+        assert pause is not None
+        assert pause.resume_after == now + timedelta(hours=5)
 
     def test_parallel_result_uses_latest_recoverable_resume_after(
         self,
@@ -2708,6 +5127,7 @@ class TestOrchestratorRunner:
         pause = runner._recoverable_failure_pause_from_parallel_result(
             parallel_result,
             now=now,
+            default_pause_seconds=18_000,
         )
 
         assert pause is not None
@@ -2802,6 +5222,413 @@ class TestOrchestratorRunner:
                 execution_id=tracker.execution_id,
             )
             runner._unregister_session(tracker.execution_id, tracker.session_id)
+
+    @pytest.mark.asyncio
+    async def test_parallel_owner_publication_failure_prevents_executor_effects(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """One pre-await Routing D snapshot owns executor and owner publication."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_first",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_first",
+        )
+        _enable_direct_bounded_routes(runner, runner._adapter)
+
+        async def drift_capability_after_snapshot(*_args: Any, **_kwargs: Any) -> bool:
+            runner._adapter.capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.IGNORED,
+            )
+            return False
+
+        execute_parallel = AsyncMock(
+            side_effect=AssertionError("parallel executor entered before owner publication")
+        )
+        with (
+            patch.object(
+                runner,
+                "_check_cancellation",
+                AsyncMock(side_effect=drift_capability_after_snapshot),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                execute_parallel,
+            ),
+            patch.object(
+                runner._session_repo,
+                "track_progress",
+                AsyncMock(return_value=Result.err(PersistenceError("owner store unavailable"))),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                force_sequential_levels=True,
+            )
+
+        assert result.is_err
+        assert result.error.message == "Failed to persist the parallel Routing D resume owner"
+        execute_parallel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "lost_prerequisite",
+        ["model_router", "route_economics", "model_enforcement", "durable_depth"],
+    )
+    async def test_persisted_parallel_owner_rejects_lost_model_enforcement_before_executor(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+        lost_prerequisite: str,
+    ) -> None:
+        """The owner marker closes every pre-first-route-event activation gap."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        _enable_direct_bounded_routes(runner, runner._adapter)
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_capability_loss",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_capability_loss",
+        ).with_progress({"routing_resume_owner": "parallel"})
+        if lost_prerequisite == "model_router":
+            runner._model_router = None
+        elif lost_prerequisite == "route_economics":
+            runner._route_economics = None
+        elif lost_prerequisite == "model_enforcement":
+            runner._adapter.capabilities = RuntimeCapabilities(
+                skill_dispatch=True,
+                targeted_resume=True,
+                structured_output=True,
+                model_override_support=ParamSupport.IGNORED,
+            )
+        else:
+            runner._max_decomposition_depth = MAX_DECOMPOSITION_DEPTH + 1
+        assert runner._bounded_route_runtime_active() is False
+        executor_cls = MagicMock(
+            side_effect=AssertionError("parallel executor entered without model enforcement")
+        )
+        analyzer = MagicMock()
+        analyzer.analyze = AsyncMock(
+            side_effect=AssertionError("dependency analyzer entered before owner enforcement")
+        )
+        runner._build_dependency_analyzer = MagicMock(return_value=analyzer)  # type: ignore[method-assign]
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+            executor_cls,
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "routing_enforcement_unavailable"
+        assert result.error.details["retryable"] is True
+        analyzer.analyze.assert_not_awaited()
+        executor_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parallel_dispatch_rejects_post_restore_execution_semantics_drift(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """The invocation snapshot stays authoritative after restore returns."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_semantics_drift",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_semantics_drift",
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        runner._run_verify_commands = not runner._run_verify_commands
+        analyzer = MagicMock()
+        analyzer.analyze = AsyncMock(
+            side_effect=AssertionError("dependency analyzer entered after semantics drift")
+        )
+        runner._build_dependency_analyzer = MagicMock(return_value=analyzer)  # type: ignore[method-assign]
+        executor_cls = MagicMock(
+            side_effect=AssertionError("parallel executor entered after semantics drift")
+        )
+
+        with patch(
+            "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+            executor_cls,
+        ):
+            with pytest.raises(OrchestratorError, match="execution semantics drifted"):
+                await runner._execute_parallel(
+                    seed=sample_seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=["Read"],
+                    tool_catalog=assemble_session_tool_catalog(["Read"]),
+                    system_prompt="system",
+                    start_time=tracker.start_time,
+                    execution_contract=execution_contract,
+                )
+
+        analyzer.analyze.assert_not_awaited()
+        executor_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_direct_provider_entry_rejects_post_restore_runtime_capability_drift(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+    ) -> None:
+        """The provider choke point rechecks the full durable capability vocabulary."""
+        _enable_direct_bounded_routes(runner, mock_adapter)
+        runner._reasoning_effort = "high"
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.NATIVE,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        )
+        expected = runner._execution_semantics_contract()["runtime_effect_capabilities"]
+        assert isinstance(expected, dict)
+
+        mock_adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            reasoning_effort_support=ParamSupport.IGNORED,
+            enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
+            model_override_support=ParamSupport.NATIVE,
+        )
+
+        with pytest.raises(OrchestratorError, match="capabilities drifted before dispatch"):
+            await runner._route_call_effort(
+                execution_id="execution-capability-drift",
+                session_id="session-capability-drift",
+                bounded_escalation=True,
+                expected_runtime_effect_capabilities=expected,
+            )
+
+    @pytest.mark.asyncio
+    async def test_parallel_dispatch_consumes_resolved_worker_and_rate_snapshot(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """No live backend-limit reread may replace the persisted executor inputs."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "exec_parallel_resolved_limits",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_resolved_limits",
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        semantics = execution_contract["execution_semantics"]
+        executor_cls = MagicMock()
+        cancellation_result = Result.err(
+            OrchestratorError(message="cancelled after constructor inspection")
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                executor_cls,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=True)),
+            patch.object(
+                runner,
+                "_handle_cancellation",
+                AsyncMock(return_value=cancellation_result),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                execution_contract=execution_contract,
+                force_sequential_levels=True,
+            )
+
+        assert result is cancellation_result
+        kwargs = executor_cls.call_args.kwargs
+        assert kwargs["max_concurrent"] == semantics["effective_parallel_workers"]
+        assert (
+            kwargs["resolved_self_governs_rate_limit"]
+            is semantics["backend_self_governs_rate_limit"]
+        )
+        limits = kwargs["resolved_backend_limits"]
+        assert limits.backend == semantics["backend_limits_backend"]
+        assert limits.max_concurrency == semantics["backend_max_concurrency"]
+        assert limits.requests_per_minute == semantics["backend_requests_per_minute"]
+        assert limits.tokens_per_minute == semantics["backend_tokens_per_minute"]
+
+    @pytest.mark.asyncio
+    async def test_resume_session_enforces_owner_marker_before_provider_when_capability_is_lost(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Production resume dispatch cannot fall through during the empty-event crash window."""
+
+        _enable_direct_bounded_routes(runner, runner._adapter)
+        tracker = SessionTracker.create(
+            "exec_parallel_owner_resume_capability_loss",
+            sample_seed.metadata.seed_id,
+            session_id="sess_parallel_owner_resume_capability_loss",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=criterion)
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=tuple(
+                (index,) for index in range(len(sample_seed.acceptance_criteria))
+            ),
+        )
+        tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+            {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": False,
+                "routing_parallel_plan": runner._serialize_parallel_resume_plan(
+                    graph.to_execution_plan()
+                ),
+                "routing_parallel_externally_satisfied_acs": {},
+            }
+        )
+        runner._adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        provider = MagicMock(side_effect=AssertionError("provider entered after capability loss"))
+        runner._adapter.execute_task = provider
+
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(tracker)),
+        ):
+            result = await runner.resume_session(tracker.session_id, sample_seed)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "runtime_effect_capability_drift"
+        assert result.error.details["retryable"] is True
+        provider.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("compatibility_mode", ["routing_dormant", "depth_above_durable"])
+    async def test_legacy_parallel_pause_does_not_publish_routing_d_resume_owner(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+        compatibility_mode: str,
+    ) -> None:
+        """Dormant Routing D cannot claim replay authority for legacy stages."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        if compatibility_mode == "routing_dormant":
+            runner._model_router = None
+        else:
+            runner._max_decomposition_depth = MAX_DECOMPOSITION_DEPTH + 1
+        tracker = SessionTracker.create(
+            "exec_legacy_parallel_pause",
+            sample_seed.metadata.seed_id,
+            session_id="sess_legacy_parallel_pause",
+        )
+        graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=criterion)
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=tuple(
+                (index,) for index in range(len(sample_seed.acceptance_criteria))
+            ),
+        )
+        quota_message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Retry after 2 hours.",
+            data={"subtype": "error", "error_type": "UsageLimitError"},
+        )
+        legacy_pause = ParallelExecutionResult(
+            results=tuple(
+                ACExecutionResult(
+                    ac_index=index,
+                    ac_content=criterion,
+                    success=False,
+                    messages=(quota_message,),
+                    final_message=quota_message.content,
+                )
+                for index, criterion in enumerate(sample_seed.acceptance_criteria)
+            ),
+            success_count=0,
+            failure_count=len(sample_seed.acceptance_criteria),
+            total_messages=len(sample_seed.acceptance_criteria),
+        )
+        track_progress = AsyncMock(return_value=Result.ok(None))
+        execute_parallel = AsyncMock(return_value=legacy_pause)
+        parallel_executor = MagicMock()
+        parallel_executor.execute_parallel = execute_parallel
+        executor_cls = MagicMock(return_value=parallel_executor)
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                executor_cls,
+            ),
+            patch.object(runner._session_repo, "track_progress", track_progress),
+            patch.object(
+                runner._session_repo,
+                "mark_paused",
+                AsyncMock(return_value=Result.ok(True)),
+            ),
+            patch.object(runner, "_project_execution_outcome", AsyncMock()),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+                force_sequential_levels=True,
+                resume_execution_plan=graph.to_execution_plan(),
+            )
+
+        assert result.is_ok and result.value.success is False
+        track_progress.assert_not_awaited()
+        if compatibility_mode == "depth_above_durable":
+            assert executor_cls.call_args.kwargs["model_router"] is runner._model_router
+            assert executor_cls.call_args.kwargs["route_economics"] is runner._route_economics
 
     @pytest.mark.asyncio
     async def test_parallel_paused_projection_failure_preserves_owner(
@@ -3028,6 +5855,123 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is True
         mark_completed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_reuses_research_prompt_and_tool_authority(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Research resume cannot fall back to default tools or gain Edit."""
+        research_seed = sample_seed.model_copy(update={"task_type": "research"})
+        paused_tracker = SessionTracker.create(
+            "exec_resume_research",
+            research_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            research_seed,
+            session_id="sess_resume_research",
+        )
+        captured: dict[str, Any] = {}
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args
+            captured.update(kwargs)
+            yield AgentMessage(
+                type="result",
+                content="Research resumed successfully",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("sess_resume_research", research_seed)
+
+        assert result.is_ok
+        assert "Edit" not in captured["tools"]
+        assert "research" in captured["system_prompt"].lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_uses_frozen_context_after_manifest_changes(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A sibling workspace edit cannot change a paused provider prompt."""
+        monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
+        manifest = tmp_path / "pyproject.toml"
+        manifest.write_text(
+            '[project]\nname = "resume-app"\nversion = "1.0.0"\n',
+            encoding="utf-8",
+        )
+        mock_adapter.working_directory = str(tmp_path)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(tmp_path),
+        )
+        paused_tracker = SessionTracker.create(
+            "exec_resume_context",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_context",
+        )
+        manifest.write_text(
+            '[project]\nname = "resume-app"\nversion = "9.9.9"\n',
+            encoding="utf-8",
+        )
+        captured: dict[str, Any] = {}
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args
+            captured.update(kwargs)
+            yield AgentMessage(
+                type="result",
+                content="Resume preserved the original prompt",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("sess_resume_context", sample_seed)
+
+        assert result.is_ok
+        assert "resume-app 1.0.0" in captured["system_prompt"]
+        assert "resume-app 9.9.9" not in captured["system_prompt"]
 
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
@@ -3594,8 +6538,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Default fat-harness leaves must be prompted to emit typed JSON evidence."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
@@ -3618,10 +6560,12 @@ class TestOrchestratorRunner:
         )
         captured_strategy: Any = None
 
-        async def _capture_tools(**kwargs: Any) -> tuple[list[str], None, tuple[Any, ...]]:
+        original_get_merged_tools = runner._get_merged_tools
+
+        async def _capture_tools(**kwargs: Any) -> Any:
             nonlocal captured_strategy
             captured_strategy = kwargs["strategy"]
-            return ["Read"], None, assemble_session_tool_catalog(["Read"])
+            return await original_get_merged_tools(**kwargs)
 
         with (
             patch.object(runner, "_check_startup_cancellation", AsyncMock(return_value=False)),
@@ -3635,7 +6579,7 @@ class TestOrchestratorRunner:
             )
 
         assert result is expected
-        assert isinstance(captured_strategy, ProfileBackedStrategy)
+        assert "consolidated evidence contract" in (captured_strategy.get_system_prompt_fragment())
         system_prompt = execute.await_args.kwargs["system_prompt"]
         assert "consolidated evidence contract" in system_prompt
         assert "files_touched" in system_prompt
@@ -3653,8 +6597,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Single-AC fat-harness runs must not bypass the typed-evidence gate."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         single_ac_seed = sample_seed.model_copy(
             update={"acceptance_criteria": (sample_seed.acceptance_criteria[0],)}
         )
@@ -3684,7 +6626,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -3707,8 +6649,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Structured investment authority must not be lost on direct dispatch."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -3745,7 +6685,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -3768,8 +6708,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Any explicit metadata uses per-AC routing, even without lowering authority."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -3804,7 +6742,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -3826,8 +6764,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Investment-bearing legacy sequential runs retain sequential semantics."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         investment_seed = sample_seed.model_copy(
             update={
                 "acceptance_criteria": (
@@ -3868,7 +6804,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -3891,8 +6827,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """--sequential plus fat-harness should preserve ordering and enforce AC gates."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         tracker = SessionTracker.create("exec_sequential", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(
             mock_adapter,
@@ -3919,7 +6853,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -3937,8 +6871,6 @@ class TestOrchestratorRunner:
         sample_seed: Seed,
     ) -> None:
         """Direct runner callers can request one-AC-per-stage executor routing."""
-        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
-
         tracker = SessionTracker.create("exec_forced", sample_seed.metadata.seed_id)
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         tracker = _attach_live_process_local_contract(
@@ -3960,7 +6892,7 @@ class TestOrchestratorRunner:
             patch.object(
                 runner,
                 "_get_merged_tools",
-                AsyncMock(return_value=(["Read"], None, assemble_session_tool_catalog(["Read"]))),
+                AsyncMock(wraps=runner._get_merged_tools),
             ),
             patch.object(runner, "_execute_parallel", AsyncMock(return_value=expected)) as execute,
         ):
@@ -4038,6 +6970,7 @@ class TestOrchestratorRunner:
         """Parallel execution should restore LLM-assisted dependency analysis."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
+        runner._adapter.llm_backend = None
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=tuple(
@@ -4114,6 +7047,7 @@ class TestOrchestratorRunner:
     ) -> None:
         """Nested dependency analysis should inherit the runtime's resolved Codex CLI path."""
         mock_adapter.runtime_backend = "codex"
+        mock_adapter.llm_backend = None
         mock_adapter.cli_path = "/tmp/real-codex"
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
@@ -4373,6 +7307,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> None:
         """TypeError from create_llm_adapter propagates uncaught (programming error)."""
+        mock_adapter.llm_backend = None
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
         with (
@@ -4391,6 +7326,7 @@ class TestOrchestratorRunner:
         mock_console: MagicMock,
     ) -> None:
         """AttributeError from create_llm_adapter propagates uncaught (programming error)."""
+        mock_adapter.llm_backend = None
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
         with (
@@ -4450,6 +7386,11 @@ class TestOrchestratorRunner:
             metadata={"fork_session": True},
         )
         mock_adapter = MagicMock()
+        mock_adapter.runtime_backend = "claude"
+        mock_adapter.llm_backend = "test-llm"
+        mock_adapter._model = "test-model"
+        mock_adapter.working_directory = "/tmp/project"
+        mock_adapter.permission_mode = "acceptEdits"
         captured_kwargs: dict[str, Any] = {}
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -4473,6 +7414,7 @@ class TestOrchestratorRunner:
             inherited_tools=["WebFetch", "mcp__chrome-devtools__click"],
             fat_harness_mode=False,
         )
+        _allow_mocked_precreated_durable_state(runner)
 
         from ouroboros.core.types import Result
 
@@ -4506,13 +7448,13 @@ class TestOrchestratorRunner:
         assert "mcp__chrome-devtools__click" not in captured_kwargs["tools"]
 
     @pytest.mark.asyncio
-    async def test_execute_parallel_passes_inherited_runtime_handle_to_executor(
+    async def test_execute_parallel_restores_profile_and_inherited_handle_from_contract(
         self,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
-        """Parallel delegated runs should propagate inherited runtime/tool context."""
+        """Parallel replay must not adopt current profile or parent lineage drift."""
         from ouroboros.core.types import Result
         from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
         from ouroboros.orchestrator.parallel_executor import (
@@ -4531,6 +7473,20 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             inherited_runtime_handle=inherited_handle,
+        )
+        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        persisted_profile = runner._execution_profile_snapshot(
+            execution_contract,
+            require_bound=True,
+        )
+        assert persisted_profile is not None
+        drifted_profile = persisted_profile.model_copy(
+            update={"suggested_model_tier": SuggestedModelTier.HIGH}
+        )
+        runner._inherited_runtime_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_drifted_parent",
+            metadata={"fork_session": True},
         )
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         captured_init: dict[str, Any] = {}
@@ -4575,6 +7531,10 @@ class TestOrchestratorRunner:
                 "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
                 FakeParallelExecutor,
             ),
+            patch(
+                "ouroboros.orchestrator.runner._execution_profile_for_seed",
+                return_value=drifted_profile,
+            ) as load_current_profile,
             patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
             patch.object(
                 runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
@@ -4593,6 +7553,7 @@ class TestOrchestratorRunner:
                 tool_catalog=tool_catalog,
                 system_prompt="system",
                 start_time=datetime.now(UTC),
+                execution_contract=execution_contract,
             )
 
         assert result.is_ok
@@ -4600,6 +7561,9 @@ class TestOrchestratorRunner:
         assert inherited_runtime_handle.native_session_id == inherited_handle.native_session_id
         assert inherited_runtime_handle.metadata == inherited_handle.metadata
         assert inherited_runtime_handle.approval_mode == "bypassPermissions"
+        assert captured_init["execution_profile"] == persisted_profile
+        assert captured_init["execution_profile"].suggested_model_tier is SuggestedModelTier.MEDIUM
+        load_current_profile.assert_not_called()
         assert captured_execute["tools"] == ["Read", "mcp__chrome-devtools__click"]
 
     @pytest.mark.asyncio
@@ -4751,6 +7715,8 @@ class TestOrchestratorRunnerWithMCP:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
@@ -5168,6 +8134,7 @@ class TestOrchestratorRunnerWithMCP:
             mock_console,
             mcp_manager=mock_mcp_manager,
         )
+        _allow_mocked_precreated_durable_state(runner)
 
         # Mock session creation
         async def mock_create_session(*args: Any, **kwargs: Any):
@@ -5199,6 +8166,8 @@ class TestCancellationPolling:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
+        adapter.llm_backend = "test-llm"
+        adapter._model = "test-model"
         adapter.working_directory = "/tmp/project"
         adapter.permission_mode = "acceptEdits"
         return adapter
@@ -5225,7 +8194,9 @@ class TestCancellationPolling:
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
         """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        _allow_mocked_precreated_durable_state(runner)
+        return runner
 
     @pytest.mark.asyncio
     async def test_check_cancellation_returns_false_when_no_event(

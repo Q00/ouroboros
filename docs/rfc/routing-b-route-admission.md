@@ -113,8 +113,10 @@ provider calls, retry/escalation policy, or Final Gate behavior.
 
 ## Next slices
 
-1. Add bounded observations and escalation. Escalation may choose the
-   next configured route only after a classified failure and a finite budget.
+1. Operate the bounded escalation and observation slice implemented in
+   [`routing-d-bounded-escalation.md`](./routing-d-bounded-escalation.md).
+   Escalation chooses the next configured route only after a classified
+   failure and durable observation, and stops at the finite route boundary.
 2. Emit the route fingerprint into the frugality proof and shared projection.
 
 ## Compatibility projection (implemented slice)

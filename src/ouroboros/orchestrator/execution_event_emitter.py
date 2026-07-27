@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.seed import ac_text
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.coordinator import build_coordinator_started_payload
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 from ouroboros.orchestrator.events import (
     create_heartbeat_event,
@@ -419,24 +420,14 @@ class ExecutionEventEmitter:
             type="execution.coordinator.started",
             aggregate_type="execution",
             aggregate_id=self.coordinator_aggregate_id(execution_id, level),
-            data={
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "scope": "level",
-                "session_role": "coordinator",
-                "stage_index": level - 1,
-                "level_number": level,
-                "session_scope_id": runtime_scope.aggregate_id,
-                "session_state_path": runtime_scope.state_path,
-                "conflict_count": len(conflicts),
-                "conflicts": [
-                    {
-                        "file_path": conflict.file_path,
-                        "ac_indices": list(conflict.ac_indices),
-                    }
-                    for conflict in conflicts
-                ],
-            },
+            data=build_coordinator_started_payload(
+                execution_id=execution_id,
+                session_id=session_id,
+                level_number=level,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+                conflicts=conflicts,
+            ),
         )
         await self._event_store.append(event)
 
@@ -519,25 +510,10 @@ class ExecutionEventEmitter:
             type="execution.coordinator.completed",
             aggregate_type="execution",
             aggregate_id=self.coordinator_aggregate_id(execution_id, review.level_number),
-            data={
-                "execution_id": execution_id,
-                "session_id": session_id,
-                "coordinator_session_id": review.session_id,
-                **review.to_artifact_payload(),
-                "conflicts_detected": [
-                    {
-                        "file_path": conflict.file_path,
-                        "ac_indices": list(conflict.ac_indices),
-                        "resolved": conflict.resolved,
-                        "resolution_description": conflict.resolution_description,
-                    }
-                    for conflict in review.conflicts_detected
-                ],
-                "review_summary": review.review_summary,
-                "fixes_applied": list(review.fixes_applied),
-                "warnings_for_next_level": list(review.warnings_for_next_level),
-                "duration_seconds": review.duration_seconds,
-            },
+            data=review.to_completed_event_payload(
+                execution_id=execution_id,
+                session_id=session_id,
+            ),
         )
         await self._event_store.append(event)
 

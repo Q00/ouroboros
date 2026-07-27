@@ -171,6 +171,7 @@ class _ProcessLocalAuthorityLifecycle:
     registration: _ProcessLocalAuthorityRegistration
     state: _ProcessLocalAuthorityLifecycleState
     terminal_finalizers: dict[object, Callable[[], object]]
+    prepared_contract_json: str | None = None
     terminalization_retryable: bool = False
 
 
@@ -245,6 +246,83 @@ class _ProcessLocalAuthorityRegistry:
                 "scope": "process_local",
                 "correlation_id": generation.correlation_id,
             }
+
+    @staticmethod
+    def _canonical_prepared_contract(value: object) -> str:
+        """Encode one prepared contract without lossy Python coercions."""
+        if not isinstance(value, Mapping):
+            raise ValueError("prepared execution contract must be a mapping")
+        try:
+            return json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("prepared execution contract must be canonical JSON") from exc
+
+    def seal_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> None:
+        """Seal the exact contract only after its durable publication succeeds."""
+        canonical_contract = self._canonical_prepared_contract(value)
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED
+            ):
+                raise ValueError("prepared contract requires its exact registered authority")
+            if (
+                lifecycle.prepared_contract_json is not None
+                and lifecycle.prepared_contract_json != canonical_contract
+            ):
+                raise ValueError("process-local authority already seals a different contract")
+            lifecycle.prepared_contract_json = canonical_contract
+
+    def authenticate_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> dict[str, Any] | None:
+        """Return a fresh trusted snapshot iff the claimed caller copy is exact."""
+        try:
+            canonical_contract = self._canonical_prepared_contract(value)
+        except ValueError:
+            return None
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.CLAIMED
+                or lifecycle.prepared_contract_json != canonical_contract
+            ):
+                return None
+            sealed_contract = lifecycle.prepared_contract_json
+        restored = json.loads(sealed_contract)
+        return restored if isinstance(restored, dict) else None
 
     def register(
         self,
@@ -642,6 +720,38 @@ def _register_process_local_authority_generation(
     adapter: object,
 ) -> None:
     _PROCESS_LOCAL_AUTHORITY_REGISTRY.register(session_id, execution_id, generation, adapter)
+
+
+def _seal_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> None:
+    _PROCESS_LOCAL_AUTHORITY_REGISTRY.seal_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
+
+
+def _authenticate_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> dict[str, Any] | None:
+    return _PROCESS_LOCAL_AUTHORITY_REGISTRY.authenticate_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
 
 
 def _live_process_local_authority_generation(
@@ -1940,26 +2050,122 @@ def runtime_execution_proves_effective_model(value: object) -> bool:
     return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
 
 
+_RUNTIME_EFFECT_CAPABILITY_KEYS = frozenset(
+    {
+        "version",
+        "skill_dispatch",
+        "targeted_resume",
+        "structured_output",
+        "system_prompt_support",
+        "tool_restriction_support",
+        "permission_mode_support",
+        "reasoning_effort_support",
+        "enforceable_reasoning_efforts",
+        "model_override_support",
+        "subagent_orchestration",
+        "session_signals",
+    }
+)
+_PARAM_SUPPORT_VALUES = frozenset({"native", "translated", "ignored"})
+_REASONING_EFFORT_VALUES = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_SUBAGENT_ORCHESTRATION_VALUES = frozenset(
+    {
+        "none",
+        "internal",
+        "external_host_bridge",
+        "external_leader_driven",
+    }
+)
+_SESSION_SIGNAL_CAPABILITY_KEYS = frozenset(
+    {
+        "inform_delivery",
+        "background_reply",
+        "after_turn_delivery",
+        "checkpoint_redirect",
+        "owned_turn_abort",
+        "replacement_resume",
+    }
+)
+
+
+def valid_runtime_effect_capabilities_contract(value: object) -> bool:
+    """Validate every declared runtime capability that can change a live effect."""
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS
+        or value.get("version") != 1
+        or type(value.get("version")) is not int
+    ):
+        return False
+    if any(
+        type(value.get(key)) is not bool
+        for key in ("skill_dispatch", "targeted_resume", "structured_output")
+    ):
+        return False
+    if any(
+        value.get(key) not in _PARAM_SUPPORT_VALUES
+        for key in (
+            "system_prompt_support",
+            "tool_restriction_support",
+            "permission_mode_support",
+            "reasoning_effort_support",
+            "model_override_support",
+        )
+    ):
+        return False
+    if value.get("subagent_orchestration") not in _SUBAGENT_ORCHESTRATION_VALUES:
+        return False
+    raw_levels = value.get("enforceable_reasoning_efforts")
+    if raw_levels is not None and (
+        type(raw_levels) is not list
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+        or len(set(raw_levels)) != len(raw_levels)
+        or raw_levels != sorted(raw_levels)
+    ):
+        return False
+    raw_signals = value.get("session_signals")
+    return bool(
+        isinstance(raw_signals, Mapping)
+        and set(raw_signals) == _SESSION_SIGNAL_CAPABILITY_KEYS
+        and all(type(raw_signals.get(key)) is bool for key in _SESSION_SIGNAL_CAPABILITY_KEYS)
+    )
+
+
+def runtime_effect_capabilities_contract(adapter: object) -> dict[str, object]:
+    """Return the complete closed runtime-capability population used by effects."""
+    capabilities = runtime_capabilities_for(adapter)
+    raw_levels = capabilities.enforceable_reasoning_efforts
+    if raw_levels is not None and (
+        not isinstance(raw_levels, frozenset)
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+    ):
+        raise ValueError("runtime reasoning-effort vocabulary must be a closed immutable set")
+    contract: dict[str, object] = {
+        "version": 1,
+        "skill_dispatch": capabilities.skill_dispatch,
+        "targeted_resume": capabilities.targeted_resume,
+        "structured_output": capabilities.structured_output,
+        "system_prompt_support": capabilities.system_prompt_support.value,
+        "tool_restriction_support": capabilities.tool_restriction_support.value,
+        "permission_mode_support": capabilities.permission_mode_support.value,
+        "reasoning_effort_support": capabilities.reasoning_effort_support.value,
+        "enforceable_reasoning_efforts": sorted(raw_levels) if raw_levels is not None else None,
+        "model_override_support": capabilities.model_override_support.value,
+        "subagent_orchestration": capabilities.subagent_orchestration.value,
+        "session_signals": capabilities.session_signals.to_event_data(),
+    }
+    if not valid_runtime_effect_capabilities_contract(contract):
+        raise ValueError("runtime effect capabilities are not canonical")
+    return contract
+
+
 def _runtime_capabilities_descriptor(adapter: object) -> dict[str, object]:
     try:
-        capabilities = runtime_capabilities_for(adapter)
-        value = {
-            "skill_dispatch": capabilities.skill_dispatch,
-            "targeted_resume": capabilities.targeted_resume,
-            "structured_output": capabilities.structured_output,
-            "system_prompt_support": capabilities.system_prompt_support.value,
-            "tool_restriction_support": capabilities.tool_restriction_support.value,
-            "permission_mode_support": capabilities.permission_mode_support.value,
-            "reasoning_effort_support": capabilities.reasoning_effort_support.value,
-            "enforceable_reasoning_efforts": (
-                sorted(capabilities.enforceable_reasoning_efforts)
-                if capabilities.enforceable_reasoning_efforts is not None
-                else None
-            ),
-            "model_override_support": capabilities.model_override_support.value,
-            "subagent_orchestration": capabilities.subagent_orchestration.value,
-            "session_signals": capabilities.session_signals.to_event_data(),
-        }
+        value = runtime_effect_capabilities_contract(adapter)
     except Exception:
         return {"observed": False}
     return _digest_descriptor(value, field="runtime capabilities")
@@ -2623,6 +2829,7 @@ class ExecutionAuthorityLiveBinding:
         expected_coordinator_review_root: object | None = None,
         expected_coordinator_review_code: object | None = None,
         force_runtime_process_local: bool = False,
+        runtime_instance_nonce: str | None = None,
     ) -> ExecutionAuthorityLiveBinding:
         executor_attribute_resolution_observable = (
             executor is None or _uses_default_instance_attribute_resolution(executor)
@@ -2894,7 +3101,12 @@ class ExecutionAuthorityLiveBinding:
             )
             else uuid.uuid4().hex
         )
-        runtime_instance_nonce = uuid.uuid4().hex
+        if runtime_instance_nonce is not None and (
+            len(runtime_instance_nonce) != 32
+            or any(char not in "0123456789abcdef" for char in runtime_instance_nonce)
+        ):
+            raise ValueError("runtime instance nonce must be 32 lowercase hex characters")
+        runtime_instance_nonce = runtime_instance_nonce or uuid.uuid4().hex
         contract = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=verifier,
@@ -3226,10 +3438,12 @@ __all__ = [
     "execution_policy_authority_contract",
     "executor_authority_contract",
     "runtime_authority_contract",
+    "runtime_effect_capabilities_contract",
     "runtime_execution_identity_contract",
     "runtime_execution_proves_effective_model",
     "valid_constructor_model_contract",
     "valid_process_local_authority_contract",
+    "valid_runtime_effect_capabilities_contract",
     "valid_runtime_execution_identity_contract",
     "verifier_authority_contract",
 ]

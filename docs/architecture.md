@@ -287,9 +287,13 @@ units along the profile's axis — splitting is conservative because each sub-AC
 costs a full agent session. Sub-ACs recurse within a bounded depth.
 
 Key constraints:
-- `DEFAULT_MAX_DECOMPOSITION_DEPTH = 2` — soft depth cap (env/CLI overridable via `OUROBOROS_MAX_DECOMPOSITION_DEPTH`); at the cap a non-atomic unit executes as atomic with a recorded depth-warning
+- `DEFAULT_MAX_DECOMPOSITION_DEPTH = 2`; any non-negative depth remains accepted through Seed/env/CLI for backward compatibility. Depths `0..4` may use Routing D crash replay: the maximum five-way tree has 780 child nodes and the completion/pause envelope is derived from that durable boundary. Larger values execute through the historical legacy parallel path without the Routing D resume-owner guarantee. At the configured cap a non-atomic unit executes as atomic with a recorded depth warning.
 - Failures are handled by an attempt-then-bounce loop (bounded retries + evaluation feedback) rather than ever-deeper pre-execution splitting
 - Children are dependency-sorted and executed within each level
+
+Values above `4` remain executable on the legacy path, but cannot authorize
+Routing D route switching or its crash-resumable parallel owner. Reducing the
+value to `4` or less opts a fresh run into that stronger durable boundary.
 
 For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 

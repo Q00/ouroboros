@@ -17,7 +17,7 @@ No provider calls, retry policy, or Final Gate behavior belongs here.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import TYPE_CHECKING
 
@@ -447,6 +447,153 @@ def admit_compat_route(
         return _blocked_compat_admission(projection)
 
 
+def build_compat_escalation_requirements(
+    projection: RouteCompatProjection,
+    *,
+    effort: str | None,
+    route_id: str | None = None,
+    required_capabilities: Iterable[object] = (),
+) -> RouteRequirements | None:
+    """Build hard constraints for cheapest-first or exact-route admission.
+
+    Unlike :func:`_compat_requirements`, the initial form leaves model and route
+    unpinned so the Admission Kernel selects the cheapest candidate in the
+    *escalation registry*.  That registry preserves ``projection.base_tier`` as
+    the configured lower bound; this requirements value supplies the remaining
+    authority dimensions.  An escalation pins the exact next route and model.
+    """
+
+    if not isinstance(projection, RouteCompatProjection):
+        return None
+    try:
+        normalized_required_capabilities = _bounded_tuple(
+            required_capabilities,
+            max_count=MAX_ROUTE_CAPABILITIES,
+        )
+        pinned_model: str | None = None
+        if route_id is not None:
+            candidate = next(
+                (
+                    candidate
+                    for candidate in projection.registry.candidates
+                    if candidate.route_id == route_id
+                ),
+                None,
+            )
+            if candidate is None:
+                return None
+            pinned_model = candidate.model
+        return RouteRequirements(
+            required_capabilities=normalized_required_capabilities,
+            allowed_harnesses=(projection.runtime_backend,),
+            required_effort=effort,
+            pinned_route_id=route_id,
+            pinned_model=pinned_model,
+            pinned_harness=projection.runtime_backend,
+            pinned_persona=projection.persona,
+            pinned_tool_policy=projection.tool_policy,
+            pinned_authority_identity=projection.authority_identity,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def build_compat_escalation_registry(
+    projection: RouteCompatProjection | None,
+) -> RouteRegistry | None:
+    """Return the finite registry eligible at or above the configured base tier.
+
+    Routing D may choose more cheaply than a prior *attempt*, but it may not
+    silently undercut the run's public starting-tier contract.  Candidates below
+    ``base_tier`` remain in the immutable registry with ``enabled=False`` so
+    replay can still resolve their identities while admission and ``advance_route``
+    apply one identical lower-bound policy.
+    """
+
+    if not isinstance(projection, RouteCompatProjection):
+        return None
+    try:
+        floor_index = MODEL_TIER_LADDER.index(projection.base_tier)
+        eligible_route_ids = {
+            route_id
+            for tier, route_id in projection.tier_route_ids
+            if MODEL_TIER_LADDER.index(tier) >= floor_index
+        }
+        return replace(
+            projection.registry,
+            candidates=tuple(
+                replace(
+                    candidate,
+                    enabled=candidate.enabled and candidate.route_id in eligible_route_ids,
+                )
+                for candidate in projection.registry.candidates
+            ),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def admit_compat_escalation_route(
+    projection: RouteCompatProjection | None,
+    *,
+    effort: str | None,
+    route_id: str | None = None,
+    required_capabilities: Iterable[object] = (),
+) -> RouteAdmission:
+    """Admit the cheapest eligible route or one exact escalation route."""
+
+    if projection is None:
+        return _blocked_compat_admission(None)
+    requirements = build_compat_escalation_requirements(
+        projection,
+        effort=effort,
+        route_id=route_id,
+        required_capabilities=required_capabilities,
+    )
+    if requirements is None:
+        return _blocked_compat_admission(projection)
+    registry = build_compat_escalation_registry(projection)
+    if registry is None:
+        return _blocked_compat_admission(projection)
+    try:
+        return admit_route(registry, requirements)
+    except Exception:
+        return _blocked_compat_admission(projection)
+
+
+def validate_compat_escalation_admission(
+    projection: RouteCompatProjection | None,
+    admission: RouteAdmission,
+    *,
+    effort: str | None,
+    route_id: str | None = None,
+    required_capabilities: Iterable[object] = (),
+) -> bool:
+    """Revalidate a cheapest-first/escalated admission at provider entry."""
+
+    if projection is None:
+        return False
+    try:
+        requirements = build_compat_escalation_requirements(
+            projection,
+            effort=effort,
+            route_id=route_id,
+            required_capabilities=required_capabilities,
+        )
+        registry = build_compat_escalation_registry(projection)
+        return (
+            requirements is not None
+            and registry is not None
+            and validate_admission(
+                registry,
+                requirements,
+                admission,
+            )
+        )
+    except Exception:
+        return False
+
+
 def _blocked_compat_admission(projection: RouteCompatProjection | None) -> RouteAdmission:
     """Return a genuine Kernel-produced blocked decision for invalid input."""
 
@@ -790,12 +937,16 @@ __all__ = [
     "INVALID_CAPABILITY",
     "ROUTE_COMPAT_VERSION",
     "RouteCompatProjection",
+    "admit_compat_escalation_route",
     "admit_compat_route",
     "admitted_execute_model_kwargs",
+    "build_compat_escalation_requirements",
+    "build_compat_escalation_registry",
     "build_route_compat_projection",
     "deserialize_route_compat_contract",
     "deserialize_route_compat_projection",
     "serialize_route_compat_contract",
     "validate_compat_admission",
+    "validate_compat_escalation_admission",
     "validate_route_compat_projection",
 ]

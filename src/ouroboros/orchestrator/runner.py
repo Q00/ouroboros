@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from uuid import uuid4
 
 from rich.console import Console
@@ -41,7 +41,11 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ouroboros.backends import backend_supports_tool_envelope, get_backend_capability
-from ouroboros.config import get_llm_model_for_role
+from ouroboros.config import (
+    MAX_USAGE_LIMIT_PAUSE_SECONDS,
+    get_llm_model_for_role,
+    get_usage_limit_pause_seconds,
+)
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ConfigError, OuroborosError, PersistenceError
 from ouroboros.core.execution_preferences import (
@@ -67,6 +71,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.backend_limits import (
+    BackendConcurrencyLimits,
     plan_fan_out_concurrency,
     resolve_backend_limits,
 )
@@ -78,6 +83,11 @@ from ouroboros.orchestrator.capabilities import (
 from ouroboros.orchestrator.control_plane import (
     build_control_plane_state,
     serialize_control_plane_state,
+)
+from ouroboros.orchestrator.decomposition_limits import (
+    DEFAULT_MAX_DECOMPOSITION_DEPTH,
+    has_durable_decomposition_replay,
+    validate_max_decomposition_depth,
 )
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
@@ -91,6 +101,7 @@ from ouroboros.orchestrator.events import (
 )
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
+    _authenticate_process_local_prepared_contract,
     _await_process_local_cleanup,
     _claim_process_local_authority_generation,
     _discard_process_local_authority_generation,
@@ -104,14 +115,20 @@ from ouroboros.orchestrator.execution_authority import (
     _register_process_local_authority_terminal_finalizer,
     _release_process_local_authority_generation,
     _retire_process_local_authority_generation,
+    _seal_process_local_prepared_contract,
     collect_cancellation_acceptance_plan,
     collect_terminal_acceptance_plan,
     constructor_model_contract,
     request_process_local_cancellation,
+    runtime_effect_capabilities_contract,
     runtime_execution_proves_effective_model,
     valid_constructor_model_contract,
     valid_process_local_authority_contract,
+    valid_runtime_effect_capabilities_contract,
     valid_runtime_execution_identity_contract,
+)
+from ouroboros.orchestrator.execution_event_replay import (
+    replay_execution_events_chronologically,
 )
 from ouroboros.orchestrator.execution_guidance import (
     ExecutionGuidanceBundle,
@@ -122,6 +139,7 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     build_ac_runtime_scope,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
@@ -129,7 +147,6 @@ from ouroboros.orchestrator.mcp_tools import (
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
-from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyDecision,
@@ -139,6 +156,12 @@ from ouroboros.orchestrator.policy import (
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, ProfileError, load_profile
 from ouroboros.orchestrator.profile_strategy import ProfileBackedStrategy
+from ouroboros.orchestrator.recoverable_failure import (
+    is_usage_limit_pause_message,
+    project_failure_metadata,
+    retry_duration_seconds_from_message,
+    retry_duration_seconds_from_metadata,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
     message_tool_name,
@@ -158,7 +181,7 @@ from ouroboros.orchestrator.session import (
     SessionTracker,
     runtime_resume_identity_from_payload,
 )
-from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
+from ouroboros.orchestrator.workflow_state import ActivityType, coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
@@ -178,10 +201,78 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
     from ouroboros.orchestrator.heartbeat import CancellationRequest
     from ouroboros.orchestrator.model_routing import ModelRouter
+    from ouroboros.orchestrator.route_escalation import RouteEscalationDecision
+    from ouroboros.orchestrator.route_policy import RouteCandidate
     from ouroboros.orchestrator.synapse import SessionSignalHub
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+_DIRECT_ROUTE_PAUSE_REPLAY_PAGE_SIZE = 64
+_MAX_EXECUTION_STRATEGY_TOOLS = 256
+_MAX_EXECUTION_STRATEGY_TEXT_CHARS = 100_000
+_MAX_EXECUTION_TOOL_CATALOG_CHARS = 1_000_000
+_MAX_EXECUTION_ALLOWED_TOOLS = 1024
+_MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS = 100_000
+_MAX_EXECUTION_PROFILE_CHARS = 100_000
+_MAX_EXECUTION_RUNTIME_HANDLE_CHARS = 1_000_000
+_DIRECT_ROUTE_OBSERVATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "session_id",
+        "root_ac_index",
+        "call_site",
+        "observation",
+        "decision",
+        "human_handoff_required",
+        "final_acceptance_declared",
+    }
+)
+
+
+def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    """Inspect at most one key beyond a finite durable-contract schema."""
+
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    seen: set[str] = set()
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(seen) == len(expected)
+        except Exception:
+            return False
+        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
+            return False
+        seen.add(key)
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedExecutionStrategy:
+    """Effect-bearing prompt/tool strategy restored without live config reads."""
+
+    tools: tuple[str, ...]
+    system_prompt_fragment: str
+    task_prompt_suffix: str
+    activity_map: tuple[tuple[str, ActivityType], ...]
+
+    def get_tools(self) -> list[str]:
+        return list(self.tools)
+
+    def get_system_prompt_fragment(self) -> str:
+        return self.system_prompt_fragment
+
+    def get_task_prompt_suffix(self) -> str:
+        return self.task_prompt_suffix
+
+    def get_activity_map(self) -> dict[str, ActivityType]:
+        return dict(self.activity_map)
 
 
 # =============================================================================
@@ -235,6 +326,16 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectRouteResumeState:
+    """Exact nonterminal Routing D state owned by the direct runner."""
+
+    episode_id: str
+    attempt_index: int
+    prior_route_ids: tuple[str, ...]
+    candidate: RouteCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +498,8 @@ def build_system_prompt(
     *,
     repo_root: str | Path | None = None,
     guidance_fragment: str = "",
+    context_pack_enabled: bool | None = None,
+    resolved_context_pack_fragment: str | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -412,6 +515,12 @@ def build_system_prompt(
         guidance_fragment: Explicit project execution guidance resolved and
             provenance-checked by the runner. Empty preserves the historical
             prompt byte-for-byte.
+        context_pack_enabled: Resolved context-pack mode. ``None`` preserves
+            lazy config resolution for direct helper callers; runner-owned
+            execution passes the durable contract value explicitly.
+        resolved_context_pack_fragment: Exact context-pack text frozen before
+            session publication. When provided (including the empty string),
+            prompt construction never scans the mutable workspace again.
 
     Returns:
         System prompt string.
@@ -449,7 +558,15 @@ def build_system_prompt(
     if conductor_directive:
         prompt = f"{prompt}\n\n{conductor_directive}"
 
-    context_pack_fragment = _context_pack_fragment(seed, repo_root)
+    context_pack_fragment = (
+        resolved_context_pack_fragment
+        if resolved_context_pack_fragment is not None
+        else _context_pack_fragment(
+            seed,
+            repo_root,
+            context_pack_enabled=context_pack_enabled,
+        )
+    )
     if context_pack_fragment:
         prompt = f"{prompt}\n\n{context_pack_fragment}"
     return prompt
@@ -533,6 +650,8 @@ def _resolve_context_pack_root(
 def _context_pack_fragment(
     seed: Seed,
     repo_root: str | Path | None,
+    *,
+    context_pack_enabled: bool | None = None,
 ) -> str:
     """Render the deterministic context pack fragment, or empty string.
 
@@ -544,9 +663,11 @@ def _context_pack_fragment(
     if root is None:
         return ""
 
-    from ouroboros.config import get_context_pack_enabled
+    if context_pack_enabled is None:
+        from ouroboros.config import get_context_pack_enabled
 
-    if not get_context_pack_enabled():
+        context_pack_enabled = get_context_pack_enabled()
+    if not context_pack_enabled:
         return ""
 
     from ouroboros.orchestrator.context_pack import build_context_pack, render_context_pack
@@ -611,12 +732,64 @@ CANCELLATION_CHECK_INTERVAL = 5
 # most this many same-seed executions.
 FRUGALITY_PROOF_SESSION_LOOKBACK = 1000
 FRUGALITY_PROOF_MAX_COHORT_RUNS = 50
-EXECUTION_CONTRACT_VERSION = 4
+EXECUTION_CONTRACT_VERSION = 9
+EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS = frozenset(
+    {
+        "version",
+        "foundation_a_authority",
+        "execution_preferences",
+        "execution_semantics",
+        "execution_inputs",
+        "model_routing",
+        "frugality_proof",
+        "guidance",
+        "resume",
+    }
+)
 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION = 2
 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION = 3
+PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION = 4
+PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION = 5
+PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
+PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
+PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
+
+
+def _require_exact_execution_contract_v9(raw_contract: object) -> Mapping[str, Any]:
+    """Return a current contract only when its complete top-level shape is canonical."""
+    raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
+    if (
+        not isinstance(raw_contract, Mapping)
+        or isinstance(raw_version, bool)
+        or not isinstance(raw_version, int)
+        or raw_version != EXECUTION_CONTRACT_VERSION
+    ):
+        raise OrchestratorError(
+            message="Cannot resume with an invalid execution contract",
+            details={"contract_version": raw_version},
+        )
+
+    actual_top_level_keys = frozenset(raw_contract)
+    if actual_top_level_keys != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
+        missing_keys = sorted(EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS - actual_top_level_keys)
+        unknown_keys = sorted(
+            key if isinstance(key, str) else repr(key)
+            for key in actual_top_level_keys - EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
+        )
+        raise OrchestratorError(
+            message="Cannot resume with an invalid execution contract top-level schema",
+            details={
+                "contract_version": raw_version,
+                "invalid": "top_level_schema",
+                "missing": missing_keys,
+                "unknown": unknown_keys,
+            },
+        )
+    return raw_contract
+
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _DURATION_PATTERN = re.compile(
@@ -766,7 +939,7 @@ class OrchestratorRunner:
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
-        self._max_decomposition_depth = max(0, max_decomposition_depth)
+        self._max_decomposition_depth = validate_max_decomposition_depth(max_decomposition_depth)
         self._max_parallel_workers = max(1, max_parallel_workers)
         self._fat_harness_mode = fat_harness_mode
         self._session_signal_hub = session_signal_hub
@@ -842,6 +1015,13 @@ class OrchestratorRunner:
         self._run_verify_commands = _execution_config.run_verify_commands
         self._verify_command_timeout_seconds = _execution_config.verify_command_timeout_seconds
         self._ac_retry_attempts = _execution_config.ac_retry_attempts
+        from ouroboros.config import (
+            get_context_pack_enabled,
+            get_cross_harness_redispatch_enabled,
+        )
+
+        self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
+        self._context_pack_enabled = get_context_pack_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
         self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
             "off"
@@ -1038,6 +1218,11 @@ class OrchestratorRunner:
         *,
         execution_id: str | None,
         session_id: str | None,
+        bounded_escalation: bool = False,
+        route_id_override: str | None = None,
+        expected_route_candidate: Any | None = None,
+        expected_runtime_effect_capabilities: Mapping[str, object] | None = None,
+        selected_route_sink: list[Any] | None = None,
     ) -> dict[str, str]:
         """Lay the runner's own execute_task paths on BOTH investment contracts.
 
@@ -1065,13 +1250,16 @@ class OrchestratorRunner:
         from ouroboros.orchestrator.effort_routing import assess_investment, resolve_execute_effort
         from ouroboros.orchestrator.model_routing import resolve_execute_model
         from ouroboros.orchestrator.route_compat import (
+            admit_compat_escalation_route,
             admit_compat_route,
             admitted_execute_model_kwargs,
             build_route_compat_projection,
             deserialize_route_compat_contract,
             validate_compat_admission,
+            validate_compat_escalation_admission,
         )
 
+        self._require_runtime_effect_capabilities(expected_runtime_effect_capabilities)
         investment_assessment = assess_investment(None)
         decision, kwargs = resolve_execute_effort(
             self._adapter,
@@ -1087,6 +1275,7 @@ class OrchestratorRunner:
             decomposition_trustworthy=False,
         )
         route_admission = None
+        admission_projection = None
         if initial_model_router is not None:
             admission_projection = build_route_compat_projection(
                 self._route_economics,
@@ -1102,11 +1291,71 @@ class OrchestratorRunner:
                     )
                     if recognized:
                         admission_projection = persisted_projection
-            route_admission = admit_compat_route(
-                admission_projection,
-                model_decision=model_decision,
-                effort=decision.level,
-            )
+            if bounded_escalation:
+                route_admission = admit_compat_escalation_route(
+                    admission_projection,
+                    effort=decision.level,
+                    route_id=route_id_override,
+                )
+                selected = route_admission.selected
+                if expected_route_candidate is not None and selected != expected_route_candidate:
+                    raise OrchestratorError(
+                        message="Route admission blocked before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": "durable successor snapshot drifted",
+                            "call_site": "runner",
+                        },
+                    )
+                model_support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    None,
+                )
+                if selected is not None and admission_projection is not None:
+                    from ouroboros.orchestrator.adapter import ParamSupport
+                    from ouroboros.orchestrator.model_routing import (
+                        MODEL_MODE_ENFORCED,
+                        ModelDecision,
+                    )
+
+                    tier = next(
+                        (
+                            tier
+                            for tier, candidate_route_id in admission_projection.tier_route_ids
+                            if candidate_route_id == selected.route_id
+                        ),
+                        None,
+                    )
+                    model_decision = ModelDecision(
+                        tier=tier,
+                        model=selected.model,
+                        mode=(
+                            MODEL_MODE_ENFORCED
+                            if model_support is ParamSupport.NATIVE
+                            else "advised"
+                        ),
+                    )
+                if not route_admission.admitted or not model_decision.is_enforced:
+                    reason = (
+                        route_admission.reason
+                        if not route_admission.admitted
+                        else "runtime cannot enforce the admitted model"
+                    )
+                    raise OrchestratorError(
+                        message="Route admission blocked before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": reason,
+                            "call_site": "runner",
+                        },
+                    )
+            else:
+                route_admission = admit_compat_route(
+                    admission_projection,
+                    model_decision=model_decision,
+                    effort=decision.level,
+                )
             if not route_admission.admitted:
                 raise OrchestratorError(
                     message="Route admission blocked before provider dispatch",
@@ -1217,13 +1466,7 @@ class OrchestratorRunner:
         if live_model_router is None:
             model_kwargs = legacy_model_kwargs
         else:
-            live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
-                self._adapter,
-                router=live_model_router,
-                is_decomposed_child=False,
-                decomposition_trustworthy=False,
-            )
-            if live_model_decision != model_decision:
+            if live_model_router != initial_model_router:
                 raise OrchestratorError(
                     message="Route admission became stale before provider dispatch",
                     details={
@@ -1232,6 +1475,22 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
+            if not bounded_escalation:
+                live_model_decision, _live_legacy_model_kwargs = resolve_execute_model(
+                    self._adapter,
+                    router=live_model_router,
+                    is_decomposed_child=False,
+                    decomposition_trustworthy=False,
+                )
+                if live_model_decision != model_decision:
+                    raise OrchestratorError(
+                        message="Route admission became stale before provider dispatch",
+                        details={
+                            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                            "reason": "model routing policy changed during pre-dispatch awaits",
+                            "call_site": "runner",
+                        },
+                    )
             live_effort_decision, live_effort_kwargs = resolve_execute_effort(
                 self._adapter,
                 base_effort=self._reasoning_effort,
@@ -1254,12 +1513,22 @@ class OrchestratorRunner:
                 effort=live_effort_decision.level,
             )
             assert route_admission is not None
-            if not validate_compat_admission(
-                live_projection,
-                route_admission,
-                model_decision=model_decision,
-                effort=live_effort_decision.level,
-            ):
+            admission_valid = (
+                validate_compat_escalation_admission(
+                    live_projection,
+                    route_admission,
+                    effort=live_effort_decision.level,
+                    route_id=route_id_override,
+                )
+                if bounded_escalation
+                else validate_compat_admission(
+                    live_projection,
+                    route_admission,
+                    model_decision=model_decision,
+                    effort=live_effort_decision.level,
+                )
+            )
+            if not admission_valid:
                 raise OrchestratorError(
                     message="Route admission became stale before provider dispatch",
                     details={
@@ -1268,12 +1537,27 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
-            model_kwargs = admitted_execute_model_kwargs(
-                route_admission,
-                model_decision=model_decision,
-                projection=live_projection,
-                effort=live_effort_decision.level,
-            )
+            if bounded_escalation:
+                selected = route_admission.selected
+                from ouroboros.orchestrator.adapter import ParamSupport
+
+                support = getattr(
+                    getattr(self._adapter, "capabilities", None),
+                    "model_override_support",
+                    None,
+                )
+                model_kwargs = (
+                    {"model": selected.model}
+                    if selected is not None and support is ParamSupport.NATIVE
+                    else {}
+                )
+            else:
+                model_kwargs = admitted_execute_model_kwargs(
+                    route_admission,
+                    model_decision=model_decision,
+                    projection=live_projection,
+                    effort=live_effort_decision.level,
+                )
             if (
                 model_decision.is_enforced
                 and model_decision.model is not None
@@ -1287,9 +1571,597 @@ class OrchestratorRunner:
                         "call_site": "runner",
                     },
                 )
-        # Model kwargs are collapsed only after live admission above. Callers
-        # invoke execute_task on the next statement without another await.
+        # Model kwargs are collapsed only after live admission above. Recheck
+        # the complete runtime declaration after every observability await so
+        # an unused vocabulary entry cannot drift into a later resumed effect.
+        self._require_runtime_effect_capabilities(expected_runtime_effect_capabilities)
+        # Callers invoke execute_task on the next statement without another await.
+        if selected_route_sink is not None and route_admission is not None:
+            selected = route_admission.selected
+            if selected is not None:
+                selected_route_sink.append(selected)
         return {**(live_effort_kwargs if live_model_router is not None else kwargs), **model_kwargs}
+
+    def _require_runtime_effect_capabilities(
+        self,
+        expected: Mapping[str, object] | None,
+    ) -> None:
+        """Fail before provider entry when any declared runtime effect can drift."""
+        if expected is None:
+            return
+        if not valid_runtime_effect_capabilities_contract(expected):
+            raise OrchestratorError(
+                message="Provider effect capability snapshot is invalid",
+                details={"invalid": "runtime_effect_capabilities"},
+            )
+        try:
+            current = runtime_effect_capabilities_contract(self._adapter)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Provider effect capability snapshot is unavailable",
+                details={"cause": type(exc).__name__},
+            ) from exc
+        if current != dict(expected):
+            raise OrchestratorError(
+                message="Provider effect capabilities drifted before dispatch",
+                details={
+                    "persisted_runtime_effect_capabilities": dict(expected),
+                    "current_runtime_effect_capabilities": current,
+                    "resume_blocked": "runtime_effect_capability_drift",
+                },
+            )
+
+    @staticmethod
+    def _classify_direct_route_failure(message: AgentMessage | None) -> Any:
+        """Classify a direct final error without inventing retry permission.
+
+        Direct execution has no leaf ``Attempt`` object, so consume explicit
+        provider/verifier metadata first and recognize only unambiguous hard
+        preconditions in the final error text.  Everything else remains the
+        conservative evidence-missing class.
+        """
+
+        from ouroboros.orchestrator.failure_taxonomy import (
+            FailureClass,
+            classify_hard_precondition,
+        )
+
+        if message is None or not (message.is_final and message.is_error):
+            return FailureClass.EVIDENCE_MISSING
+        return (
+            classify_hard_precondition(message.content, message.data)
+            or FailureClass.EVIDENCE_MISSING
+        )
+
+    @staticmethod
+    def _has_exact_resumable_runtime_handle(runtime_handle: RuntimeHandle | None) -> bool:
+        """Return whether a pause can reconnect to an existing provider session."""
+
+        return bool(
+            runtime_handle is not None
+            and runtime_handle.can_resume
+            and not runtime_handle.is_terminal
+        )
+
+    async def _persist_exact_direct_pause_runtime_handle(
+        self,
+        *,
+        session_id: str,
+        runtime_handle: RuntimeHandle | None,
+        messages_processed: int,
+    ) -> bool:
+        """Durably bind a direct PAUSED transition to provider continuity."""
+
+        if not self._has_exact_resumable_runtime_handle(runtime_handle):
+            return False
+        assert runtime_handle is not None
+        progress: dict[str, Any] = {
+            "messages_processed": messages_processed,
+            "runtime": runtime_handle.to_session_state_dict(),
+            "runtime_backend": runtime_handle.backend,
+        }
+        if runtime_handle.backend == "claude" and runtime_handle.native_session_id:
+            progress["agent_session_id"] = runtime_handle.native_session_id
+        try:
+            persisted = await self._session_repo.track_progress(session_id, progress)
+        except Exception:
+            log.exception(
+                "orchestrator.runner.direct_pause_handle_persist_failed",
+                session_id=session_id,
+            )
+            return False
+        if persisted.is_err:
+            log.warning(
+                "orchestrator.runner.direct_pause_handle_persist_failed",
+                session_id=session_id,
+                error=str(persisted.error),
+            )
+            return False
+        return True
+
+    async def _persist_direct_route_outcome(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+        episode_id: str,
+        prior_route_ids: tuple[str, ...],
+        candidate: RouteCandidate,
+        success: bool,
+        failure_class: object | None = None,
+    ) -> tuple[RouteEscalationDecision | None, tuple[str, ...]]:
+        """Persist one direct provisional outcome and compute its exact successor."""
+
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_registry,
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            MAX_ROUTE_ATTEMPTS,
+            EscalationAction,
+            EscalationReason,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteRequirements
+
+        history = (*prior_route_ids, candidate.route_id)
+        if len(history) > MAX_ROUTE_ATTEMPTS or len(set(history)) != len(history):
+            raise OrchestratorError(
+                message="Refusing an unbounded or repeated direct route attempt",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=candidate.effort,
+        )
+        registry = build_compat_escalation_registry(projection)
+        requirements = (
+            build_compat_escalation_requirements(projection, effort=candidate.effort)
+            if projection is not None
+            else None
+        )
+        live_candidate = (
+            next(
+                (
+                    configured
+                    for configured in projection.registry.candidates
+                    if configured.route_id == candidate.route_id
+                ),
+                None,
+            )
+            if projection is not None
+            else None
+        )
+        classified_failure = (
+            None
+            if success
+            else failure_class
+            if isinstance(failure_class, FailureClass)
+            else FailureClass.EVIDENCE_MISSING
+        )
+        decision: RouteEscalationDecision | None = None
+        if not success:
+            if (
+                projection is None
+                or registry is None
+                or requirements is None
+                or live_candidate != candidate
+            ):
+                decision = RouteEscalationDecision(
+                    action=EscalationAction.BLOCKED,
+                    failure_class=classified_failure,
+                    selected=None,
+                    attempted_route_ids=history,
+                    remaining_route_ids=(),
+                    reason=EscalationReason.NO_ELIGIBLE_ROUTE,
+                )
+            else:
+                decision = advance_route(
+                    registry,
+                    requirements,
+                    current_route_id=candidate.route_id,
+                    attempted_route_ids=history,
+                    failure_class=classified_failure,
+                )
+        observation = RouteObservation.from_candidate(
+            candidate,
+            requirements or RouteRequirements(),
+            episode_id=episode_id,
+            attempt_index=len(history) - 1,
+            verifier_outcome=(
+                VerifierOutcome.ATTEMPT_SUCCEEDED
+                if success
+                else VerifierOutcome.BLOCKED
+                if classified_failure is FailureClass.BLOCKED
+                else VerifierOutcome.FAILED
+            ),
+            failure_class=classified_failure,
+            escalation_reason=decision.reason if decision is not None else None,
+        )
+        await self._event_store.append(
+            BaseEvent(
+                type="execution.ac.route_observed",
+                aggregate_type="execution",
+                aggregate_id=execution_id,
+                data={
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "root_ac_index": None,
+                    "call_site": "runner",
+                    "observation": observation.to_contract_data(),
+                    "decision": decision.to_contract_data() if decision is not None else None,
+                    "human_handoff_required": bool(decision is not None and decision.blocked),
+                    "final_acceptance_declared": False,
+                },
+            )
+        )
+        return decision, history
+
+    async def _direct_resume_route_id(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> _DirectRouteResumeState | None:
+        """Resume only an explicitly paused direct route; seal completed effects."""
+        from ouroboros.orchestrator.route_compat import (
+            build_compat_escalation_registry,
+            build_compat_escalation_requirements,
+            build_route_compat_projection,
+        )
+        from ouroboros.orchestrator.route_escalation import (
+            MAX_ROUTE_ATTEMPTS,
+            EscalationAction,
+            RouteEscalationDecision,
+            RouteObservation,
+            VerifierOutcome,
+            advance_route,
+        )
+        from ouroboros.orchestrator.route_policy import RouteCandidate, RouteRequirements
+
+        observation_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.route_observed",
+            limit=MAX_ROUTE_ATTEMPTS + 1,
+        )
+        if len(observation_events) > MAX_ROUTE_ATTEMPTS:
+            raise OrchestratorError(
+                message="Refusing to replay unbounded direct route observations",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        direct_events = [
+            event
+            for event in observation_events
+            if event.type == "execution.ac.route_observed"
+            if event.data.get("session_id") == session_id
+        ]
+        if any(
+            event.data.get("call_site") != "runner"
+            or event.data.get("execution_id") != execution_id
+            for event in direct_events
+        ):
+            raise OrchestratorError(
+                message="Refusing to replay route evidence from another call site",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        if any(
+            not _mapping_has_exact_keys(event.data, _DIRECT_ROUTE_OBSERVATION_KEYS)
+            for event in direct_events
+        ):
+            raise OrchestratorError(
+                message="Refusing to replay an invalid direct route observation envelope",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        expected_episode = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        expected_pause_keys = {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "root_ac_index",
+            "call_site",
+            "episode_id",
+            "attempt_index",
+            "prior_route_ids",
+            "route",
+            "recoverable_pause",
+            "final_acceptance_declared",
+        }
+
+        parsed_rows: list[tuple[RouteObservation, object, object]] = []
+        for event in direct_events:
+            data = event.data
+            if (
+                type(data.get("schema_version")) is not int
+                or data.get("schema_version") != 1
+                or data.get("final_acceptance_declared") is not False
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if observation.episode_id != expected_episode:
+                raise OrchestratorError(
+                    message="Refusing to replay a direct route from another episode",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            parsed_rows.append(
+                (observation, data.get("decision"), data.get("human_handoff_required"))
+            )
+        parsed_rows.sort(key=lambda row: row[0].attempt_index)
+        route_history_is_contiguous = [row[0].attempt_index for row in parsed_rows] == list(
+            range(len(parsed_rows))
+        )
+        prior_route_ids = tuple(row[0].route_id for row in parsed_rows)
+        pause_data: dict[str, Any] | None = None
+        paused_candidate: RouteCandidate | None = None
+        async for pause_event in replay_execution_events_chronologically(
+            self._event_store,
+            execution_id=execution_id,
+            event_type="execution.ac.route_paused",
+            page_size=_DIRECT_ROUTE_PAUSE_REPLAY_PAGE_SIZE,
+        ):
+            if pause_event.type != "execution.ac.route_paused":
+                continue
+            superseded = pause_event.data
+            if superseded.get("session_id") != session_id:
+                continue
+            if not route_history_is_contiguous:
+                raise OrchestratorError(
+                    message="Refusing to replay gapped direct route history",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            if (
+                not _mapping_has_exact_keys(superseded, frozenset(expected_pause_keys))
+                or superseded.get("schema_version") != 1
+                or superseded.get("execution_id") != execution_id
+                or superseded.get("session_id") != session_id
+                or superseded.get("root_ac_index") is not None
+                or superseded.get("call_site") != "runner"
+                or superseded.get("episode_id") != expected_episode
+                or superseded.get("recoverable_pause") is not True
+                or superseded.get("final_acceptance_declared") is not False
+                or type(superseded.get("attempt_index")) is not int
+                or type(superseded.get("prior_route_ids")) is not list
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay invalid superseded direct route pause state",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            superseded_index = superseded["attempt_index"]
+            try:
+                superseded_candidate = RouteCandidate.from_contract_data(superseded.get("route"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay invalid superseded direct route pause state",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            superseded_prior_route_ids = tuple(superseded["prior_route_ids"])
+            if superseded_index < len(parsed_rows):
+                if (
+                    superseded_index < 0
+                    or superseded_prior_route_ids != prior_route_ids[:superseded_index]
+                    or parsed_rows[superseded_index][0].route_id != superseded_candidate.route_id
+                ):
+                    raise OrchestratorError(
+                        message="Refusing to replay an invalid consumed direct route pause",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    )
+                continue
+            if (
+                superseded_index != len(parsed_rows)
+                or superseded_prior_route_ids != prior_route_ids
+                or len(set(prior_route_ids) | {superseded_candidate.route_id})
+                != len(prior_route_ids) + 1
+                or paused_candidate is not None
+                and paused_candidate != superseded_candidate
+            ):
+                raise OrchestratorError(
+                    message="Refusing to replay inconsistent direct route pause history",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            # Repeated quota windows on the same unconsumed route replace only
+            # the external provider boundary. Keep the newest durable envelope
+            # while validating every superseded row in bounded-memory pages.
+            pause_data = superseded
+            paused_candidate = superseded_candidate
+
+        if pause_data is None or paused_candidate is None:
+            if not direct_events:
+                return None
+            latest = max(direct_events, key=lambda event: (event.timestamp, event.id))
+            data = latest.data
+            try:
+                observation = RouteObservation.from_contract_data(data.get("observation"))
+            except (TypeError, ValueError) as exc:
+                raise OrchestratorError(
+                    message="Refusing to replay an invalid direct route observation",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                ) from exc
+            if observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED:
+                raise OrchestratorError(
+                    message="Refusing to replay a successful direct route before Final Gate",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+            raise OrchestratorError(
+                message="Refusing to replay a completed direct route; human handoff is required",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+
+        from ouroboros.orchestrator.effort_routing import (
+            assess_investment,
+            resolve_execute_effort,
+        )
+
+        expected_effort, _expected_effort_kwargs = resolve_execute_effort(
+            self._adapter,
+            base_effort=self._reasoning_effort,
+            is_decomposed_child=False,
+            investment_assessment=assess_investment(None),
+        )
+        live_paused_projection = build_route_compat_projection(
+            self._route_economics,
+            model_router=self._model_router,
+            runtime_backend=getattr(self._adapter, "runtime_backend", None),
+            effort=expected_effort.level,
+        )
+        if live_paused_projection is None:
+            raise OrchestratorError(
+                message="Refusing to replay a paused route without a live registry",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+        live_paused_registry = build_compat_escalation_registry(live_paused_projection)
+        live_paused_candidate = (
+            next(
+                (
+                    candidate
+                    for candidate in live_paused_registry.candidates
+                    if candidate.route_id == paused_candidate.route_id
+                ),
+                None,
+            )
+            if live_paused_registry is not None
+            else None
+        )
+        if live_paused_candidate != paused_candidate:
+            raise OrchestratorError(
+                message="Refusing to replay a drifted direct route pause",
+                details={"execution_id": execution_id, "session_id": session_id},
+            )
+
+        if parsed_rows:
+            for row_index, (observation, raw_decision, handoff_claim) in enumerate(parsed_rows):
+                live_projection = build_route_compat_projection(
+                    self._route_economics,
+                    model_router=self._model_router,
+                    runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                    effort=observation.effort,
+                )
+                escalation_registry = build_compat_escalation_registry(live_projection)
+                requirements = (
+                    build_compat_escalation_requirements(
+                        live_projection,
+                        effort=observation.effort,
+                    )
+                    if live_projection is not None
+                    else None
+                )
+                try:
+                    if (
+                        live_projection is None
+                        or escalation_registry is None
+                        or requirements is None
+                        or observation.failure_class is None
+                        or observation.verifier_outcome is VerifierOutcome.ATTEMPT_SUCCEEDED
+                    ):
+                        raise ValueError("live route failure state is unavailable")
+                    live_candidate = next(
+                        (
+                            candidate
+                            for candidate in live_projection.registry.candidates
+                            if candidate.route_id == observation.route_id
+                        ),
+                        None,
+                    )
+                    if live_candidate is None:
+                        raise ValueError("observed route was removed")
+                    expected_observation = RouteObservation.from_candidate(
+                        live_candidate,
+                        RouteRequirements(
+                            required_capabilities=requirements.required_capabilities,
+                        ),
+                        episode_id=observation.episode_id,
+                        attempt_index=observation.attempt_index,
+                        verifier_outcome=observation.verifier_outcome,
+                        failure_class=observation.failure_class,
+                        escalation_reason=observation.escalation_reason,
+                    )
+                    decision = RouteEscalationDecision.from_contract_data(
+                        raw_decision,
+                        registry=escalation_registry,
+                    )
+                    attempted_prefix = prior_route_ids[: row_index + 1]
+                    recomputed = advance_route(
+                        escalation_registry,
+                        requirements,
+                        current_route_id=observation.route_id,
+                        attempted_route_ids=attempted_prefix,
+                        failure_class=observation.failure_class,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise OrchestratorError(
+                        message="Refusing to replay invalid direct route escalation state",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    ) from exc
+                next_observation = (
+                    parsed_rows[row_index + 1][0] if row_index + 1 < len(parsed_rows) else None
+                )
+                successor_matches = (
+                    decision.selected == paused_candidate
+                    if next_observation is None
+                    else decision.selected is not None
+                    and (
+                        decision.selected.route_id,
+                        decision.selected.model,
+                        decision.selected.harness,
+                        decision.selected.effort,
+                        decision.selected.cost_units,
+                        decision.selected.capabilities,
+                    )
+                    == (
+                        next_observation.route_id,
+                        next_observation.model,
+                        next_observation.harness,
+                        next_observation.effort,
+                        next_observation.cost_units,
+                        next_observation.capabilities,
+                    )
+                )
+                if (
+                    expected_observation != observation
+                    or decision != recomputed
+                    or decision.action is not EscalationAction.ESCALATE_ROUTE
+                    or decision.selected is None
+                    or not successor_matches
+                    or handoff_claim is not False
+                ):
+                    raise OrchestratorError(
+                        message="Refusing to replay a paused route outside its escalation chain",
+                        details={"execution_id": execution_id, "session_id": session_id},
+                    )
+        else:
+            from ouroboros.orchestrator.route_compat import admit_compat_escalation_route
+
+            initial = admit_compat_escalation_route(
+                live_paused_projection,
+                effort=expected_effort.level,
+            )
+            if initial.selected != paused_candidate:
+                raise OrchestratorError(
+                    message="Refusing to replay a paused route that was not cheapest eligible",
+                    details={"execution_id": execution_id, "session_id": session_id},
+                )
+        return _DirectRouteResumeState(
+            episode_id=expected_episode,
+            attempt_index=pause_data["attempt_index"],
+            prior_route_ids=prior_route_ids,
+            candidate=paused_candidate,
+        )
 
     async def _evaluate_frugality_proof(self, execution_id: str) -> None:
         """Run the deterministic frugality proof over a bounded same-seed cohort.
@@ -1451,7 +2323,7 @@ class OrchestratorRunner:
                 break
         return current_seed_id, tuple(cohort)
 
-    def _plan_parallel_workers(self) -> int:
+    def _plan_parallel_workers(self, requested_workers: int | None = None) -> int:
         """Return the effective fan-out worker count for the connected backend.
 
         Ouroboros caps delivery fan-out to the connected backend's known
@@ -1461,7 +2333,8 @@ class OrchestratorRunner:
         ``OUROBOROS_MAX_CONCURRENCY``.
         """
         limits = resolve_backend_limits(self._adapter.runtime_backend)
-        return plan_fan_out_concurrency(self._max_parallel_workers, limits)
+        requested = self._max_parallel_workers if requested_workers is None else requested_workers
+        return plan_fan_out_concurrency(requested, limits)
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -2189,6 +3062,7 @@ class OrchestratorRunner:
         runtime_handle: RuntimeHandle | None,
         *,
         tool_catalog: SessionToolCatalog | None = None,
+        preserve_existing_tool_catalog: bool = False,
     ) -> RuntimeHandle | None:
         """Seed a runtime handle with startup metadata before execution begins."""
         backend = (
@@ -2199,7 +3073,34 @@ class OrchestratorRunner:
 
         metadata = dict(runtime_handle.metadata) if runtime_handle is not None else {}
         if tool_catalog is not None:
-            metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
+            serialized_catalog = serialize_tool_catalog(tool_catalog)
+            existing_catalog = metadata.get("tool_catalog")
+            if preserve_existing_tool_catalog and existing_catalog is not None:
+                try:
+                    existing_json = json.dumps(
+                        existing_catalog,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                    current_json = json.dumps(
+                        serialized_catalog,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise OrchestratorError(
+                        message="Cannot resume with an invalid runtime tool catalog",
+                        details={"cause": type(exc).__name__},
+                    ) from exc
+                if existing_json != current_json:
+                    raise OrchestratorError(
+                        message="Cannot overwrite changed runtime tool authority on resume",
+                        details={"resume_blocked": "runtime_tool_catalog_drift"},
+                    )
+            else:
+                metadata["tool_catalog"] = serialized_catalog
             policy_result = self._evaluate_tool_catalog_policy(
                 tool_catalog,
                 runtime_backend=backend,
@@ -2343,6 +3244,620 @@ class OrchestratorRunner:
             ensure_ascii=True,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _execution_semantics_fingerprint(semantics_contract: Mapping[str, Any]) -> str:
+        """Hash the complete scalar executor contract used by resume."""
+        encoded = json.dumps(
+            dict(semantics_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _execution_inputs_fingerprint(inputs_contract: Mapping[str, Any]) -> str:
+        """Hash the resolved prompt and complete provider tool authority."""
+        encoded = json.dumps(
+            dict(inputs_contract),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _build_execution_inputs_contract(self, seed: Seed | None) -> dict[str, object]:
+        """Freeze every prompt/profile/session input before publication."""
+        execution_profile = _execution_profile_for_seed(seed) if seed is not None else None
+        strategy = (
+            ProfileBackedStrategy(execution_profile)
+            if self._fat_harness_mode and execution_profile is not None
+            else get_strategy(seed.task_type if seed is not None else "code")
+        )
+        tools = strategy.get_tools()
+        system_fragment = strategy.get_system_prompt_fragment()
+        task_suffix = strategy.get_task_prompt_suffix()
+        activity_map = strategy.get_activity_map()
+        resolver = "profile_backed" if isinstance(strategy, ProfileBackedStrategy) else "registry"
+        context_pack_fragment = (
+            _context_pack_fragment(
+                seed,
+                self._effective_cwd(),
+                context_pack_enabled=self._context_pack_enabled,
+            )
+            if seed is not None
+            else ""
+        )
+        try:
+            execution_profile_json = (
+                json.dumps(
+                    execution_profile.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if execution_profile is not None
+                else None
+            )
+            inherited_runtime_handle_json = (
+                json.dumps(
+                    self._inherited_runtime_handle.to_persisted_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if self._inherited_runtime_handle is not None
+                else None
+            )
+        except (OverflowError, RecursionError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot persist non-canonical execution effect inputs",
+                details={"cause": type(exc).__name__},
+            ) from exc
+        raw_contract: dict[str, object] = {
+            "schema_version": 2,
+            "strategy": {
+                "schema_version": 1,
+                "resolver": resolver,
+                "tools": list(tools),
+                "system_prompt_fragment": system_fragment,
+                "task_prompt_suffix": task_suffix,
+                "activity_map": [
+                    [tool, activity.value] for tool, activity in sorted(activity_map.items())
+                ],
+            },
+            "context_pack_fragment": context_pack_fragment,
+            "execution_profile_json": execution_profile_json,
+            "inherited_runtime_handle_json": inherited_runtime_handle_json,
+            # MCP discovery is asynchronous and session-scoped, so the complete
+            # catalog is sealed immediately after discovery and before the first
+            # provider effect. A paused current-format session must always have
+            # these fields bound.
+            "allowed_tools": None,
+            "tool_catalog_json": None,
+            "tool_catalog_fingerprint": None,
+        }
+        if self._mcp_manager is None:
+            _, _, static_catalog = self._assemble_strategy_base_catalog(strategy)
+            policy_result = self._evaluate_tool_catalog_policy(static_catalog)
+            serialized_catalog = serialize_tool_catalog(static_catalog)
+            catalog_json = json.dumps(
+                serialized_catalog,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            raw_contract["allowed_tools"] = list(policy_result.allowed_tools)
+            raw_contract["tool_catalog_json"] = catalog_json
+            raw_contract["tool_catalog_fingerprint"] = hashlib.sha256(
+                catalog_json.encode("utf-8")
+            ).hexdigest()
+        if self._normalize_execution_inputs_contract(raw_contract, require_bound=False) is None:
+            raise OrchestratorError(
+                message="Cannot create an invalid execution prompt/tool contract",
+                details={"invalid": "execution_inputs"},
+            )
+        return raw_contract
+
+    @staticmethod
+    def _normalize_execution_inputs_contract(
+        value: object,
+        *,
+        require_bound: bool,
+    ) -> dict[str, object] | None:
+        """Return a bounded plain copy of the exact durable input schema."""
+        input_keys = frozenset(
+            {
+                "schema_version",
+                "strategy",
+                "allowed_tools",
+                "tool_catalog_json",
+                "tool_catalog_fingerprint",
+                "context_pack_fragment",
+                "execution_profile_json",
+                "inherited_runtime_handle_json",
+            }
+        )
+        strategy_keys = frozenset(
+            {
+                "schema_version",
+                "resolver",
+                "tools",
+                "system_prompt_fragment",
+                "task_prompt_suffix",
+                "activity_map",
+            }
+        )
+        try:
+            if not _mapping_has_exact_keys(value, input_keys):
+                return None
+            assert isinstance(value, Mapping)
+            if value.get("schema_version") != 2:
+                return None
+            raw_strategy = value.get("strategy")
+            if not _mapping_has_exact_keys(raw_strategy, strategy_keys):
+                return None
+            assert isinstance(raw_strategy, Mapping)
+            if raw_strategy.get("schema_version") != 1:
+                return None
+            resolver = raw_strategy.get("resolver")
+            tools = raw_strategy.get("tools")
+            system_fragment = raw_strategy.get("system_prompt_fragment")
+            task_suffix = raw_strategy.get("task_prompt_suffix")
+            raw_activity_map = raw_strategy.get("activity_map")
+            context_pack_fragment = value.get("context_pack_fragment")
+            execution_profile_json = value.get("execution_profile_json")
+            inherited_runtime_handle_json = value.get("inherited_runtime_handle_json")
+            if (
+                resolver not in {"registry", "profile_backed"}
+                or type(tools) is not list
+                or not tools
+                or len(tools) > _MAX_EXECUTION_STRATEGY_TOOLS
+                or any(type(tool) is not str or not tool or len(tool) > 256 for tool in tools)
+                or len(set(tools)) != len(tools)
+                or type(system_fragment) is not str
+                or not system_fragment
+                or len(system_fragment) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
+                or type(task_suffix) is not str
+                or not task_suffix
+                or len(task_suffix) > _MAX_EXECUTION_STRATEGY_TEXT_CHARS
+                or type(raw_activity_map) is not list
+                or len(raw_activity_map) > _MAX_EXECUTION_STRATEGY_TOOLS
+                or type(context_pack_fragment) is not str
+                or len(context_pack_fragment) > _MAX_EXECUTION_CONTEXT_FRAGMENT_CHARS
+            ):
+                return None
+            normalized_activity: list[list[str]] = []
+            activity_tools: set[str] = set()
+            allowed_activity_values = {activity.value for activity in ActivityType}
+            for row in raw_activity_map:
+                if (
+                    type(row) is not list
+                    or len(row) != 2
+                    or type(row[0]) is not str
+                    or not row[0]
+                    or len(row[0]) > 256
+                    or row[0] in activity_tools
+                    or row[0] not in tools
+                    or type(row[1]) is not str
+                    or row[1] not in allowed_activity_values
+                ):
+                    return None
+                activity_tools.add(row[0])
+                normalized_activity.append([row[0], row[1]])
+
+            allowed_tools = value.get("allowed_tools")
+            catalog_json = value.get("tool_catalog_json")
+            catalog_fingerprint = value.get("tool_catalog_fingerprint")
+            unbound = allowed_tools is None and catalog_json is None and catalog_fingerprint is None
+            if unbound:
+                if require_bound:
+                    return None
+                normalized_allowed_tools: list[str] | None = None
+            else:
+                if (
+                    type(allowed_tools) is not list
+                    or len(allowed_tools) > _MAX_EXECUTION_ALLOWED_TOOLS
+                    or any(
+                        type(tool) is not str or not tool or len(tool) > 256
+                        for tool in allowed_tools
+                    )
+                    or len(set(allowed_tools)) != len(allowed_tools)
+                    or type(catalog_json) is not str
+                    or len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS
+                    or type(catalog_fingerprint) is not str
+                    or len(catalog_fingerprint) != 64
+                    or any(char not in "0123456789abcdef" for char in catalog_fingerprint)
+                    or hashlib.sha256(catalog_json.encode("utf-8")).hexdigest()
+                    != catalog_fingerprint
+                ):
+                    return None
+                decoded_catalog = json.loads(catalog_json)
+                if not isinstance(decoded_catalog, list | dict):
+                    return None
+                canonical_catalog = json.dumps(
+                    decoded_catalog,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_catalog != catalog_json:
+                    return None
+                normalized_allowed_tools = list(allowed_tools)
+
+            if execution_profile_json is None:
+                normalized_profile_json: str | None = None
+            else:
+                if (
+                    type(execution_profile_json) is not str
+                    or len(execution_profile_json) > _MAX_EXECUTION_PROFILE_CHARS
+                ):
+                    return None
+                decoded_profile = json.loads(execution_profile_json)
+                if not isinstance(decoded_profile, dict):
+                    return None
+                normalized_profile = ExecutionProfile.model_validate(decoded_profile)
+                canonical_profile = json.dumps(
+                    normalized_profile.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_profile != execution_profile_json:
+                    return None
+                normalized_profile_json = execution_profile_json
+
+            if inherited_runtime_handle_json is None:
+                normalized_runtime_handle_json: str | None = None
+            else:
+                if (
+                    type(inherited_runtime_handle_json) is not str
+                    or len(inherited_runtime_handle_json) > _MAX_EXECUTION_RUNTIME_HANDLE_CHARS
+                ):
+                    return None
+                decoded_runtime_handle = json.loads(inherited_runtime_handle_json)
+                if not isinstance(decoded_runtime_handle, dict):
+                    return None
+                normalized_runtime_handle = RuntimeHandle.from_dict(decoded_runtime_handle)
+                if normalized_runtime_handle is None:
+                    return None
+                canonical_runtime_handle = json.dumps(
+                    normalized_runtime_handle.to_persisted_dict(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                if canonical_runtime_handle != inherited_runtime_handle_json:
+                    return None
+                normalized_runtime_handle_json = inherited_runtime_handle_json
+
+            return {
+                "schema_version": 2,
+                "strategy": {
+                    "schema_version": 1,
+                    "resolver": resolver,
+                    "tools": list(tools),
+                    "system_prompt_fragment": system_fragment,
+                    "task_prompt_suffix": task_suffix,
+                    "activity_map": normalized_activity,
+                },
+                "context_pack_fragment": context_pack_fragment,
+                "execution_profile_json": normalized_profile_json,
+                "inherited_runtime_handle_json": normalized_runtime_handle_json,
+                "allowed_tools": normalized_allowed_tools,
+                "tool_catalog_json": catalog_json,
+                "tool_catalog_fingerprint": catalog_fingerprint,
+            }
+        except Exception:
+            return None
+
+    def _execution_inputs_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> dict[str, object]:
+        """Return the validated immutable provider-input population."""
+        raw_inputs = (
+            execution_contract.get("execution_inputs")
+            if isinstance(execution_contract, Mapping)
+            else None
+        )
+        normalized = self._normalize_execution_inputs_contract(
+            raw_inputs,
+            require_bound=require_bound,
+        )
+        if normalized is None:
+            raise OrchestratorError(
+                message="Cannot execute with an invalid prompt/tool input snapshot",
+                details={"invalid": "execution_inputs"},
+            )
+        return normalized
+
+    def _execution_strategy_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> _PersistedExecutionStrategy:
+        normalized = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        strategy = normalized["strategy"]
+        assert isinstance(strategy, dict)
+        raw_activity = strategy["activity_map"]
+        assert isinstance(raw_activity, list)
+        return _PersistedExecutionStrategy(
+            tools=tuple(strategy["tools"]),
+            system_prompt_fragment=strategy["system_prompt_fragment"],
+            task_prompt_suffix=strategy["task_prompt_suffix"],
+            activity_map=tuple((row[0], ActivityType(row[1])) for row in raw_activity),
+        )
+
+    def _execution_context_pack_fragment_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> str:
+        """Return context text resolved before the durable session existed."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        fragment = inputs["context_pack_fragment"]
+        assert isinstance(fragment, str)
+        return fragment
+
+    def _execution_profile_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> ExecutionProfile | None:
+        """Restore the complete profile without rereading mutable YAML."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        raw_profile = inputs["execution_profile_json"]
+        if raw_profile is None:
+            return None
+        assert isinstance(raw_profile, str)
+        return ExecutionProfile.model_validate(json.loads(raw_profile))
+
+    def _execution_inherited_runtime_handle_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+        *,
+        require_bound: bool,
+    ) -> RuntimeHandle | None:
+        """Restore parent conversation lineage from the durable snapshot."""
+        inputs = self._execution_inputs_snapshot(
+            execution_contract,
+            require_bound=require_bound,
+        )
+        raw_handle = inputs["inherited_runtime_handle_json"]
+        if raw_handle is None:
+            return None
+        assert isinstance(raw_handle, str)
+        restored = RuntimeHandle.from_dict(json.loads(raw_handle))
+        if restored is None:  # pragma: no cover - exact-schema validation owns this path
+            raise OrchestratorError(message="Cannot restore inherited runtime authority")
+        return restored
+
+    def _bind_execution_tool_authority(
+        self,
+        execution_contract: Mapping[str, Any],
+        *,
+        merged_tools: list[str],
+        tool_catalog: SessionToolCatalog,
+    ) -> tuple[dict[str, Any], bool]:
+        """Seal or validate the exact allowed tools and complete catalog."""
+        normalized = self._normalize_execution_inputs_contract(
+            execution_contract.get("execution_inputs"),
+            require_bound=False,
+        )
+        if normalized is None:
+            raise OrchestratorError(
+                message="Cannot bind an invalid prompt/tool input snapshot",
+                details={"invalid": "execution_inputs"},
+            )
+        serialized_catalog = serialize_tool_catalog(tool_catalog)
+        try:
+            catalog_json = json.dumps(
+                serialized_catalog,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot persist a non-canonical tool catalog",
+                details={"cause": type(exc).__name__},
+            ) from exc
+        if len(catalog_json) > _MAX_EXECUTION_TOOL_CATALOG_CHARS:
+            raise OrchestratorError(message="Cannot persist an oversized tool catalog")
+        current_allowed = list(merged_tools)
+        if (
+            len(current_allowed) > _MAX_EXECUTION_ALLOWED_TOOLS
+            or any(type(tool) is not str or not tool or len(tool) > 256 for tool in current_allowed)
+            or len(set(current_allowed)) != len(current_allowed)
+        ):
+            raise OrchestratorError(message="Cannot persist an invalid allowed-tool catalog")
+
+        persisted_catalog = normalized["tool_catalog_json"]
+        persisted_allowed = normalized["allowed_tools"]
+        if persisted_catalog is not None:
+            if persisted_catalog != catalog_json or persisted_allowed != current_allowed:
+                raise OrchestratorError(
+                    message="Cannot resume with changed prompt/tool authority",
+                    details={
+                        "resume_blocked": "execution_tool_authority_drift",
+                        "hint": "Restore the original tool catalog or start a new session.",
+                    },
+                )
+            return dict(execution_contract), False
+
+        normalized["allowed_tools"] = current_allowed
+        normalized["tool_catalog_json"] = catalog_json
+        normalized["tool_catalog_fingerprint"] = hashlib.sha256(
+            catalog_json.encode("utf-8")
+        ).hexdigest()
+        bound_contract = deepcopy(dict(execution_contract))
+        bound_contract["execution_inputs"] = normalized
+        proof = bound_contract.get("frugality_proof")
+        if not isinstance(proof, dict):
+            raise OrchestratorError(message="Cannot bind an invalid proof contract")
+        proof["execution_inputs_fingerprint"] = self._execution_inputs_fingerprint(normalized)
+        return bound_contract, True
+
+    def _execution_semantics_contract(self) -> dict[str, object]:
+        """Return every scalar setting that can change resumed AC effects."""
+        backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
+        return {
+            "version": 3,
+            "run_verify_commands": self._run_verify_commands,
+            "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
+            "ac_retry_attempts": self._ac_retry_attempts,
+            "cross_harness_redispatch": self._cross_harness_redispatch_enabled,
+            "enable_decomposition": self._enable_decomposition,
+            "decomposition_mode": self._decomposition_mode,
+            "max_decomposition_depth": self._max_decomposition_depth,
+            "max_parallel_workers": self._max_parallel_workers,
+            "effective_parallel_workers": plan_fan_out_concurrency(
+                self._max_parallel_workers,
+                backend_limits,
+            ),
+            "fat_harness_mode": self._fat_harness_mode,
+            "shadow_replay_enabled": self._shadow_replay_enabled,
+            "checkpoint_store_enabled": self._checkpoint_store is not None,
+            "session_signal_hub_enabled": self._session_signal_hub is not None,
+            "context_pack_enabled": self._context_pack_enabled,
+            "backend_limits_backend": backend_limits.backend,
+            "backend_max_concurrency": backend_limits.max_concurrency,
+            "backend_requests_per_minute": backend_limits.requests_per_minute,
+            "backend_tokens_per_minute": backend_limits.tokens_per_minute,
+            "backend_self_governs_rate_limit": bool(
+                getattr(self._adapter, "self_governs_rate_limit", False)
+            ),
+            "usage_limit_pause_seconds": get_usage_limit_pause_seconds(),
+            "runtime_effect_capabilities": runtime_effect_capabilities_contract(self._adapter),
+        }
+
+    @staticmethod
+    def _valid_execution_semantics_contract(value: object) -> bool:
+        """Validate the exact current scalar executor schema."""
+        expected_keys = frozenset(
+            {
+                "version",
+                "run_verify_commands",
+                "verify_command_timeout_seconds",
+                "ac_retry_attempts",
+                "cross_harness_redispatch",
+                "enable_decomposition",
+                "decomposition_mode",
+                "max_decomposition_depth",
+                "max_parallel_workers",
+                "effective_parallel_workers",
+                "fat_harness_mode",
+                "shadow_replay_enabled",
+                "checkpoint_store_enabled",
+                "session_signal_hub_enabled",
+                "context_pack_enabled",
+                "backend_limits_backend",
+                "backend_max_concurrency",
+                "backend_requests_per_minute",
+                "backend_tokens_per_minute",
+                "backend_self_governs_rate_limit",
+                "usage_limit_pause_seconds",
+                "runtime_effect_capabilities",
+            }
+        )
+        if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
+            return False
+        boolean_keys = (
+            "run_verify_commands",
+            "cross_harness_redispatch",
+            "enable_decomposition",
+            "fat_harness_mode",
+            "shadow_replay_enabled",
+            "checkpoint_store_enabled",
+            "session_signal_hub_enabled",
+            "context_pack_enabled",
+            "backend_self_governs_rate_limit",
+        )
+        if (
+            type(value.get("version")) is not int
+            or value.get("version") != 3
+            or any(type(value.get(key)) is not bool for key in boolean_keys)
+        ):
+            return False
+        timeout = value.get("verify_command_timeout_seconds")
+        retries = value.get("ac_retry_attempts")
+        max_depth = value.get("max_decomposition_depth")
+        max_workers = value.get("max_parallel_workers")
+        effective_workers = value.get("effective_parallel_workers")
+        mode = value.get("decomposition_mode")
+        backend = value.get("backend_limits_backend")
+        backend_max_concurrency = value.get("backend_max_concurrency")
+        backend_limits = (
+            backend_max_concurrency,
+            value.get("backend_requests_per_minute"),
+            value.get("backend_tokens_per_minute"),
+        )
+        usage_limit_pause_seconds = value.get("usage_limit_pause_seconds")
+        expected_effective_workers = (
+            min(max_workers, backend_max_concurrency)
+            if type(max_workers) is int and type(backend_max_concurrency) is int
+            else max_workers
+        )
+        return bool(
+            type(timeout) is int
+            and timeout >= 1
+            and type(retries) is int
+            and retries >= 0
+            and type(max_depth) is int
+            and max_depth >= 0
+            and type(max_workers) is int
+            and max_workers >= 1
+            and type(effective_workers) is int
+            and 1 <= effective_workers <= max_workers
+            and effective_workers == expected_effective_workers
+            and isinstance(mode, str)
+            and mode in {"preflight", "bounce_only", "off"}
+            and (value.get("enable_decomposition") is True or mode == "off")
+            and isinstance(backend, str)
+            and bool(backend)
+            and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
+            and type(usage_limit_pause_seconds) is int
+            and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+            and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
+        )
+
+    def _execution_semantics_snapshot(
+        self,
+        execution_contract: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return one validated immutable-input snapshot from a durable contract."""
+        raw_execution_semantics = (
+            execution_contract.get("execution_semantics")
+            if isinstance(execution_contract, Mapping)
+            else None
+        )
+        if not self._valid_execution_semantics_contract(raw_execution_semantics):
+            raise OrchestratorError(
+                message="Cannot execute with an invalid execution-semantics snapshot",
+                details={"invalid": "execution_semantics"},
+            )
+        return dict(raw_execution_semantics)
 
     @staticmethod
     def _seed_semantics_fingerprint(seed: Seed) -> str:
@@ -2535,6 +4050,147 @@ class OrchestratorRunner:
             session_id,
             execution_id,
             self._adapter,
+        )
+
+    def _seal_process_local_prepared_contract(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        execution_contract: Mapping[str, object],
+    ) -> None:
+        """Bind the successfully persisted prepare contract to its live owner."""
+        _seal_process_local_prepared_contract(
+            session_id,
+            execution_id,
+            generation,
+            self._adapter,
+            execution_contract,
+        )
+
+    def _authenticate_process_local_prepared_contract(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        execution_contract: object,
+    ) -> dict[str, Any] | None:
+        """Recover the sealed snapshot only for an exact claimed caller copy."""
+        return _authenticate_process_local_prepared_contract(
+            session_id,
+            execution_id,
+            generation,
+            self._adapter,
+            execution_contract,
+        )
+
+    async def _reconstruct_precreated_durable_tracker(
+        self,
+        tracker: SessionTracker,
+    ) -> Result[SessionTracker, OrchestratorError]:
+        """Return the durable lifecycle owner for one prepared execution.
+
+        Caller-owned trackers are immutable preparation receipts, not lifecycle
+        authority. Every prepared dispatch observes the event-sourced status at
+        this choke point before it may claim process-local execution authority.
+        """
+        try:
+            durable_result = await self._session_repo.reconstruct_session(tracker.session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return Result.err(
+                OrchestratorError(
+                    message="Cannot verify durable prepared session state",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "cause": str(exc),
+                        "resume_blocked": "precreated_state_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
+        if durable_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message="Cannot verify durable prepared session state",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "cause": str(durable_result.error),
+                        "resume_blocked": "precreated_state_reconstruction_pending",
+                        "retryable": True,
+                    },
+                )
+            )
+        durable_tracker = durable_result.value
+        if (
+            durable_tracker.session_id != tracker.session_id
+            or durable_tracker.execution_id != tracker.execution_id
+        ):
+            return Result.err(
+                OrchestratorError(
+                    message="Durable session identity does not match the supplied tracker",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "durable_session_id": durable_tracker.session_id,
+                        "durable_execution_id": durable_tracker.execution_id,
+                        "resume_blocked": "precreated_session_identity_mismatch",
+                    },
+                )
+            )
+        return Result.ok(durable_tracker)
+
+    @staticmethod
+    def _precreated_non_running_error(
+        durable_tracker: SessionTracker,
+    ) -> OrchestratorError | None:
+        """Reject every durable lifecycle state except a fresh RUNNING owner."""
+        if durable_tracker.status is SessionStatus.RUNNING:
+            return None
+        if durable_tracker.status is SessionStatus.PAUSED:
+            return OrchestratorError(
+                message=(
+                    "Session is paused; resume it through resume_session instead of "
+                    "reusing a prepared tracker"
+                ),
+                details={
+                    "session_id": durable_tracker.session_id,
+                    "execution_id": durable_tracker.execution_id,
+                    "status": durable_tracker.status.value,
+                    "resume_blocked": "session_paused_use_resume",
+                },
+            )
+        if durable_tracker.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        }:
+            return OrchestratorError(
+                message=(
+                    f"Session is in terminal state {durable_tracker.status.value}, cannot execute"
+                ),
+                details={
+                    "session_id": durable_tracker.session_id,
+                    "execution_id": durable_tracker.execution_id,
+                    "status": durable_tracker.status.value,
+                },
+            )
+        return OrchestratorError(
+            message=(
+                "Session is not in durable running state, cannot execute "
+                f"({durable_tracker.status.value})"
+            ),
+            details={
+                "session_id": durable_tracker.session_id,
+                "execution_id": durable_tracker.execution_id,
+                "status": durable_tracker.status.value,
+                "resume_blocked": "precreated_session_not_running",
+            },
         )
 
     def _cleanup_process_local_authority_after_external_terminal(
@@ -3305,18 +4961,21 @@ class OrchestratorRunner:
             )
 
         resolved_status: SessionStatus
+        if intent.status is SessionStatus.PAUSED and intent.pause is None:
+            return Result.err(
+                OrchestratorError(
+                    message="Pending PAUSED intent is missing its replay payload",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": "pending_lifecycle_payload_missing",
+                    },
+                )
+            )
+
         try:
             if intent.status is SessionStatus.PAUSED:
-                pause = intent.pause
-                if pause is None:
-                    raise OrchestratorError(
-                        message="Pending PAUSED intent is missing its replay payload",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                            "resume_blocked": "pending_lifecycle_payload_missing",
-                        },
-                    )
+                pause = cast(RecoverableFailurePause, intent.pause)
                 pause_result = await self._session_repo.mark_paused(
                     tracker.session_id,
                     reason=pause.reason,
@@ -3680,9 +5339,6 @@ class OrchestratorRunner:
     def _restore_guidance_contract(self, raw_contract: Mapping[str, Any]) -> None:
         """Restore persisted guidance refs without consulting the current allowlist."""
         raw_guidance = raw_contract.get("guidance")
-        if raw_guidance is None:
-            self._execution_guidance = self._resolve_guidance_bundle(())
-            return
         if not isinstance(raw_guidance, Mapping):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -3738,6 +5394,7 @@ class OrchestratorRunner:
         seed: Seed | None = None,
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        execution_inputs_contract: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -3747,6 +5404,20 @@ class OrchestratorRunner:
         )
 
         guidance_bundle = self._ensure_new_run_guidance()
+        execution_semantics = self._execution_semantics_contract()
+        if execution_inputs_contract is None:
+            execution_inputs = self._build_execution_inputs_contract(seed)
+        else:
+            normalized_inputs = self._normalize_execution_inputs_contract(
+                execution_inputs_contract,
+                require_bound=True,
+            )
+            if normalized_inputs is None:
+                raise OrchestratorError(
+                    message="Cannot preserve an invalid execution input contract",
+                    details={"invalid": "execution_inputs"},
+                )
+            execution_inputs = normalized_inputs
         routing_contract = serialize_model_router(self._model_router)
         routing_contract["requested_model_tier"] = self._requested_model_tier
         # Effort routing is independent of model-tier routing. Persist it even
@@ -3768,6 +5439,10 @@ class OrchestratorRunner:
         proof_contract: dict[str, Any] = {
             "protocol_version": FRUGALITY_PROOF_PROTOCOL_VERSION,
             "routing_fingerprint": self._routing_fingerprint(routing_contract),
+            "execution_semantics_fingerprint": self._execution_semantics_fingerprint(
+                execution_semantics
+            ),
+            "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
         workspace_identity = self._proof_workspace_identity()
         if workspace_identity is not None:
@@ -3790,10 +5465,12 @@ class OrchestratorRunner:
             }
         else:
             authority_contract = self._process_local_authority_contract(authority_generation)
-        return {
+        contract = {
             "version": EXECUTION_CONTRACT_VERSION,
             "foundation_a_authority": authority_contract,
             "execution_preferences": self._execution_preferences.to_contract_data(),
+            "execution_semantics": execution_semantics,
+            "execution_inputs": execution_inputs,
             "model_routing": routing_contract,
             "frugality_proof": proof_contract,
             "guidance": self._guidance_contract(guidance_bundle),
@@ -3801,6 +5478,9 @@ class OrchestratorRunner:
                 "workspace": self._resume_workspace_identity(),
             },
         }
+        if frozenset(contract) != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
+            raise AssertionError("execution contract v9 builder emitted a non-canonical shape")
+        return contract
 
     async def _emit_run_configuration_resolved(
         self,
@@ -3809,7 +5489,6 @@ class OrchestratorRunner:
         session_id: str,
     ) -> None:
         """Persist the user-facing run configuration before any AC dispatch."""
-        from ouroboros.config import get_cross_harness_redispatch_enabled
         from ouroboros.events.base import BaseEvent
 
         starting_tier = self._model_router.base_tier if self._model_router else None
@@ -3836,7 +5515,7 @@ class OrchestratorRunner:
                     "starting_model_tier": starting_tier,
                     "starting_model": starting_model,
                     "progressive_escalation_enabled": self._model_router is not None,
-                    "alternate_harness_enabled": get_cross_harness_redispatch_enabled(),
+                    "alternate_harness_enabled": self._cross_harness_redispatch_enabled,
                     "strict_baseline_authorized": (
                         self._execution_preferences.strict_baseline_authorized
                     ),
@@ -3894,6 +5573,228 @@ class OrchestratorRunner:
                 },
             )
         )
+
+    @staticmethod
+    def _serialize_parallel_resume_plan(execution_plan: Any) -> dict[str, object]:
+        """Seal the exact dependency plan needed by the parallel resume owner."""
+
+        return {
+            "schema_version": 1,
+            "nodes": [
+                {
+                    "index": node.index,
+                    "depends_on": list(node.depends_on),
+                    "can_run_independently": node.can_run_independently,
+                    "requires_serial_stage": node.requires_serial_stage,
+                    "serialization_reasons": list(node.serialization_reasons),
+                }
+                for node in execution_plan.nodes
+            ],
+            "stages": [
+                {
+                    "index": stage.index,
+                    "ac_indices": list(stage.ac_indices),
+                    "depends_on_stages": list(stage.depends_on_stages),
+                }
+                for stage in execution_plan.stages
+            ],
+        }
+
+    @staticmethod
+    def _parallel_process_local_resume_nonce(tracker: Any) -> str | None:
+        """Reuse the live Foundation A generation across parallel executors."""
+
+        progress = getattr(tracker, "progress", None)
+        raw_contract = (
+            progress.get(EXECUTION_CONTRACT_PROGRESS_KEY) if isinstance(progress, Mapping) else None
+        )
+        authority = (
+            raw_contract.get("foundation_a_authority")
+            if isinstance(raw_contract, Mapping)
+            else None
+        )
+        correlation_id = authority.get("correlation_id") if isinstance(authority, Mapping) else None
+        if correlation_id is None:
+            # Low-level unit callers may invoke _execute_parallel without the
+            # outer run lifecycle. Production new/resume paths always carry the
+            # Foundation A contract and therefore take the stable branch below.
+            return None
+        if (
+            not isinstance(correlation_id, str)
+            or len(correlation_id) != 32
+            or any(char not in "0123456789abcdef" for char in correlation_id)
+        ):
+            raise OrchestratorError(message="Invalid process-local authority for parallel resume")
+        return correlation_id
+
+    @staticmethod
+    def _deserialize_parallel_resume_plan(seed: Seed, raw: object) -> Any:
+        """Restore a bounded exact plan or fail before any analyzer/provider effect."""
+
+        from ouroboros.orchestrator.dependency_analyzer import (
+            ACNode,
+            ExecutionStage,
+            StagedExecutionPlan,
+        )
+
+        if not isinstance(raw, Mapping) or not _mapping_has_exact_keys(
+            raw, frozenset({"schema_version", "nodes", "stages"})
+        ):
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        nodes_raw = raw.get("nodes")
+        stages_raw = raw.get("stages")
+        ac_count = len(seed.acceptance_criteria)
+        if (
+            raw.get("schema_version") != 1
+            or type(nodes_raw) is not list
+            or len(nodes_raw) != ac_count
+            or type(stages_raw) is not list
+            or len(stages_raw) > ac_count
+            or (ac_count > 0 and not stages_raw)
+        ):
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        nodes: list[ACNode] = []
+        for expected_index, value in enumerate(nodes_raw):
+            if not isinstance(value, Mapping) or not _mapping_has_exact_keys(
+                value,
+                frozenset(
+                    {
+                        "index",
+                        "depends_on",
+                        "can_run_independently",
+                        "requires_serial_stage",
+                        "serialization_reasons",
+                    }
+                ),
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            depends_on = value.get("depends_on")
+            reasons = value.get("serialization_reasons")
+            if (
+                type(value.get("index")) is not int
+                or value.get("index") != expected_index
+                or type(depends_on) is not list
+                or len(depends_on) > ac_count
+                or any(type(index) is not int for index in depends_on)
+                or len(set(depends_on)) != len(depends_on)
+                or any(not 0 <= index < ac_count or index == expected_index for index in depends_on)
+                or type(value.get("can_run_independently")) is not bool
+                or type(value.get("requires_serial_stage")) is not bool
+                or type(reasons) is not list
+                or len(reasons) > ac_count
+                or any(
+                    type(reason) is not str or not reason or len(reason) > 256 for reason in reasons
+                )
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            nodes.append(
+                ACNode(
+                    index=expected_index,
+                    content=ac_text(seed.acceptance_criteria[expected_index]),
+                    depends_on=tuple(depends_on),
+                    can_run_independently=value["can_run_independently"],
+                    requires_serial_stage=value["requires_serial_stage"],
+                    serialization_reasons=tuple(reasons),
+                )
+            )
+        stages: list[ExecutionStage] = []
+        seen_acs: set[int] = set()
+        stage_by_ac: dict[int, int] = {}
+        for expected_stage, value in enumerate(stages_raw):
+            if not isinstance(value, Mapping) or not _mapping_has_exact_keys(
+                value,
+                frozenset({"index", "ac_indices", "depends_on_stages"}),
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            ac_indices = value.get("ac_indices")
+            dependencies = value.get("depends_on_stages")
+            if (
+                type(value.get("index")) is not int
+                or value.get("index") != expected_stage
+                or type(ac_indices) is not list
+                or not ac_indices
+                or len(ac_indices) > ac_count
+                or any(type(index) is not int or not 0 <= index < ac_count for index in ac_indices)
+                or len(set(ac_indices)) != len(ac_indices)
+                or seen_acs.intersection(ac_indices)
+                or type(dependencies) is not list
+                or len(dependencies) > expected_stage
+                or any(
+                    type(index) is not int or not 0 <= index < expected_stage
+                    for index in dependencies
+                )
+                or len(set(dependencies)) != len(dependencies)
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+            stage = ExecutionStage(
+                index=expected_stage,
+                ac_indices=tuple(ac_indices),
+                depends_on_stages=tuple(dependencies),
+            )
+            stages.append(stage)
+            seen_acs.update(ac_indices)
+            stage_by_ac.update(dict.fromkeys(ac_indices, expected_stage))
+        if seen_acs != set(range(ac_count)):
+            raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        for node in nodes:
+            node_stage = stage_by_ac[node.index]
+            stage_dependencies = set(stages[node_stage].depends_on_stages)
+            if any(
+                stage_by_ac[dependency] >= node_stage
+                or stage_by_ac[dependency] not in stage_dependencies
+                for dependency in node.depends_on
+            ):
+                raise OrchestratorError(message="Invalid persisted parallel resume plan")
+        return StagedExecutionPlan(nodes=tuple(nodes), stages=tuple(stages))
+
+    @staticmethod
+    def _serialize_parallel_external_satisfaction(
+        seed: Seed,
+        values: dict[int, dict[str, Any]] | None,
+    ) -> dict[str, dict[str, str | None]]:
+        """Seal the partial-stage ``--skip-completed`` authority for resume."""
+
+        serialized: dict[str, dict[str, str | None]] = {}
+        for ac_index, metadata in (values or {}).items():
+            if type(ac_index) is not int or not 0 <= ac_index < len(seed.acceptance_criteria):
+                raise OrchestratorError(message="Invalid externally satisfied AC index")
+            reason = metadata.get("reason") if isinstance(metadata, Mapping) else None
+            commit = metadata.get("commit") if isinstance(metadata, Mapping) else None
+            if reason is not None and not isinstance(reason, str):
+                raise OrchestratorError(message="Invalid externally satisfied AC reason")
+            if commit is not None and not isinstance(commit, str):
+                raise OrchestratorError(message="Invalid externally satisfied AC commit")
+            serialized[str(ac_index)] = {"reason": reason, "commit": commit}
+        return serialized
+
+    @staticmethod
+    def _deserialize_parallel_external_satisfaction(
+        seed: Seed,
+        raw: object,
+    ) -> dict[int, dict[str, Any]]:
+        """Restore the exact skip map or fail before a provider effect."""
+
+        if not isinstance(raw, Mapping) or len(raw) > len(seed.acceptance_criteria):
+            raise OrchestratorError(message="Invalid persisted external satisfaction state")
+        restored: dict[int, dict[str, Any]] = {}
+        for raw_index, metadata in raw.items():
+            if not isinstance(raw_index, str) or not raw_index.isdecimal():
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            ac_index = int(raw_index)
+            if not 0 <= ac_index < len(seed.acceptance_criteria):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            if not isinstance(metadata, Mapping) or not _mapping_has_exact_keys(
+                metadata, frozenset({"reason", "commit"})
+            ):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            reason = metadata.get("reason")
+            commit = metadata.get("commit")
+            if (reason is not None and not isinstance(reason, str)) or (
+                commit is not None and not isinstance(commit, str)
+            ):
+                raise OrchestratorError(message="Invalid persisted external satisfaction state")
+            restored[ac_index] = {"reason": reason, "commit": commit}
+        return restored
 
     def _validate_legacy_resume_identity(
         self,
@@ -4040,25 +5941,28 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        require_bound_execution_inputs: bool = True,
+        prepared_live_execution: bool = False,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
         Returns whether a replacement contract (an explicit override or one-time
         legacy migration) should be checkpointed for subsequent resumes. A present
         malformed contract blocks resume; it is never reinterpreted as a legacy
-        session or allowed to change models silently.
+        session or allowed to change models silently. ``prepared_live_execution``
+        admits only the explicit unobservable states emitted by the new-run builder;
+        the caller must already hold and match that run's sealed process-local
+        contract, while the normal durable resume path remains strict.
         """
         if EXECUTION_CONTRACT_PROGRESS_KEY not in progress:
-            self._validate_legacy_resume_identity(progress, seed=seed)
-            self._execution_guidance = self._resolve_guidance_bundle(())
-            self._execution_contract = self._build_execution_contract(
-                seed=seed,
-                authority_generation=authority_generation,
+            raise OrchestratorError(
+                message="Cannot resume a session without durable effect inputs",
+                details={
+                    "contract_version": None,
+                    "resume_blocked": "execution_inputs_unavailable",
+                    "hint": "Start a new session under the current execution contract.",
+                },
             )
-            # One unavoidable recomputation migrates a legacy session. Persist the
-            # resolved contract now so every later resume restores this exact policy
-            # instead of drifting again with each environment/config change.
-            return True
         raw_contract = progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
 
         raw_version = raw_contract.get("version") if isinstance(raw_contract, Mapping) else None
@@ -4070,6 +5974,11 @@ class OrchestratorRunner:
             not in {
                 PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION,
                 PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION,
+                PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION,
+                PRE_EXECUTION_INPUTS_EXECUTION_CONTRACT_VERSION,
+                PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION,
+                PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION,
+                PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION,
                 EXECUTION_CONTRACT_VERSION,
             }
         ):
@@ -4078,12 +5987,33 @@ class OrchestratorRunner:
                 details={"contract_version": raw_version},
             )
 
+        if raw_version != EXECUTION_CONTRACT_VERSION:
+            # Every older version may already have dispatched provider effects,
+            # but none sealed the complete v9 effect population, including the
+            # runtime capability/vocabulary that builds provider-call kwargs.
+            # Reconstructing any missing field from current runtime state would
+            # change replay authorization.
+            raise OrchestratorError(
+                message="Cannot resume a session without durable effect inputs",
+                details={
+                    "contract_version": raw_version,
+                    "resume_blocked": "execution_inputs_unavailable",
+                    "hint": "Start a new session under the current execution contract.",
+                },
+            )
+
+        raw_contract = _require_exact_execution_contract_v9(raw_contract)
+
         migrate_v2_contract = raw_version == PRE_ROUTE_ADMISSION_EXECUTION_CONTRACT_VERSION
         migrate_v3_contract = raw_version == PRE_REQUESTED_TIER_EXECUTION_CONTRACT_VERSION
+        migrate_v4_contract = raw_version == PRE_EXECUTION_SEMANTICS_EXECUTION_CONTRACT_VERSION
+        migrate_legacy_contract = migrate_v2_contract or migrate_v3_contract or migrate_v4_contract
         raw_proof = raw_contract.get("frugality_proof")
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        raw_execution_semantics = raw_contract.get("execution_semantics")
+        raw_execution_inputs = raw_contract.get("execution_inputs")
         raw_authority = raw_contract.get("foundation_a_authority")
         if (
             not isinstance(raw_proof, Mapping)
@@ -4099,8 +6029,19 @@ class OrchestratorRunner:
             )
 
         # Version 2 predates effort/Route B fields; version 3 predates the
-        # independent requested-tier field. Only those exact shapes migrate.
+        # independent requested-tier field; version 4 predates the complete
+        # executor-semantics snapshot. Only those exact shapes migrate.
         # A malformed current contract must never fall through either path.
+        if migrate_legacy_contract and (
+            "execution_semantics" in raw_contract
+            or "execution_semantics_fingerprint" in raw_proof
+            or "execution_inputs" in raw_contract
+            or "execution_inputs_fingerprint" in raw_proof
+        ):
+            raise OrchestratorError(
+                message="Cannot resume with an invalid execution contract",
+                details={"invalid": f"version {raw_version} execution semantics extension"},
+            )
         if migrate_v2_contract and (
             "reasoning_effort" in raw_routing
             or "route_compat" in raw_routing
@@ -4122,6 +6063,8 @@ class OrchestratorRunner:
         persisted_project_root = raw_proof.get("project_root")
         persisted_workspace_path = raw_proof.get("workspace_path")
         persisted_routing_fingerprint = raw_proof.get("routing_fingerprint")
+        persisted_execution_semantics_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+        persisted_execution_inputs_fingerprint = raw_proof.get("execution_inputs_fingerprint")
         persisted_seed_fingerprint = raw_proof.get("seed_fingerprint")
         persisted_constructor_model = raw_routing.get("constructor_model")
         persisted_runtime_execution = raw_routing.get("runtime_execution")
@@ -4138,23 +6081,65 @@ class OrchestratorRunner:
             and len(persisted_seed_fingerprint) == 64
             and all(char in "0123456789abcdef" for char in persisted_seed_fingerprint)
         )
+        normalized_execution_inputs = (
+            None
+            if migrate_legacy_contract
+            else self._normalize_execution_inputs_contract(
+                raw_execution_inputs,
+                require_bound=require_bound_execution_inputs,
+            )
+        )
         if (
             isinstance(protocol_version, bool)
             or not isinstance(protocol_version, int)
             or protocol_version != FRUGALITY_PROOF_PROTOCOL_VERSION
-            or not isinstance(persisted_project_root, str)
-            or not persisted_project_root.strip()
-            or not isinstance(persisted_workspace_path, str)
-            or not persisted_workspace_path.strip()
+            or not (
+                isinstance(persisted_project_root, str)
+                and bool(persisted_project_root.strip())
+                and isinstance(persisted_workspace_path, str)
+                and bool(persisted_workspace_path.strip())
+                or prepared_live_execution
+                and persisted_project_root is None
+                and persisted_workspace_path is None
+            )
             or not isinstance(persisted_routing_fingerprint, str)
             or persisted_routing_fingerprint != self._routing_fingerprint(raw_routing)
+            or (
+                not migrate_legacy_contract
+                and (
+                    not self._valid_execution_semantics_contract(raw_execution_semantics)
+                    or not isinstance(persisted_execution_semantics_fingerprint, str)
+                    or persisted_execution_semantics_fingerprint
+                    != self._execution_semantics_fingerprint(raw_execution_semantics)
+                )
+            )
+            or (
+                not migrate_legacy_contract
+                and (
+                    normalized_execution_inputs is None
+                    or not isinstance(persisted_execution_inputs_fingerprint, str)
+                    or persisted_execution_inputs_fingerprint
+                    != self._execution_inputs_fingerprint(normalized_execution_inputs)
+                )
+            )
             or (seed is not None and not valid_seed_fingerprint)
-            or not self._valid_constructor_model_contract(persisted_constructor_model)
+            or not (
+                self._valid_constructor_model_contract(persisted_constructor_model)
+                or (prepared_live_execution and persisted_constructor_model == {"observed": False})
+            )
             or not self._valid_runtime_execution_identity_contract(persisted_runtime_execution)
-            or not isinstance(persisted_runtime_backend, str)
-            or not persisted_runtime_backend.strip()
-            or not isinstance(persisted_llm_backend, str)
-            or not persisted_llm_backend.strip()
+            or not (
+                isinstance(persisted_runtime_backend, str)
+                and bool(persisted_runtime_backend.strip())
+                or prepared_live_execution
+                and persisted_runtime_backend is None
+            )
+            or not (
+                isinstance(persisted_llm_backend, str)
+                and bool(persisted_llm_backend.strip())
+                or prepared_live_execution
+                and persisted_llm_backend is None
+            )
             or not self._valid_permission_mode_contract(persisted_permission_mode)
             or (
                 not migrate_v2_contract
@@ -4171,7 +6156,11 @@ class OrchestratorRunner:
                     not in {None, "frugal", "standard", "frontier"}
                 )
             )
-            or not isinstance(persisted_resume_workspace, Mapping)
+            or not (
+                isinstance(persisted_resume_workspace, Mapping)
+                or prepared_live_execution
+                and persisted_resume_workspace is None
+            )
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -4179,14 +6168,11 @@ class OrchestratorRunner:
             )
 
         persisted_preferences = execution_preferences_from_contract(raw_preferences)
-        preferences_migrated = persisted_preferences is None and raw_preferences is None
         if persisted_preferences is None:
-            if not preferences_migrated:
-                raise OrchestratorError(
-                    message="Cannot resume with invalid execution preferences",
-                    details={"invalid": "execution_preferences"},
-                )
-            persisted_preferences = resolve_execution_preferences(None, None)
+            raise OrchestratorError(
+                message="Cannot resume with invalid execution preferences",
+                details={"invalid": "execution_preferences"},
+            )
         if (
             self._execution_preferences_override_explicit
             and self._execution_preferences != persisted_preferences
@@ -4204,10 +6190,14 @@ class OrchestratorRunner:
             self._seed_semantics_fingerprint(seed) if seed is not None else None
         )
         active_workspace = self._proof_workspace_identity()
-        persisted_workspace = {
-            "project_root": persisted_project_root,
-            "workspace_path": persisted_workspace_path,
-        }
+        persisted_workspace = (
+            None
+            if persisted_project_root is None and persisted_workspace_path is None
+            else {
+                "project_root": persisted_project_root,
+                "workspace_path": persisted_workspace_path,
+            }
+        )
         if active_workspace != persisted_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different project workspace",
@@ -4218,11 +6208,16 @@ class OrchestratorRunner:
                 },
             )
         active_resume_workspace = self._resume_workspace_identity()
-        if active_resume_workspace != dict(persisted_resume_workspace):
+        normalized_persisted_resume_workspace = (
+            dict(persisted_resume_workspace)
+            if isinstance(persisted_resume_workspace, Mapping)
+            else None
+        )
+        if active_resume_workspace != normalized_persisted_resume_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different execution workspace",
                 details={
-                    "persisted_workspace": dict(persisted_resume_workspace),
+                    "persisted_workspace": normalized_persisted_resume_workspace,
                     "current_workspace": active_resume_workspace,
                     "hint": "Resume from the exact original worktree and branch.",
                 },
@@ -4441,11 +6436,37 @@ class OrchestratorRunner:
             )
         self._execution_preferences = persisted_preferences
         self._shadow_replay_enabled = self._resolved_shadow_replay_enabled()
+        current_execution_semantics = self._execution_semantics_contract()
+        if (
+            not migrate_legacy_contract
+            and dict(raw_execution_semantics) != current_execution_semantics
+        ):
+            runtime_capability_drift = raw_execution_semantics.get(
+                "runtime_effect_capabilities"
+            ) != current_execution_semantics.get("runtime_effect_capabilities")
+            raise OrchestratorError(
+                message="Cannot resume with changed execution semantics",
+                details={
+                    "persisted_execution_semantics": dict(raw_execution_semantics),
+                    "current_execution_semantics": current_execution_semantics,
+                    "resume_blocked": (
+                        "runtime_effect_capability_drift"
+                        if runtime_capability_drift
+                        else "execution_semantics_drift"
+                    ),
+                    "retryable": True,
+                    "hint": (
+                        "Restore the original verification, retry, decomposition, and "
+                        "executor settings or start a new session."
+                    ),
+                },
+            )
         if self._model_routing_override_explicit:
             replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
+                execution_inputs_contract=normalized_execution_inputs,
             )
             # Only the public resume path reaches this branch with a live,
             # registry-issued generation.  Preserve the persisted diagnostics
@@ -4458,7 +6479,7 @@ class OrchestratorRunner:
 
         self._model_router = restored_router
         self._requested_model_tier = persisted_requested_model_tier
-        if migrate_v2_contract or migrate_v3_contract:
+        if migrate_legacy_contract:
             replacement = self._build_execution_contract(
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
@@ -4472,11 +6493,6 @@ class OrchestratorRunner:
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
-        if preferences_migrated:
-            self._execution_contract["execution_preferences"] = (
-                persisted_preferences.to_contract_data()
-            )
-            return True
         return False
 
     def _restore_execution_contract_snapshot(
@@ -4485,6 +6501,8 @@ class OrchestratorRunner:
         *,
         seed: Seed | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
+        require_bound_execution_inputs: bool = True,
+        prepared_live_execution: bool = False,
     ) -> tuple[bool, dict[str, Any]]:
         """Restore and return one immutable invocation-local contract snapshot.
 
@@ -4498,6 +6516,8 @@ class OrchestratorRunner:
                 progress,
                 seed=seed,
                 authority_generation=authority_generation,
+                require_bound_execution_inputs=require_bound_execution_inputs,
+                prepared_live_execution=prepared_live_execution,
             )
             if not isinstance(self._execution_contract, Mapping):
                 raise OrchestratorError(
@@ -4760,25 +6780,9 @@ class OrchestratorRunner:
 
     @staticmethod
     def _metadata_candidates(message: AgentMessage) -> tuple[Mapping[str, Any], ...]:
-        """Return structured metadata maps attached to a runtime message."""
-        candidates: list[Mapping[str, Any]] = []
-        seen: set[int] = set()
-
-        def add(value: object) -> None:
-            if not isinstance(value, Mapping):
-                return
-            identity = id(value)
-            if identity in seen:
-                return
-            seen.add(identity)
-            candidates.append(value)
-            for key in ("meta", "mcp_meta", "metadata", "error", "details", "response"):
-                nested = value.get(key)
-                if isinstance(nested, Mapping):
-                    add(nested)
-
-        add(message.data)
-        return tuple(candidates)
+        """Return the shared bounded closed-vocabulary metadata projection."""
+        candidates, _overflowed = project_failure_metadata(message)
+        return candidates
 
     @staticmethod
     def _parse_datetime(value: object) -> datetime | None:
@@ -4799,6 +6803,8 @@ class OrchestratorRunner:
         total_seconds = 0.0
         for match in _DURATION_PATTERN.finditer(text):
             value = float(match.group("value"))
+            if not math.isfinite(value):
+                return None
             unit = match.group("unit").lower()
             if unit.startswith("d"):
                 seconds = value * 24 * 60 * 60
@@ -4809,6 +6815,8 @@ class OrchestratorRunner:
             else:
                 seconds = value
             total_seconds += seconds
+            if not math.isfinite(total_seconds):
+                return None
         if total_seconds <= 0:
             return None
         return max(1, math.ceil(total_seconds))
@@ -4818,8 +6826,12 @@ class OrchestratorRunner:
         """Parse a numeric or textual retry duration into seconds."""
         if isinstance(value, bool) or value is None:
             return None
-        if isinstance(value, int | float):
+        if isinstance(value, int):
             if value <= 0:
+                return None
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value) or value <= 0:
                 return None
             return max(1, math.ceil(value))
         if isinstance(value, str):
@@ -4830,7 +6842,7 @@ class OrchestratorRunner:
                 numeric = float(stripped)
             except ValueError:
                 return cls._duration_text_to_seconds(stripped)
-            if numeric <= 0:
+            if not math.isfinite(numeric) or numeric <= 0:
                 return None
             return max(1, math.ceil(numeric))
         return None
@@ -4842,52 +6854,15 @@ class OrchestratorRunner:
         *,
         now: datetime,
     ) -> int | None:
-        """Extract retry/pause duration from structured runtime metadata."""
-        for key in (
-            "pause_seconds",
-            "retry_after_seconds",
-            "retryAfterSeconds",
-            "reset_after_seconds",
-            "resetAfterSeconds",
-        ):
-            parsed = cls._duration_value_to_seconds(metadata.get(key))
-            if parsed is not None:
-                return parsed
+        """Extract retry metadata through the provider-neutral shared parser."""
 
-        for key in ("retry_after_ms", "retryAfterMs", "reset_after_ms", "resetAfterMs"):
-            parsed = cls._duration_value_to_seconds(metadata.get(key))
-            if parsed is not None:
-                return max(1, math.ceil(parsed / 1000))
-
-        for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
-            value = metadata.get(key)
-            parsed_datetime = cls._parse_datetime(value)
-            if parsed_datetime is not None:
-                seconds = math.ceil((parsed_datetime - now).total_seconds())
-                if seconds > 0:
-                    return seconds
-            parsed_duration = cls._duration_value_to_seconds(value)
-            if parsed_duration is not None:
-                return parsed_duration
-
-        for key in ("resume_after", "resumeAfter", "reset_at", "resetAt"):
-            parsed_datetime = cls._parse_datetime(metadata.get(key))
-            if parsed_datetime is not None:
-                seconds = math.ceil((parsed_datetime - now).total_seconds())
-                if seconds > 0:
-                    return seconds
-
-        return None
+        return retry_duration_seconds_from_metadata(metadata, now=now)
 
     @classmethod
     def _duration_from_message(cls, message: AgentMessage, *, now: datetime) -> int | None:
-        """Extract a retry/pause duration from metadata, then final error text."""
-        for metadata in cls._metadata_candidates(message):
-            duration = cls._duration_from_metadata(metadata, now=now)
-            if duration is not None:
-                return duration
+        """Extract a retry duration through the same parser used for classification."""
 
-        return cls._duration_text_to_seconds(message.content)
+        return retry_duration_seconds_from_message(message, now=now)
 
     @staticmethod
     def _metadata_has_runtime_error_shape(metadata: Mapping[str, Any]) -> bool:
@@ -4977,11 +6952,9 @@ class OrchestratorRunner:
     ) -> bool:
         """Return True when structured metadata identifies a quota-window failure."""
         for metadata in cls._metadata_candidates(message):
-            recovery = metadata.get("recovery")
-            if isinstance(recovery, Mapping):
-                kind = str(recovery.get("kind", "")).strip().lower()
-                if kind in _USAGE_LIMIT_RECOVERY_KINDS:
-                    return True
+            kind = metadata.get("kind")
+            if isinstance(kind, str) and kind.strip().lower() in _USAGE_LIMIT_RECOVERY_KINDS:
+                return True
 
             if metadata.get("usage_limit") is True or metadata.get("quota_exhausted") is True:
                 return True
@@ -5019,26 +6992,37 @@ class OrchestratorRunner:
         message: AgentMessage,
         *,
         now: datetime,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
         """Return a pause decision for provider usage/quota window failures."""
-        has_runtime_error_shape = self._message_has_runtime_error_shape(message)
-        is_usage_limit = self._usage_limit_failure_from_metadata(
-            message,
-            now=now,
-        ) or self._is_usage_limit_text(
-            message.content,
-            has_runtime_error_shape=has_runtime_error_shape,
-        )
-        if not is_usage_limit:
+        if not is_usage_limit_pause_message(message, now=now):
             return None
 
-        from ouroboros.config import get_usage_limit_pause_seconds
-
-        default_pause_seconds = get_usage_limit_pause_seconds()
+        if (
+            type(default_pause_seconds) is not int
+            or not 1 <= default_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+        ):
+            raise ConfigError(
+                "Durable usage-limit pause policy is missing or outside its range",
+                config_key="orchestrator.usage_limit_pause_hours",
+                details={
+                    "pause_seconds": default_pause_seconds,
+                    "max_seconds": MAX_USAGE_LIMIT_PAUSE_SECONDS,
+                },
+            )
 
         pause_seconds = self._duration_from_message(message, now=now) or default_pause_seconds
         pause_seconds = max(1, pause_seconds)
-        resume_after = now + timedelta(seconds=pause_seconds)
+        try:
+            resume_after = now + timedelta(seconds=pause_seconds)
+        except OverflowError:
+            # Retry metadata is provider-controlled. An otherwise recognizable
+            # quota boundary must remain PAUSED even when its numeric hint is
+            # outside Python's datetime envelope; fall back to the validated
+            # operator-configured window instead of turning pause construction
+            # into exception cleanup.
+            pause_seconds = default_pause_seconds
+            resume_after = now + timedelta(seconds=pause_seconds)
         duration_display = self._format_pause_duration(pause_seconds)
         return RecoverableFailurePause(
             pause_kind="usage_limit",
@@ -5052,15 +7036,26 @@ class OrchestratorRunner:
             ),
         )
 
+    def _bounded_route_runtime_active(self) -> bool:
+        """Return whether this runner can authorize a Routing D provider effect."""
+        return bool(
+            has_durable_decomposition_replay(self._max_decomposition_depth)
+            and self._model_router is not None
+            and self._route_economics is not None
+            and getattr(
+                getattr(self._adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            is ParamSupport.NATIVE
+        )
+
     @classmethod
     def _resume_retry_pause(cls, message: AgentMessage) -> RecoverableFailurePause | None:
         """Return a pause decision for recoverable resume-bootstrap failures."""
         for metadata in cls._metadata_candidates(message):
-            recovery = metadata.get("recovery")
-            if not isinstance(recovery, Mapping):
-                continue
-            kind = str(recovery.get("kind", "")).strip().lower()
-            if kind == _RESUME_RETRY_RECOVERY_KIND:
+            kind = metadata.get("kind")
+            if isinstance(kind, str) and kind.strip().lower() == _RESUME_RETRY_RECOVERY_KIND:
                 return RecoverableFailurePause(
                     pause_kind=_RESUME_RETRY_RECOVERY_KIND,
                     reason=message.content,
@@ -5075,6 +7070,7 @@ class OrchestratorRunner:
         message: AgentMessage,
         *,
         now: datetime | None = None,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
         """Return pause metadata when a final runtime error should stay resumable."""
         if not (message.is_final and message.is_error):
@@ -5084,19 +7080,21 @@ class OrchestratorRunner:
         if resume_retry is not None:
             return resume_retry
 
-        return self._usage_limit_pause(message, now=now or datetime.now(UTC))
-
-    def _is_recoverable_resume_failure(self, message: AgentMessage) -> bool:
-        """Return True when a final error should leave the session resumable."""
-        return self._recoverable_failure_pause(message) is not None
+        return self._usage_limit_pause(
+            message,
+            now=now or datetime.now(UTC),
+            default_pause_seconds=default_pause_seconds,
+        )
 
     def _recoverable_failure_pause_from_parallel_result(
         self,
         parallel_result: Any,
         *,
         now: datetime | None = None,
+        require_all_failures_recoverable: bool = True,
+        default_pause_seconds: int | None = None,
     ) -> RecoverableFailurePause | None:
-        """Return a pause only when every executed failure is recoverable."""
+        """Resolve a parallel pause under the caller's explicit ownership rule."""
 
         def iter_leaf_ac_results(results: tuple[Any, ...]) -> Any:
             for result in results:
@@ -5130,24 +7128,35 @@ class OrchestratorRunner:
 
         for ac_result in iter_leaf_ac_results(results):
             if bool(getattr(ac_result, "is_invalid", False)):
-                return None
-            if not bool(getattr(ac_result, "is_failure", False)):
+                if require_all_failures_recoverable:
+                    return None
                 continue
+            if not bool(getattr(ac_result, "is_failure", False)):
+                if require_all_failures_recoverable or bool(getattr(ac_result, "success", False)):
+                    continue
 
             found_failure = True
             messages = getattr(ac_result, "messages", ())
             if not isinstance(messages, tuple):
-                return None
+                if require_all_failures_recoverable:
+                    return None
+                continue
 
             failure_pause = None
             for message in reversed(messages):
-                pause = self._recoverable_failure_pause(message, now=resolved_now)
+                pause = self._recoverable_failure_pause(
+                    message,
+                    now=resolved_now,
+                    default_pause_seconds=default_pause_seconds,
+                )
                 if pause is not None:
                     failure_pause = pause
                     break
 
             if failure_pause is None:
-                return None
+                if require_all_failures_recoverable:
+                    return None
+                continue
 
             selected_pause = (
                 failure_pause
@@ -5553,6 +7562,33 @@ class OrchestratorRunner:
             }
         )
 
+    def _assemble_strategy_base_catalog(
+        self,
+        strategy: ExecutionStrategy | None,
+    ) -> tuple[list[str], set[str], SessionToolCatalog]:
+        """Build the deterministic pre-MCP catalog used by prepare and execute."""
+        base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        inherited_mcp: set[str] = set()
+        if self._inherited_tools:
+            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
+            for tool_name in self._inherited_tools:
+                if tool_name in known_builtins and tool_name not in base_tools:
+                    base_tools.append(tool_name)
+                elif tool_name not in known_builtins:
+                    inherited_mcp.add(tool_name)
+                    log.info(
+                        "orchestrator.runner.inherited_mcp_capability_preserved",
+                        tool=tool_name,
+                        has_mcp_manager=self._mcp_manager is not None,
+                    )
+        session_catalog = assemble_session_tool_catalog(base_tools)
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
+        return base_tools, inherited_mcp, session_catalog
+
     async def _get_merged_tools(
         self,
         session_id: str,
@@ -5573,40 +7609,7 @@ class OrchestratorRunner:
         Returns:
             Tuple of (merged tool names list, MCPToolProvider or None, session catalog).
         """
-        # Start with strategy tools (or DEFAULT_TOOLS as fallback)
-        base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
-        inherited_mcp: set[str] = set()
-        if self._inherited_tools:
-            # Separate inherited tools into two buckets:
-            #
-            # 1. **Builtins** (Read, Edit, Bash, …) → added to ``base_tools``
-            #    so they receive real catalog entries with handlers.
-            #
-            # 2. **Bridge / MCP tools** → stored as ``inherited_capabilities``
-            #    on the session catalog.  They are *not* added to
-            #    ``base_tools`` because that would synthesize phantom catalog
-            #    entries (definitions with no backing handler).  When
-            #    ``self._mcp_manager`` is set, ``MCPToolProvider.get_tools()``
-            #    below discovers them with real server connections.  When the
-            #    manager is absent the names are still preserved so the
-            #    delegated-session capability contract is not silently lost.
-            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
-            for tool_name in self._inherited_tools:
-                if tool_name in known_builtins and tool_name not in base_tools:
-                    base_tools.append(tool_name)
-                elif tool_name not in known_builtins:
-                    inherited_mcp.add(tool_name)
-                    log.info(
-                        "orchestrator.runner.inherited_mcp_capability_preserved",
-                        tool=tool_name,
-                        has_mcp_manager=self._mcp_manager is not None,
-                    )
-        session_catalog = assemble_session_tool_catalog(base_tools)
-        if inherited_mcp:
-            session_catalog = replace(
-                session_catalog,
-                inherited_capabilities=frozenset(inherited_mcp),
-            )
+        base_tools, inherited_mcp, session_catalog = self._assemble_strategy_base_catalog(strategy)
 
         # Defer the pre-discovery policy evaluation.  Previously we computed
         # it unconditionally and threw it away whenever MCP discovery
@@ -5762,6 +7765,27 @@ class OrchestratorRunner:
                 session_id=session_id,
             )
             return False
+
+    async def _handle_requested_cancellation(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        messages_processed: int,
+        start_time: datetime,
+        expected_root_indices: Iterable[int] | None = None,
+    ) -> Result[OrchestratorResult, OrchestratorError] | None:
+        """Apply the terminal cancellation transition at an effect choke point."""
+
+        if not await self._check_cancellation(session_id):
+            return None
+        return await self._handle_cancellation(
+            session_id=session_id,
+            execution_id=execution_id,
+            messages_processed=messages_processed,
+            start_time=start_time,
+            expected_root_indices=expected_root_indices,
+        )
 
     def _cancellation_persistence_pending_result(
         self,
@@ -6489,6 +8513,40 @@ class OrchestratorRunner:
                 )
             )
 
+        try:
+            self._seal_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=execution_contract,
+            )
+        except ValueError as exc:
+            seal_details: dict[str, Any] = {
+                "session_id": tracker.session_id,
+                "execution_id": tracker.execution_id,
+                "cause": str(exc),
+                "resume_blocked": "prepared_execution_contract_unsealed",
+            }
+            terminal_mark_error = await self._mark_preparation_failed_best_effort(
+                tracker=tracker,
+                message="Failed to seal persisted initial session contract",
+                details=seal_details,
+            )
+            if terminal_mark_error is None:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+            else:
+                seal_details["terminal_mark_error"] = terminal_mark_error
+                seal_details["terminal_persistence_pending"] = True
+            return Result.err(
+                OrchestratorError(
+                    message="Failed to seal persisted initial session contract",
+                    details=seal_details,
+                )
+            )
+
         return Result.ok(tracker.with_progress(initial_progress))
 
     async def execute_precreated_session(
@@ -6508,40 +8566,12 @@ class OrchestratorRunner:
 
         set_console_logging(self._debug)
 
-        if tracker.status in (
-            SessionStatus.COMPLETED,
-            SessionStatus.CANCELLED,
-            SessionStatus.FAILED,
-        ):
-            durable_tracker_result = await self._session_repo.reconstruct_session(
-                tracker.session_id
-            )
-            if durable_tracker_result.is_err:
-                return Result.err(
-                    OrchestratorError(
-                        message="Cannot verify caller-supplied terminal session state",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                            "cause": str(durable_tracker_result.error),
-                            "resume_blocked": "terminal_state_unverified",
-                        },
-                    )
-                )
-            durable_tracker = durable_tracker_result.value
-            if (
-                durable_tracker.session_id != tracker.session_id
-                or durable_tracker.execution_id != tracker.execution_id
-            ):
-                return Result.err(
-                    OrchestratorError(
-                        message="Durable session identity does not match the supplied tracker",
-                        details={
-                            "session_id": tracker.session_id,
-                            "execution_id": tracker.execution_id,
-                        },
-                    )
-                )
+        durable_before_claim = await self._reconstruct_precreated_durable_tracker(tracker)
+        if durable_before_claim.is_err:
+            return Result.err(durable_before_claim.error)
+        durable_tracker = durable_before_claim.value
+        durable_status_error = self._precreated_non_running_error(durable_tracker)
+        if durable_status_error is not None:
             if durable_tracker.status in {
                 SessionStatus.COMPLETED,
                 SessionStatus.CANCELLED,
@@ -6551,27 +8581,57 @@ class OrchestratorRunner:
                     session_id=durable_tracker.session_id,
                     execution_id=durable_tracker.execution_id,
                 )
-                return Result.err(
-                    OrchestratorError(
-                        message=(
-                            "Session is in terminal state "
-                            f"{durable_tracker.status.value}, cannot execute"
-                        ),
-                        details={
-                            "session_id": durable_tracker.session_id,
-                            "status": durable_tracker.status.value,
-                        },
-                    )
-                )
+            return Result.err(durable_status_error)
+
+        # A retained lifecycle transition outranks a still-RUNNING durable
+        # snapshot. Persistence-pending means the previous provider effect
+        # already happened and only its PAUSED/terminal publication remains;
+        # entering normal prepared authentication would repeat that effect.
+        # Use the authenticated durable tracker at the same replay choke point
+        # as ``resume_session`` before any normal prepared claim or dispatch.
+        pending_lifecycle = await self._retry_pending_lifecycle_intent(durable_tracker)
+        if pending_lifecycle is not None:
+            return pending_lifecycle
+
+        # Preserve the historical terminal-copy recovery contract, but only
+        # after durable identity and RUNNING status have been authenticated.
+        # Nonterminal caller copies must still match the sealed prepared receipt.
+        if tracker.status in {
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        }:
             tracker = durable_tracker
             exec_id = tracker.execution_id
 
         raw_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+        if not isinstance(raw_contract, Mapping):
+            if self._process_local_authority_held_elsewhere(
+                tracker.session_id,
+                tracker.execution_id,
+                raw_contract,
+            ):
+                return Result.err(
+                    self._process_local_authority_held_elsewhere_error(
+                        tracker.session_id,
+                        tracker.execution_id,
+                    )
+                )
+            self._cleanup_pre_execution_state(
+                tracker.execution_id,
+                tracker.session_id,
+                session_registered=False,
+            )
+            return Result.err(
+                self._process_local_resume_unavailable_error(
+                    tracker.session_id,
+                    tracker.execution_id,
+                )
+            )
 
         # This API may execute only the tracker returned by ``prepare_session``.
-        # A legacy/reconstructed tracker with no contract is not a new-session
-        # shortcut: it has no Foundation A generation and must fail closed before
-        # prompts, tool setup, or any runtime-owned provider are consulted.
+        # Claim its live capability first, then authenticate the caller-owned
+        # contract against the snapshot sealed only after durable publication.
         authority_generation, authority_claimed = self._claim_process_local_authority_generation(
             tracker.session_id,
             exec_id,
@@ -6607,8 +8667,76 @@ class OrchestratorRunner:
                     tracker.execution_id,
                 )
             )
+
+        # Close the observation-to-claim race. If another execution published
+        # PAUSED or a terminal state after the first durable read, this claimed
+        # generation prevents further legitimate dispatch while the second read
+        # rejects the stale prepared receipt before any tool or provider effect.
         try:
-            await asyncio.to_thread(self._restore_guidance_contract, raw_contract)
+            durable_after_claim = await self._reconstruct_precreated_durable_tracker(tracker)
+        except asyncio.CancelledError:
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+            raise
+        if durable_after_claim.is_err:
+            self._preserve_process_local_owner_for_retry(
+                execution_id=tracker.execution_id,
+                session_id=tracker.session_id,
+            )
+            return Result.err(durable_after_claim.error)
+        durable_tracker = durable_after_claim.value
+        durable_status_error = self._precreated_non_running_error(durable_tracker)
+        if durable_status_error is not None:
+            if durable_tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            }:
+                await self._cleanup_terminal_process_local_state(
+                    session_id=durable_tracker.session_id,
+                    execution_id=durable_tracker.execution_id,
+                )
+            else:
+                self._preserve_process_local_owner_for_retry(
+                    execution_id=tracker.execution_id,
+                    session_id=tracker.session_id,
+                )
+            return Result.err(durable_status_error)
+
+        try:
+            authenticated_contract = self._authenticate_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=raw_contract,
+            )
+            if authenticated_contract is None:
+                raise OrchestratorError(
+                    message=(
+                        "Caller-supplied execution contract does not match the "
+                        "persisted prepared contract"
+                    ),
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "resume_blocked": "prepared_execution_contract_mismatch",
+                    },
+                )
+            contract_changed, validated_contract = await asyncio.to_thread(
+                self._restore_execution_contract_snapshot,
+                {EXECUTION_CONTRACT_PROGRESS_KEY: authenticated_contract},
+                seed=seed,
+                authority_generation=authority_generation,
+                require_bound_execution_inputs=False,
+                prepared_live_execution=True,
+            )
+            if contract_changed:
+                raise OrchestratorError(
+                    message="Prepared execution contract changed during authentication",
+                    details={"resume_blocked": "prepared_execution_contract_changed"},
+                )
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
             cancellation_result = (
@@ -6651,10 +8779,11 @@ class OrchestratorRunner:
             if persistence_pending is not None:
                 return persistence_pending
             return Result.err(exc)
+
         # Keep the immutable per-session contract local to this invocation.
         # ``self._execution_contract`` is retained for legacy helpers, but it
         # must never be the source of acceptance authority under concurrency.
-        execution_contract = dict(raw_contract) if isinstance(raw_contract, Mapping) else None
+        execution_contract = dict(validated_contract)
         self._execution_contract = execution_contract
 
         log.info(
@@ -6676,15 +8805,65 @@ class OrchestratorRunner:
                     expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
 
-            # Build prompts with strategy. The fat-harness default path must use
-            # the profile-backed prompt contract so leaf agents are told to emit
-            # schema-valid evidence before the acceptance gate parses it.
-            strategy = _strategy_for_seed(seed, fat_harness_mode=self._fat_harness_mode)
+            # Build prompts from the strategy frozen during preparation. The
+            # fat-harness profile and legacy registry are effect-bearing inputs;
+            # neither may be reread after the durable session is published.
+            strategy = self._execution_strategy_snapshot(
+                execution_contract,
+                require_bound=False,
+            )
+            # Get merged tools (strategy tools + MCP tools if configured) and
+            # authenticate the fully bound prompt/tool input contract before
+            # building prompts or entering any provider path.
+            merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
+                session_id=tracker.session_id,
+                tool_prefix=self._mcp_tool_prefix,
+                strategy=strategy,
+            )
+            execution_contract, inputs_changed = self._bind_execution_tool_authority(
+                execution_contract,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+            )
+            if inputs_changed:
+                bound_progress = {
+                    EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
+                    "messages_processed": tracker.messages_processed,
+                }
+                persisted_inputs = await self._session_repo.track_progress(
+                    tracker.session_id,
+                    bound_progress,
+                )
+                if persisted_inputs.is_err:
+                    raise OrchestratorError(
+                        message="Failed to persist resolved prompt/tool authority",
+                        details={
+                            "session_id": tracker.session_id,
+                            "cause": str(persisted_inputs.error),
+                        },
+                    )
+                tracker = tracker.with_progress(bound_progress)
+                self._execution_contract = execution_contract
+            await asyncio.to_thread(
+                self._restore_execution_contract_snapshot,
+                {EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract},
+                seed=seed,
+                authority_generation=authority_generation,
+                prepared_live_execution=True,
+            )
+            execution_semantics = self._execution_semantics_snapshot(execution_contract)
             system_prompt = build_system_prompt(
                 seed,
                 strategy=strategy,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=execution_semantics["context_pack_enabled"],
+                resolved_context_pack_fragment=(
+                    self._execution_context_pack_fragment_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    )
+                ),
             )
             await self._record_execution_guidance_injection(
                 session_id=tracker.session_id,
@@ -6692,13 +8871,6 @@ class OrchestratorRunner:
                 injection_key="start",
             )
             task_prompt = build_task_prompt(seed, strategy=strategy)
-
-            # Get merged tools (strategy tools + MCP tools if configured)
-            merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
-                session_id=tracker.session_id,
-                tool_prefix=self._mcp_tool_prefix,
-                strategy=strategy,
-            )
             await self._emit_run_configuration_resolved(
                 execution_id=exec_id,
                 session_id=tracker.session_id,
@@ -6839,9 +9011,14 @@ class OrchestratorRunner:
             last_tool: str | None = None
             last_completed_count = 0
             runtime_handle: RuntimeHandle | None = None
+            runtime_handle_transferred_to_pause = False
             recovery_interventions_used = 0
             recovery_personas: list[str] = []
             recoverable_failure_pause: RecoverableFailurePause | None = None
+            last_direct_final_message: AgentMessage | None = None
+            direct_route_candidate: Any | None = None
+            direct_bounded_routing = self._bounded_route_runtime_active()
+            direct_terminal_blocked = False
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
@@ -6850,6 +9027,7 @@ class OrchestratorRunner:
                 prompt: str,
                 resume_handle: RuntimeHandle | None,
                 status: Any,
+                expected_route_candidate: Any | None = None,
             ) -> RuntimeHandle | None:
                 nonlocal cancelled_result
                 nonlocal final_message
@@ -6859,16 +9037,43 @@ class OrchestratorRunner:
                 nonlocal recoverable_failure_pause
                 nonlocal success
                 nonlocal tracker
+                nonlocal direct_route_candidate
+                nonlocal last_direct_final_message
+                nonlocal direct_terminal_blocked
 
                 active_runtime_handle = resume_handle
                 self._announce_param_degradations(
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
+                selected_routes: list[Any] = []
+                route_id_override = (
+                    expected_route_candidate.route_id
+                    if expected_route_candidate is not None
+                    else None
+                )
                 effort_kwargs = await self._route_call_effort(
                     execution_id=exec_id,
                     session_id=tracker.session_id,
+                    bounded_escalation=direct_bounded_routing,
+                    route_id_override=route_id_override,
+                    expected_route_candidate=expected_route_candidate,
+                    expected_runtime_effect_capabilities=execution_semantics[
+                        "runtime_effect_capabilities"
+                    ],
+                    selected_route_sink=selected_routes,
                 )
+                direct_route_candidate = selected_routes[0] if selected_routes else None
+                if direct_bounded_routing:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        return active_runtime_handle
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=prompt,
@@ -6884,14 +9089,14 @@ class OrchestratorRunner:
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                            if await self._check_cancellation(tracker.session_id):
-                                cancelled_result = await self._handle_cancellation(
-                                    session_id=tracker.session_id,
-                                    execution_id=exec_id,
-                                    messages_processed=messages_processed,
-                                    start_time=start_time,
-                                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                                )
+                            cancelled_result = await self._handle_requested_cancellation(
+                                session_id=tracker.session_id,
+                                execution_id=exec_id,
+                                messages_processed=messages_processed,
+                                start_time=start_time,
+                                expected_root_indices=range(len(seed.acceptance_criteria)),
+                            )
+                            if cancelled_result is not None:
                                 break
 
                         tracker = await self._update_and_persist_progress(
@@ -7002,12 +9207,44 @@ class OrchestratorRunner:
 
                         # Handle final message
                         if message.is_final:
+                            last_direct_final_message = message
                             final_message = message.content
                             success = not message.is_error
                             recoverable_failure_pause = self._recoverable_failure_pause(
                                 message,
                                 now=datetime.now(UTC),
+                                default_pause_seconds=execution_semantics[
+                                    "usage_limit_pause_seconds"
+                                ],
                             )
+
+                if direct_bounded_routing and cancelled_result is None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+
+                if (
+                    recoverable_failure_pause is not None
+                    and direct_bounded_routing
+                    and not await self._persist_exact_direct_pause_runtime_handle(
+                        session_id=tracker.session_id,
+                        runtime_handle=active_runtime_handle,
+                        messages_processed=messages_processed,
+                    )
+                ):
+                    # A quota signal without provider continuity cannot authorize
+                    # PAUSED: retrying it would be a second fresh provider effect.
+                    recoverable_failure_pause = None
+                    direct_terminal_blocked = True
+                    success = False
+                    final_message = (
+                        f"{final_message}\nRecoverable provider pause rejected: no exact "
+                        "resumable handle is available; human handoff required."
+                    )
 
                 return active_runtime_handle
 
@@ -7045,13 +9282,115 @@ class OrchestratorRunner:
                 spinner="dots",
             ) as status:
                 runtime_handle = self._seed_runtime_handle(
-                    self._inherited_runtime_handle, tool_catalog=tool_catalog
+                    self._execution_inherited_runtime_handle_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    ),
+                    tool_catalog=tool_catalog,
                 )
-                runtime_handle = await _consume_task_stream(
-                    prompt=task_prompt,
-                    resume_handle=runtime_handle,
-                    status=status,
-                )
+                direct_route_history: tuple[str, ...] = ()
+                direct_route_override: Any | None = None
+                direct_prompt = task_prompt
+                while True:
+                    runtime_handle = await _consume_task_stream(
+                        prompt=direct_prompt,
+                        resume_handle=runtime_handle,
+                        status=status,
+                        expected_route_candidate=direct_route_override,
+                    )
+                    if cancelled_result is not None:
+                        # Cancellation owns the terminal transition.  It is not a
+                        # classified route failure and must never authorize a
+                        # successor provider effect or route observation.
+                        break
+                    if recoverable_failure_pause is not None:
+                        # Usage/quota pauses retain the current provider session
+                        # for resume.  Persisting a terminal BLOCKED observation
+                        # would seal the very continuation advertised by PAUSED.
+                        if direct_bounded_routing and direct_route_candidate is not None:
+                            from ouroboros.events.base import BaseEvent
+
+                            pause_episode = (
+                                "route:" + hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
+                            )
+                            await self._event_store.append(
+                                BaseEvent(
+                                    type="execution.ac.route_paused",
+                                    aggregate_type="execution",
+                                    aggregate_id=exec_id,
+                                    data={
+                                        "schema_version": 1,
+                                        "execution_id": exec_id,
+                                        "session_id": tracker.session_id,
+                                        "root_ac_index": None,
+                                        "call_site": "runner",
+                                        "episode_id": pause_episode,
+                                        "attempt_index": len(direct_route_history),
+                                        "prior_route_ids": list(direct_route_history),
+                                        "route": direct_route_candidate.to_contract_data(),
+                                        "recoverable_pause": True,
+                                        "final_acceptance_declared": False,
+                                    },
+                                )
+                            )
+                        break
+                    if not direct_bounded_routing or direct_route_candidate is None:
+                        break
+
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
+                    episode_digest = hashlib.sha256(f"{exec_id}\0direct".encode()).hexdigest()
+                    decision, direct_route_history = await self._persist_direct_route_outcome(
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
+                        episode_id=f"route:{episode_digest}",
+                        prior_route_ids=direct_route_history,
+                        candidate=direct_route_candidate,
+                        success=success,
+                        failure_class=self._classify_direct_route_failure(last_direct_final_message)
+                        if not direct_terminal_blocked
+                        else FailureClass.BLOCKED,
+                    )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=tracker.session_id,
+                        execution_id=exec_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
+                    if success or decision is None or decision.blocked:
+                        if decision is not None and decision.blocked:
+                            direct_terminal_blocked = True
+                            final_message = (
+                                f"{final_message}\nRoute escalation stopped: "
+                                f"{decision.reason.value}; human handoff required."
+                            )
+                        break
+                    assert decision.selected is not None
+                    direct_route_override = decision.selected
+                    direct_prompt = (
+                        task_prompt
+                        + "\n\nThe prior implementation route failed. Continue in a fresh "
+                        "session and satisfy the same Seed contracts."
+                    )
+                    # A route change never resumes the previous provider session.
+                    await self._terminate_runtime_handle(
+                        runtime_handle,
+                        session_id=tracker.session_id,
+                        context="bounded_route_escalation",
+                    )
+                    runtime_handle = None
+                    success = False
+                    recoverable_failure_pause = None
 
                 # Same-session recovery is limited to the sequential runner.
                 # Parallel execution owns per-AC retry semantics, and resume_session
@@ -7061,6 +9400,7 @@ class OrchestratorRunner:
                     and not success
                     and recoverable_failure_pause is None
                     and runtime_handle is not None
+                    and not direct_bounded_routing
                 ):
                     planner = RecoveryPlanner()
                     recovery_action = planner.plan(_build_recovery_snapshot())
@@ -7164,9 +9504,14 @@ class OrchestratorRunner:
                     pause=recoverable_failure_pause,
                 )
                 if pause_pending is not None:
+                    # The lifecycle helper explicitly retained process-local
+                    # pause ownership. Terminating here would destroy the exact
+                    # provider boundary that its retry must publish.
+                    runtime_handle_transferred_to_pause = True
                     return pause_pending
                 assert pause_status is not None
                 if pause_status is SessionStatus.PAUSED:
+                    runtime_handle_transferred_to_pause = True
                     self._console.print(
                         Panel(
                             Text(final_message[:1000], style="yellow"),
@@ -7189,7 +9534,7 @@ class OrchestratorRunner:
                     execution_id=exec_id,
                     session_id=tracker.session_id,
                     terminal_status=SessionStatus.FAILED.value,
-                    default_outcome="failed",
+                    default_outcome="blocked" if direct_terminal_blocked else "failed",
                     execution_contract=execution_contract,
                 )
                 durable_terminal_status = await self._persist_session_terminal_status(
@@ -7379,11 +9724,12 @@ class OrchestratorRunner:
                 )
             )
         finally:
-            await self._terminate_runtime_handle(
-                runtime_handle,
-                session_id=tracker.session_id,
-                context="execute",
-            )
+            if not runtime_handle_transferred_to_pause:
+                await self._terminate_runtime_handle(
+                    runtime_handle,
+                    session_id=tracker.session_id,
+                    context="execute",
+                )
 
     async def _execute_parallel(
         self,
@@ -7397,6 +9743,7 @@ class OrchestratorRunner:
         execution_contract: Mapping[str, Any] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         force_sequential_levels: bool = False,
+        resume_execution_plan: Any | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -7421,6 +9768,7 @@ class OrchestratorRunner:
         from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
         from ouroboros.orchestrator.parallel_executor import (
             ParallelACExecutor,
+            ParallelExecutionCancelled,
             render_parallel_completion_message,
             render_parallel_verification_report,
         )
@@ -7432,8 +9780,76 @@ class OrchestratorRunner:
             ac_count=len(seed.acceptance_criteria),
         )
 
-        # Analyze dependencies
-        if force_sequential_levels:
+        # Consume one immutable scalar snapshot for the whole invocation. The
+        # public new/resume paths pass the exact durable contract; low-level
+        # callers without one retain their current constructor semantics.
+        contract_source = execution_contract
+        if contract_source is None and isinstance(tracker.progress, Mapping):
+            tracker_contract = tracker.progress.get(EXECUTION_CONTRACT_PROGRESS_KEY)
+            contract_source = tracker_contract if isinstance(tracker_contract, Mapping) else None
+        if contract_source is None:
+            execution_semantics = self._execution_semantics_contract()
+        else:
+            execution_semantics = self._execution_semantics_snapshot(contract_source)
+        current_execution_semantics = self._execution_semantics_contract()
+        if execution_semantics != current_execution_semantics:
+            raise OrchestratorError(
+                message="Cannot execute after execution semantics drifted",
+                details={
+                    "persisted_execution_semantics": execution_semantics,
+                    "current_execution_semantics": current_execution_semantics,
+                },
+            )
+        max_decomposition_depth = execution_semantics["max_decomposition_depth"]
+        max_parallel_workers = execution_semantics["max_parallel_workers"]
+        effective_workers = execution_semantics["effective_parallel_workers"]
+        resolved_backend_limits = BackendConcurrencyLimits(
+            backend=execution_semantics["backend_limits_backend"],
+            max_concurrency=execution_semantics["backend_max_concurrency"],
+            requests_per_minute=execution_semantics["backend_requests_per_minute"],
+            tokens_per_minute=execution_semantics["backend_tokens_per_minute"],
+        )
+        parallel_bounded_routing = bool(
+            has_durable_decomposition_replay(max_decomposition_depth)
+            and self._model_router is not None
+            and self._route_economics is not None
+            and getattr(
+                getattr(self._adapter, "capabilities", None),
+                "model_override_support",
+                ParamSupport.IGNORED,
+            )
+            is ParamSupport.NATIVE
+        )
+
+        # Capture Routing D effect capability once at the dispatch choke point.
+        # A durable parallel owner is itself sufficient replay evidence: it is
+        # persisted before the first route event, so absence of those events
+        # cannot authorize a fallthrough to the legacy executor after a crash.
+        persisted_parallel_owner = tracker.progress.get("routing_resume_owner") == "parallel"
+        if persisted_parallel_owner and not parallel_bounded_routing:
+            self._preserve_process_local_owner_for_retry(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+            )
+            return Result.err(
+                OrchestratorError(
+                    message="Persisted parallel Routing D owner cannot enforce its route",
+                    details={
+                        "session_id": tracker.session_id,
+                        "execution_id": exec_id,
+                        "resume_blocked": "routing_enforcement_unavailable",
+                        "routing_resume_owner": "parallel",
+                        "retryable": True,
+                    },
+                )
+            )
+
+        # A paused parallel owner must reuse its already-durable plan.  Running
+        # dependency analysis again would be a provider effect before Routing D
+        # replay has validated its judgment/observation chain.
+        if resume_execution_plan is not None:
+            execution_plan = resume_execution_plan
+        elif force_sequential_levels:
             self._console.print("\n[cyan]Preparing sequential AC execution plan...[/cyan]")
             dependency_graph = DependencyGraph(
                 nodes=tuple(
@@ -7466,14 +9882,14 @@ class OrchestratorRunner:
             else:
                 dependency_graph = dep_result.value
 
-        execution_plan = dependency_graph.to_execution_plan()
-
-        await self._emit_execution_plan_created(
-            seed=seed,
-            execution_id=exec_id,
-            session_id=tracker.session_id,
-            execution_plan=execution_plan,
-        )
+        if resume_execution_plan is None:
+            execution_plan = dependency_graph.to_execution_plan()
+            await self._emit_execution_plan_created(
+                seed=seed,
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                execution_plan=execution_plan,
+            )
 
         # Log execution plan
         log.info(
@@ -7493,48 +9909,69 @@ class OrchestratorRunner:
                 f"  Stage {stage.stage_number}: ACs {[idx + 1 for idx in stage.ac_indices]}"
             )
 
-        execution_profile = _execution_profile_for_seed(seed)
+        if contract_source is None:
+            execution_profile = _execution_profile_for_seed(seed)
+            inherited_runtime_handle = self._inherited_runtime_handle
+        else:
+            execution_profile = self._execution_profile_snapshot(
+                contract_source,
+                require_bound=True,
+            )
+            inherited_runtime_handle = self._execution_inherited_runtime_handle_snapshot(
+                contract_source,
+                require_bound=True,
+            )
 
         # Cap fan-out to the connected backend's concurrency constraints so a
         # parallel dispatch never stampedes the LLM's rate/quota window (R3).
-        effective_workers = self._plan_parallel_workers()
-        if effective_workers < self._max_parallel_workers:
+        if effective_workers < max_parallel_workers:
             self._console.print(
                 f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
-                f"'{self._adapter.runtime_backend}' (requested {self._max_parallel_workers}). "
+                f"'{self._adapter.runtime_backend}' (requested {max_parallel_workers}). "
                 f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
             )
             log.info(
                 "orchestrator.runner.fan_out_capped",
                 runtime_backend=self._adapter.runtime_backend,
-                requested_workers=self._max_parallel_workers,
+                requested_workers=max_parallel_workers,
                 effective_workers=effective_workers,
             )
 
         # Execute in parallel. Reuse the base effort resolved once in __init__
         # (self._reasoning_effort) so a single runner instance has one consistent
         # effort source across its direct paths and the parallel executor.
+        # Capture the activation snapshot immediately before construction so
+        # the executor and the later owner publication use the same decision.
         parallel_executor = ParallelACExecutor(
             adapter=self._adapter,
             event_store=self._event_store,
             console=self._console,
-            enable_decomposition=self._enable_decomposition,
-            decomposition_mode=self._decomposition_mode,
+            enable_decomposition=execution_semantics["enable_decomposition"],
+            decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
-            max_decomposition_depth=self._max_decomposition_depth,
-            inherited_runtime_handle=self._inherited_runtime_handle,
+            max_decomposition_depth=max_decomposition_depth,
+            inherited_runtime_handle=inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
             execution_profile=execution_profile,
-            fat_harness_mode=self._fat_harness_mode,
+            fat_harness_mode=execution_semantics["fat_harness_mode"],
             reasoning_effort=self._reasoning_effort,
+            # Legacy model selection predates Routing D and remains active when
+            # durable route ownership is unavailable (for example, configured
+            # decomposition depths above four). ParallelACExecutor separately
+            # gates only bounded escalation/replay with its durable-depth flag.
             model_router=self._model_router,
             route_economics=self._route_economics,
-            run_verify_commands=self._run_verify_commands,
-            verify_command_timeout_seconds=self._verify_command_timeout_seconds,
-            ac_retry_attempts=self._ac_retry_attempts,
-            shadow_replay_enabled=self._shadow_replay_enabled,
+            run_verify_commands=execution_semantics["run_verify_commands"],
+            verify_command_timeout_seconds=execution_semantics["verify_command_timeout_seconds"],
+            ac_retry_attempts=execution_semantics["ac_retry_attempts"],
+            cross_harness_redispatch=execution_semantics["cross_harness_redispatch"],
+            shadow_replay_enabled=execution_semantics["shadow_replay_enabled"],
             session_signal_hub=self._session_signal_hub,
+            process_local_resume_nonce=self._parallel_process_local_resume_nonce(tracker),
+            resolved_backend_limits=resolved_backend_limits,
+            resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
+            expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
         )
 
         # Check for cancellation before starting parallel execution
@@ -7547,17 +9984,59 @@ class OrchestratorRunner:
                 expected_root_indices=range(len(seed.acceptance_criteria)),
             )
 
-        try:
-            parallel_result = await parallel_executor.execute_parallel(
-                seed=seed,
-                execution_plan=execution_plan,
-                session_id=tracker.session_id,
-                execution_id=exec_id,
-                tools=merged_tools,
-                tool_catalog=tool_catalog.tools,
-                system_prompt=system_prompt,
-                externally_satisfied_acs=externally_satisfied_acs,
+        if parallel_bounded_routing:
+            # Publish the parallel effect owner before Routing D can append a
+            # route judgment, observation, pause, or enter a provider boundary.
+            # Legacy parallel execution has no complete durable stage replay
+            # owner, so it must not publish this stronger resume claim.
+            resume_owner_progress = {
+                "routing_resume_owner": "parallel",
+                "routing_parallel_force_sequential": force_sequential_levels,
+                "routing_parallel_plan": self._serialize_parallel_resume_plan(execution_plan),
+                "routing_parallel_externally_satisfied_acs": (
+                    self._serialize_parallel_external_satisfaction(
+                        seed,
+                        externally_satisfied_acs,
+                    )
+                ),
+            }
+            owner_result = await self._session_repo.track_progress(
+                tracker.session_id,
+                resume_owner_progress,
             )
+            if owner_result.is_err:
+                return Result.err(
+                    OrchestratorError(
+                        message="Failed to persist the parallel Routing D resume owner",
+                        details={
+                            "session_id": tracker.session_id,
+                            "execution_id": exec_id,
+                            "cause": str(owner_result.error),
+                        },
+                    )
+                )
+            tracker = tracker.with_progress(resume_owner_progress)
+
+        try:
+            try:
+                parallel_result = await parallel_executor.execute_parallel(
+                    seed=seed,
+                    execution_plan=execution_plan,
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    tools=merged_tools,
+                    tool_catalog=tool_catalog.tools,
+                    system_prompt=system_prompt,
+                    externally_satisfied_acs=externally_satisfied_acs,
+                )
+            except ParallelExecutionCancelled as cancelled:
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=cancelled.messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
         finally:
             # Release any warm worker-pool sessions the runtime holds (e.g. the
             # codex-mcp persistent connection pool). The non-parallel path closes
@@ -7590,6 +10069,10 @@ class OrchestratorRunner:
             recoverable_failure_pause = self._recoverable_failure_pause_from_parallel_result(
                 parallel_result,
                 now=datetime.now(UTC),
+                require_all_failures_recoverable=not bool(
+                    getattr(parallel_result, "recoverable_route_pause", False)
+                ),
+                default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
 
         final_message = render_parallel_completion_message(
@@ -7599,7 +10082,7 @@ class OrchestratorRunner:
         verification_report = render_parallel_verification_report(
             parallel_result,
             len(seed.acceptance_criteria),
-            max_decomposition_depth=self._max_decomposition_depth,
+            max_decomposition_depth=max_decomposition_depth,
         )
         execution_summary = {
             "goal": seed.goal,
@@ -7615,8 +10098,8 @@ class OrchestratorRunner:
             "invalid_count": parallel_result.invalid_count,
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
-            "max_decomposition_depth": self._max_decomposition_depth,
-            "max_parallel_workers": self._max_parallel_workers,
+            "max_decomposition_depth": max_decomposition_depth,
+            "max_parallel_workers": max_parallel_workers,
             "effective_parallel_workers": effective_workers,
             "verification_report": verification_report,
             **self._task_summary(),
@@ -7988,6 +10471,7 @@ class OrchestratorRunner:
             )
 
         tracker = session_result.value
+        parallel_resume_owner = tracker.progress.get("routing_resume_owner") == "parallel"
 
         # Check if session can be resumed
         if tracker.status in (
@@ -8145,7 +10629,7 @@ class OrchestratorRunner:
                 )
             )
 
-        if self._fat_harness_mode:
+        if self._fat_harness_mode and not parallel_resume_owner:
             self._release_process_local_authority(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -8166,7 +10650,7 @@ class OrchestratorRunner:
                 )
             )
 
-        if _seed_has_investment_metadata(seed):
+        if _seed_has_investment_metadata(seed) and not parallel_resume_owner:
             self._release_process_local_authority(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -8194,6 +10678,7 @@ class OrchestratorRunner:
                 seed=seed,
                 authority_generation=authority_generation,
             )
+            execution_semantics = self._execution_semantics_snapshot(execution_contract)
             self._execution_guidance_delivery_mode()
         except asyncio.CancelledError:
             cancellation_result = (
@@ -8282,11 +10767,25 @@ class OrchestratorRunner:
                 f"[dim]Previously processed: {tracker.messages_processed} messages[/dim]"
             )
 
-            # Build resume prompt
+            # Reuse the exact strategy that produced the original prompt/tool
+            # boundary. Profile files and the task-type registry are mutable
+            # current configuration and therefore are not resume authority.
+            strategy = self._execution_strategy_snapshot(
+                execution_contract,
+                require_bound=True,
+            )
             system_prompt = build_system_prompt(
                 seed,
+                strategy=strategy,
                 repo_root=self._effective_cwd(),
                 guidance_fragment=self._ensure_new_run_guidance().rendered_fragment,
+                context_pack_enabled=execution_semantics["context_pack_enabled"],
+                resolved_context_pack_fragment=(
+                    self._execution_context_pack_fragment_snapshot(
+                        execution_contract,
+                        require_bound=True,
+                    )
+                ),
             )
             await self._record_execution_guidance_injection(
                 session_id=session_id,
@@ -8295,7 +10794,7 @@ class OrchestratorRunner:
             )
             resume_prompt = f"""Continue executing the task from where you left off.
 
-{build_task_prompt(seed)}
+{build_task_prompt(seed, strategy=strategy)}
 
 Note: This is a resumed session. Please continue from where execution was interrupted.
 """
@@ -8311,12 +10810,40 @@ Note: This is a resumed session. Please continue from where execution was interr
                     {"workspace": self._task_workspace.to_progress_dict()},
                 )
 
-            # Get merged tools (DEFAULT_TOOLS + MCP tools if configured)
+            # Discover handlers for the persisted base strategy, then require
+            # exact equality with the complete original catalog before any
+            # provider resume effect.
             merged_tools, mcp_provider, tool_catalog = await self._get_merged_tools(
                 session_id=session_id,
                 tool_prefix=self._mcp_tool_prefix,
+                strategy=strategy,
             )
-            runtime_handle = self._seed_runtime_handle(runtime_handle, tool_catalog=tool_catalog)
+            execution_contract, inputs_changed = self._bind_execution_tool_authority(
+                execution_contract,
+                merged_tools=merged_tools,
+                tool_catalog=tool_catalog,
+            )
+            if inputs_changed:
+                bound_progress = {
+                    EXECUTION_CONTRACT_PROGRESS_KEY: execution_contract,
+                    "messages_processed": tracker.messages_processed,
+                }
+                persisted_inputs = await self._session_repo.track_progress(
+                    session_id,
+                    bound_progress,
+                )
+                if persisted_inputs.is_err:
+                    raise OrchestratorError(
+                        message="Failed to persist migrated prompt/tool authority",
+                        details={"session_id": session_id, "cause": str(persisted_inputs.error)},
+                    )
+                tracker = tracker.with_progress(bound_progress)
+                self._execution_contract = execution_contract
+            runtime_handle = self._seed_runtime_handle(
+                runtime_handle,
+                tool_catalog=tool_catalog,
+                preserve_existing_tool_catalog=True,
+            )
 
             start_time = datetime.now(UTC)
             messages_processed = tracker.messages_processed
@@ -8327,14 +10854,48 @@ Note: This is a resumed session. Please continue from where execution was interr
             # Create workflow state tracker for progress display
             from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
-            resume_strategy = get_strategy(seed.task_type)
             state_tracker = WorkflowStateTracker(
                 acceptance_criteria=list(seed.acceptance_criteria),
                 goal=seed.goal,
                 session_id=session_id,
-                activity_map=resume_strategy.get_activity_map(),
+                activity_map=strategy.get_activity_map(),
             )
             await self._replay_workflow_state(session_id, state_tracker)
+
+            if parallel_resume_owner:
+                force_sequential = tracker.progress.get(
+                    "routing_parallel_force_sequential",
+                    False,
+                )
+                if type(force_sequential) is not bool:
+                    raise OrchestratorError(
+                        message="Invalid persisted parallel Routing D resume owner state",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                        },
+                    )
+                resume_execution_plan = self._deserialize_parallel_resume_plan(
+                    seed,
+                    tracker.progress.get("routing_parallel_plan"),
+                )
+                resume_externally_satisfied_acs = self._deserialize_parallel_external_satisfaction(
+                    seed,
+                    tracker.progress.get("routing_parallel_externally_satisfied_acs"),
+                )
+                return await self._execute_parallel(
+                    seed=seed,
+                    exec_id=tracker.execution_id,
+                    tracker=tracker,
+                    merged_tools=merged_tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    start_time=start_time,
+                    execution_contract=execution_contract,
+                    externally_satisfied_acs=resume_externally_satisfied_acs,
+                    force_sequential_levels=force_sequential,
+                    resume_execution_plan=resume_execution_plan,
+                )
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -8400,7 +10961,11 @@ Note: This is a resumed session. Please continue from where execution was interr
             last_tool: str | None = None
             last_completed_count = state_tracker.state.completed_count
             live_runtime_handle = runtime_handle
+            runtime_handle_transferred_to_pause = False
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
+            resume_route_state: _DirectRouteResumeState | None = None
+            last_resume_final_message: AgentMessage | None = None
+            resume_terminal_blocked = False
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
@@ -8411,10 +10976,51 @@ Note: This is a resumed session. Please continue from where execution was interr
                     system_prompt=system_prompt,
                     tools=merged_tools,
                 )
-                effort_kwargs = await self._route_call_effort(
-                    execution_id=None,
+                resume_route_state = await self._direct_resume_route_id(
+                    execution_id=tracker.execution_id,
                     session_id=session_id,
                 )
+                if resume_route_state is not None and not self._has_exact_resumable_runtime_handle(
+                    runtime_handle
+                ):
+                    raise OrchestratorError(
+                        message=(
+                            "Refusing to replay a paused direct route without its exact "
+                            "resumable provider handle"
+                        ),
+                        details={
+                            "session_id": session_id,
+                            "execution_id": tracker.execution_id,
+                            "resume_blocked": "provider_handle_unavailable",
+                            "human_handoff_required": True,
+                        },
+                    )
+                effort_kwargs = await self._route_call_effort(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    bounded_escalation=resume_route_state is not None,
+                    route_id_override=(
+                        resume_route_state.candidate.route_id
+                        if resume_route_state is not None
+                        else None
+                    ),
+                    expected_route_candidate=(
+                        resume_route_state.candidate if resume_route_state is not None else None
+                    ),
+                    expected_runtime_effect_capabilities=execution_semantics[
+                        "runtime_effect_capabilities"
+                    ],
+                )
+                if resume_route_state is not None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        return cancelled_result
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
                         prompt=resume_prompt,
@@ -8430,14 +11036,14 @@ Note: This is a resumed session. Please continue from where execution was interr
 
                         # Check for cancellation periodically
                         if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                            if await self._check_cancellation(session_id):
-                                cancelled_result = await self._handle_cancellation(
-                                    session_id=session_id,
-                                    execution_id=tracker.execution_id,
-                                    messages_processed=messages_processed,
-                                    start_time=start_time,
-                                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                                )
+                            cancelled_result = await self._handle_requested_cancellation(
+                                session_id=session_id,
+                                execution_id=tracker.execution_id,
+                                messages_processed=messages_processed,
+                                start_time=start_time,
+                                expected_root_indices=range(len(seed.acceptance_criteria)),
+                            )
+                            if cancelled_result is not None:
                                 break
 
                         tracker = await self._update_and_persist_progress(
@@ -8526,12 +11132,240 @@ Note: This is a resumed session. Please continue from where execution was interr
                             await self._event_store.append(progress_event)
 
                         if message.is_final:
+                            last_resume_final_message = message
                             final_message = message.content
                             success = not message.is_error
                             recoverable_resume_failure = self._recoverable_failure_pause(
                                 message,
                                 now=datetime.now(UTC),
+                                default_pause_seconds=execution_semantics[
+                                    "usage_limit_pause_seconds"
+                                ],
                             )
+
+                if (
+                    recoverable_resume_failure is not None
+                    and resume_route_state is not None
+                    and not await self._persist_exact_direct_pause_runtime_handle(
+                        session_id=session_id,
+                        runtime_handle=live_runtime_handle,
+                        messages_processed=messages_processed,
+                    )
+                ):
+                    recoverable_resume_failure = None
+                    resume_terminal_blocked = True
+                    success = False
+                    final_message = (
+                        f"{final_message}\nRecoverable provider pause rejected: no exact "
+                        "resumable handle is available; human handoff required."
+                    )
+
+                if resume_route_state is not None and cancelled_result is None:
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+
+            if (
+                resume_route_state is not None
+                and cancelled_result is None
+                and recoverable_resume_failure is None
+            ):
+                cancelled_result = await self._handle_requested_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
+            if (
+                resume_route_state is not None
+                and cancelled_result is None
+                and recoverable_resume_failure is None
+            ):
+                decision, route_history = await self._persist_direct_route_outcome(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    episode_id=resume_route_state.episode_id,
+                    prior_route_ids=resume_route_state.prior_route_ids,
+                    candidate=resume_route_state.candidate,
+                    success=success,
+                    failure_class=(
+                        FailureClass.BLOCKED
+                        if resume_terminal_blocked
+                        else self._classify_direct_route_failure(last_resume_final_message)
+                    ),
+                )
+                cancelled_result = await self._handle_requested_cancellation(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                )
+                while not success and decision is not None and not decision.blocked:
+                    if cancelled_result is not None:
+                        break
+                    assert decision.selected is not None
+                    await self._terminate_runtime_handle(
+                        live_runtime_handle,
+                        session_id=session_id,
+                        context="bounded_route_resume_escalation",
+                    )
+                    live_runtime_handle = None
+                    successor = decision.selected
+                    successor_kwargs = await self._route_call_effort(
+                        execution_id=tracker.execution_id,
+                        session_id=session_id,
+                        bounded_escalation=True,
+                        route_id_override=successor.route_id,
+                        expected_route_candidate=successor,
+                        expected_runtime_effect_capabilities=execution_semantics[
+                            "runtime_effect_capabilities"
+                        ],
+                    )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
+                    final_message = ""
+                    last_resume_final_message = None
+                    recoverable_resume_failure = None
+                    async with (
+                        aclosing(
+                            self._adapter.execute_task(  # type: ignore[type-var]
+                                prompt=(
+                                    build_task_prompt(seed, strategy=strategy)
+                                    + "\n\nThe resumed route failed. Continue in a fresh "
+                                    "session and satisfy the same Seed contracts."
+                                ),
+                                tools=merged_tools,
+                                system_prompt=system_prompt,
+                                resume_handle=None,
+                                **successor_kwargs,
+                            )
+                        ) as successor_stream
+                    ):
+                        async for message in successor_stream:
+                            messages_processed += 1
+                            if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
+                                cancelled_result = await self._handle_requested_cancellation(
+                                    session_id=session_id,
+                                    execution_id=tracker.execution_id,
+                                    messages_processed=messages_processed,
+                                    start_time=start_time,
+                                    expected_root_indices=range(len(seed.acceptance_criteria)),
+                                )
+                                if cancelled_result is not None:
+                                    break
+                            tracker = await self._update_and_persist_progress(
+                                tracker,
+                                message,
+                                messages_processed,
+                                session_id,
+                            )
+                            if message.resume_handle is not None:
+                                live_runtime_handle = message.resume_handle
+                            state_tracker.process_runtime_message(message)
+                            if message.is_final:
+                                last_resume_final_message = message
+                                final_message = message.content
+                                success = not message.is_error
+                                recoverable_resume_failure = self._recoverable_failure_pause(
+                                    message,
+                                    now=datetime.now(UTC),
+                                    default_pause_seconds=execution_semantics[
+                                        "usage_limit_pause_seconds"
+                                    ],
+                                )
+                    if cancelled_result is None:
+                        cancelled_result = await self._handle_requested_cancellation(
+                            session_id=session_id,
+                            execution_id=tracker.execution_id,
+                            messages_processed=messages_processed,
+                            start_time=start_time,
+                            expected_root_indices=range(len(seed.acceptance_criteria)),
+                        )
+                    if cancelled_result is not None:
+                        break
+                    if recoverable_resume_failure is not None:
+                        if not await self._persist_exact_direct_pause_runtime_handle(
+                            session_id=session_id,
+                            runtime_handle=live_runtime_handle,
+                            messages_processed=messages_processed,
+                        ):
+                            recoverable_resume_failure = None
+                            resume_terminal_blocked = True
+                            success = False
+                            final_message = (
+                                f"{final_message}\nRecoverable provider pause rejected: no exact "
+                                "resumable handle is available; human handoff required."
+                            )
+                    if recoverable_resume_failure is not None:
+                        from ouroboros.events.base import BaseEvent
+
+                        await self._event_store.append(
+                            BaseEvent(
+                                type="execution.ac.route_paused",
+                                aggregate_type="execution",
+                                aggregate_id=tracker.execution_id,
+                                data={
+                                    "schema_version": 1,
+                                    "execution_id": tracker.execution_id,
+                                    "session_id": session_id,
+                                    "root_ac_index": None,
+                                    "call_site": "runner",
+                                    "episode_id": resume_route_state.episode_id,
+                                    "attempt_index": len(route_history),
+                                    "prior_route_ids": list(route_history),
+                                    "route": successor.to_contract_data(),
+                                    "recoverable_pause": True,
+                                    "final_acceptance_declared": False,
+                                },
+                            )
+                        )
+                        break
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                    if cancelled_result is not None:
+                        break
+                    decision, route_history = await self._persist_direct_route_outcome(
+                        execution_id=tracker.execution_id,
+                        session_id=session_id,
+                        episode_id=resume_route_state.episode_id,
+                        prior_route_ids=route_history,
+                        candidate=successor,
+                        success=success,
+                        failure_class=self._classify_direct_route_failure(
+                            last_resume_final_message
+                        ),
+                    )
+                    cancelled_result = await self._handle_requested_cancellation(
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                        messages_processed=messages_processed,
+                        start_time=start_time,
+                        expected_root_indices=range(len(seed.acceptance_criteria)),
+                    )
+                if not success and decision is not None and decision.blocked:
+                    resume_terminal_blocked = True
+                    final_message = (
+                        f"{final_message}\nRoute escalation stopped: "
+                        f"{decision.reason.value}; human handoff required."
+                    )
 
             if cancelled_result is not None:
                 return cancelled_result
@@ -8595,9 +11429,11 @@ Note: This is a resumed session. Please continue from where execution was interr
                     pause=recoverable_resume_failure,
                 )
                 if pause_pending is not None:
+                    runtime_handle_transferred_to_pause = True
                     return pause_pending
                 assert pause_status is not None
                 if pause_status is SessionStatus.PAUSED:
+                    runtime_handle_transferred_to_pause = True
                     self._console.print(
                         Panel(
                             Text(final_message[:1000], style="yellow"),
@@ -8620,7 +11456,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     execution_id=tracker.execution_id,
                     session_id=session_id,
                     terminal_status=SessionStatus.FAILED.value,
-                    default_outcome="failed",
+                    default_outcome="blocked" if resume_terminal_blocked else "failed",
                     execution_contract=execution_contract,
                 )
                 durable_terminal_status = await self._persist_session_terminal_status(
@@ -8801,11 +11637,12 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
             )
         finally:
-            await self._terminate_runtime_handle(
-                live_runtime_handle,
-                session_id=session_id,
-                context="resume",
-            )
+            if not runtime_handle_transferred_to_pause:
+                await self._terminate_runtime_handle(
+                    live_runtime_handle,
+                    session_id=session_id,
+                    context="resume",
+                )
 
 
 __all__ = [

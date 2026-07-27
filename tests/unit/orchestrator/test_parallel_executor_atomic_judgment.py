@@ -41,6 +41,7 @@ async def test_try_decompose_ac_treats_atomic_response_as_terminal() -> None:
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=True,
+        max_decomposition_depth=MAX_DECOMPOSITION_DEPTH,
     )
 
     result = await executor._try_decompose_ac(
@@ -72,6 +73,7 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=True,
+        max_decomposition_depth=MAX_DECOMPOSITION_DEPTH,
     )
     executor._emit_subtask_event = AsyncMock()
     executor._try_decompose_ac = AsyncMock(

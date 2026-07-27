@@ -21,7 +21,8 @@ if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
     from ouroboros.orchestrator.coordinator import CoordinatorReview
     from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
-    from ouroboros.orchestrator.level_context import LevelContext
+    from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
+    from ouroboros.orchestrator.route_policy import RouteCandidate
     from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
@@ -91,6 +92,16 @@ class ACExecutionResult:
     atomic_verifier_verdict: VerifierVerdict | None = None
     verify_gate_outcome: Any | None = None
     decomposition_decision: DecompositionDecisionRecord | None = None
+    # Provisional dispatch metadata only.  The selected candidate authorizes no
+    # future effect and says nothing about Final Gate acceptance; the outer
+    # bounded-escalation owner uses it to durably observe the attempt.
+    route_candidate: RouteCandidate | None = None
+    # Canonical bounded context sealed before an interrupted stage returns.
+    # When present, downstream prompt construction and conflict detection must
+    # consume this projection instead of attempting to reconstruct provider
+    # messages that are intentionally not persisted.
+    context_summary: ACContextSummary | None = None
+    conflict_files: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
@@ -264,6 +275,10 @@ class ParallelExecutionResult:
     reconciled_level_contexts: tuple[LevelContext, ...] = field(default_factory=tuple)
     total_messages: int = 0
     total_duration_seconds: float = 0.0
+    # A bounded-routing quota pause is not an ordinary failed execution.  The
+    # owner uses this durable signal to publish PAUSED even when another AC in
+    # the same round already persisted a valid next-route decision.
+    recoverable_route_pause: bool = False
 
     @property
     def all_succeeded(self) -> bool:

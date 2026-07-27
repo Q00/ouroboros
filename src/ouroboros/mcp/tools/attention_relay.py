@@ -10,6 +10,7 @@ from ouroboros.events.base import BaseEvent
 ATTENTION_SOURCE_EVENT_TYPES = frozenset(
     {
         "execution.ac.recovery_exhausted",
+        "execution.ac.route_observed",
         "execution.ac.deliver_verdict",
         "execution.frugality_proof.evaluated",
         "auto.seed_qa.blocked",
@@ -28,6 +29,7 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
         "execution.decomposition.level_started",
         "execution.decomposition.level_completed",
         "execution.ac.model_routed",
+        "execution.ac.route_observed",
         "execution.ac.alt_harness_redispatched",
         "execution.ac.attempt_judged",
         "execution.ac.outcome_finalized",
@@ -508,6 +510,32 @@ def _proactive_relays(
                     },
                 )
             )
+        elif event.type == "execution.ac.route_observed":
+            decision = data.get("decision") if isinstance(data.get("decision"), Mapping) else {}
+            selected_route = (
+                decision.get("selected_route")
+                if isinstance(decision.get("selected_route"), Mapping)
+                else {}
+            )
+            observation = (
+                data.get("observation") if isinstance(data.get("observation"), Mapping) else {}
+            )
+            if decision.get("action") == "escalate_route":
+                relays.append(
+                    _progress(
+                        event,
+                        kind="progress_advanced",
+                        subtype="route_escalated",
+                        job_id=job_id,
+                        evidence={
+                            "root_ac_index": data.get("root_ac_index"),
+                            "from_route_id": observation.get("route_id"),
+                            "to_route_id": selected_route.get("route_id"),
+                            "failure_class": observation.get("failure_class"),
+                            "reason": decision.get("reason"),
+                        },
+                    )
+                )
         elif event.type in {
             "execution.ac.attempt_judged",
             "execution.ac.outcome_finalized",
@@ -601,6 +629,42 @@ def classify_relay_events(
 
     recovery_by_key: dict[str, BaseEvent] = {}
     for event in history:
+        if (
+            event.type == "execution.ac.route_observed"
+            and event.id in new_ids
+            and event.data.get("human_handoff_required") is True
+        ):
+            decision = (
+                event.data.get("decision")
+                if isinstance(event.data.get("decision"), Mapping)
+                else {}
+            )
+            observation = (
+                event.data.get("observation")
+                if isinstance(event.data.get("observation"), Mapping)
+                else {}
+            )
+            relays.append(
+                _attention(
+                    event,
+                    trigger=(
+                        "route_exhausted"
+                        if decision.get("reason") == "routes_exhausted"
+                        else "route_blocked"
+                    ),
+                    job_id=job_id,
+                    ownership_state="closed",
+                    evidence={
+                        "root_ac_index": event.data.get("root_ac_index"),
+                        "route_id": observation.get("route_id"),
+                        "failure_class": observation.get("failure_class"),
+                        "reason": decision.get("reason"),
+                        "attempted_route_ids": decision.get("attempted_route_ids"),
+                    },
+                    evidence_event_ids=[event.id],
+                    available_tools=registered,
+                )
+            )
         if event.type == "execution.ac.recovery_exhausted":
             key = _text(event.data.get("semantic_ac_key"), limit=96)
             if key:

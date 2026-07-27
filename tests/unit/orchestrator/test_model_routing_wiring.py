@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -35,8 +36,15 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.model_routing import ModelRouter, build_model_router
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+from ouroboros.orchestrator.profile_loader import (
+    EvidenceSchema,
+    ExecutionProfile,
+    SuggestedModelTier,
+    VerifierCapability,
+)
 from ouroboros.orchestrator.runner import OrchestratorError, OrchestratorRunner
 
 
@@ -86,6 +94,7 @@ class _EnforcedModelRuntime:
 
     def __init__(self) -> None:
         self.received_model: str | None = "UNSET"
+        self.received_reasoning_effort: str | None = "UNSET"
 
     @property
     def runtime_backend(self) -> str:
@@ -111,8 +120,10 @@ class _EnforcedModelRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.received_model = model
+        self.received_reasoning_effort = reasoning_effort
         yield AgentMessage(
             type="result",
             content="[TASK_COMPLETE]",
@@ -164,6 +175,7 @@ async def _run_one_ac(
     is_sub_ac: bool,
     retry_attempt: int = 0,
     decomposition_trustworthy: bool = False,
+    **route_kwargs: Any,
 ):
     return await executor._execute_atomic_ac(
         ac_index=1,
@@ -180,10 +192,163 @@ async def _run_one_ac(
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
         decomposition_trustworthy=decomposition_trustworthy,
+        **route_kwargs,
     )
 
 
 class TestExecutorModelWiring:
+    @pytest.mark.asyncio
+    async def test_depth_above_durable_keeps_legacy_configured_model_selection(self) -> None:
+        """Disabling Routing D ownership must not drop the established router."""
+
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_decomposition_depth=5,
+            model_router=_claude_router(),
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert executor._durable_decomposition_replay_enabled is False
+        assert executor._bounded_route_escalation_enabled is False
+        assert result.success is True
+        assert result.route_candidate is None
+        assert runtime.received_model == "sonnet-x"
+
+    @pytest.mark.asyncio
+    async def test_bounded_parallel_honors_frontier_starting_tier(self) -> None:
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=replace(_claude_router(), base_tier="frontier"),
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.success is True
+        assert result.route_candidate is not None
+        assert result.route_candidate.route_id == "compat:claude:frontier"
+        assert runtime.received_model == "opus-x"
+
+    @pytest.mark.asyncio
+    async def test_bounded_route_index_does_not_mutate_durable_successor_effort(self) -> None:
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        runtime = _EnforcedModelRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            reasoning_effort="low",
+            model_router=_claude_router(),
+            route_economics=_economics(),
+        )
+        projection = build_route_compat_projection(
+            _economics(),
+            model_router=executor._model_router,
+            runtime_backend="claude",
+            effort="low",
+        )
+        assert projection is not None
+        frontier = projection.candidate_for_tier("frontier")
+        assert frontier is not None
+
+        result = await _run_one_ac(
+            executor,
+            is_sub_ac=False,
+            retry_attempt=2,
+            route_id_override=frontier.route_id,
+            expected_route_candidate=frontier,
+        )
+
+        assert result.success is True
+        assert result.route_candidate == frontier
+        assert result.route_candidate.effort == "low"
+        assert runtime.received_model == "opus-x"
+
+    @pytest.mark.asyncio
+    async def test_bounded_parallel_honors_high_profile_starting_tier(self) -> None:
+        runtime = _EnforcedModelRuntime()
+        profile = ExecutionProfile(
+            profile="high",
+            axis="testable_unit",
+            min_unit="one acceptance criterion",
+            verifier_focus="verify the criterion",
+            verifier_capability=VerifierCapability.READ_ONLY_DISCOVERY,
+            evidence_schema=EvidenceSchema(),
+            suggested_model_tier=SuggestedModelTier.HIGH,
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=profile,
+            model_router=_claude_router(),
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(executor, is_sub_ac=False)
+
+        assert result.success is True
+        assert result.route_candidate is not None
+        assert result.route_candidate.route_id == "compat:claude:frontier"
+        assert runtime.received_model == "opus-x"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("drift_field", ["cost", "model", "policy"])
+    async def test_bounded_parallel_blocks_durable_successor_snapshot_drift(
+        self,
+        drift_field: str,
+    ) -> None:
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        runtime = _EnforcedModelRuntime()
+        router = _claude_router()
+        projection = build_route_compat_projection(
+            _economics(),
+            model_router=router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        expected = projection.candidate_for_tier("standard")
+        assert expected is not None
+        if drift_field == "cost":
+            expected = replace(expected, cost_units=expected.cost_units + 1)
+        elif drift_field == "model":
+            expected = replace(expected, model="drifted-model")
+        else:
+            expected = replace(expected, tool_policy="drifted-policy")
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            model_router=router,
+            route_economics=_economics(),
+        )
+
+        result = await _run_one_ac(
+            executor,
+            is_sub_ac=False,
+            route_id_override=expected.route_id,
+            expected_route_candidate=expected,
+        )
+
+        assert result.outcome.value == "blocked"
+        assert "successor snapshot drifted" in (result.error or "")
+        assert runtime.received_model == "UNSET"
+
     @pytest.mark.asyncio
     async def test_top_level_ac_receives_standard_tier_model(self) -> None:
         store, events = _capturing_event_store()
@@ -498,6 +663,69 @@ class TestModelRoutedEvent:
 
 
 class TestRunnerRouterConstruction:
+    @pytest.mark.asyncio
+    async def test_direct_bounded_routing_honors_frontier_starting_tier(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = replace(_claude_router(), base_tier="frontier")
+
+        kwargs = await runner._route_call_effort(
+            execution_id="exec-direct-frontier",
+            session_id="session-direct-frontier",
+            bounded_escalation=True,
+        )
+
+        assert kwargs["model"] == "opus-x"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("drift_field", ["cost", "model", "policy"])
+    async def test_direct_bounded_routing_blocks_durable_successor_snapshot_drift(
+        self,
+        drift_field: str,
+    ) -> None:
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._route_economics = _economics()
+        runner._model_router = _claude_router()
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        expected = projection.candidate_for_tier("standard")
+        assert expected is not None
+        if drift_field == "cost":
+            expected = replace(expected, cost_units=expected.cost_units + 1)
+        elif drift_field == "model":
+            expected = replace(expected, model="drifted-model")
+        else:
+            expected = replace(expected, tool_policy="drifted-policy")
+
+        with pytest.raises(OrchestratorError, match="successor snapshot drifted"):
+            await runner._route_call_effort(
+                execution_id="exec-direct-drift",
+                session_id="session-direct-drift",
+                bounded_escalation=True,
+                route_id_override=expected.route_id,
+                expected_route_candidate=expected,
+            )
+
     def _adapter(self, backend: str = "claude") -> MagicMock:
         adapter = MagicMock()
         adapter.runtime_backend = backend
@@ -541,6 +769,105 @@ class TestRunnerRouterConstruction:
         assert routed[0].data["decomposition_trustworthy"] is False
         assert routed[0].data["child_downgrade_authorized"] is False
         assert routed[0].data["call_site"] == "runner"
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_routing_starts_at_configured_floor_and_can_pin_successor(
+        self,
+    ) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._model_router = _claude_router()
+        runner._route_economics = _economics()
+        selected: list = []
+
+        cheapest = await runner._route_call_effort(
+            execution_id="exec_direct",
+            session_id="sess_direct",
+            bounded_escalation=True,
+            selected_route_sink=selected,
+        )
+        successor = await runner._route_call_effort(
+            execution_id="exec_direct",
+            session_id="sess_direct",
+            bounded_escalation=True,
+            route_id_override="compat:claude:frontier",
+        )
+
+        assert cheapest["model"] == "sonnet-x"
+        assert selected[0].route_id == "compat:claude:standard"
+        assert successor["model"] == "opus-x"
+
+    @pytest.mark.asyncio
+    async def test_direct_hard_precondition_blocks_without_spending_successor(self) -> None:
+        from ouroboros.orchestrator.route_compat import build_route_compat_projection
+
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.NATIVE,
+        )
+        store = AsyncMock()
+        runner = OrchestratorRunner(adapter, store, MagicMock())
+        runner._model_router = _claude_router()
+        runner._route_economics = _economics()
+        projection = build_route_compat_projection(
+            runner._route_economics,
+            model_router=runner._model_router,
+            runtime_backend="claude",
+        )
+        assert projection is not None
+        candidate = projection.candidate_for_tier("standard")
+        assert candidate is not None
+        final_error = AgentMessage(
+            type="result",
+            content="Missing access to the required deployment account.",
+            data={"subtype": "error", "error_type": "PermissionError"},
+        )
+        failure = runner._classify_direct_route_failure(final_error)
+
+        decision, history = await runner._persist_direct_route_outcome(
+            execution_id="exec-direct-blocked",
+            session_id="session-direct-blocked",
+            episode_id="route:direct-blocked",
+            prior_route_ids=(),
+            candidate=candidate,
+            success=False,
+            failure_class=failure,
+        )
+
+        assert failure is FailureClass.BLOCKED
+        assert decision is not None and decision.blocked
+        assert decision.failure_class is FailureClass.BLOCKED
+        assert decision.selected is None
+        assert history == (candidate.route_id,)
+
+    @pytest.mark.asyncio
+    async def test_direct_bounded_routing_requires_native_model_enforcement(self) -> None:
+        adapter = self._adapter("claude")
+        adapter.capabilities = RuntimeCapabilities(
+            skill_dispatch=True,
+            targeted_resume=True,
+            structured_output=True,
+            model_override_support=ParamSupport.IGNORED,
+        )
+        runner = OrchestratorRunner(adapter, AsyncMock(), MagicMock())
+        runner._model_router = _claude_router()
+        runner._route_economics = _economics()
+
+        with pytest.raises(OrchestratorError, match="Route admission blocked"):
+            await runner._route_call_effort(
+                execution_id="exec_direct",
+                session_id="sess_direct",
+                bounded_escalation=True,
+            )
 
     @pytest.mark.asyncio
     async def test_direct_runner_blocks_catalog_drift_before_provider_kwargs(self) -> None:
