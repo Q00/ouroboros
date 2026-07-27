@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -388,9 +389,7 @@ class SkillInterceptor:
 
 
 def _truncate(value: str | None, *, limit: int) -> str | None:
-    if value is None or len(value) <= limit:
-        return value
-    return f"{value[: limit - 3]}..."
+    return truncate_with_ellipsis(value, limit=limit)
 
 
 def _preview(value: Any, *, limit: int = 160) -> Any:

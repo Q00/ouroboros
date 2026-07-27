@@ -33,6 +33,7 @@ from ouroboros.codex_permissions import (
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.session_signal import SessionSignalCapabilities
+from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
@@ -849,9 +850,7 @@ class CodexCliRuntime:
 
     def _truncate_log_value(self, value: str | None, *, limit: int) -> str | None:
         """Trim long string values before including them in warning logs."""
-        if value is None or len(value) <= limit:
-            return value
-        return f"{value[: limit - 3]}..."
+        return truncate_with_ellipsis(value, limit=limit)
 
     def _preview_dispatch_value(self, value: Any, *, limit: int = 160) -> Any:
         """Build a bounded preview of resolved MCP arguments for diagnostics."""
