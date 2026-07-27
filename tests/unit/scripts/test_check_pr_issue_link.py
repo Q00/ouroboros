@@ -122,6 +122,10 @@ def test_bodies_without_a_reference_are_rejected(body: str) -> None:
         pytest.param("## Summary\n\n\tlog line #4242\n", id="indented-code-tab"),
         pytest.param("## Summary\n\nAn off-by-one: &#1234; in the output.\n", id="entity-decimal"),
         pytest.param("## Summary\n\nThe byte &#x4d2; appears here.\n", id="entity-hex"),
+        pytest.param("## Summary\n\n<!-- Refs #4242\n", id="unclosed-html-comment"),
+        pytest.param("## Summary\n\ntext\n\n[hidden]: #4242\n", id="link-reference-definition"),
+        pytest.param("## Summary\n\n>     trace #4242\n", id="blockquoted-indented-code"),
+        pytest.param("## Summary\n\n> ```\n> log #4242\n> ```\n", id="blockquoted-fence"),
     ],
 )
 def test_non_rendered_regions_do_not_count(body: str) -> None:
@@ -164,3 +168,17 @@ def test_candidates_are_emitted_one_per_line_for_the_shell_loop() -> None:
     """The workflow iterates stdout with `for number in ${candidates}`."""
     result = run("Refs #12, #7.\n")
     assert result.stdout == "7\n12\n"
+
+
+def test_blockquoted_prose_still_counts() -> None:
+    """Stripping `>` must remove the marker, not the visible sentence behind it."""
+    assert references("## Summary\n\n> Closes #1777 per review.\n") == [1777]
+
+
+def test_arrow_operators_are_not_blockquote_markers() -> None:
+    """`_BLOCKQUOTE_PREFIX` is line-anchored, so prose arrows are untouched."""
+    assert references("The flow is A -> B, and this Closes #1777.\n") == [1777]
+
+
+def test_reference_survives_an_unclosed_comment_later_in_the_body() -> None:
+    assert references("Closes #1777.\n\n<!-- Refs #4242\n") == [1777]

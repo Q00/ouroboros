@@ -60,6 +60,17 @@ import sys
 # unrelated span. Entities are removed last, after tags, because stripping
 # `<...>` first would otherwise leave a bare `&#1234;` looking like prose.
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# An unterminated `<!--` comments out the remainder of the document, so
+# `<!-- Refs #1777` with no closing marker renders nothing at all.
+_UNCLOSED_HTML_COMMENT = re.compile(r"<!--.*\Z", re.DOTALL)
+# `> ` markers are removed before code detection so that a blockquoted code
+# block (`>     trace #1777`) is recognized as code. Quoted *prose* is visible
+# and keeps counting, which is why the prefix is stripped rather than the line.
+# Anchored at line start, so `->` and `=>` in prose are untouched.
+_BLOCKQUOTE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+", re.MULTILINE)
+# A link reference definition is metadata: it renders only where the label is
+# used, and `[hidden]: #1777` with no `[hidden]` usage renders nothing.
+_LINK_REFERENCE_DEFINITION = re.compile(r"^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$", re.MULTILINE)
 _RAW_TEXT_HTML = re.compile(
     r"<(pre|code|script|style|kbd|samp)\b[^>]*>.*?</\1\s*>",
     re.DOTALL | re.IGNORECASE,
@@ -93,10 +104,13 @@ _ISSUE_REF = re.compile(r"(?<![0-9A-Za-z_/#&])#(\d+)")
 def visible_text(body: str) -> str:
     """Return `body` with every region a reader would not see as prose removed."""
     text = _HTML_COMMENT.sub(" ", body)
+    text = _UNCLOSED_HTML_COMMENT.sub(" ", text)
     text = _RAW_TEXT_HTML.sub(" ", text)
     text = _UNCLOSED_RAW_TEXT_HTML.sub(" ", text)
+    text = _BLOCKQUOTE_PREFIX.sub("", text)
     text = _FENCED_BLOCK.sub(" ", text)
     text = _INDENTED_CODE.sub(" ", text)
+    text = _LINK_REFERENCE_DEFINITION.sub(" ", text)
     text = _INLINE_CODE.sub(" ", text)
     text = _URL.sub(" ", text)
     text = _HTML_TAG.sub(" ", text)
