@@ -26,6 +26,7 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import CLAUDE_REASONING_EFFORT_LEVELS, ParamSupport
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
+    ResolvedWorkerCwd,
     WorkerTurn,
     resolve_worker_cwd,
 )
@@ -105,7 +106,7 @@ class ClaudeWorkerTransport:
         self,
         *,
         cli_path: str | None = None,
-        cwd: str | None = None,
+        cwd: str | ResolvedWorkerCwd | None = None,
         timeout: float | None = None,
         disallowed_tools: tuple[str, ...] = _RECURSION_GUARD_DISALLOWED_TOOLS,
         persist_sessions: bool = False,
@@ -115,7 +116,7 @@ class ClaudeWorkerTransport:
         # Claude sessions are CWD-SCOPED: ``--resume`` finds a conversation only
         # when run from the directory it was created in ("No conversation found"
         # otherwise). The transport pins the cwd so resume targets the same store.
-        self._cwd = resolve_worker_cwd(cwd)
+        self._cwd = cwd.value if isinstance(cwd, ResolvedWorkerCwd) else resolve_worker_cwd(cwd)
         self._timeout = timeout if timeout and timeout > 0 else None
         # Native passthrough keeps the worker's MCP surface, MINUS these tools
         # (recursion hardening — see _RECURSION_GUARD_DISALLOWED_TOOLS).
@@ -344,7 +345,7 @@ def build_claude_worker_runtime(
     ``--add-dir`` grants (deduped, capped). Empty (the default) is a byte-for-byte
     no-op — the worker command is identical to the pre-C4 invocation.
     """
-    normalized_cwd = resolve_worker_cwd(cwd)
+    normalized_cwd = ResolvedWorkerCwd(resolve_worker_cwd(cwd))
     return LeaderDrivenWorkerRuntime(
         transport=ClaudeWorkerTransport(
             cli_path=cli_path,

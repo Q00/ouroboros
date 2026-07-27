@@ -519,6 +519,31 @@ def test_git_environment_disables_global_and_system_config(
     assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
 
 
+def test_git_queries_are_independent_of_process_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    home_a = tmp_path / "home-a"
+    home_b = tmp_path / "home-b"
+    _init_repo(repo)
+    home_a.mkdir()
+    home_b.mkdir()
+    _git("config", "include.path", "~/.identity-owner", cwd=repo)
+
+    monkeypatch.setenv("HOME", str(home_a))
+    first = _run_git(repo, "config", "--path", "--get", "include.path")
+    first_identity = resolve_project_identity(repo)
+    monkeypatch.setenv("HOME", str(home_b))
+    second = _run_git(repo, "config", "--path", "--get", "include.path")
+    second_identity = resolve_project_identity(repo)
+
+    assert first == second
+    assert str(home_a).encode() not in (first or b"")
+    assert str(home_b).encode() not in (second or b"")
+    assert first_identity == second_identity
+
+
 def test_non_git_directory_is_a_local_first_project(tmp_path: Path) -> None:
     project = tmp_path / "greenfield"
     project.mkdir()

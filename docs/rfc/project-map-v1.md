@@ -56,10 +56,12 @@ binary with argv rather than a shell and asks it for:
 - the configured top level via `rev-parse --path-format=absolute
   --show-toplevel`.
 
-The process environment removes caller-supplied `GIT_*` overrides, while the
-central untrusted-project `.env` boundary rejects dynamic-loader controls
-(`LD_*`, `DYLD_*`, and platform equivalents). Git queries disable global/system
-config and prompting and set a five-second timeout. Only
+The process environment removes caller-supplied `GIT_*` overrides and gives Git
+a fixed neutral `HOME`, so home-relative local includes cannot change identity
+between start and resume. The central untrusted-project `.env` boundary rejects
+platform home selectors and dynamic-loader controls (`LD_*`, `DYLD_*`, and
+platform equivalents). Git queries disable global/system config and prompting
+and set a five-second timeout. Only
 complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
 accepted. When a checkout marker is present, it is passed back to Git explicitly
 as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor

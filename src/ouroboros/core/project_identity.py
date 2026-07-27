@@ -19,6 +19,7 @@ PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_OUTPUT_LENGTH = 65_536
 _GIT_TIMEOUT_SECONDS = 5.0
+_GIT_NEUTRAL_HOME = str(Path(Path(__file__).anchor) / ".ouroboros-git-neutral-home")
 
 
 class ProjectIdentityError(ValueError):
@@ -142,6 +143,7 @@ def _git_environment() -> dict[str, str]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
+            "HOME": _GIT_NEUTRAL_HOME,
             "LC_ALL": "C",
         }
     )
