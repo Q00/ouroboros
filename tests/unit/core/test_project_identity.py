@@ -79,6 +79,36 @@ def test_linked_worktree_reuses_primary_source_identity(tmp_path: Path) -> None:
     assert linked_identity.workspace_path == "packages/web"
 
 
+def test_external_git_directory_joins_primary_and_linked_checkouts(tmp_path: Path) -> None:
+    external_git = tmp_path / "storage.git"
+    (external_git / "objects").mkdir(parents=True)
+    (external_git / "refs").mkdir()
+    (external_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (external_git / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        encoding="utf-8",
+    )
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "web"
+    primary_workspace.mkdir(parents=True)
+    (primary / ".git").write_text(f"gitdir: {external_git}\n", encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "web"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = external_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+
+    primary_identity = resolve_project_identity(primary_workspace)
+    linked_identity = resolve_project_identity(linked_workspace)
+
+    assert primary_identity == linked_identity
+    assert primary_identity.project_root == str(external_git.resolve())
+    assert primary_identity.workspace_path == "packages/web"
+
+
 def test_unproven_worktree_pointer_cannot_join_another_project(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source_git = source / ".git"
@@ -112,6 +142,32 @@ def test_git_file_without_commondir_remains_its_own_project(tmp_path: Path) -> N
     module_git_dir.mkdir(parents=True)
     (submodule / ".git").write_text(
         f"gitdir: {module_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    identity = resolve_project_identity(submodule)
+
+    assert identity.project_root == str(submodule.resolve())
+    assert identity.project_id == project_id_for_root(submodule)
+    assert identity.workspace_path == "."
+
+
+def test_submodule_core_worktree_resolves_back_to_its_checkout(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent_git = parent / ".git"
+    parent_git.mkdir(parents=True)
+    submodule = parent / "vendor" / "child"
+    submodule.mkdir(parents=True)
+    module_git_dir = parent_git / "modules" / "vendor" / "child"
+    (module_git_dir / "objects").mkdir(parents=True)
+    (module_git_dir / "refs").mkdir()
+    (module_git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (module_git_dir / "config").write_text(
+        "[core]\n\tbare = false\n\tworktree = ../../../../vendor/child\n",
+        encoding="utf-8",
+    )
+    (submodule / ".git").write_text(
+        "gitdir: ../../.git/modules/vendor/child\n",
         encoding="utf-8",
     )
 

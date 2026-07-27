@@ -3187,9 +3187,21 @@ class OrchestratorRunner:
         )
 
     @classmethod
-    def _task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Return the existing nested source identity for compatibility."""
-        return cls._task_workspace_project_identity(workspace).to_workspace_data()
+    def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
+        """Reproduce the pre-anchor managed-workspace representation exactly."""
+        project_root = Path(cls._canonical_path(workspace.repo_root))
+        source_workspace = Path(cls._canonical_path(workspace.original_cwd))
+        try:
+            workspace_path = source_workspace.relative_to(project_root).as_posix() or "."
+        except ValueError as exc:
+            raise OrchestratorError(
+                message="Cannot resume from an invalid historical task workspace",
+                details={"invalid": "legacy_task_workspace"},
+            ) from exc
+        return {
+            "project_root": str(project_root),
+            "workspace_path": workspace_path,
+        }
 
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
@@ -3219,7 +3231,7 @@ class OrchestratorRunner:
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
         if self._task_workspace is not None:
-            return self._task_workspace_identity(self._task_workspace)
+            return self._legacy_task_workspace_identity(self._task_workspace)
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None

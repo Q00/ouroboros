@@ -27,7 +27,7 @@ One V1 identity contains:
 | Field | Contract |
 | --- | --- |
 | `project_id` | `project_` plus the full 32-character UUIDv5 hex digest |
-| `project_root` | canonical, absolute, symlink-resolved source repository root |
+| `project_root` | canonical, absolute, symlink-resolved identity root; normally the source checkout, or the external common Git directory for `--separate-git-dir` repositories |
 | `workspace_path` | canonical POSIX path relative to the active checkout root; `.` at root |
 
 The exact ID algorithm is:
@@ -43,10 +43,18 @@ remote-based identity is explicitly deferred.
 
 The resolver walks from the effective cwd to the nearest `.git` marker. A
 normal checkout uses that root. A linked worktree is joined to its primary
-source checkout only when its bounded `.git` pointer and `commondir` prove the
-relationship. A submodule-style `.git` file without `commondir` remains a
-separate project. Non-Git directories remain valid local-first projects and
-use their canonical cwd with `workspace_path="."`.
+source checkout only when its bounded `.git` pointer, `commondir`, worktree
+record, and backlink prove the relationship. Submodules use their configured
+worktree and therefore remain separate projects.
+
+Git does not persist the primary working-tree path for a non-bare repository
+created with `--separate-git-dir`. In that topology the validated external
+common Git directory is the only root that both the primary gitfile and every
+linked-worktree record can prove, so it becomes `project_root`; the
+`workspace_path` is still relative to each active checkout. Malformed or
+unproven metadata stays scoped to the active checkout. Non-Git directories
+remain valid local-first projects and use their canonical cwd with
+`workspace_path="."`.
 
 ### Managed task worktrees
 

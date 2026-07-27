@@ -60,7 +60,11 @@ from ouroboros.orchestrator.runner import (
     request_cancellation,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
-from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import (
+    SESSION_START_IDENTITY_PROGRESS_KEY,
+    SessionStatus,
+    SessionTracker,
+)
 from ouroboros.persistence.event_store import EventStore
 
 _LONG_WINDOW_429_ENCODINGS = tuple(
@@ -5921,6 +5925,101 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is True
         mark_completed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_public_resume_accepts_pre_anchor_managed_linked_identity(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        primary = tmp_path / "primary"
+        primary_git = primary / ".git"
+        primary_git.mkdir(parents=True)
+        linked = tmp_path / "linked"
+        linked_workspace = linked / "packages" / "app"
+        linked_workspace.mkdir(parents=True)
+        linked_git_dir = primary_git / "worktrees" / "linked"
+        linked_git_dir.mkdir(parents=True)
+        (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+        generated = tmp_path / "managed" / "legacy-public"
+        generated_workspace = generated / "packages" / "app"
+        generated_workspace.mkdir(parents=True)
+        task_workspace = TaskWorkspace(
+            durable_id="legacy-public",
+            repo_root=str(linked),
+            repo_name="linked",
+            original_cwd=str(linked_workspace),
+            effective_cwd=str(generated_workspace),
+            worktree_path=str(generated),
+            branch="ooo/legacy-public",
+            lock_path=str(tmp_path / ".locks" / "legacy-public.json"),
+        )
+        runner._task_workspace = task_workspace
+        session_id = "sess-legacy-managed-linked"
+        execution_id = "exec-legacy-managed-linked"
+        generation = runner._begin_process_local_authority_generation()
+        contract = runner._build_execution_contract(
+            seed=sample_seed,
+            authority_generation=generation,
+        )
+        contract["frugality_proof"]["project_root"] = str(linked.resolve())
+        contract["frugality_proof"]["workspace_path"] = "packages/app"
+        runner._register_process_local_authority(
+            session_id=session_id,
+            execution_id=execution_id,
+            execution_contract=contract,
+            generation=generation,
+        )
+        runner._seal_process_local_prepared_contract(
+            session_id=session_id,
+            execution_id=execution_id,
+            generation=generation,
+            execution_contract=contract,
+        )
+        tracker = SessionTracker.create(
+            execution_id,
+            sample_seed.metadata.seed_id,
+            session_id=session_id,
+        ).with_status(SessionStatus.PAUSED)
+        tracker = tracker.with_progress(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: contract,
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "execution_id": execution_id,
+                    "seed_id": sample_seed.metadata.seed_id,
+                },
+            }
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Resumed managed linked session",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session(session_id, sample_seed)
+
+        assert result.is_ok
+        assert result.value.success is True
 
     @pytest.mark.asyncio
     async def test_resume_session_reuses_research_prompt_and_tool_authority(

@@ -1983,6 +1983,69 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
     assert direct.workspace_path == "packages/app"
 
 
+def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    primary_git = primary / ".git"
+    primary_git.mkdir(parents=True)
+    linked = tmp_path / "linked"
+    (linked / "packages" / "app").mkdir(parents=True)
+    linked_git_dir = primary_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "managed" / "legacy-run"
+    (generated / "packages" / "app").mkdir(parents=True)
+    task_workspace = _workspace(
+        durable_id="legacy-run",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+    original = _runner(task_workspace=task_workspace)
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract(seed=_seed())
+    persisted["frugality_proof"]["project_root"] = str(linked.resolve())
+    persisted["frugality_proof"]["workspace_path"] = "packages/app"
+    legacy_start = {
+        "execution_id": "legacy-managed-linked",
+        "seed_id": "seed-routing-contract",
+    }
+
+    first_resume = _runner(
+        task_workspace=task_workspace,
+        base_model_tier="standard",
+    )
+    first_resume._route_economics = _frontier_custom_economics()
+    first_resume._model_router = _frontier_custom_router(base_tier="standard")
+    assert first_resume._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+        },
+        seed=_seed(),
+    )
+    replacement = first_resume._execution_contract
+    assert replacement is not None
+    assert replacement["frugality_proof"]["project_root"] == str(linked.resolve())
+    assert replacement["frugality_proof"]["workspace_path"] == "packages/app"
+
+    second_resume = _runner(task_workspace=task_workspace)
+    second_resume._route_economics = _frontier_custom_economics()
+    second_resume._model_router = _frontier_custom_router(base_tier="standard")
+    second_resume._requested_model_tier = "standard"
+
+    assert (
+        second_resume._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: replacement,
+                SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+            },
+            seed=_seed(),
+        )
+        is False
+    )
+
+
 def test_direct_nested_checkout_uses_same_project_identity_contract(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     workspace = repo_root / "packages" / "app"
