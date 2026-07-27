@@ -34,7 +34,6 @@ Functions:
     get_zcode_cli_path: Get zcode CLI path from env var or config
 """
 
-import ast
 from collections.abc import Callable
 import math
 import os
@@ -43,6 +42,7 @@ import shutil
 import stat
 from typing import Any
 
+from dotenv import dotenv_values
 from pydantic import ValidationError as PydanticValidationError
 import yaml
 
@@ -141,24 +141,6 @@ _RUNTIME_CONTROL_ENV_KEYS = {
     "OUROBOROS_GENERATION_SAFETY_TIMEOUT_SECONDS": "generation_safety_timeout_seconds",
     "OUROBOROS_WATCHDOG_POLL_SECONDS": "watchdog_poll_seconds",
 }
-
-
-def _parse_env_value(raw_value: str) -> str:
-    candidate = raw_value.strip()
-    if not candidate:
-        return ""
-
-    if candidate[0] in {'"', "'"} and candidate[-1:] == candidate[0]:
-        try:
-            parsed = ast.literal_eval(candidate)
-        except (SyntaxError, ValueError):
-            return candidate[1:-1]
-        return str(parsed)
-
-    comment_index = candidate.find(" #")
-    if comment_index != -1:
-        candidate = candidate[:comment_index]
-    return candidate.rstrip()
 
 
 def _is_placeholder_api_key(value: str) -> bool:
@@ -322,21 +304,39 @@ def _is_untrusted_env_denied_key(key: str) -> bool:
 
 
 def _load_env_file(path: Path, *, trusted: bool = False) -> None:
+    """Apply a ``.env`` file to ``os.environ`` under this module's trust policy.
+
+    Grammar is delegated to ``python-dotenv``, which owns it. The previous
+    hand-rolled parser routed quoted values through :func:`ast.literal_eval`,
+    applying *Python* string syntax to a POSIX-shaped file: `X='C:\\new\\table'`
+    came back ten characters long with a newline and a tab in it, because single
+    quotes are literal everywhere except in Python. Escapes, comments, quoting,
+    and `export ` are now the library's problem.
+
+    Every policy decision stays here:
+
+    * the untrusted-source key denylist (RCE guard) is applied per key;
+    * template placeholder keys are skipped;
+    * an already-set real environment value is never overridden.
+
+    ``interpolate=False`` is deliberate. python-dotenv expands ``${VAR}`` from
+    the environment by default; leaving that on would both change today's
+    behaviour (``$HOME`` is currently literal) and hand an untrusted
+    project-directory ``.env`` a way to read the real process environment into
+    a value it controls.
+    """
     if not path.is_file():
         return
 
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            continue
+    try:
+        entries = dotenv_values(path, interpolate=False, encoding="utf-8")
+    except OSError:
+        # An unreadable .env is not fatal; the process environment still wins.
+        return
 
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        if not key or any(ch.isspace() for ch in key):
+    for key, parsed_value in entries.items():
+        # A bare `KEY` line with no `=` yields None, matching the old skip.
+        if not key or parsed_value is None:
             continue
 
         if not trusted and _is_untrusted_env_denied_key(key):
@@ -344,7 +344,6 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
             # binary Ouroboros executes (remote code execution guard).
             continue
 
-        parsed_value = _parse_env_value(raw_value)
         if not parsed_value or _is_placeholder_api_key(parsed_value):
             continue
 

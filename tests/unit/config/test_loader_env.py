@@ -366,3 +366,123 @@ def test_native_session_index_opt_in_values(monkeypatch) -> None:
     for falsy in ("0", "off", "false", "no", ""):
         monkeypatch.setenv("OUROBOROS_NATIVE_SESSION_INDEX", falsy)
         assert get_native_session_index_enabled() is False
+
+
+class TestEnvValueGrammar:
+    """Value parsing follows `.env` grammar, not Python string grammar.
+
+    The previous implementation ran quoted values through `ast.literal_eval`,
+    so any single-quoted value containing a backslash escape was silently
+    rewritten. `X='C:\new\table'` arrived as ten characters holding a real
+    newline and a real tab.
+    """
+
+    @staticmethod
+    def _load(tmp_path: Path, body: str, key: str, monkeypatch) -> str | None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(body, encoding="utf-8")
+        monkeypatch.delenv(key, raising=False)
+        _load_env_file(env_file, trusted=True)
+        return os.environ.get(key)
+
+    def test_single_quoted_windows_path_survives_intact(self, tmp_path: Path, monkeypatch) -> None:
+        """The regression this class exists for."""
+        value = self._load(tmp_path, r"WINPATH='C:\new\table'" + "\n", "WINPATH", monkeypatch)
+
+        assert value == r"C:\new\table"
+        assert len(value or "") == 12
+        assert not any(ord(ch) < 0x20 for ch in value or "")
+
+    def test_single_quotes_do_not_process_escapes(self, tmp_path: Path, monkeypatch) -> None:
+        """Single quotes are literal in POSIX shells and in every .env dialect."""
+        assert self._load(tmp_path, r"LITERAL='a\nb'" + "\n", "LITERAL", monkeypatch) == r"a\nb"
+
+    def test_double_quoted_escapes_are_still_processed(self, tmp_path: Path, monkeypatch) -> None:
+        """Unchanged behaviour: double quotes keep interpreting escapes."""
+        assert self._load(tmp_path, r'ESCAPED="a\nb"' + "\n", "ESCAPED", monkeypatch) == "a\nb"
+
+    @pytest.mark.parametrize(
+        ("body", "key"),
+        [
+            pytest.param('CONCAT="abc" "def"\n', "CONCAT", id="python-implicit-concatenation"),
+            pytest.param('TAIL="value" junk\n', "TAIL", id="trailing-junk"),
+        ],
+    )
+    def test_malformed_lines_are_rejected_not_invented(
+        self, tmp_path: Path, monkeypatch, body: str, key: str
+    ) -> None:
+        """`"abc" "def"` used to yield `abcdef`, a value present nowhere in the file."""
+        assert self._load(tmp_path, body, key, monkeypatch) is None
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            pytest.param("DOLLAR=$HOME\n", "$HOME", id="bare"),
+            pytest.param("DOLLAR=${HOME}\n", "${HOME}", id="braced"),
+        ],
+    )
+    def test_variable_references_are_not_interpolated(
+        self, tmp_path: Path, monkeypatch, body: str, expected: str
+    ) -> None:
+        """`interpolate=False` keeps today's behaviour and denies an untrusted
+        `.env` a way to read the real process environment into a value."""
+        assert self._load(tmp_path, body, "DOLLAR", monkeypatch) == expected
+
+    def test_untrusted_env_cannot_interpolate_a_denied_key(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Interpolation would otherwise let a cloned repo's .env read PATH."""
+        monkeypatch.setenv("PATH", "/sentinel/bin")
+        leaked = self._load(tmp_path, "LEAK=${PATH}\n", "LEAK", monkeypatch)
+
+        assert leaked == "${PATH}"
+        assert "/sentinel/bin" not in (leaked or "")
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            pytest.param("PLAIN=value\n", "value", id="unquoted"),
+            pytest.param("export EXPORTED=value\n", "value", id="export-prefix"),
+            pytest.param('QUOTED="two words"\n', "two words", id="double-quoted-space"),
+            pytest.param("INLINE=value # comment\n", "value", id="inline-comment"),
+            pytest.param('HASH="a # b"\n', "a # b", id="hash-inside-quotes"),
+            pytest.param("PAD=  padded  \n", "padded", id="surrounding-whitespace"),
+            pytest.param("UNICODE=한글값\n", "한글값", id="non-ascii"),
+        ],
+    )
+    def test_established_forms_are_unchanged(
+        self, tmp_path: Path, monkeypatch, body: str, expected: str
+    ) -> None:
+        key = body.replace("export ", "").split("=", 1)[0]
+        assert self._load(tmp_path, body, key, monkeypatch) == expected
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param("# COMMENTED=value\n", id="comment-line"),
+            pytest.param("BARE\n", id="bare-key-no-equals"),
+            pytest.param("EMPTY=\n", id="empty-value"),
+        ],
+    )
+    def test_non_assignments_set_nothing(self, tmp_path: Path, monkeypatch, body: str) -> None:
+        for key in ("COMMENTED", "BARE", "EMPTY"):
+            monkeypatch.delenv(key, raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text(body, encoding="utf-8")
+
+        _load_env_file(env_file, trusted=True)
+
+        assert not {"COMMENTED", "BARE", "EMPTY"} & set(os.environ)
+
+    def test_denylist_still_applies_to_the_delegated_parser(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Delegating the grammar must not delegate the trust policy."""
+        denied = sorted(_UNTRUSTED_ENV_DENYLIST)[0]
+        monkeypatch.setenv(denied, "original")
+        env_file = tmp_path / ".env"
+        env_file.write_text(f"{denied}=hijacked\n", encoding="utf-8")
+
+        _load_env_file(env_file, trusted=False)
+
+        assert os.environ[denied] == "original"

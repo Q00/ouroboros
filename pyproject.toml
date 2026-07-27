@@ -14,6 +14,11 @@ dependencies = [
     "jsonschema>=4.21.0,<5.0.0",
     "pydantic>=2.0.0,<3.0.0",
     "prompt-toolkit>=3.0.0,<4.0.0",
+    # Exact-pinned rather than range-pinned like its neighbours: this parses
+    # `.env`, a documented trust boundary (see `_UNTRUSTED_ENV_DENYLIST` in
+    # config/loader.py), so an unreviewed upgrade is a supply-chain path.
+    # Same rationale as the AI-stack pins from #1347.
+    "python-dotenv==1.2.2",
     "pyyaml>=6.0.0,<7.0.0",
     "rich>=13.0.0,<16.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
