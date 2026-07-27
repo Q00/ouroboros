@@ -60,8 +60,17 @@ configured submodule Git directory therefore stays separate. Core section names
 are interpreted case-insensitively with later values winning, matching Git.
 The bounded core parser accepts Git section comments, valueless boolean
 shorthand, empty boolean values, quoted values, documented escapes, inline
-comments, and backslash continuations. Includes fail closed because they escape
-the bounded config file used for identity proof.
+comments, and variable-value backslash continuations. Section headers cannot
+span physical lines and fail closed before continuation folding. Includes fail
+closed because they escape the bounded config file used for identity proof.
+
+When the common config enables `extensions.worktreeConfig`, the resolver reads
+the bounded, regular, non-symlink main-worktree `config.worktree` after the
+common `config`, matching Git's later-value override order for `core.bare` and
+`core.worktree`. A missing worktree config is an empty overlay; malformed,
+oversized, or including worktree config cannot prove an identity owner. This
+keeps direct, positively proven linked, and managed paths on the same explicit
+main-worktree owner when Git stores that owner outside the common config.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without

@@ -200,7 +200,7 @@ def _git_config_comment_index(value: str) -> int | None:
 
 
 def _git_config_logical_lines(raw_config: str) -> tuple[str, ...] | None:
-    """Fold Git backslash continuations without accepting non-CRLF CRs."""
+    """Fold value continuations while rejecting multiline section headers."""
     logical_lines: list[str] = []
     current = ""
     continuation_pending = False
@@ -219,9 +219,17 @@ def _git_config_logical_lines(raw_config: str) -> tuple[str, ...] | None:
         if continues:
             if not has_line_feed:
                 return None
+            # Git permits continuations for variable values, but explicitly
+            # forbids section headers from spanning physical lines.  Check the
+            # accumulated candidate before discarding the newline so malformed
+            # ``[co\\\nre]`` cannot become a trusted ``[core]`` section.
+            if candidate.lstrip(" \t").startswith("["):
+                return None
             current = candidate[:-1]
             continuation_pending = True
             continue
+        if continuation_pending and candidate.lstrip(" \t").startswith("["):
+            return None
         logical_lines.append(candidate)
         current = ""
         continuation_pending = False
@@ -265,6 +273,8 @@ def _parse_git_config_section(value: str) -> tuple[str, str] | None:
     folded = section_name.casefold()
     if folded == "core" and not section_suffix:
         kind = "core"
+    elif folded == "extensions" and not section_suffix:
+        kind = "extensions"
     elif folded in {"include", "includeif"}:
         kind = "include"
     else:
@@ -339,13 +349,15 @@ def _parse_git_config_assignment(value: str) -> tuple[str, str | None] | None:
     return (key, parsed_value) if valid else None
 
 
-def _parse_git_core_values(raw_config: str) -> dict[str, str | None] | None:
-    """Return later-wins core values under the bounded Git grammar subset."""
+def _parse_git_config_values(
+    raw_config: str,
+) -> dict[tuple[str, str], str | None] | None:
+    """Return identity-relevant later-wins values from one bounded config."""
     logical_lines = _git_config_logical_lines(raw_config)
     if logical_lines is None:
         return None
     current_section: str | None = None
-    core_values: dict[str, str | None] = {}
+    relevant_values: dict[tuple[str, str], str | None] = {}
     for logical_line in logical_lines:
         candidate = logical_line.lstrip(" \t")
         if not candidate or candidate[0] in "#;":
@@ -368,8 +380,10 @@ def _parse_git_core_values(raw_config: str) -> dict[str, str | None] | None:
             return None
         key, parsed_value = assignment
         if current_section == "core" and key in {"bare", "worktree"}:
-            core_values[key] = parsed_value
-    return core_values
+            relevant_values[("core", key)] = parsed_value
+        elif current_section == "extensions" and key == "worktreeconfig":
+            relevant_values[("extensions", key)] = parsed_value
+    return relevant_values
 
 
 def _parse_git_boolean(value: str | None) -> bool | None:
@@ -386,15 +400,61 @@ def _parse_git_boolean(value: str | None) -> bool | None:
 
 
 def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
-    """Read only the bounded core fields needed to prove a common-dir root."""
+    """Read bounded common and applicable main-worktree core configuration."""
     raw_config = _read_bounded_utf8(
         git_dir / "config",
         max_bytes=_MAX_GIT_CONFIG_LENGTH,
     )
     if raw_config is None:
         return None
-    core_values = _parse_git_core_values(raw_config)
-    if core_values is None or "bare" not in core_values:
+    common_values = _parse_git_config_values(raw_config)
+    if common_values is None:
+        return None
+
+    worktree_config_enabled = False
+    worktree_config_key = ("extensions", "worktreeconfig")
+    if worktree_config_key in common_values:
+        parsed_extension = _parse_git_boolean(common_values[worktree_config_key])
+        if parsed_extension is None:
+            return None
+        worktree_config_enabled = parsed_extension
+
+    core_values = {
+        key: value for (section, key), value in common_values.items() if section == "core"
+    }
+    if worktree_config_enabled:
+        # For the main worktree, ``git rev-parse --git-path
+        # config.worktree`` names ``<common-dir>/config.worktree``.  Git reads
+        # it after the common config, so its core values override earlier
+        # values.  A missing file is a valid empty overlay; a present symlink,
+        # non-file, oversized, malformed, or including file cannot prove
+        # ownership and fails closed.
+        worktree_config_path = git_dir / "config.worktree"
+        try:
+            if worktree_config_path.is_symlink():
+                return None
+            worktree_config_exists = worktree_config_path.exists()
+        except OSError:
+            return None
+        if worktree_config_exists:
+            raw_worktree_config = _read_bounded_utf8(
+                worktree_config_path,
+                max_bytes=_MAX_GIT_CONFIG_LENGTH,
+            )
+            if raw_worktree_config is None:
+                return None
+            worktree_values = _parse_git_config_values(raw_worktree_config)
+            if worktree_values is None:
+                return None
+            core_values.update(
+                {
+                    key: value
+                    for (section, key), value in worktree_values.items()
+                    if section == "core"
+                }
+            )
+
+    if "bare" not in core_values:
         return None
     bare = _parse_git_boolean(core_values["bare"])
     if bare is None:

@@ -230,6 +230,91 @@ def test_quoted_continued_core_worktree_keeps_direct_linked_parity(tmp_path: Pat
     assert direct_identity.project_root == str(primary.resolve())
 
 
+def test_worktree_config_owner_joins_direct_linked_and_managed_identity(
+    tmp_path: Path,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n",
+        encoding="utf-8",
+    )
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config.worktree").write_text(
+        f'[core]\n\tworktree = "{primary}"\n',
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "generated" / "packages" / "app"
+    generated.mkdir(parents=True)
+
+    direct_identity = resolve_project_identity(primary_workspace)
+    linked_identity = resolve_project_identity(linked_workspace)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked_workspace,
+    )
+
+    assert direct_identity == linked_identity == managed_identity
+    assert direct_identity.project_root == str(primary.resolve())
+    assert direct_identity.workspace_path == "packages/app"
+
+
+def test_continued_section_header_cannot_claim_linked_or_managed_identity(
+    tmp_path: Path,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    claimed = tmp_path / "claimed"
+    claimed.mkdir()
+    (claimed / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[co\\\nre]\n\tbare = false\n\tworktree = {claimed}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    linked_identity = resolve_project_identity(linked)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked,
+    )
+
+    assert linked_identity == managed_identity
+    assert linked_identity.project_root == str(linked.resolve())
+    assert linked_identity.project_id != project_id_for_root(claimed)
+
+
 def test_bare_common_repository_joins_direct_and_managed_worktrees(
     tmp_path: Path,
 ) -> None:
