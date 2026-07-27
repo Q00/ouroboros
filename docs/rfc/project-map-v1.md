@@ -56,8 +56,10 @@ binary with argv rather than a shell and asks it for:
 - the configured top level via `rev-parse --path-format=absolute
   --show-toplevel`.
 
-The process environment removes caller-supplied `GIT_*` overrides, disables
-global/system config and prompting, and sets a five-second timeout. Only
+The process environment removes caller-supplied `GIT_*` overrides, while the
+central untrusted-project `.env` boundary rejects dynamic-loader controls
+(`LD_*`, `DYLD_*`, and platform equivalents). Git queries disable global/system
+config and prompting and set a five-second timeout. Only
 complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
 accepted. When a checkout marker is present, it is passed back to Git explicitly
 as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor
@@ -118,8 +120,11 @@ event. Contract-free utility sessions remain valid; historical events are read
 without being recreated through this API.
 
 Every bundled runtime normalizes an omitted working directory to the process
-cwd at runtime construction. The resulting concrete workspace is therefore
-available before a runner-owned session publishes its mandatory identity.
+cwd at runtime construction, and the runner captures the same fallback for
+valid optional-cwd protocol implementations. Persistent Claude transport and
+runtime objects share that captured path for both spawn and resume. The
+resulting concrete workspace is therefore available before a runner-owned
+session publishes its mandatory identity.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

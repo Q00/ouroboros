@@ -934,6 +934,7 @@ class OrchestratorRunner:
                 bounded signals to exact active AC attempts.
         """
         self._adapter = adapter
+        self._launch_cwd = os.getcwd()
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
         self._checkpoint_store = checkpoint_store
@@ -3179,7 +3180,7 @@ class OrchestratorRunner:
         if runtime_handle is not None and runtime_handle.cwd:
             return runtime_handle.cwd
         cwd = self._adapter.working_directory
-        return cwd if isinstance(cwd, str) and cwd else None
+        return cwd if isinstance(cwd, str) and cwd else self._launch_cwd
 
     @staticmethod
     def _canonical_path(value: str) -> str:

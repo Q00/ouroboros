@@ -3003,6 +3003,27 @@ class TestOrchestratorRunner:
                 execution_id="exec-leader-cwd",
             )
 
+    def test_optional_runtime_cwd_is_captured_at_runner_construction(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        later_cwd = tmp_path / "later"
+        launch_cwd.mkdir()
+        later_cwd.mkdir()
+        mock_adapter.working_directory = None
+        monkeypatch.chdir(launch_cwd)
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        monkeypatch.chdir(later_cwd)
+
+        assert runner._effective_cwd() == str(launch_cwd)
+        assert runner._project_identity() == resolve_project_identity(launch_cwd)
+
     @pytest.mark.asyncio
     async def test_prepare_session_rejects_resolved_project_identity_absence(
         self,

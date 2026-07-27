@@ -198,6 +198,11 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # Node/Electron preload hook. A project .env could otherwise inject a
         # --require/--import payload before a spawned JavaScript CLI starts.
         "NODE_OPTIONS",
+        # Non-LD_/DYLD_ dynamic-loader controls used by supported or adjacent
+        # Unix platforms. Prefix families are rejected below.
+        "LDR_PRELOAD",
+        "LIBPATH",
+        "SHLIB_PATH",
         # Explicit executable-path overrides.
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",
@@ -307,6 +312,7 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_SHADOW_REPLAY",
     }
 )
+_UNTRUSTED_ENV_DENIED_PREFIXES = ("DYLD_", "LD_")
 
 # The reasoning-effort vocabulary every native runtime accepts (mirrors
 # OrchestratorConfig.reasoning_effort). A value outside this set — Codex-only
@@ -317,7 +323,10 @@ _VALID_REASONING_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh"})
 
 def _is_untrusted_env_denied_key(key: str) -> bool:
     """Return whether an untrusted .env key may alter execution routing."""
-    return key.upper() in _UNTRUSTED_ENV_DENYLIST
+    normalized = key.upper()
+    return normalized in _UNTRUSTED_ENV_DENYLIST or normalized.startswith(
+        _UNTRUSTED_ENV_DENIED_PREFIXES
+    )
 
 
 def _load_env_file(path: Path, *, trusted: bool = False) -> None:

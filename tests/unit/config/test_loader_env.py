@@ -100,6 +100,9 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         # Process lookup/preload hooks + explicit path overrides/bare alias.
         "PATH",
         "NODE_OPTIONS",
+        "LDR_PRELOAD",
+        "LIBPATH",
+        "SHLIB_PATH",
         "OUROBOROS_CLI_PATH",
         "OPENCODE_CLI_PATH",
         # Spawned-CLI / agent instruction + extension roots.
@@ -161,6 +164,34 @@ def test_untrusted_env_cannot_set_node_options(
     _load_env_file(env_file, trusted=False)
 
     assert "NODE_OPTIONS" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "LDR_PRELOAD",
+        "LIBPATH",
+        "SHLIB_PATH",
+    ],
+)
+def test_untrusted_env_cannot_set_dynamic_loader_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=./attacker-library\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
 
 
 def test_untrusted_env_cannot_disable_approval_gate(

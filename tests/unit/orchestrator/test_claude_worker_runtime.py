@@ -104,6 +104,41 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    @pytest.mark.asyncio
+    async def test_omitted_cwd_is_shared_by_spawn_and_persistent_resume(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        later_cwd = tmp_path / "later"
+        launch_cwd.mkdir()
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        runtime = build_claude_worker_runtime(persist_sessions=True)
+        transport = runtime._transport
+        observed_cwds: list[str | None] = []
+
+        async def fake_run(command, prompt, cwd):
+            observed_cwds.append(cwd)
+            return WorkerTurn(text="ok", session_id="session-1")
+
+        transport._run = fake_run  # type: ignore[method-assign]
+        first = [message async for message in runtime.execute_task("first")]
+        resume_handle = first[-1].resume_handle
+        assert resume_handle is not None
+        monkeypatch.chdir(later_cwd)
+        _ = [
+            message
+            async for message in runtime.execute_task(
+                "resume",
+                resume_handle=resume_handle,
+            )
+        ]
+
+        assert runtime.working_directory == str(launch_cwd)
+        assert observed_cwds == [str(launch_cwd), str(launch_cwd)]
+
     def test_exposes_effective_cli_path(self) -> None:
         rt = build_claude_worker_runtime(cli_path="/tmp/claude", cwd="/tmp")
 
