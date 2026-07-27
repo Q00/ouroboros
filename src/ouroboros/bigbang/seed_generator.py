@@ -13,6 +13,7 @@ The SeedGenerator:
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -156,10 +157,25 @@ def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> floa
                 f"{field_label} entry field 'weight' must be a number; got {raw_weight!r}."
             )
         try:
-            return min(1.0, max(0.0, float(str(raw_weight).strip())))
-        except ValueError:
+            numeric = float(str(raw_weight).strip())
+        except (ValueError, OverflowError):
             return 1.0
-    return min(1.0, max(0.0, float(raw_weight)))
+        return min(1.0, max(0.0, numeric)) if math.isfinite(numeric) else 1.0
+    if isinstance(raw_weight, int):
+        # Clamp in integer space: arbitrary-precision JSON integers would
+        # overflow float() (an OverflowError the retry path does not catch),
+        # and the clamp result is what any out-of-range number gets anyway.
+        return float(min(max(raw_weight, 0), 1))
+    if not math.isfinite(raw_weight):
+        # Python's json.loads accepts the non-standard NaN/Infinity tokens;
+        # they are not JSON numbers, so strict extraction retries and lenient
+        # parsing keeps the historical 1.0 fallback.
+        if strict:
+            raise ValueError(
+                f"{field_label} entry field 'weight' must be a finite number; got {raw_weight!r}."
+            )
+        return 1.0
+    return min(1.0, max(0.0, raw_weight))
 
 
 def _decode_object_array(text: str, *, field_label: str, strict: bool) -> list | None:
@@ -250,17 +266,15 @@ def _parse_evaluation_principles(
         parts = principle_str.split(":")
         if len(parts) < 2:
             continue
-        weight = 1.0
-        if len(parts) >= 3:
-            try:
-                weight = float(parts[2].strip())
-            except ValueError:
-                weight = 1.0
         principles.append(
             EvaluationPrinciple(
                 name=parts[0].strip(),
                 description=parts[1].strip(),
-                weight=min(1.0, max(0.0, weight)),
+                weight=_clamp_weight(
+                    parts[2].strip() if len(parts) >= 3 else None,
+                    field_label=field_label,
+                    strict=False,
+                ),
             )
         )
     return tuple(principles)

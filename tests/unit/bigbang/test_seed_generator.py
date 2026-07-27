@@ -1532,6 +1532,83 @@ class TestObjectArrayExtractionContract:
         condition = ExitCondition(name="c", description="d", evaluation_criteria="e")
         assert _parse_exit_conditions([condition]) == (condition,)
 
+    def test_strict_rejects_nonfinite_weights(self) -> None:
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with pytest.raises(ValueError, match="finite"):
+                _parse_evaluation_principles(
+                    f'[{{"name": "x", "description": "d", "weight": {token}}}]',
+                    strict=True,
+                )
+
+    def test_oversized_integer_weights_clamp_without_crashing(self) -> None:
+        huge = "9" * 400
+        principles = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]', strict=True
+        )
+        assert principles[0].weight == 1.0
+        principles = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": -{huge}}}]', strict=True
+        )
+        assert principles[0].weight == 0.0
+
+    def test_lenient_nonfinite_and_oversized_weights_never_raise(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "a", "description": "d", "weight": NaN},'
+            ' {"name": "b", "description": "d", "weight": Infinity},'
+            f' {{"name": "c", "description": "d", "weight": {"9" * 400}}}]'
+        )
+        assert [p.weight for p in principles] == [1.0, 1.0, 1.0]
+        legacy = _parse_evaluation_principles("a:d:inf | b:d:nan | c:d:1e999")
+        assert [p.weight for p in legacy] == [1.0, 1.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_nonfinite_weight_triggers_extraction_retry_not_crash(self) -> None:
+        malformed = create_valid_extraction_response(
+            evaluation_principles='[{"name": "x", "description": "d", "weight": NaN}]'
+        )
+        reformatted = create_valid_extraction_response()
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_oversized_weight_does_not_crash_seed_generation(self) -> None:
+        response = create_valid_extraction_response(
+            evaluation_principles=(f'[{{"name": "x", "description": "d", "weight": {"9" * 400}}}]')
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(response))
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.evaluation_principles[0].weight == 1.0
+
     def test_strict_string_array_rejects_predecoded_non_strings(self) -> None:
         with pytest.raises(ValueError, match="only strings"):
             _parse_string_array_values([1, "x"], field_label="CONSTRAINTS", strict=True)
