@@ -365,18 +365,14 @@ def _runtime_message_supports_file_reference(
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
-    text = _runtime_message_file_proof_text(message)
     if message.tool_name == "Bash":
-        return (
-            allow_bash_command_text
-            and _bash_command_mutates_file_reference(
-                message,
-                reference=reference,
-                normalized_reference=normalized_reference,
-                task_cwd=task_cwd,
-            )
-            and _runtime_message_has_success_evidence(message, messages=messages, index=index)
-        )
+        return _bash_message_mutates_file_reference(
+            message,
+            reference=reference,
+            normalized_reference=normalized_reference,
+            task_cwd=task_cwd,
+            allow_bash_command_text=allow_bash_command_text,
+        ) and _runtime_message_has_success_evidence(message, messages=messages, index=index)
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
         return _runtime_message_has_success_evidence(
             message,
@@ -386,7 +382,27 @@ def _runtime_message_supports_file_reference(
             _file_claim_matches_runtime_path(reference, path, task_cwd=task_cwd)
             for path in _runtime_message_file_path_values(message)
         )
+    text = _runtime_message_file_proof_text(message)
     return _text_supports_file_mutation_reference(text, normalized_reference)
+
+
+def _bash_message_mutates_file_reference(
+    message: AgentMessage,
+    *,
+    reference: str,
+    normalized_reference: str,
+    task_cwd: str | None,
+    allow_bash_command_text: bool,
+) -> bool:
+    text = _runtime_message_file_proof_text(message)
+    if text and _text_supports_file_mutation_reference(text, normalized_reference):
+        return True
+    return allow_bash_command_text and _bash_command_mutates_file_reference(
+        message,
+        reference=reference,
+        normalized_reference=normalized_reference,
+        task_cwd=task_cwd,
+    )
 
 
 def _text_supports_file_mutation_reference(text: str, normalized_reference: str) -> bool:
@@ -523,8 +539,12 @@ def _python_c_pathlib_write_reference_match(
         if _raw_command_mentions_python_c_pathlib_write(command):
             return False
         return None
-    python_index = _python_c_argv_index(argv)
+    python_index = _python_c_argv_index(argv, task_cwd=task_cwd)
+    if python_index is False:
+        return False
     if python_index is None:
+        if _command_has_python_c(argv) and _source_mentions_pathlib_write(command):
+            return False
         return None
     if len(argv) <= python_index + 2 or "-c" not in argv[python_index + 1 :]:
         return None
@@ -539,13 +559,12 @@ def _python_c_pathlib_write_reference_match(
         or source_index != 3
         or len(argv) != 4
         or argv[1] != "-I"
-        or not _trusted_python_executable(argv[0])
         or _source_needs_shell_expansion(source)
     ):
         return False
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except (MemoryError, RecursionError, SyntaxError, ValueError):
         return False
     targets = _pathlib_write_targets(tree)
     if not targets:
@@ -559,23 +578,6 @@ def _python_c_pathlib_write_reference_match(
         )
         for target in targets
     )
-
-
-def _python_c_argv_index(argv: list[str]) -> int | None:
-    for index, value in enumerate(argv):
-        executable = Path(value).name.lower()
-        if executable in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable):
-            return index
-        if "=" not in value:
-            return None
-    return None
-
-
-def _trusted_python_executable(value: str) -> bool:
-    try:
-        return Path(value).resolve() == Path(sys.executable).resolve()
-    except (OSError, ValueError):
-        return False
 
 
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
@@ -629,13 +631,16 @@ def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
 
 
 def _call_has_side_effecting_arguments(call: ast.Call) -> bool:
-    return any(
-        isinstance(
-            child, (ast.Call, ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom)
+    try:
+        return any(
+            isinstance(
+                child, (ast.Call, ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom)
+            )
+            for argument in (*call.args, *(keyword.value for keyword in call.keywords))
+            for child in ast.walk(argument)
         )
-        for argument in (*call.args, *(keyword.value for keyword in call.keywords))
-        for child in ast.walk(argument)
-    )
+    except RecursionError:
+        return True
 
 
 def _imports_pathlib_path(node: ast.AST) -> bool:
@@ -668,7 +673,10 @@ def _binds_name(node: ast.AST, name: str) -> bool:
         targets = (node.target,)
     elif isinstance(node, ast.With):
         targets = tuple(item.optional_vars for item in node.items if item.optional_vars is not None)
-    return any(_target_binds_name(target, name) for target in targets)
+    try:
+        return any(_target_binds_name(target, name) for target in targets)
+    except RecursionError:
+        return True
 
 
 def _target_binds_name(target: ast.AST, name: str) -> bool:
@@ -679,27 +687,62 @@ def _target_binds_name(target: ast.AST, name: str) -> bool:
 
 
 def _literal_pathlib_receiver(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Call) and _is_path_constructor(node.func):
-        if len(node.args) != 1 or node.keywords:
-            return None
-        return _literal_path_segment(node.args[0])
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        left = _literal_pathlib_receiver(node.left)
-        right = _literal_path_segment(node.right)
-        if left is None or right is None:
-            return None
-        return str(PurePosixPath(left) / right)
-    return None
+    try:
+        if isinstance(node, ast.Call) and _is_path_constructor(node.func):
+            if len(node.args) != 1 or node.keywords:
+                return None
+            return _literal_path_segment(node.args[0])
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left = _literal_pathlib_receiver(node.left)
+            right = _literal_path_segment(node.right)
+            if left is None or right is None:
+                return None
+            return str(PurePosixPath(left) / right)
+        return None
+    except RecursionError:
+        return None
+
+
+def _literal_path_segment(node: ast.AST) -> str | None:
+    try:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
+            return node.value
+        return None
+    except RecursionError:
+        return None
 
 
 def _is_path_constructor(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "Path"
 
 
-def _literal_path_segment(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
-        return node.value
+def _command_has_python_c(argv: list[str]) -> bool:
+    for index, value in enumerate(argv):
+        name = Path(value).name.lower()
+        if name in {"python", "python3"} or re.fullmatch(r"python3\.\d+", name):
+            return "-c" in argv[index + 1 :]
+    return False
+
+
+def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool:
+    for index, value in enumerate(argv):
+        executable = Path(value).name.lower()
+        if executable in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable):
+            if index != 0:
+                return False
+            return index if _trusted_python_executable(value, task_cwd=task_cwd) else False
+        if "=" not in value:
+            return None
     return None
+
+
+def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
+    try:
+        path = Path(value)
+        candidate = path if path.is_absolute() else Path(task_cwd) / path
+        return candidate.resolve() == Path(sys.executable).resolve()
+    except (OSError, ValueError):
+        return False
 
 
 def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
