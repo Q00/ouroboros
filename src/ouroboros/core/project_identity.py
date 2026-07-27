@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
+import stat
 import subprocess
 import tempfile
 from uuid import NAMESPACE_URL, uuid5
@@ -138,6 +139,29 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
     return None
 
 
+def _nearest_bare_repository_candidate(start: Path) -> Path | None:
+    """Return the nearest bare filesystem shape for Git to validate.
+
+    This does not interpret Git records.  It only avoids treating a valid
+    markerless bare repository as a generic local directory before Git gets to
+    own the actual topology decision.
+    """
+    for candidate in (start, *start.parents):
+        try:
+            head = (candidate / "HEAD").stat().st_mode
+            objects = (candidate / "objects").stat().st_mode
+            refs = (candidate / "refs").stat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ProjectIdentityUnavailableError(
+                "bare repository discovery is temporarily unavailable"
+            ) from exc
+        if stat.S_ISREG(head) and stat.S_ISDIR(objects) and stat.S_ISDIR(refs):
+            return candidate
+    return None
+
+
 def _git_environment() -> dict[str, str]:
     """Return a stable environment without caller-supplied Git overrides."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -154,8 +178,13 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _run_git(start: Path, *arguments: str) -> bytes | None:
-    """Run one bounded, non-interactive Git query and return complete stdout."""
+def _run_git(start: Path, *arguments: str) -> bytes:
+    """Run one bounded, non-interactive Git query and return complete stdout.
+
+    A nonzero exit is unavailable because Git does not expose a portable
+    exit-code distinction between malformed topology and transient repository
+    I/O.
+    """
     try:
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run(
@@ -169,7 +198,9 @@ def _run_git(start: Path, *arguments: str) -> bytes | None:
                 shell=False,
             )
             if completed.returncode != 0:
-                return None
+                raise ProjectIdentityUnavailableError(
+                    "Git query failed before topology could be proven"
+                )
             if output.tell() > _MAX_GIT_OUTPUT_LENGTH:
                 raise ProjectIdentityUnavailableError("Git query output exceeds its bound")
             output.seek(0)
@@ -202,24 +233,27 @@ def _git_dir_argument(checkout_root: Path | None) -> tuple[str, ...]:
 def _git_head_is_valid(git_dir: Path) -> bool:
     """Ask Git to validate either a symbolic/unborn or detached HEAD."""
     git_dir_argument = f"--git-dir={git_dir}"
-    symbolic_head = _run_git(
-        git_dir,
-        git_dir_argument,
-        "symbolic-ref",
-        "--quiet",
-        "HEAD",
-    )
-    if symbolic_head is not None:
+    try:
+        _run_git(
+            git_dir,
+            git_dir_argument,
+            "symbolic-ref",
+            "--quiet",
+            "HEAD",
+        )
         return True
-    detached_head = _run_git(
-        git_dir,
-        git_dir_argument,
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        "HEAD^{object}",
-    )
-    return detached_head is not None
+    except ProjectIdentityUnavailableError:
+        # Detached HEAD is the one expected non-symbolic shape. Its independent
+        # object proof must succeed; a second nonzero remains unavailable.
+        _run_git(
+            git_dir,
+            git_dir_argument,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD^{object}",
+        )
+        return True
 
 
 def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | None:
@@ -252,8 +286,6 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--porcelain",
         "-z",
     )
-    if output is None:
-        return None
     prefix = b"worktree "
     try:
         worktrees = tuple(
@@ -273,8 +305,6 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
     main_worktree = worktrees[0]
     # ``worktree list`` identifies the primary checkout, while rev-parse asks
     # Git's own config parser to apply an explicit ``core.worktree`` owner.
-    # It fails for a bare primary, where the worktree-list path is the desired
-    # stable common-directory identity.
     top_level = _run_git(
         main_worktree,
         f"--git-dir={common_dir}",
@@ -282,7 +312,7 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--path-format=absolute",
         "--show-toplevel",
     )
-    project_root = main_worktree if top_level is None else _git_path(top_level)
+    project_root = _git_path(top_level)
     if project_root is None:
         return None
     # Git accepting an explicit --git-dir does not prove that the active
@@ -306,9 +336,12 @@ def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
 def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
     """Resolve Git-owned topology, conservatively falling back to one checkout."""
     checkout_root = _nearest_git_checkout_root(start)
+    bare_candidate = _nearest_bare_repository_candidate(start)
+    if checkout_root is None and bare_candidate is None:
+        return start, start
     # A markerless bare repository may live inside an ordinary checkout. Ask
     # Git about the active directory before adopting an ancestor marker.
-    if checkout_root != start and _active_repository_is_bare(start, None):
+    if bare_candidate is not None and _active_repository_is_bare(start, None):
         active_git_dir = _git_path(
             _run_git(start, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
         )
@@ -367,8 +400,7 @@ def resolve_project_identity(
     path from splitting one source project into a new project on every run.
     """
     effective = _canonical_directory(effective_cwd)
-    if _run_git(Path(Path(__file__).anchor), "--version") is None:
-        raise ProjectIdentityUnavailableError("installed Git cannot answer identity queries")
+    _run_git(Path(Path(__file__).anchor), "--version")
     if source_root is not None:
         checkout_root = _canonical_directory(source_root)
         workspace = _canonical_directory(

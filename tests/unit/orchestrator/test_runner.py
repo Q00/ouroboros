@@ -7,6 +7,7 @@ import copy
 from datetime import UTC, datetime, timedelta
 import hashlib
 from pathlib import Path
+import subprocess
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +37,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
@@ -100,6 +102,33 @@ def _task_workspace() -> TaskWorkspace:
         branch="ooo/orch_test",
         lock_path="/tmp/worktree/.locks/repo/orch_test.json",
     )
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Runner Test",
+            "-c",
+            "user.email=runner@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _runtime_owned_task_workspace(adapter: Any) -> TaskWorkspace:
+    workspace = _task_workspace()
+    adapter.working_directory = workspace.effective_cwd
+    return workspace
 
 
 def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
@@ -2929,7 +2958,6 @@ class TestOrchestratorRunner:
         repo_root = tmp_path / "repo"
         workspace = repo_root / "packages" / "app"
         workspace.mkdir(parents=True)
-        (repo_root / ".git").mkdir()
         mock_adapter.working_directory = str(workspace)
         runner = OrchestratorRunner(
             mock_adapter,
@@ -3093,6 +3121,40 @@ class TestOrchestratorRunner:
 
         assert runner._effective_cwd() == str(tmp_path)
         assert runner._project_identity() == resolve_project_identity(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_task_cwd_when_provider_cwd_is_unavailable(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=FileNotFoundError,
+        ):
+            runtime = CodexCliRuntime(cli_path="/usr/bin/true")
+            runner = OrchestratorRunner(
+                runtime,
+                mock_event_store,
+                mock_console,
+                task_cwd=str(tmp_path),
+            )
+
+        provider_entry = MagicMock()
+        with patch.object(runtime, "execute_task", provider_entry):
+            result = await runner.execute_seed(
+                sample_seed,
+                execution_id="exec-cwd-owner",
+                session_id="orch-cwd-owner",
+                parallel=False,
+            )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+        provider_entry.assert_not_called()
+        mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_prepare_session_rejects_resolved_project_identity_absence(
@@ -4208,7 +4270,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
             fat_harness_mode=False,
         )
 
@@ -4240,7 +4302,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
             fat_harness_mode=False,
         )
         _allow_mocked_precreated_durable_state(runner)
@@ -4298,7 +4360,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
             fat_harness_mode=False,
         )
         _allow_mocked_precreated_durable_state(runner)
@@ -4362,7 +4424,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
             fat_harness_mode=False,
         )
         completed_tracker = SessionTracker.create("exec", "seed").with_status(
@@ -4398,7 +4460,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             fat_harness_mode=True,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
@@ -4465,7 +4527,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
@@ -4518,7 +4580,7 @@ class TestOrchestratorRunner:
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_task_workspace(),
+            task_workspace=_runtime_owned_task_workspace(mock_adapter),
             fat_harness_mode=False,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
@@ -6091,16 +6153,16 @@ class TestOrchestratorRunner:
         tmp_path: Path,
     ) -> None:
         primary = tmp_path / "primary"
-        primary_git = primary / ".git"
-        primary_git.mkdir(parents=True)
         linked = tmp_path / "linked"
+        _init_git_repo(primary)
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "linked", str(linked), "HEAD"],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+        )
         linked_workspace = linked / "packages" / "app"
         linked_workspace.mkdir(parents=True)
-        linked_git_dir = primary_git / "worktrees" / "linked"
-        linked_git_dir.mkdir(parents=True)
-        (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-        (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-        (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
         generated = tmp_path / "managed" / "legacy-public"
         generated_workspace = generated / "packages" / "app"
         generated_workspace.mkdir(parents=True)
@@ -6115,6 +6177,7 @@ class TestOrchestratorRunner:
             lock_path=str(tmp_path / ".locks" / "legacy-public.json"),
         )
         runner._task_workspace = task_workspace
+        mock_adapter.working_directory = str(generated_workspace)
         session_id = "sess-legacy-managed-linked"
         execution_id = "exec-legacy-managed-linked"
         generation = runner._begin_process_local_authority_generation()

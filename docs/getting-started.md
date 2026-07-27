@@ -158,6 +158,7 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 
 | Path | Requirements |
 |------|-------------|
+| All runner sessions | Git on PATH. Project identity uses the installed Git binary even for a non-Git local workspace. |
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |

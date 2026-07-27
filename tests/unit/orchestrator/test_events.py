@@ -52,7 +52,6 @@ class TestSessionEvents:
         project = tmp_path / "project"
         workspace = project / "packages" / "app"
         workspace.mkdir(parents=True)
-        (project / ".git").mkdir()
         identity = resolve_project_identity(workspace)
 
         event = create_session_started_event(

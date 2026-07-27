@@ -3187,18 +3187,46 @@ class OrchestratorRunner:
             "task_cwd": self._task_workspace.effective_cwd,
         }
 
-    def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
-        """Resolve the effective cwd for persisted runtime metadata."""
-        if self._task_cwd:
-            return self._task_cwd
-        if self._task_workspace is not None:
-            return self._task_workspace.effective_cwd
-        if runtime_handle is not None and runtime_handle.cwd:
-            return resolve_worker_cwd(runtime_handle.cwd)
+    def _provider_cwd(self) -> str | None:
+        """Return the one cwd value retained by the provider runtime."""
         cwd = self._adapter.working_directory
         if cwd == self._adapter_launch_cwd:
             return self._resolved_adapter_launch_cwd
-        return resolve_worker_cwd(cwd) if isinstance(cwd, str) and cwd else self._launch_cwd
+        return resolve_worker_cwd(cwd) if isinstance(cwd, str) and cwd else None
+
+    def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
+        """Return one cwd shared by publication, handles, and provider effects."""
+        provider_cwd = self._provider_cwd()
+        selected_cwd = self._task_cwd
+        if selected_cwd is None and self._task_workspace is not None:
+            selected_cwd = resolve_worker_cwd(self._task_workspace.effective_cwd)
+        handle_cwd = (
+            resolve_worker_cwd(runtime_handle.cwd)
+            if runtime_handle is not None and runtime_handle.cwd
+            else None
+        )
+        if selected_cwd is not None and handle_cwd is not None and selected_cwd != handle_cwd:
+            raise OrchestratorError(
+                message="Runtime handle does not own the selected task cwd",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": selected_cwd,
+                    "handle_cwd": handle_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        required_cwd = selected_cwd or handle_cwd
+        if required_cwd is not None and provider_cwd != required_cwd:
+            raise OrchestratorError(
+                message="Provider runtime does not own the selected task cwd",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": required_cwd,
+                    "provider_cwd": provider_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        return required_cwd or provider_cwd or self._launch_cwd
 
     @staticmethod
     def _canonical_path(value: str) -> str:
@@ -3235,6 +3263,7 @@ class OrchestratorRunner:
         """Return the single canonical identity shared by event and contract."""
         try:
             if self._task_workspace is not None:
+                self._effective_cwd()
                 return self._task_workspace_project_identity(self._task_workspace)
             effective_cwd = self._effective_cwd()
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():

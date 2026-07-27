@@ -108,10 +108,8 @@ def test_malformed_child_git_entry_stops_parent_discovery(
         target.write_text("invalid\n", encoding="utf-8")
     (child / ".git").symlink_to(target)
 
-    identity = resolve_project_identity(workspace)
-
-    assert identity.project_root == str(child.resolve())
-    assert identity.workspace_path == "packages/app"
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(workspace)
 
 
 def test_standard_linked_and_managed_worktrees_share_primary_identity(tmp_path: Path) -> None:
@@ -287,15 +285,14 @@ def test_installed_git_owns_form_feed_config_decision(tmp_path: Path) -> None:
         cwd=holder,
         check=False,
     )
-    identities = [resolve_project_identity(checkout) for checkout in (holder, owner, linked)]
-
     if git_decision.returncode == 0:
+        identities = [resolve_project_identity(checkout) for checkout in (holder, owner, linked)]
         assert identities[0] == identities[1] == identities[2]
         assert identities[0].project_root == str(owner.resolve())
     else:
-        assert identities[0].project_root == str(holder.resolve())
-        assert identities[1].project_root == str(owner.resolve())
-        assert identities[2].project_root == str(linked.resolve())
+        for checkout in (holder, owner, linked):
+            with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+                resolve_project_identity(checkout)
 
 
 @pytest.mark.parametrize(
@@ -317,10 +314,8 @@ def test_git_rejection_of_malformed_config_cannot_join_worktrees(
     with (primary / ".git" / "config").open("a", encoding="utf-8") as stream:
         stream.write(invalid_config)
 
-    linked_identity = resolve_project_identity(linked)
-
-    assert linked_identity.project_root == str(linked.resolve())
-    assert linked_identity.project_id != project_id_for_root(primary)
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(linked)
 
 
 def test_bare_repository_and_its_worktrees_share_common_identity(tmp_path: Path) -> None:
@@ -412,11 +407,9 @@ def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None
     )
     (common_git / "HEAD").write_text("not-a-ref-or-object-id\n", encoding="utf-8")
 
-    direct = resolve_project_identity(common_git)
-    linked_identity = resolve_project_identity(linked)
-
-    assert linked_identity.project_root == str(linked.resolve())
-    assert linked_identity != direct
+    for checkout in (common_git, linked):
+        with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+            resolve_project_identity(checkout)
 
 
 def test_bare_repository_named_dot_git_is_not_its_parent(tmp_path: Path) -> None:
@@ -553,6 +546,25 @@ def test_git_operational_failure_cannot_become_a_fallback_identity(
         pytest.raises(ProjectIdentityUnavailableError, match="unavailable"),
     ):
         resolve_project_identity(tmp_path)
+
+
+def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        command = args[0]
+        output = kwargs["stdout"]
+        if "--version" in command:
+            output.write(b"git version 2.50.0\n")  # type: ignore[union-attr]
+            return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, 128)
+
+    with (
+        patch("ouroboros.core.project_identity.subprocess.run", side_effect=fake_run),
+        pytest.raises(ProjectIdentityUnavailableError, match="topology"),
+    ):
+        resolve_project_identity(repo)
 
 
 def test_linked_identity_does_not_drift_when_git_disappears_from_path(

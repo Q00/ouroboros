@@ -90,12 +90,18 @@ def _adapter(
 
 def _runner(
     *,
-    cwd: str = "/tmp/project",
+    cwd: str | None = None,
     constructor_model: str | None = "constructor-sonnet",
     **kwargs,
 ) -> OrchestratorRunner:
+    task_workspace = kwargs.get("task_workspace")
+    resolved_cwd = (
+        cwd
+        or (task_workspace.effective_cwd if isinstance(task_workspace, TaskWorkspace) else None)
+        or "/tmp/project"
+    )
     return OrchestratorRunner(
-        _adapter(cwd, constructor_model=constructor_model),
+        _adapter(resolved_cwd, constructor_model=constructor_model),
         AsyncMock(),
         MagicMock(),
         **kwargs,
@@ -1006,7 +1012,7 @@ def test_explicit_override_preserves_legacy_workspace_across_two_resumes(
     repo_root = tmp_path / "repo"
     workspace = repo_root / "packages" / "app"
     workspace.mkdir(parents=True)
-    (repo_root / ".git").mkdir()
+    _init_git_repo(repo_root)
     original = _runner(cwd=str(workspace))
     _use_frontier_custom_routing(original)
     persisted = original._build_execution_contract(seed=_seed())
@@ -2202,15 +2208,10 @@ def test_unowned_gitfile_cannot_resume_as_its_target_repository(tmp_path: Path) 
 
 def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
-    primary_git = primary / ".git"
-    primary_git.mkdir(parents=True)
     linked = tmp_path / "linked"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
     (linked / "packages" / "app").mkdir(parents=True)
-    linked_git_dir = primary_git / "worktrees" / "linked"
-    linked_git_dir.mkdir(parents=True)
-    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
-    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
     generated = tmp_path / "managed" / "legacy-run"
     (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
@@ -2267,7 +2268,7 @@ def test_direct_nested_checkout_uses_same_project_identity_contract(tmp_path: Pa
     repo_root = tmp_path / "repo"
     workspace = repo_root / "packages" / "app"
     workspace.mkdir(parents=True)
-    (repo_root / ".git").mkdir()
+    _init_git_repo(repo_root)
     runner = _runner(cwd=str(workspace))
 
     identity = runner._project_identity()
@@ -2286,7 +2287,7 @@ def test_pre_anchor_nested_contract_resumes_with_legacy_cwd_identity(tmp_path: P
     repo_root = tmp_path / "repo"
     workspace = repo_root / "packages" / "app"
     workspace.mkdir(parents=True)
-    (repo_root / ".git").mkdir()
+    _init_git_repo(repo_root)
     original = _runner(cwd=str(workspace))
     persisted = original._build_execution_contract(seed=_seed())
     persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
@@ -2311,7 +2312,7 @@ def test_project_anchor_binds_nested_contract_and_current_workspace(tmp_path: Pa
     repo_root = tmp_path / "repo"
     workspace = repo_root / "packages" / "app"
     workspace.mkdir(parents=True)
-    (repo_root / ".git").mkdir()
+    _init_git_repo(repo_root)
     original = _runner(cwd=str(workspace))
     identity = original._project_identity()
     assert identity is not None
@@ -2365,8 +2366,7 @@ def test_project_anchor_rejects_partial_or_invalid_identity(
 
 def test_project_anchor_rejects_nested_contract_conflict(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    (repo_root / ".git").mkdir()
+    _init_git_repo(repo_root)
     runner = _runner(cwd=str(repo_root))
     identity = runner._project_identity()
     assert identity is not None
@@ -2389,10 +2389,8 @@ def test_project_anchor_rejects_nested_contract_conflict(tmp_path: Path) -> None
 def test_project_anchor_rejects_current_project_change(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
-    first_root.mkdir()
-    second_root.mkdir()
-    (first_root / ".git").mkdir()
-    (second_root / ".git").mkdir()
+    _init_git_repo(first_root)
+    _init_git_repo(second_root)
     original = _runner(cwd=str(first_root))
     identity = original._project_identity()
     assert identity is not None
