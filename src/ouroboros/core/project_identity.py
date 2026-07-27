@@ -126,6 +126,8 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
 def _read_bounded_utf8(path: Path, *, max_bytes: int) -> str | None:
     """Return one complete, bounded UTF-8 file or ``None`` when untrusted."""
     try:
+        if path.is_symlink() or not path.is_file():
+            return None
         with path.open("rb") as stream:
             raw_value = stream.read(max_bytes + 1)
     except OSError:
@@ -160,11 +162,12 @@ def _git_pointer_target(checkout_root: Path) -> Path | None:
     pointer = _read_bounded_record(marker)
     if pointer is None or not pointer.startswith("gitdir: "):
         return None
-    raw_git_dir = pointer.removeprefix("gitdir: ").strip()
-    if not raw_git_dir:
+    raw_git_dir = pointer.removeprefix("gitdir: ")
+    if not raw_git_dir or raw_git_dir != raw_git_dir.strip():
         return None
     try:
-        git_dir = Path(raw_git_dir).expanduser()
+        # Git pointer records are paths, not shell input: ``~`` is literal.
+        git_dir = Path(raw_git_dir)
         if not git_dir.is_absolute():
             git_dir = checkout_root / git_dir
         git_dir = git_dir.resolve(strict=False)
@@ -279,7 +282,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
     if not raw_common_dir:
         return _common_git_source_root(git_dir) or checkout_root
     try:
-        common_dir = Path(raw_common_dir).expanduser()
+        common_dir = Path(raw_common_dir)
         if not common_dir.is_absolute():
             common_dir = git_dir / common_dir
         common_dir = common_dir.resolve(strict=False)
@@ -298,7 +301,7 @@ def _linked_worktree_source_root(checkout_root: Path) -> Path:
     if not raw_checkout_marker:
         return checkout_root
     try:
-        checkout_marker = Path(raw_checkout_marker).expanduser()
+        checkout_marker = Path(raw_checkout_marker)
         if not checkout_marker.is_absolute():
             checkout_marker = git_dir / checkout_marker
         backlink_matches = checkout_marker.resolve(strict=False) == marker.resolve(strict=False)
