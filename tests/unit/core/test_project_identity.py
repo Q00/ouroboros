@@ -238,6 +238,59 @@ def test_incomplete_pointer_record_cannot_join_another_project(
     assert identity.project_id == project_id_for_root(linked)
 
 
+def test_gitfile_target_leading_whitespace_cannot_join_another_project(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source_git = source / ".git"
+    source_git.mkdir(parents=True)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = source_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(
+        f"gitdir:  {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+
+    identity = resolve_project_identity(linked)
+
+    assert identity.project_root == str(linked.resolve())
+    assert identity.project_id == project_id_for_root(linked)
+
+
+def test_symlinked_gitfile_cannot_reuse_another_checkout_backlink(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source_git = source / ".git"
+    source_git.mkdir(parents=True)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = source_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n",
+        encoding="utf-8",
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").symlink_to(linked / ".git")
+
+    identity = resolve_project_identity(forged)
+
+    assert identity.project_root == str(forged.resolve())
+    assert identity.project_id == project_id_for_root(forged)
+
+
 def test_git_file_without_commondir_remains_its_own_project(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
     parent_git = parent / ".git"

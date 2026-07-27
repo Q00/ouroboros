@@ -49,8 +49,9 @@ worktree and therefore remain separate projects.
 
 Each Git pointer is parsed as one complete UTF-8 record bounded to 4,096 bytes,
 with only one optional final line ending. Extra records, oversized content,
-NULs, invalid UTF-8, or surrounding whitespace invalidate the topology proof;
-a valid first line cannot hide malformed trailing data.
+NULs, invalid UTF-8, target-leading or surrounding whitespace, and symlinked
+records invalidate the topology proof; a valid first line cannot hide malformed
+trailing data, and pointer paths never receive shell-style `~` expansion.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir`. In that topology the validated external
