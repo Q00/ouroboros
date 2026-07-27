@@ -59,6 +59,80 @@ def test_recovery_exhaustion_and_model_escalation_are_closed_attention() -> None
     assert all(relay["recommended_host_actions"][0]["kind"] == "host_verify" for relay in attention)
 
 
+def test_route_progress_and_exhaustion_surface_to_the_human() -> None:
+    escalated = _event(
+        1,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "cheap",
+                "failure_class": "EVIDENCE_MISSING",
+            },
+            "decision": {
+                "action": "escalate_route",
+                "selected_route": {"route_id": "standard"},
+                "reason": "classified_failure",
+            },
+            "human_handoff_required": False,
+        },
+    )
+    exhausted = _event(
+        2,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "frontier",
+                "failure_class": "EVIDENCE_MISSING",
+            },
+            "decision": {
+                "action": "blocked",
+                "selected_route": None,
+                "attempted_route_ids": ["cheap", "standard", "frontier"],
+                "reason": "routes_exhausted",
+            },
+            "human_handoff_required": True,
+        },
+    )
+
+    relays = classify_relay_events([escalated, exhausted], job_id="job_1")
+
+    progress = next(relay for relay in relays if relay.get("subtype") == "route_escalated")
+    assert progress["evidence"]["from_route_id"] == "cheap"
+    assert progress["evidence"]["to_route_id"] == "standard"
+    attention = next(relay for relay in relays if relay.get("trigger") == "route_exhausted")
+    assert attention["engine_ownership"]["state"] == "closed"
+    assert attention["evidence"]["reason"] == "routes_exhausted"
+
+
+def test_hard_block_is_not_mislabeled_as_route_exhaustion() -> None:
+    blocked = _event(
+        1,
+        "execution.ac.route_observed",
+        {
+            "root_ac_index": 0,
+            "observation": {
+                "route_id": "cheap",
+                "failure_class": "BLOCKED",
+            },
+            "decision": {
+                "action": "blocked",
+                "selected_route": None,
+                "attempted_route_ids": ["cheap"],
+                "remaining_route_ids": ["standard", "frontier"],
+                "reason": "human_handoff_required",
+            },
+            "human_handoff_required": True,
+        },
+    )
+
+    relays = classify_relay_events([blocked], job_id="job_1")
+
+    attention = next(relay for relay in relays if relay.get("trigger") == "route_blocked")
+    assert attention["evidence"]["reason"] == "human_handoff_required"
+
+
 def test_mutating_action_menu_requires_both_successor_and_audit_tools() -> None:
     exhausted = _event(
         1,
@@ -216,6 +290,254 @@ def test_proactive_relay_has_no_action_menu_and_deduplicates_unchanged_route() -
     assert sum(relay["subtype"] == "ac_routing" for relay in proactive) == 1
     plan_relay = next(relay for relay in proactive if relay["subtype"] == "execution_plan")
     assert plan_relay["evidence"]["first_ac_summaries"] == ["API", "CLI"]
+
+
+def test_acceptance_relay_is_scoped_to_the_linked_session() -> None:
+    acceptance_a = _event(
+        1,
+        "execution.ac.acceptance_finalized",
+        {
+            "root_ac_index": 0,
+            "final_retry_attempt": 0,
+            "accepted": True,
+            "disposition": "accepted",
+            "terminal_status": "completed",
+        },
+    )
+    acceptance_b = _event(
+        2,
+        "execution.ac.acceptance_finalized",
+        {
+            "session_id": "orch_2",
+            "root_ac_index": 1,
+            "final_retry_attempt": 0,
+            "accepted": True,
+            "disposition": "accepted",
+            "terminal_status": "completed",
+        },
+    )
+
+    relays = classify_relay_events(
+        [acceptance_a, acceptance_b],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    accepted = [relay for relay in relays if relay.get("subtype") == "ac_accepted"]
+    assert [relay["source_event_id"] for relay in accepted] == [acceptance_a.id]
+
+
+def test_legacy_level_producers_use_session_aggregate_scope() -> None:
+    """Production level events carry the session only as aggregate_id."""
+    level_started = BaseEvent(
+        id="legacy_level_started",
+        type="execution.decomposition.level_started",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={"level": 0, "total_levels": 1, "child_indices": [0]},
+    )
+    level_completed = BaseEvent(
+        id="legacy_level_completed",
+        type="execution.decomposition.level_completed",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=2),
+        data={"level": 0, "successful": 1, "failed": 0, "outcome": "succeeded"},
+    )
+
+    relays = classify_relay_events(
+        [level_started, level_completed],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    assert [relay["subtype"] for relay in relays] == ["level_started", "level_completed"]
+    assert all(relay["scope"]["session_id"] == "orch_1" for relay in relays)
+
+
+def test_explicit_foreign_session_wins_over_legacy_level_aggregate_inference() -> None:
+    """A migrated payload must not be re-attributed from its aggregate shape."""
+    foreign_level = BaseEvent(
+        id="foreign_level",
+        type="execution.decomposition.level_started",
+        aggregate_type="execution",
+        aggregate_id="orch_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={
+            "orchestrator_session_id": "orch_2",
+            "level": 0,
+            "total_levels": 1,
+            "child_indices": [0],
+        },
+    )
+
+    assert (
+        classify_relay_events(
+            [foreign_level],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
+
+
+def test_legacy_frugality_proof_uses_single_session_execution_scope() -> None:
+    """Production proof events omit session_id but share the execution aggregate."""
+    configuration = BaseEvent(
+        id="legacy_config",
+        type="execution.run.configuration_resolved",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE,
+        data={
+            "execution_id": "exec_1",
+            "session_id": "orch_1",
+            "frugality_assurance": "observe",
+        },
+    )
+    proof = BaseEvent(
+        id="legacy_proof",
+        type="execution.frugality_proof.evaluated",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE + timedelta(seconds=1),
+        data={
+            "execution_id": "exec_1",
+            "status": "fail_no_frugality",
+            "reason": "no measurable savings",
+        },
+    )
+
+    relays = classify_relay_events(
+        [configuration, proof],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    attention = next(relay for relay in relays if relay["kind"] == "attention_required")
+    assert attention["trigger"] == "frugality_no_savings"
+    assert attention["scope"]["session_id"] == "orch_1"
+
+
+def test_legacy_frugality_proof_fails_closed_for_ambiguous_sessions() -> None:
+    proof = BaseEvent(
+        id="ambiguous_proof",
+        type="execution.frugality_proof.evaluated",
+        aggregate_type="execution",
+        aggregate_id="exec_1",
+        timestamp=_BASE + timedelta(seconds=2),
+        data={
+            "execution_id": "exec_1",
+            "status": "fail_no_frugality",
+            "reason": "no measurable savings",
+        },
+    )
+    history = [
+        _event(1, "execution.run.configuration_resolved", {"frugality_assurance": "observe"}),
+        _event(
+            2,
+            "execution.run.configuration_resolved",
+            {"session_id": "orch_2", "frugality_assurance": "observe"},
+        ),
+        proof,
+    ]
+
+    relays = classify_relay_events(history, job_id="job_1", session_id="orch_1")
+    assert not any(relay.get("trigger") == "frugality_no_savings" for relay in relays)
+
+
+def test_foreign_execution_attention_evidence_is_not_relayed() -> None:
+    foreign_routed = _event(
+        1,
+        "execution.ac.model_routed",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "model_tier": "frontier",
+            "model": "gpt-5.5",
+            "model_escalated": True,
+        },
+    )
+    foreign_exhausted = _event(
+        2,
+        "execution.ac.recovery_exhausted",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "last_failure_class": "verify_command_failed",
+        },
+    )
+    foreign_attempt = _event(
+        3,
+        "execution.ac.attempt_judged",
+        {
+            "session_id": "orch_2",
+            "semantic_ac_key": "ac_foreign",
+            "root_ac_index": 0,
+            "attempt_number": 1,
+            "outcome": "failed",
+        },
+    )
+
+    relays = classify_relay_events(
+        [foreign_routed, foreign_exhausted, foreign_attempt],
+        job_id="job_1",
+        session_id="orch_1",
+    )
+
+    assert relays == []
+
+
+def test_execution_event_without_session_identity_fails_closed_for_linked_job() -> None:
+    unscoped = _event(
+        1,
+        "execution.ac.recovery_exhausted",
+        {
+            "session_id": None,
+            "semantic_ac_key": "ac_unscoped",
+            "last_failure_class": "verify_command_failed",
+        },
+    )
+
+    assert (
+        classify_relay_events(
+            [unscoped],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
+
+
+def test_foreign_control_signal_attention_is_not_relayed() -> None:
+    foreign = _event(
+        1,
+        "control.session.signal.rejected",
+        {
+            "orchestrator_session_id": "orch_2",
+            "rejection_code": "expired",
+            "detail": "signal expired before delivery",
+        },
+    )
+    unscoped = _event(
+        2,
+        "control.session.signal.rejected",
+        {
+            "session_id": None,
+            "rejection_code": "invalid_target",
+            "detail": "target session missing",
+        },
+    )
+
+    assert (
+        classify_relay_events(
+            [foreign, unscoped],
+            job_id="job_1",
+            session_id="orch_1",
+        )
+        == []
+    )
 
 
 def test_synapse_completed_relay_carries_only_bounded_reply_summary() -> None:

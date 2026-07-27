@@ -78,6 +78,7 @@ from ouroboros.orchestrator.execution_authority import (
     _has_live_process_local_authority_registration,
     _register_process_local_authority_terminal_finalizer,
     _retire_process_local_authority_after_terminal_persistence,
+    collect_terminal_acceptance_plan,
     valid_process_local_authority_contract,
 )
 from ouroboros.orchestrator.heartbeat import is_holder_alive
@@ -1754,6 +1755,53 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     # cancellation, which reaches the cleanup below.
                     background_started = True
                     try:
+
+                        async def _mark_background_failed(error_message: str) -> Any:
+                            """Persist fallback failure through Foundation B's terminal plan."""
+                            acceptance_finalizations: list[dict[str, Any]] | None = None
+                            try:
+                                acceptance_finalizations = await collect_terminal_acceptance_plan(
+                                    session_id=_tracker.session_id,
+                                    execution_id=_tracker.execution_id,
+                                    event_store=_event_store,
+                                    terminal_status="failed",
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as exc:
+                                # A current-format EventStore rejects a missing or
+                                # incomplete plan, preserving fail-closed semantics;
+                                # historical/mock repositories retain compatibility.
+                                log.warning(
+                                    "mcp.tool.execute_seed.background_failure_plan_unavailable",
+                                    session_id=_tracker.session_id,
+                                    execution_id=_tracker.execution_id,
+                                    error=str(exc),
+                                )
+                            mark_failed_kwargs: dict[str, Any] = {
+                                "error_message": error_message,
+                            }
+                            try:
+                                supports_plan = (
+                                    "acceptance_finalizations"
+                                    in inspect.signature(_session_repo.mark_failed).parameters
+                                )
+                            except (TypeError, ValueError):
+                                supports_plan = False
+                            if supports_plan:
+                                # An explicit empty plan is valid for historical
+                                # zero-root sessions and is rejected by current
+                                # EventStore sessions whose durable roots differ.
+                                mark_failed_kwargs["acceptance_finalizations"] = (
+                                    acceptance_finalizations
+                                    if acceptance_finalizations is not None
+                                    else []
+                                )
+                            return await _session_repo.mark_failed(
+                                _tracker.session_id,
+                                **mark_failed_kwargs,
+                            )
+
                         if _resume_existing:
                             result = await _runner.resume_session(_tracker.session_id, _seed)
                         else:
@@ -1775,10 +1823,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     resume_blocked=result.error.details.get("resume_blocked"),
                                 )
                                 return
-                            mark_result = await _session_repo.mark_failed(
-                                _tracker.session_id,
-                                error_message=str(result.error),
-                            )
+                            mark_result = await _mark_background_failed(str(result.error))
                             if mark_result.is_err:
                                 log.error(
                                     "mcp.tool.execute_seed.background_mark_failed_error",
@@ -1839,9 +1884,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             session_id=_tracker.session_id,
                         )
                         try:
-                            mark_result = await _session_repo.mark_failed(
-                                _tracker.session_id,
-                                error_message="Unexpected error in background execution",
+                            mark_result = await _mark_background_failed(
+                                "Unexpected error in background execution"
                             )
                             if mark_result.is_err:
                                 log.error(

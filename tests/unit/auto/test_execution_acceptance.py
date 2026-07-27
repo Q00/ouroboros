@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from ouroboros.auto.execution_acceptance import (
+    _AUTORESEARCH_CANONICAL_AC,
+    _unwrap_seed_repairer_original_requirement,
     is_auto_reporting_acceptance_criterion,
     normalize_execution_acceptance,
+)
+
+_SEED_REPAIRER_WRAPPER = (
+    "A command/API check returns stable observable output or artifacts "
+    "proving the original requirement for "
 )
 
 _SINGLE_HELLO_AUTO_OBSERVATION_AC = (
@@ -16,11 +23,13 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
+    InvestmentSpec,
     OntologyField,
     OntologySchema,
     Seed,
     SeedMetadata,
     ac_texts,
+    derive_semantic_ac_key,
 )
 
 
@@ -209,6 +218,47 @@ def test_normalize_execution_acceptance_preserves_surviving_success_contracts() 
     assert normalized_spec.expected_artifacts == ("hello_auto.py",)
 
 
+def test_normalize_execution_acceptance_preserves_canonicalized_success_contract() -> None:
+    spec = AcceptanceCriterionSpec(
+        description=(
+            "A command/API check returns stable observable output or artifacts proving "
+            "the original requirement for `hello_auto.py` defines `hello_auto() -> str` "
+            "returning exactly `hello from ooo auto`."
+        ),
+        semantic_ac_key="ac_0123456789abcdef",
+        verify_command="uv run pytest tests/test_hello_auto.py",
+        expected_artifacts=("hello_auto.py", "tests/test_hello_auto.py"),
+        output_assertion="1 passed",
+        investment=InvestmentSpec(
+            difficulty="low",
+            stakes="medium",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+    seed = _seed(spec).model_copy(
+        update={
+            "goal": (
+                "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+                "hello_auto returns exactly hello from ooo auto and "
+                "uv run pytest tests/test_hello_auto.py passes."
+            )
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert len(normalized.acceptance_criteria) == 1
+    normalized_spec = normalized.acceptance_criteria[0]
+    assert isinstance(normalized_spec, AcceptanceCriterionSpec)
+    assert normalized_spec.description == _SINGLE_HELLO_AUTO_OBSERVATION_AC
+    assert normalized_spec.semantic_ac_key == spec.semantic_ac_key
+    assert normalized_spec.verify_command == spec.verify_command
+    assert normalized_spec.expected_artifacts == spec.expected_artifacts
+    assert normalized_spec.output_assertion == spec.output_assertion
+    assert normalized_spec.investment == spec.investment
+
+
 def test_normalize_execution_acceptance_preserves_extra_hello_auto_requirements() -> None:
     seed = _seed(
         "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
@@ -281,6 +331,261 @@ def test_normalize_execution_acceptance_unwraps_repaired_observation_criteria() 
     normalized = normalize_execution_acceptance(seed)
 
     assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+
+
+def test_normalize_execution_acceptance_collapses_legacy_equivalents_without_duplication() -> None:
+    """Legacy-collapse regression: equivalent strings canonicalize to one AC.
+
+    ``Seed`` materializes every legacy string as an ``AcceptanceCriterionSpec``.
+    Treating each as an independent structured source duplicated the canonical
+    AC and re-ran equivalent execution work; the collapse must yield exactly one
+    criterion carrying no phantom success contract.
+    """
+    seed = _seed(
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+    only = normalized.acceptance_criteria[0]
+    assert isinstance(only, AcceptanceCriterionSpec)
+    assert not only.has_success_contract
+    # A bare legacy collapse carries a key freshly derived from the canonical
+    # description, never a stale key inherited from a source description. (Seed
+    # always materializes a derived key, so persistence is a
+    # {description, semantic_ac_key} dict — the key must match the canonical
+    # text, not any collapsed source.)
+    assert only.semantic_ac_key == derive_semantic_ac_key(only)
+    stale_source_key = derive_semantic_ac_key(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
+        )
+    )
+    assert only.semantic_ac_key != stale_source_key
+    serialized = normalized.to_dict()["acceptance_criteria"]
+    assert serialized == [
+        {
+            "description": _SINGLE_HELLO_AUTO_OBSERVATION_AC,
+            "semantic_ac_key": derive_semantic_ac_key(only),
+        }
+    ]
+
+
+def test_normalize_execution_acceptance_preserves_distinct_contracts_reachably() -> None:
+    """Multi-source regression: refusing a collapse is loss-free.
+
+    When several sources carry *different* verification contracts, collapsing
+    them into one scalar ``AcceptanceCriterionSpec`` would drop every command
+    but the first.  Refusing the collapse must keep EVERY source verbatim —
+    both distinct contracts and the bare requirement the canonical text would
+    otherwise represent — never silently deleting a caller-authorized AC.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    returns_spec = AcceptanceCriterionSpec(
+        description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        verify_command="python -m pytest tests/test_return.py",
+        expected_artifacts=("hello_auto.py",),
+    )
+    imports_spec = AcceptanceCriterionSpec(
+        description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        verify_command="python -m pytest tests/test_import.py",
+        expected_artifacts=("tests/test_hello_auto.py",),
+        output_assertion="1 passed",
+    )
+    bare_requirement = "The exact command `uv run pytest tests/test_hello_auto.py` passes."
+    seed = _seed(
+        returns_spec,
+        imports_spec,
+        # Bare requirement: must survive the refused collapse, not be deleted.
+        AcceptanceCriterionSpec(description=bare_requirement),
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # Every source survives verbatim in source order — nothing deleted.
+    assert ac_texts(normalized.acceptance_criteria) == (
+        returns_spec.description,
+        imports_spec.description,
+        bare_requirement,
+    )
+
+    spec_map = _seed_ac_spec_map(normalized)
+    assert (
+        spec_map[returns_spec.description].verify_command == "python -m pytest tests/test_return.py"
+    )
+    assert (
+        spec_map[imports_spec.description].verify_command == "python -m pytest tests/test_import.py"
+    )
+    assert spec_map[imports_spec.description].output_assertion == "1 passed"
+
+
+def test_normalize_execution_acceptance_collapses_equivalent_contracts_to_one() -> None:
+    """A canonical text backed by byte-identical contracts stays a single AC.
+
+    Equivalent contracts are safe to collapse — there is no evidence to lose —
+    so the canonical criterion keeps one reachable contract rather than a
+    duplicated one.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    shared = {
+        "verify_command": "uv run pytest tests/test_hello_auto.py",
+        "expected_artifacts": ("hello_auto.py",),
+        "output_assertion": "1 passed",
+    }
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            **shared,
+        ),
+        AcceptanceCriterionSpec(
+            description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+            **shared,
+        ),
+        AcceptanceCriterionSpec(
+            description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+            **shared,
+        ),
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert ac_texts(normalized.acceptance_criteria) == (_SINGLE_HELLO_AUTO_OBSERVATION_AC,)
+    spec_map = _seed_ac_spec_map(normalized)
+    assert list(spec_map) == [_SINGLE_HELLO_AUTO_OBSERVATION_AC]
+    contract = spec_map[_SINGLE_HELLO_AUTO_OBSERVATION_AC]
+    assert contract.verify_command == "uv run pytest tests/test_hello_auto.py"
+    assert contract.expected_artifacts == ("hello_auto.py",)
+    assert contract.output_assertion == "1 passed"
+
+
+def test_normalize_execution_acceptance_preserves_explicit_semantic_identity() -> None:
+    """Distinct explicit semantic keys are identity that collapse must not destroy.
+
+    ``Seed`` auto-derives a key for every criterion, but an *explicitly supplied*
+    key (differing from the derived value) is the identity runtime routing and
+    recovery correlate events on.  Three hello criteria with distinct explicit
+    keys must not fold into one criterion under a single re-derived key.
+    """
+    keyed = [
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            semantic_ac_key="ac_00000000000000a1",
+        ),
+        AcceptanceCriterionSpec(
+            description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+            semantic_ac_key="ac_00000000000000b2",
+        ),
+        AcceptanceCriterionSpec(
+            description="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+            semantic_ac_key="ac_00000000000000c3",
+        ),
+    ]
+    seed = _seed(*keyed).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # Each explicit identity survives — never conflated into one derived key.
+    surviving_keys = {
+        c.semantic_ac_key
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+    }
+    for original in keyed:
+        assert original.semantic_ac_key in surviving_keys
+
+
+def test_normalize_execution_acceptance_preserves_source_order_of_refused_collapse() -> None:
+    """Refused collapses keep source position; sequential execution reads order.
+
+    A criterion surviving between two distinct contracts must not be reordered
+    around them — persisted Seeds may execute criteria sequentially, where tuple
+    order is stage order.
+    """
+    contract_a = AcceptanceCriterionSpec(
+        description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+        verify_command="python -m pytest tests/test_a.py",
+    )
+    contract_b = AcceptanceCriterionSpec(
+        description="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        verify_command="python -m pytest tests/test_b.py",
+    )
+    seed = _seed(
+        contract_a,
+        # A distinct product criterion sitting between the two contracts.
+        AcceptanceCriterionSpec(description="`hello_auto.py` contains a module-level docstring."),
+        contract_b,
+    ).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    texts = ac_texts(normalized.acceptance_criteria)
+    # contract_a must precede contract_b, in original source order.
+    assert texts.index(contract_a.description) < texts.index(contract_b.description)
+
+
+def test_normalize_execution_acceptance_never_deletes_same_description_contracts() -> None:
+    """Duplicate descriptions must not cost a distinct contract.
+
+    Two criteria that arrive sharing a description but carrying different verify
+    commands are a caller-authored (if awkward) Seed.  Normalization must not
+    delete either contract to force description uniqueness — both survive to
+    durable handoff.  The description-keyed evaluation map is a pre-existing
+    boundary limitation, not a licence to discard a valid contract here.
+    """
+    shared_description = (
+        "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`."
+    )
+    first = AcceptanceCriterionSpec(
+        description=shared_description,
+        verify_command="python -m pytest tests/test_first.py",
+    )
+    second = AcceptanceCriterionSpec(
+        description=shared_description,
+        verify_command="python -m pytest tests/test_second.py",
+    )
+    seed = _seed(first, second).model_copy(
+        update={
+            "goal": "Observation run: verify latest main Ouroboros ooo auto with hello_auto.py and tests/test_hello_auto.py via ouroboros_auto."
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # Exactly the two source contracts survive — no deletion, and no phantom
+    # contractless duplicate manufactured for the repeated description.
+    surviving = list(normalized.acceptance_criteria)
+    assert len(surviving) == 2
+    assert all(isinstance(c, AcceptanceCriterionSpec) for c in surviving)
+    commands = {c.verify_command for c in surviving}
+    assert commands == {
+        "python -m pytest tests/test_first.py",
+        "python -m pytest tests/test_second.py",
+    }
 
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
@@ -493,6 +798,575 @@ def test_normalize_execution_acceptance_preserves_distinct_autoresearch_user_ac(
     normalized_texts = ac_texts(normalized.acceptance_criteria)
     assert "train.py must preserve the existing --device CLI flag behavior." in normalized_texts
     assert "Final report must include the baseline val_bpb and memory." in normalized_texts
+
+
+def test_normalize_execution_acceptance_transfers_contract_onto_autoresearch_canonical() -> None:
+    """Blocker regression: a covered structured source is not dropped or duplicated.
+
+    When a source truly subsumed by a canonical autoresearch AC carries an
+    explicit verification contract, that contract is transferred ONTO the
+    canonical criterion — so execution/evaluation see exactly one contracted
+    baseline AC, not a contractless canonical plus a duplicate source.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    baseline_canonical = (
+        "The experiment ledger artifact contains a baseline entry written before any edit; "
+        "it includes measured command `/usr/bin/time -l uv run train.py`, inner command, "
+        "exit status, val_bpb, maximum resident set size bytes, and baseline status."
+    )
+    baseline_spec = AcceptanceCriterionSpec(
+        description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+        verify_command="/usr/bin/time -l uv run train.py",
+        expected_artifacts=("experiment_ledger.json",),
+        output_assertion="baseline recorded",
+    )
+    seed = _seed(baseline_spec).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # Exactly the six canonical ACs — no verbatim duplicate of the source.
+    normalized_texts = ac_texts(normalized.acceptance_criteria)
+    assert baseline_spec.description not in normalized_texts
+    assert len(normalized_texts) == 6
+    # The baseline canonical AC now carries the source's verification contract.
+    spec_map = _seed_ac_spec_map(normalized)
+    assert baseline_canonical in spec_map
+    transferred = spec_map[baseline_canonical]
+    assert transferred.verify_command == "/usr/bin/time -l uv run train.py"
+    assert transferred.expected_artifacts == ("experiment_ledger.json",)
+    assert transferred.output_assertion == "baseline recorded"
+
+
+def _autoresearch_seed(*criteria: str | AcceptanceCriterionSpec) -> Seed:
+    return _seed(*criteria).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+
+def test_normalize_execution_acceptance_keeps_distinct_covered_contracts() -> None:
+    """Blocker regression: two covered baselines with different commands both survive.
+
+    Transferring onto an already-contracted canonical AC is only a valid collapse
+    when the contracts are identical.  A second baseline carrying a different
+    verify command must not be silently dropped as a successful transfer.
+    """
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            verify_command="python -m pytest tests/test_baseline_a.py",
+        ),
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            verify_command="python -m pytest tests/test_baseline_b.py",
+        ),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    commands = {
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command
+    }
+    assert "python -m pytest tests/test_baseline_a.py" in commands
+    assert "python -m pytest tests/test_baseline_b.py" in commands
+
+
+def test_normalize_execution_acceptance_keeps_distinct_covered_identities() -> None:
+    """Blocker regression: full identity governs collapse, not just the command.
+
+    Two covered baselines with the SAME command but different explicit keys, and
+    two with different investments, must each survive — the transfer compares the
+    complete identity (command, artifacts, assertion, investment, explicit key)
+    and never overwrites authority.
+    """
+    baseline = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    # Same command, distinct explicit keys.
+    seed_keys = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description=baseline, semantic_ac_key="ac_1111111111111111", verify_command="cmd"
+        ),
+        AcceptanceCriterionSpec(
+            description=baseline, semantic_ac_key="ac_2222222222222222", verify_command="cmd"
+        ),
+    )
+    keys = {
+        c.semantic_ac_key
+        for c in normalize_execution_acceptance(seed_keys).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+    }
+    assert {"ac_1111111111111111", "ac_2222222222222222"} <= keys
+
+    # Authority-only specs: differing investments must not overwrite each other.
+    low = InvestmentSpec(difficulty="low", stakes="low", provenance="declared", confidence="high")
+    high = InvestmentSpec(
+        difficulty="high", stakes="high", provenance="declared", confidence="high"
+    )
+    seed_inv = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline, investment=low),
+        AcceptanceCriterionSpec(description=baseline, investment=high),
+    )
+    investments = [
+        c.investment
+        for c in normalize_execution_acceptance(seed_inv).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.investment is not None
+    ]
+    assert low in investments
+    assert high in investments
+
+
+def test_normalize_execution_acceptance_generic_removal_is_exact_only() -> None:
+    """Blocker regression: a distinct requirement sharing the proof phrase survives.
+
+    Generic-placeholder removal must be exact, not a substring match, so a
+    criterion that merely opens with the proof phrase but adds a distinct clause
+    is preserved.
+    """
+    seed = _autoresearch_seed(
+        "A command/API check returns stable observable output while preserving "
+        "the raw stderr log for every attempt."
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert any("stderr log" in text for text in ac_texts(normalized.acceptance_criteria))
+
+
+def test_normalize_execution_acceptance_exact_canonical_source_keeps_sequence() -> None:
+    """Blocker regression: a lone exact canonical AC keeps its canonical position.
+
+    A source whose text IS the baseline canonical AC must anchor to the fixed
+    canonical sequence, not the source coordinate space — otherwise it sorts
+    after the injected experiments/reporting ACs and inverts stage order.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py")
+    )
+
+    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
+    # The full canonical sequence is emitted in order, baseline first.
+    assert list(texts) == list(_AUTORESEARCH_CANONICAL_AC)
+
+
+def test_normalize_execution_acceptance_mixed_canonical_restatement_reachable() -> None:
+    """Blocker regression: a distinct restatement stays uniquely reachable.
+
+    An exact canonical baseline (cmd_a) plus a known restatement carrying a
+    different command (cmd_b) must not collapse onto one canonical description —
+    the restatement keeps its own description so `_seed_ac_spec_map` reaches both
+    contracts.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import _seed_ac_spec_map
+
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    reachable = {spec.verify_command for spec in _seed_ac_spec_map(normalized).values()}
+    assert "cmd_a" in reachable
+    assert "cmd_b" in reachable
+
+
+def test_normalize_execution_acceptance_equivalent_restatement_collapses_across_matches() -> None:
+    """Blocker regression: an equivalent contract collapses onto any matching AC.
+
+    With two canonical contracts (cmd_a, cmd_b) and a restatement equivalent to
+    the second (cmd_b), the restatement must collapse onto the existing cmd_b AC
+    rather than being emitted a third time — scanning every same-text emission,
+    not just the first.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    cmd_b_count = sum(
+        1
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "cmd_b"
+    )
+    assert cmd_b_count == 1
+
+
+def test_normalize_execution_acceptance_is_idempotent() -> None:
+    """Blocker regression: re-normalizing a normalized Seed is a fixed point."""
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="cmd_b"),
+    )
+
+    once = normalize_execution_acceptance(seed)
+    twice = normalize_execution_acceptance(once)
+    assert ac_texts(once.acceptance_criteria) == ac_texts(twice.acceptance_criteria)
+
+
+def test_normalize_execution_acceptance_wrapped_structured_runs_once() -> None:
+    """Blocker regression: a wrapped structured requirement produces one contracted AC.
+
+    The string normalizer emits the unwrapped requirement; the contract must be
+    transferred ONTO that emission (with case preserved and a fresh key), not
+    appended as a second contracted copy — otherwise the requirement dispatches
+    twice.
+    """
+    wrapped = _SEED_REPAIRER_WRAPPER + "RawStderr.LOG must be preserved for every attempt."
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=wrapped, verify_command="cmd_stderr")
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    texts = ac_texts(normalized.acceptance_criteria)
+    stderr_acs = [t for t in texts if "RawStderr.LOG" in t]
+    # Exactly one AC carries the requirement — case preserved — and it is contracted.
+    assert len(stderr_acs) == 1
+    stderr_spec = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and "RawStderr.LOG" in c.description
+    )
+    assert stderr_spec.verify_command == "cmd_stderr"
+    commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "cmd_stderr"
+    ]
+    assert commands == ["cmd_stderr"]
+
+
+def test_normalize_execution_acceptance_multi_stage_source_not_mis_transferred() -> None:
+    """Blocker regression: a multi-canonical restatement is not transferred to a narrower AC.
+
+    "up to two post-baseline experiments … sequentially … kept … reverted" spans
+    experiment count (canonical 1) AND sequential keep/revert semantics
+    (canonical 2).  A contracted source must be preserved verbatim, not have its
+    contract attached to the narrower count-only canonical AC.
+    """
+    multi_stage = (
+        "Seed requires up to two post-baseline experiments to selected sequentially "
+        "from the current best state, with improvements kept and all non-improvements "
+        "reverted before the next attempt."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=multi_stage, verify_command="cmd_multi")
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    # The original structured criterion survives verbatim with its contract.
+    preserved = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and "post-baseline experiments" in c.description
+    )
+    assert preserved.verify_command == "cmd_multi"
+    # The narrower count-only canonical AC did NOT receive the contract.
+    count_ac = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "at most two train.py-only experiment entries" in c.description
+    )
+    assert count_ac.verify_command != "cmd_multi"
+
+
+def test_normalize_execution_acceptance_groups_identical_exact_canonical_sources() -> None:
+    """Blocker regression: byte-identical exact canonical sources collapse once.
+
+    Two byte-identical already-canonical specs must produce one execution AC
+    (one command, one key), regardless of source order, while a bare duplicate is
+    subsumed by its contracted twin and genuinely distinct contracts both survive.
+    """
+    baseline_canonical = _AUTORESEARCH_CANONICAL_AC[0]
+
+    # Byte-identical → one AC, one dispatched command.
+    identical = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+    )
+    normalized = normalize_execution_acceptance(identical)
+    assert len(normalized.acceptance_criteria) == 6
+    commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "uv run train.py"
+    ]
+    assert commands == ["uv run train.py"]
+
+    # Bare-first / contract-second is order-independent: the contract survives.
+    bare_first = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+    )
+    bare_first_normalized = normalize_execution_acceptance(bare_first)
+    assert len(bare_first_normalized.acceptance_criteria) == 6
+    baseline = next(
+        c
+        for c in bare_first_normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "baseline entry written before any edit" in c.description
+    )
+    assert baseline.verify_command == "uv run train.py"
+
+    # Genuinely distinct contracts on the same canonical text both survive.
+    distinct = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_a"),
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="cmd_b"),
+    )
+    distinct_commands = {
+        c.verify_command
+        for c in normalize_execution_acceptance(distinct).acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command
+    }
+    assert {"cmd_a", "cmd_b"} <= distinct_commands
+
+
+def test_unwrap_seed_repairer_preserves_case_and_recurses() -> None:
+    """Blocker regression: unwrapping keeps case and strips every nested wrapper."""
+    # Case-sensitive identifiers survive verbatim (not lowercased).
+    cased = _SEED_REPAIRER_WRAPPER + "RawStderr.LOG and VAL_BPB must match."
+    assert (
+        _unwrap_seed_repairer_original_requirement(cased) == "RawStderr.LOG and VAL_BPB must match."
+    )
+    # A doubly-wrapped requirement is fully unwrapped to its inner requirement.
+    nested = _SEED_REPAIRER_WRAPPER + _SEED_REPAIRER_WRAPPER + "preserve the raw stderr log."
+    assert _unwrap_seed_repairer_original_requirement(nested) == "preserve the raw stderr log."
+
+
+def test_normalize_execution_acceptance_preserves_nested_wrapped_requirement() -> None:
+    """Blocker regression: a nested wrapper does not delete its inner requirement.
+
+    A doubly-wrapped autoresearch criterion carrying a distinct raw-stderr
+    requirement must not be classified as a generic placeholder and dropped.
+    """
+    nested = (
+        _SEED_REPAIRER_WRAPPER
+        + _SEED_REPAIRER_WRAPPER
+        + "preserve the raw stderr log for every attempt."
+    )
+    seed = _autoresearch_seed(nested)
+
+    texts = ac_texts(normalize_execution_acceptance(seed).acceptance_criteria)
+    assert any("stderr log" in text for text in texts)
+
+
+def test_normalize_execution_acceptance_collapse_refreshes_auto_derived_key() -> None:
+    """Blocker regression: a canonical rewrite re-derives a non-explicit key.
+
+    A contracted hello criterion collapsed onto the canonical description must
+    carry a key derived from that description, not the source's derived key —
+    otherwise downstream code mistakes a stale source key for explicit identity.
+    """
+    seed = _seed(
+        AcceptanceCriterionSpec(
+            description="`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
+            verify_command="uv run pytest tests/test_hello_auto.py",
+        )
+    ).model_copy(
+        update={
+            "goal": (
+                "Verify current ooo auto with hello_auto.py and tests/test_hello_auto.py; "
+                "hello_auto returns exactly hello from ooo auto and "
+                "uv run pytest tests/test_hello_auto.py passes."
+            )
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    collapsed = normalized.acceptance_criteria[0]
+    assert isinstance(collapsed, AcceptanceCriterionSpec)
+    assert collapsed.description == _SINGLE_HELLO_AUTO_OBSERVATION_AC
+    assert collapsed.semantic_ac_key == derive_semantic_ac_key(collapsed)
+
+
+def test_normalize_execution_acceptance_equivalent_contracts_collapse_once() -> None:
+    """Blocker regression: equivalent contracts dispatch a command once.
+
+    A source whose description is already the canonical baseline and a known
+    restatement that carry the SAME contract must collapse to one AC — a
+    materialized derived key on one and ``None`` on the other is not a real
+    identity difference, so the command must not be dispatched twice.
+    """
+    baseline_canonical = (
+        "The experiment ledger artifact contains a baseline entry written before any edit; "
+        "it includes measured command `/usr/bin/time -l uv run train.py`, inner command, "
+        "exit status, val_bpb, maximum resident set size bytes, and baseline status."
+    )
+    restatement = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(description=baseline_canonical, verify_command="uv run train.py"),
+        AcceptanceCriterionSpec(description=restatement, verify_command="uv run train.py"),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert len(normalized.acceptance_criteria) == 6
+    baseline_commands = [
+        c.verify_command
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec) and c.verify_command == "uv run train.py"
+    ]
+    assert baseline_commands == ["uv run train.py"]
+
+
+def test_normalize_execution_acceptance_transfer_keeps_canonical_sequence() -> None:
+    """Blocker regression: a transferred contract never reorders the canonical block.
+
+    The autoresearch canonical ACs are a fixed sequence (baseline before
+    experiments before …).  Transferring a covered baseline contract must keep
+    the canonical baseline ahead of the experiments AC, not re-anchor it into the
+    source coordinate space and invert the sequence.
+    """
+    baseline = (
+        "Seed requires execution to record a baseline uv run train.py result "
+        "before any experiment changes evaluated."
+    )
+    seed = _autoresearch_seed(
+        "train.py must preserve the existing --device CLI flag behavior.",
+        AcceptanceCriterionSpec(
+            description=baseline, verify_command="/usr/bin/time -l uv run train.py"
+        ),
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+    texts = ac_texts(normalized.acceptance_criteria)
+    baseline_index = next(
+        i for i, t in enumerate(texts) if "baseline entry written before any edit" in t
+    )
+    experiments_index = next(
+        i for i, t in enumerate(texts) if "at most two train.py-only experiment entries" in t
+    )
+    # Canonical sequence intact: baseline precedes experiments.
+    assert baseline_index < experiments_index
+    # The transferred contract still landed on the canonical baseline AC.
+    baseline_spec = next(
+        c
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+        and "baseline entry written before any edit" in c.description
+    )
+    assert baseline_spec.verify_command == "/usr/bin/time -l uv run train.py"
+    # The distinct source requirement survives (as a source-tier criterion).
+    assert any("--device" in text for text in texts)
+
+
+def test_normalize_execution_acceptance_transfer_preserves_explicit_key() -> None:
+    """Blocker regression: contract transfer keeps an explicitly-supplied key.
+
+    Runtime routing/recovery correlate on the explicit ``semantic_ac_key``; the
+    canonical AC must inherit it, not a freshly derived key.
+    """
+    seed = _autoresearch_seed(
+        AcceptanceCriterionSpec(
+            description="Seed requires execution to record a baseline uv run train.py result before any experiment changes evaluated.",
+            semantic_ac_key="ac_1111111111111111",
+            verify_command="/usr/bin/time -l uv run train.py",
+        )
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    keys = {
+        c.semantic_ac_key
+        for c in normalized.acceptance_criteria
+        if isinstance(c, AcceptanceCriterionSpec)
+    }
+    assert "ac_1111111111111111" in keys
+
+
+def test_normalize_execution_acceptance_preserves_contradicting_in_vocabulary_criterion() -> None:
+    """Blocker regression: token membership does not imply semantic equivalence.
+
+    "record a baseline after every experiment" uses only in-domain words yet
+    contradicts the canonical before-edit baseline requirement.  It is not a
+    known equivalent restatement, so it must be preserved, not silently deleted.
+    """
+    contradicting = "Seed requires execution to record a baseline after every experiment."
+    seed = _autoresearch_seed(contradicting)
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert any(
+        "after every experiment" in text for text in ac_texts(normalized.acceptance_criteria)
+    )
+
+
+def test_normalize_execution_acceptance_preserves_extra_autoresearch_requirement() -> None:
+    """Blocker regression: a covered prefix with a distinct extra clause survives.
+
+    A source that restates a standard autoresearch requirement but adds a
+    caller-specific clause (a token outside the canonical vocabulary, e.g.
+    "raw stderr log") is NOT fully subsumed by a canonical AC, so the normalizer
+    must preserve it instead of silently dropping it behind the prefix matcher.
+    """
+    extra_requirement = (
+        "Seed requires execution to record a baseline uv run train.py result and "
+        "preserves the raw stderr log for every attempt."
+    )
+    seed = _seed(extra_requirement).model_copy(
+        update={
+            "goal": (
+                "Run a bounded Karpathy-style autoresearch loop. "
+                "Edit train.py and optimize val_bpb."
+            ),
+            "constraints": (
+                "Runtime Context: local autoresearch repository with train.py.",
+                "Non-Goals: do not edit prepare.py.",
+            ),
+        }
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    normalized_texts = ac_texts(normalized.acceptance_criteria)
+    # The distinct "raw stderr log" requirement is not lost to canonicalization.
+    assert any("stderr log" in text for text in normalized_texts)
 
 
 def test_normalize_execution_acceptance_preserves_existing_autoresearch_runtime_context() -> None:

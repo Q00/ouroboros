@@ -90,6 +90,11 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    def test_exposes_effective_cli_path(self) -> None:
+        rt = build_codex_mcp_worker_runtime(cli_path="/tmp/codex", cwd="/tmp")
+
+        assert rt.cli_path == "/tmp/codex"
+
     def test_resume_controls_are_declared_ignored(self) -> None:
         """codex-reply cannot retarget either model or reasoning effort."""
         rt = build_codex_mcp_worker_runtime(cwd="/tmp")

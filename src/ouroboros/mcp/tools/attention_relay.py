@@ -10,6 +10,7 @@ from ouroboros.events.base import BaseEvent
 ATTENTION_SOURCE_EVENT_TYPES = frozenset(
     {
         "execution.ac.recovery_exhausted",
+        "execution.ac.route_observed",
         "execution.ac.deliver_verdict",
         "execution.frugality_proof.evaluated",
         "auto.seed_qa.blocked",
@@ -28,8 +29,11 @@ PROACTIVE_SOURCE_EVENT_TYPES = frozenset(
         "execution.decomposition.level_started",
         "execution.decomposition.level_completed",
         "execution.ac.model_routed",
+        "execution.ac.route_observed",
         "execution.ac.alt_harness_redispatched",
+        "execution.ac.attempt_judged",
         "execution.ac.outcome_finalized",
+        "execution.ac.acceptance_finalized",
         "control.session.signal.queued",
         "control.session.signal.applied",
         "control.session.signal.completed",
@@ -42,6 +46,19 @@ _MAX_RELAY_EVENTS = 20
 _MAX_EVIDENCE_EVENT_IDS = 8
 _MAX_TEXT = 320
 _MAX_LIST = 8
+
+# These producers predate the explicit session-id contract.  Their scope is
+# still recoverable without guessing: level events use the linked session as
+# their execution aggregate, while the proof event uses the execution
+# aggregate and can be attributed only when the surrounding history identifies
+# exactly one session for that execution.
+_LEGACY_SESSIONLESS_EVENT_TYPES = frozenset(
+    {
+        "execution.decomposition.level_started",
+        "execution.decomposition.level_completed",
+        "execution.frugality_proof.evaluated",
+    }
+)
 
 
 def _text(value: object, *, limit: int = _MAX_TEXT) -> str | None:
@@ -64,12 +81,82 @@ def _strings(value: object, *, limit: int = _MAX_LIST) -> list[str]:
     return result
 
 
+def _is_session_scoped_event(event: BaseEvent) -> bool:
+    return event.type.startswith(("execution.", "control.session.signal."))
+
+
+def _event_session_id(event: BaseEvent) -> str | None:
+    """Return the authoritative orchestration session carried by an event.
+
+    Execution and Synapse control events can share an aggregate across
+    concurrent orchestration sessions.  New events carry the explicit
+    ``orchestrator_session_id`` field; older execution projections used
+    ``session_id``.  An explicit field always wins so a stale fallback cannot
+    make a foreign event look local.
+    """
+    if not _is_session_scoped_event(event):
+        return None
+    data = event.data
+    explicit = data.get("orchestrator_session_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    legacy = data.get("session_id")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy
+    return None
+
+
+def _event_execution_id(event: BaseEvent) -> str | None:
+    """Return the execution identity used to correlate legacy projections."""
+    execution_id = event.data.get("execution_id")
+    if isinstance(execution_id, str) and execution_id.strip():
+        return execution_id
+    if event.aggregate_type == "execution":
+        return event.aggregate_id
+    return None
+
+
+def _legacy_event_belongs_to_session(
+    event: BaseEvent,
+    *,
+    session_id: str,
+    history_events: Sequence[BaseEvent],
+) -> bool:
+    """Safely recover session scope for the known legacy producer shapes.
+
+    We never attach an unscoped event to a linked session from the caller's
+    session ID alone.  A level event is unambiguous when its execution
+    aggregate is the linked session itself.  A frugality proof is unambiguous
+    only when all explicitly scoped events for its execution identify exactly
+    that one session; mixed-session histories remain fail-closed.
+    """
+    if event.type not in _LEGACY_SESSIONLESS_EVENT_TYPES:
+        return False
+    if event.type.startswith("execution.decomposition."):
+        return event.aggregate_type == "execution" and event.aggregate_id == session_id
+
+    if event.aggregate_type != "execution":
+        return False
+    execution_id = _event_execution_id(event)
+    if execution_id is None or execution_id != event.aggregate_id:
+        return False
+
+    sessions: set[str] = set()
+    for candidate in history_events:
+        candidate_session = _event_session_id(candidate)
+        if candidate_session is None:
+            continue
+        if _event_execution_id(candidate) == execution_id:
+            sessions.add(candidate_session)
+    return sessions == {session_id}
+
+
 def _scope(event: BaseEvent, *, job_id: str | None) -> dict[str, object]:
     data = event.data
     return {
         "job_id": job_id,
         "execution_id": _text(data.get("execution_id"), limit=96),
-        "session_id": _text(data.get("session_id"), limit=96),
+        "session_id": _text(_event_session_id(event), limit=96),
         "lineage_id": _text(data.get("lineage_id"), limit=96),
         "semantic_ac_key": _text(data.get("semantic_ac_key"), limit=96),
         "root_ac_index": (
@@ -207,6 +294,49 @@ def _event_order(events: Iterable[BaseEvent]) -> list[BaseEvent]:
     return sorted(events, key=lambda event: (event.timestamp, event.id))
 
 
+def _history_for_session(
+    history_events: Iterable[BaseEvent], *, session_id: str | None
+) -> list[BaseEvent]:
+    """Drop unscoped/foreign execution evidence before any relay correlation.
+
+    Job and lineage events remain available because those aggregates are the
+    relay's own scope.  Execution events, however, may be interleaved for
+    several sessions under one execution id and must be fail-closed when a
+    linked session is known.
+    """
+    events = list(history_events)
+    if session_id is None:
+        return events
+
+    scoped: list[BaseEvent] = []
+    for event in events:
+        if not _is_session_scoped_event(event):
+            scoped.append(event)
+            continue
+        event_session_id = _event_session_id(event)
+        if event_session_id == session_id:
+            scoped.append(event)
+            continue
+        # Legacy inference is only valid for genuinely sessionless producer
+        # payloads.  An explicit foreign session is authoritative and must
+        # never be re-attributed from aggregate shape, otherwise a linked job
+        # can absorb another orchestration session's progress.
+        if event_session_id is not None:
+            continue
+        if not _legacy_event_belongs_to_session(
+            event,
+            session_id=session_id,
+            history_events=events,
+        ):
+            continue
+        # Normalize only the safely attributed legacy projection.  Downstream
+        # scope construction and correlation then see the same explicit
+        # session identity as migrated producers, while the original event ID
+        # and payload values remain unchanged.
+        scoped.append(event.model_copy(update={"data": {**event.data, "session_id": session_id}}))
+    return scoped
+
+
 def _latest_configuration_before(
     history: Sequence[BaseEvent],
     target: BaseEvent,
@@ -225,6 +355,7 @@ def _proactive_relays(
     new_event_ids: set[str],
     *,
     job_id: str | None,
+    session_id: str | None,
 ) -> list[dict[str, object]]:
     relays: list[dict[str, object]] = []
     last_route_by_ac: dict[str, tuple[object, ...]] = {}
@@ -379,17 +510,69 @@ def _proactive_relays(
                     },
                 )
             )
-        elif event.type == "execution.ac.outcome_finalized" and data.get("success") is True:
+        elif event.type == "execution.ac.route_observed":
+            decision = data.get("decision") if isinstance(data.get("decision"), Mapping) else {}
+            selected_route = (
+                decision.get("selected_route")
+                if isinstance(decision.get("selected_route"), Mapping)
+                else {}
+            )
+            observation = (
+                data.get("observation") if isinstance(data.get("observation"), Mapping) else {}
+            )
+            if decision.get("action") == "escalate_route":
+                relays.append(
+                    _progress(
+                        event,
+                        kind="progress_advanced",
+                        subtype="route_escalated",
+                        job_id=job_id,
+                        evidence={
+                            "root_ac_index": data.get("root_ac_index"),
+                            "from_route_id": observation.get("route_id"),
+                            "to_route_id": selected_route.get("route_id"),
+                            "failure_class": observation.get("failure_class"),
+                            "reason": decision.get("reason"),
+                        },
+                    )
+                )
+        elif event.type in {
+            "execution.ac.attempt_judged",
+            "execution.ac.outcome_finalized",
+        }:
             relays.append(
                 _progress(
                     event,
                     kind="progress_advanced",
-                    subtype="ac_verified",
+                    subtype="ac_attempt_judged",
                     job_id=job_id,
                     evidence={
                         "root_ac_index": data.get("root_ac_index"),
                         "retry_attempt": data.get("retry_attempt"),
+                        "attempt_number": data.get("attempt_number"),
                         "outcome": data.get("outcome"),
+                    },
+                )
+            )
+        elif event.type == "execution.ac.acceptance_finalized":
+            # A linked execution stream may contain multiple orchestration
+            # sessions. Final acceptance is authority-bearing and must only be
+            # relayed for the job's linked session; exposing another session's
+            # acceptance under this job is a false progress claim.
+            if session_id is not None and data.get("session_id") != session_id:
+                continue
+            relays.append(
+                _progress(
+                    event,
+                    kind="progress_advanced",
+                    subtype=("ac_accepted" if data.get("accepted") is True else "ac_rejected"),
+                    job_id=job_id,
+                    evidence={
+                        "root_ac_index": data.get("root_ac_index"),
+                        "final_retry_attempt": data.get("final_retry_attempt"),
+                        "accepted": data.get("accepted"),
+                        "disposition": data.get("disposition"),
+                        "terminal_status": data.get("terminal_status"),
                     },
                 )
             )
@@ -422,6 +605,7 @@ def classify_relay_events(
     *,
     new_event_ids: set[str] | None = None,
     job_id: str | None = None,
+    session_id: str | None = None,
     available_tools: Set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Classify bounded proactive and attention relay envelopes.
@@ -430,13 +614,57 @@ def classify_relay_events(
     ``new_event_ids`` limits emission to the current cursor page; omitting it
     performs the terminal full-history scan.
     """
-    history = _event_order(history_events)
+    # A linked execution aggregate can contain evidence from more than one
+    # orchestration session.  Filter before building route/recovery streaks so
+    # foreign events cannot create actionable or progress relays for this job.
+    history = _event_order(_history_for_session(history_events, session_id=session_id))
     registered = available_tools or frozenset()
     new_ids = new_event_ids if new_event_ids is not None else {event.id for event in history}
-    relays = _proactive_relays(history, new_ids, job_id=job_id)
+    relays = _proactive_relays(
+        history,
+        new_ids,
+        job_id=job_id,
+        session_id=session_id,
+    )
 
     recovery_by_key: dict[str, BaseEvent] = {}
     for event in history:
+        if (
+            event.type == "execution.ac.route_observed"
+            and event.id in new_ids
+            and event.data.get("human_handoff_required") is True
+        ):
+            decision = (
+                event.data.get("decision")
+                if isinstance(event.data.get("decision"), Mapping)
+                else {}
+            )
+            observation = (
+                event.data.get("observation")
+                if isinstance(event.data.get("observation"), Mapping)
+                else {}
+            )
+            relays.append(
+                _attention(
+                    event,
+                    trigger=(
+                        "route_exhausted"
+                        if decision.get("reason") == "routes_exhausted"
+                        else "route_blocked"
+                    ),
+                    job_id=job_id,
+                    ownership_state="closed",
+                    evidence={
+                        "root_ac_index": event.data.get("root_ac_index"),
+                        "route_id": observation.get("route_id"),
+                        "failure_class": observation.get("failure_class"),
+                        "reason": decision.get("reason"),
+                        "attempted_route_ids": decision.get("attempted_route_ids"),
+                    },
+                    evidence_event_ids=[event.id],
+                    available_tools=registered,
+                )
+            )
         if event.type == "execution.ac.recovery_exhausted":
             key = _text(event.data.get("semantic_ac_key"), limit=96)
             if key:

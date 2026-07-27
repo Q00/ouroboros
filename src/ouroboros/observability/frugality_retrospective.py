@@ -25,6 +25,8 @@ from ouroboros.orchestrator.evidence.common import (
     strict_bool,
 )
 from ouroboros.orchestrator.frugality_proof import (
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_AC_OUTCOME_FINALIZED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
@@ -32,6 +34,7 @@ from ouroboros.orchestrator.frugality_proof import (
     EVENT_SHADOW_REPLAY,
     EVENT_TOKEN_ATTRIBUTION,
 )
+from ouroboros.persistence.event_store import validate_acceptance_finalization_payload
 
 if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
@@ -120,6 +123,73 @@ def _proof_reference(events: Iterable[object]) -> str | None:
     return None
 
 
+def _event_aggregate_id(event: object) -> str | None:
+    value = (
+        event.get("aggregate_id")
+        if isinstance(event, Mapping)
+        else getattr(event, "aggregate_id", None)
+    )
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _event_aggregate_type(event: object) -> str | None:
+    value = (
+        event.get("aggregate_type")
+        if isinstance(event, Mapping)
+        else getattr(event, "aggregate_type", None)
+    )
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _event_session_anchor(event: object, data: Mapping[str, object]) -> str | None:
+    # Child runtime events may carry both their native runtime session and the
+    # parent orchestration session. Retrospective authority follows the latter;
+    # acceptance/axis events that only carry ``session_id`` remain compatible.
+    for key in ("orchestrator_session_id", "session_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if _event_aggregate_type(event) == "session":
+        return _event_aggregate_id(event)
+    return None
+
+
+def _session_scoped_events(
+    events: Iterable[object], *, execution_id: str, session_id: str
+) -> list[object]:
+    """Keep only evidence belonging to one execution/session authority.
+
+    Current producers put the orchestration session on every frugality event,
+    while older execution-scoped telemetry may omit it.  Sessionless rows are
+    retained only when the supplied stream has no competing explicit session;
+    if two sessions share an execution, ambiguity fails closed instead of
+    allowing one session's evidence to leak into the other.
+    """
+    materialized = list(events)
+    explicit_sessions = {
+        anchor
+        for event in materialized
+        for anchor in [_event_session_anchor(event, event_data(event))]
+        if anchor is not None
+    }
+    scoped: list[object] = []
+    for event in materialized:
+        data = event_data(event)
+        event_execution = data.get("execution_id")
+        if isinstance(event_execution, str) and event_execution != execution_id:
+            continue
+        if _event_aggregate_type(event) == "session" and _event_aggregate_id(event) != session_id:
+            continue
+        anchor = _event_session_anchor(event, data)
+        if anchor is not None:
+            if anchor == session_id:
+                scoped.append(event)
+            continue
+        if not explicit_sessions or explicit_sessions == {session_id}:
+            scoped.append(event)
+    return scoped
+
+
 def build_frugality_retrospective(
     events: Iterable[object],
     *,
@@ -131,7 +201,11 @@ def build_frugality_retrospective(
     if terminal_status not in HARD_FINAL_STATUSES:
         return None
 
-    event_list = list(events)
+    event_list = _session_scoped_events(
+        events,
+        execution_id=execution_id,
+        session_id=session_id,
+    )
     attempts: dict[_AttemptKey, _AttemptEvidence] = {}
     invalid_attempt_keys: set[_AttemptKey] = set()
     anonymous_invalid_attempts: set[str] = set()
@@ -139,6 +213,9 @@ def build_frugality_retrospective(
     outcome_attempts_seen: dict[int, set[int]] = {}
     invalid_outcome_attempts: set[tuple[int, int]] = set()
     invalid_outcome_roots: set[int] = set()
+    acceptance_by_root: dict[int, list[tuple[int, bool, str, str | None]]] = {}
+    invalid_acceptance_roots: set[int] = set()
+    acceptance_generations: set[str] = set()
 
     for position, event in enumerate(event_list):
         current_type = event_type(event)
@@ -163,32 +240,61 @@ def build_frugality_retrospective(
                 attempt.token_events.append((current_id, data.get("token_spend")))
             continue
 
-        if current_type != EVENT_AC_OUTCOME_FINALIZED:
+        if current_type in {EVENT_AC_ATTEMPT_JUDGED, EVENT_AC_OUTCOME_FINALIZED}:
+            root_ac_index = parse_root_ac_index(data)
+            retry_attempt = parse_retry_attempt(data)
+            success = strict_bool(data.get("success"))
+            outcome = _normalized_outcome(data, success=success) if success is not None else None
+            if root_ac_index is None:
+                anonymous_invalid_attempts.add(invalid_identity)
+                continue
+            if retry_attempt is None:
+                invalid_outcome_roots.add(root_ac_index)
+                anonymous_invalid_attempts.add(invalid_identity)
+                continue
+            outcome_attempts_seen.setdefault(root_ac_index, set()).add(retry_attempt)
+            if success is None or outcome is None:
+                invalid_outcome_attempts.add((root_ac_index, retry_attempt))
+                continue
+            outcomes_by_root.setdefault(root_ac_index, {}).setdefault(retry_attempt, []).append(
+                _OutcomeEvidence(
+                    root_ac_index=root_ac_index,
+                    retry_attempt=retry_attempt,
+                    success=success,
+                    outcome=outcome,
+                    event_id=current_id,
+                )
+            )
             continue
 
-        root_ac_index = parse_root_ac_index(data)
-        retry_attempt = parse_retry_attempt(data)
-        success = strict_bool(data.get("success"))
-        outcome = _normalized_outcome(data, success=success) if success is not None else None
-        if root_ac_index is None:
-            anonymous_invalid_attempts.add(invalid_identity)
+        if current_type != EVENT_AC_ACCEPTANCE_FINALIZED:
             continue
-        if retry_attempt is None:
-            invalid_outcome_roots.add(root_ac_index)
-            anonymous_invalid_attempts.add(invalid_identity)
-            continue
-        outcome_attempts_seen.setdefault(root_ac_index, set()).add(retry_attempt)
-        if success is None or outcome is None:
-            invalid_outcome_attempts.add((root_ac_index, retry_attempt))
-            continue
-        outcomes_by_root.setdefault(root_ac_index, {}).setdefault(retry_attempt, []).append(
-            _OutcomeEvidence(
-                root_ac_index=root_ac_index,
-                retry_attempt=retry_attempt,
-                success=success,
-                outcome=outcome,
-                event_id=current_id,
+
+        candidate_root = parse_root_ac_index(data)
+        try:
+            _generation, root_ac_index = validate_acceptance_finalization_payload(
+                data,
+                aggregate_id=_event_aggregate_id(event),
             )
+        except Exception:
+            if candidate_root is not None:
+                invalid_acceptance_roots.add(candidate_root)
+            else:
+                anonymous_invalid_attempts.add(invalid_identity)
+            continue
+        if (
+            data.get("execution_id") != execution_id
+            or data.get("session_id") != session_id
+            or data.get("terminal_status") != terminal_status
+        ):
+            invalid_acceptance_roots.add(root_ac_index)
+            continue
+        retry_attempt = data["final_retry_attempt"]
+        accepted = data["accepted"]
+        outcome = data["outcome"]
+        acceptance_generations.add(_generation)
+        acceptance_by_root.setdefault(root_ac_index, []).append(
+            (retry_attempt, accepted, outcome, current_id)
         )
 
     measured: dict[_AttemptKey, tuple[float, str | None]] = {}
@@ -224,6 +330,32 @@ def build_frugality_retrospective(
             invalid_outcome_attempts.add((root_ac_index, latest_attempt))
             continue
         latest_outcomes[root_ac_index] = records[0]
+
+    # When the Final Gate event is present it is the terminal source of truth;
+    # historical outcome-finalized rows remain a provisional fallback only for
+    # old runs that predate Foundation B.
+    for root_ac_index, records in acceptance_by_root.items():
+        unique_records = set(records)
+        if root_ac_index in invalid_acceptance_roots or len(unique_records) != 1:
+            invalid_outcome_roots.add(root_ac_index)
+            latest_outcomes.pop(root_ac_index, None)
+            continue
+        acceptance_record: tuple[int, bool, str, str | None] = next(iter(unique_records))
+        retry_attempt, accepted, outcome, acceptance_event_id = acceptance_record
+        latest_outcomes[root_ac_index] = _OutcomeEvidence(
+            root_ac_index=root_ac_index,
+            retry_attempt=retry_attempt,
+            success=accepted,
+            outcome=outcome,
+            event_id=acceptance_event_id,
+        )
+
+    # A malformed final event is authoritative evidence that this root cannot
+    # be safely reconstructed. Do not fall back to a provisional attempt and
+    # accidentally report a misleading terminal outcome.
+    for root_ac_index in invalid_acceptance_roots:
+        invalid_outcome_roots.add(root_ac_index)
+        latest_outcomes.pop(root_ac_index, None)
 
     retry_keys: set[_AttemptKey] = set()
     retry_latest_attempts: list[int] = []
@@ -289,7 +421,10 @@ def build_frugality_retrospective(
         )
 
     invalid_count = (
-        len(invalid_attempt_keys) + len(anonymous_invalid_attempts) + len(invalid_outcome_attempts)
+        len(invalid_attempt_keys)
+        + len(anonymous_invalid_attempts)
+        + len(invalid_outcome_attempts)
+        + len(invalid_acceptance_roots)
     )
     payload: dict[str, Any] = {
         "execution_id": execution_id,
@@ -312,6 +447,8 @@ def build_frugality_retrospective(
     proof_reference = _proof_reference(event_list)
     if proof_reference is not None:
         payload["proof_reference"] = proof_reference
+    if len(acceptance_generations) == 1:
+        payload["acceptance_generation_id"] = next(iter(acceptance_generations))
     return payload
 
 
@@ -331,17 +468,28 @@ async def report_frugality_retrospective(
     if terminal_status not in HARD_FINAL_STATUSES:
         return False
     events = await event_store.query_execution_related_events(execution_id, limit=None)
-    if any(event_type(event) == FRUGALITY_RETROSPECTIVE_EVENT_TYPE for event in events):
+    scoped_events = _session_scoped_events(
+        events,
+        execution_id=execution_id,
+        session_id=session_id,
+    )
+    if any(event_type(event) == FRUGALITY_RETROSPECTIVE_EVENT_TYPE for event in scoped_events):
         return False
     payload = build_frugality_retrospective(
-        events,
+        scoped_events,
         execution_id=execution_id,
         session_id=session_id,
         terminal_status=terminal_status,
     )
     if payload is None:
         return False
-    await event_store.append(create_frugality_retrospective_event(execution_id, payload))
+    await event_store.append(
+        create_frugality_retrospective_event(
+            execution_id,
+            payload,
+            session_id=session_id,
+        )
+    )
     return True
 
 

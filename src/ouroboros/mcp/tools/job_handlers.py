@@ -43,7 +43,11 @@ from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
     request_process_local_cancellation,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.session import (
+    ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+)
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -871,10 +875,25 @@ class CancelExecutionHandler:
 
             # Historical/non-Foundation-A sessions have no live capability to
             # protect, so retain their established direct cancellation path.
+            from ouroboros.orchestrator.execution_authority import (
+                collect_cancellation_acceptance_plan,
+            )
+
+            raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
+            expected_root_indices = (
+                tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
+            )
+            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=tracker.session_id,
+                execution_id=execution_id,
+                event_store=self._event_store,
+                expected_root_indices=expected_root_indices,
+            )
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id=tracker.session_id,
                 reason=reason,
                 cancelled_by="mcp_tool",
+                acceptance_finalizations=acceptance_finalizations,
             )
             if cancel_result.is_err:
                 return Result.err(
@@ -1772,6 +1791,7 @@ class JobWaitHandler:
                 history_events,
                 new_event_ids=new_event_ids,
                 job_id=snapshot.job_id,
+                session_id=snapshot.links.session_id,
                 available_tools=self.available_conductor_tools,
             )
             if snapshot.is_terminal:
@@ -2111,6 +2131,7 @@ class JobResultHandler:
                 for relay in classify_relay_events(
                     history_events,
                     job_id=snapshot.job_id,
+                    session_id=snapshot.links.session_id,
                     available_tools=self.available_conductor_tools,
                 )
                 if relay.get("kind") == "attention_required"

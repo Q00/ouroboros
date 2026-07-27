@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import os
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +21,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -29,11 +31,15 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
+from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
-from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
+from ouroboros.orchestrator.execution_runtime_scope import (
+    ExecutionNodeIdentity,
+    build_level_coordinator_runtime_scope,
+)
 from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -48,10 +54,12 @@ from ouroboros.orchestrator.parallel_executor import (
     _complete_sibling_acs_from_evidence,
     _criterion_satisfied_by_evidence,
     _effective_evidence_schema_for_ac,
+    _matching_journal_entries,
     _message_contains_test_success,
     _runtime_messages_have_masked_test_command_form,
     _runtime_messages_support_command_claim,
     _runtime_messages_support_test_claim,
+    _standard_deliver_facts,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -63,6 +71,502 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
     """The default stall watchdog should not kill long quiet test commands too early."""
     assert STALL_TIMEOUT_SECONDS == 900.0
+
+
+def _journal_entry(
+    *,
+    handle: str,
+    command: str,
+    result_preview: str | None = None,
+) -> EvidenceEntry:
+    payload: dict[str, object] = {"tool_name": "Bash", "command": command}
+    if result_preview is not None:
+        payload["result_preview"] = result_preview
+    return _journal_payload_entry(
+        handle=handle,
+        payload=payload,
+    )
+
+
+def _journal_payload_entry(*, handle: str, payload: dict[str, object]) -> EvidenceEntry:
+    return EvidenceEntry(
+        handle=handle,
+        kind=EvidenceKind.COMMAND_EXECUTED,
+        ok=True,
+        started_at=datetime.now(UTC),
+        ended_at=datetime.now(UTC),
+        payload=payload,
+        source_event_ids=(f"event-{handle}",),
+    )
+
+
+def test_deliver_matching_uses_verifier_command_aliases() -> None:
+    """A shell-wrapped command has the same backing evidence as its clean claim."""
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_wrapped",
+                command="/bin/zsh -lc 'pytest tests/test_app.py'",
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="pytest tests/test_app.py",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_wrapped",)
+
+
+@pytest.mark.parametrize(
+    ("observed", "claim"),
+    (
+        ("pytest Tests/test_app.py", "pytest tests/test_app.py"),
+        ('python script.py "a b"', "python script.py a b"),
+        ("echo $HOME", "echo '$HOME'"),
+        ("echo x > out", "echo x '>' out"),
+        ("echo *.py", "echo '*.py'"),
+        ("echo x; touch out", "echo 'x;' touch out"),
+        ("FOO=bar command", "'FOO=bar' command"),
+        ("if true", "'if' true"),
+    ),
+)
+def test_deliver_matching_preserves_case_and_argument_boundaries(
+    observed: str,
+    claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_distinct", command=observed),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=claim,
+    )
+
+
+def test_deliver_matching_allows_inert_quote_spelling_differences() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted", command='python script.py "a b"'),),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="python script.py 'a b'",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_quoted",)
+
+
+@pytest.mark.parametrize(
+    ("observed", "malformed_claim"),
+    (
+        (
+            "pytest tests/test_app.py --basetemp='cache > out'",
+            "pytest tests/test_app.py --basetemp='cache",
+        ),
+        (
+            "pytest tests/test_app.py -k 'unit|integration'",
+            "pytest tests/test_app.py -k 'unit",
+        ),
+    ),
+)
+def test_deliver_matching_does_not_strip_quoted_shell_metacharacters(
+    observed: str,
+    malformed_claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted_meta", command=observed),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=malformed_claim,
+    )
+
+
+def test_deliver_matching_keeps_equivalent_quoted_metacharacter_argument() -> None:
+    observed = "pytest tests/test_app.py --basetemp='cache > out'"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_quoted_meta", command=observed),),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value='pytest tests/test_app.py --basetemp="cache > out"',
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_quoted_meta",)
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "claim"),
+    (
+        ({"cmd": "pytest tests/test_a.py"}, "pytest tests/test_a.py"),
+        (
+            {"cmd": ["python", "-m", "unittest", "test_slugify.py"]},
+            "python -m unittest test_slugify.py",
+        ),
+        (
+            {"cmd": ["/bin/zsh", "-lc", "pytest tests/test_app.py"]},
+            "pytest tests/test_app.py",
+        ),
+        ({"cmd": ["pytest", "--maxfail=1"]}, "pytest --maxfail=1"),
+        ({"cmd": ["pytest", "-k", "time"]}, "pytest -k time"),
+        ({"cmd": ["python", "script.py", ""]}, "python script.py ''"),
+        ({"command_line": "ruff check src"}, "ruff check src"),
+    ),
+)
+def test_deliver_matching_reads_structured_command_shapes_from_args_preview(
+    tool_input: dict[str, object],
+    claim: str,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_structured",
+                payload={
+                    "tool_name": "Bash",
+                    "args_preview": json.dumps(tool_input, separators=(",", ":")),
+                },
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=claim,
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_structured",)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"tool_name": "Bash", "command": "bash /dev/null -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "/dev/null", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash -n -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "-n", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash --version -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "--version", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash -o noexec -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "args_preview": json.dumps(
+                {"cmd": ["bash", "-o", "noexec", "-c", "pytest tests/test_app.py"]},
+                separators=(",", ":"),
+            ),
+        },
+        {"tool_name": "Bash", "command": "bash -onoexec -c 'pytest tests/test_app.py'"},
+        {
+            "tool_name": "Bash",
+            "command": "bash -c 'pytest tests/test_app.py' || true",
+        },
+        {
+            "tool_name": "Bash",
+            "command": "bash -c 'pytest tests/test_app.py' | cat",
+        },
+    ),
+)
+def test_deliver_matching_does_not_extract_shell_body_after_script_operand(
+    payload: dict[str, object],
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_payload_entry(handle="ev_script", payload=payload),),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="pytest tests/test_app.py",
+    )
+
+
+def test_deliver_matching_preserves_legacy_json_scalar_preview() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_true",
+                payload={"tool_name": "Bash", "args_preview": "true"},
+            ),
+        ),
+    )
+
+    matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="true",
+    )
+
+    assert tuple(entry.handle for entry in matches) == ("ev_true",)
+
+
+def test_deliver_matching_rejects_conflicting_command_aliases() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_conflicting",
+                payload={
+                    "tool_name": "Bash",
+                    "command": "echo ready",
+                    "args_preview": json.dumps(
+                        {"cmd": "pytest tests/not-run.py"},
+                        separators=(",", ":"),
+                    ),
+                },
+            ),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value="echo ready",
+    )
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="pytest tests/not-run.py",
+    )
+
+
+def test_tests_passed_requires_a_successful_test_command() -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(handle="ev_echo", command="echo ready"),
+            _journal_entry(
+                handle="ev_pytest",
+                command="pytest tests/test_app.py",
+                result_preview="1 passed in 0.01s",
+            ),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="echo ready",
+    )
+    matches = _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value="pytest tests/test_app.py",
+    )
+    assert tuple(entry.handle for entry in matches) == ("ev_pytest",)
+
+    facts = _standard_deliver_facts(
+        EvidenceRecord(data={"commands_run": ["echo ready"], "tests_passed": ["echo ready"]}),
+        manifest,
+        task_cwd=None,
+        verifier_passed=True,
+    )
+    assert facts is not None
+    assert tuple(fact.evidence_handle for fact in facts) == (
+        "ev_echo",
+        "missing:tests_passed:0",
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "pytest tests/does_not_exist.py >/dev/null 2>&1 || true",
+        "pytest tests/does_not_exist.py||true",
+        "pytest tests/does_not_exist.py; true",
+    ),
+)
+def test_tests_passed_rejects_status_masking_shell_chain(command: str) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_masked", command=command),),
+    )
+
+    command_matches = _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value=command,
+    )
+    test_matches = _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
+
+    assert tuple(entry.handle for entry in command_matches) == ("ev_masked",)
+    assert test_matches == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "pytest --version",
+        "pytest --collect-only",
+        "pytest --collectonly",
+        "pytest --funcargs",
+        "pytest --setup-plan",
+        "pytest --setuponly",
+        "pytest --setupplan",
+        "python -m unittest --help",
+        "tox --showconfig",
+        "nox --list",
+        "gradle test --dry-run",
+    ),
+)
+def test_tests_passed_rejects_non_executing_runner_modes(command: str) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(_journal_entry(handle="ev_no_tests", command=command),),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="commands_run",
+            value=command,
+        )
+    ) == ("ev_no_tests",)
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
+
+
+def test_npm_if_present_accepts_positive_test_execution_output() -> None:
+    command = "npm test --if-present"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_npm",
+                command=command,
+                result_preview="Tests: 2 passed, 2 total",
+            ),
+        ),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="tests_passed",
+            value=command,
+        )
+    ) == ("ev_npm",)
+
+
+def test_tests_passed_requires_positive_execution_output_despite_environment_mode() -> None:
+    command = "PYTEST_ADDOPTS=--collect-only pytest tests/test_app.py"
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(
+                handle="ev_collected",
+                command=command,
+                result_preview="collected 1 item\n\n1 test collected",
+            ),
+        ),
+    )
+
+    assert tuple(
+        entry.handle
+        for entry in _matching_journal_entries(
+            manifest,
+            field="commands_run",
+            value=command,
+        )
+    ) == ("ev_collected",)
+    assert not _matching_journal_entries(
+        manifest,
+        field="tests_passed",
+        value=command,
+    )
+
+
+def test_standard_deliver_facts_distinguishes_ambiguous_matches() -> None:
+    """Multiple journal matches remain rejected and are not labelled missing."""
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_entry(handle="ev_1", command="pytest tests/test_app.py"),
+            _journal_entry(handle="ev_2", command="pytest tests/test_app.py"),
+        ),
+    )
+
+    facts = _standard_deliver_facts(
+        EvidenceRecord(data={"commands_run": ["pytest tests/test_app.py"]}),
+        manifest,
+        task_cwd=None,
+        verifier_passed=True,
+    )
+
+    assert facts is not None
+    assert len(facts) == 1
+    assert facts[0].evidence_handle == "ambiguous:commands_run:0"
+
+
+@pytest.mark.parametrize(
+    "observed",
+    (
+        "bash -c 'pytest \"$@\"' ignored tests/test_a.py",
+        ("bash", "-c", 'pytest "$@"', "ignored", "tests/test_a.py"),
+    ),
+)
+def test_shell_wrapper_with_post_body_argv_does_not_expose_inner_alias(
+    observed: object,
+) -> None:
+    manifest = EvidenceManifest(
+        ac_id="AC-1",
+        entries=(
+            _journal_payload_entry(
+                handle="ev_wrapper",
+                payload={"tool_name": "Bash", "cmd": observed},
+            ),
+        ),
+    )
+
+    assert not _matching_journal_entries(
+        manifest,
+        field="commands_run",
+        value='pytest "$@"',
+    )
 
 
 class _RateGateStubAdapter:
@@ -177,20 +681,37 @@ def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
     )
 
 
-def _make_executor() -> ParallelACExecutor:
+def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor:
     """Create an executor with mocked dependencies and muted event emitters."""
     executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=False,
+        reasoning_effort=reasoning_effort,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._event_store.query_events = AsyncMock(return_value=[])
     executor._emit_workflow_progress = AsyncMock()
     executor._emit_level_started = AsyncMock()
     executor._emit_level_completed = AsyncMock()
     executor._emit_subtask_event = AsyncMock()
     return executor
+
+
+def test_executor_freezes_coordinator_effort_from_its_execution_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parallel owner, coordinator, and durable policy share one effort value."""
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+    executor = _make_executor(reasoning_effort="low")
+
+    assert executor._reasoning_effort == "low"
+    assert executor._coordinator._reasoning_effort == "low"
+    policy = executor._execution_authority_policy()
+    assert policy["reasoning_effort"] == "low"
+    assert policy["coordinator_reasoning_effort"] == "low"
 
 
 def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
@@ -945,6 +1466,51 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     return event_store, appended_events
 
 
+@pytest.mark.asyncio
+async def test_dispatch_append_failure_does_not_cache_phantom_predecessor() -> None:
+    """A failed dispatch append must leave the next attempt with no fake predecessor."""
+    event_store, appended_events = _make_replaying_event_store()
+    fail_dispatch_append = True
+
+    async def _append(event: BaseEvent) -> None:
+        nonlocal fail_dispatch_append
+        if event.type == "execution.ac.attempt.dispatched" and fail_dispatch_append:
+            fail_dispatch_append = False
+            raise RuntimeError("dispatch append failed")
+        appended_events.append(event)
+
+    event_store.append = AsyncMock(side_effect=_append)
+    executor = ParallelACExecutor(
+        adapter=_FinalMessageRuntime("done", native_session_id="session-1"),
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    kwargs = {
+        "ac_index": 0,
+        "ac_content": "Implement AC 1",
+        "session_id": "orch_123",
+        "tools": ["Read"],
+        "system_prompt": "system",
+        "seed_goal": "Ship the feature",
+        "depth": 0,
+        "start_time": datetime.now(UTC),
+    }
+
+    with pytest.raises(RuntimeError, match="dispatch append failed"):
+        await executor._execute_atomic_ac(**kwargs)
+    assert executor._ac_runtime_handles == {}
+
+    result = await executor._execute_atomic_ac(**kwargs)
+
+    assert result.success is True
+    dispatch_events = [
+        event for event in appended_events if event.type == "execution.ac.attempt.dispatched"
+    ]
+    assert len(dispatch_events) == 1
+    assert dispatch_events[0].data["previous_ac_dispatch_id"] is None
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     (
@@ -957,10 +1523,13 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
         ("Tests run: 3, Failures=0, Errors=0, Skipped=0\n[INFO] BUILD SUCCESS", True),
         ("no errors, 3 passed", True),
         ("no tests failed, 3 passed", True),
-        ("exit code 0", True),
+        ("exit code 0", False),
         ("Ran 4 tests in 0.000s\nOK", True),
         ("python -m unittest test_slugify.py: Ran 4 tests in 0.000s OK", True),
-        ("success", True),
+        ("success", False),
+        ("collected 1 item\n1 test collected\nexit code 0", False),
+        ("PASS tests/test_app.py", True),
+        ("tests/test_app.py::test_auth PASSED", True),
         ("FAILED (failures=1)\nRan 4 tests in 0.000s", False),
         ("1 failed, 3 passed", False),
         ("2 errors, 1 passed", False),
@@ -973,7 +1542,11 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
     expected: bool,
 ) -> None:
     """Verifier accepts explicit zero-failure summaries without allowing failures."""
-    message = AgentMessage(type="result", content=content, data={})
+    message = AgentMessage(
+        type="tool_result",
+        content=content,
+        data={"subtype": "tool_result"},
+    )
     assert _message_contains_test_success(message) is expected
 
 
@@ -1041,6 +1614,73 @@ def test_tests_passed_respects_correlated_bash_result_status(
     )
 
 
+def test_tests_passed_rejects_collect_only_from_environment_configuration() -> None:
+    command = "PYTEST_ADDOPTS=--collect-only pytest tests/test_app.py"
+    message = AgentMessage(
+        type="tool",
+        content="run tests",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": command},
+            "output": "collected 1 item\n\n1 test collected",
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(message,),
+        task_cwd=None,
+    )
+
+
+def test_tests_passed_rejects_tool_call_narration_without_runtime_result() -> None:
+    command = "pytest tests/test_app.py"
+    message = AgentMessage(
+        type="tool",
+        content="Running pytest; 1 passed",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=(message,),
+        task_cwd=None,
+    )
+
+
+def test_atomic_verifier_rejects_intermediate_result_narration_as_test_proof() -> None:
+    command = "pytest tests/test_app.py"
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(
+            AgentMessage(
+                type="tool",
+                content="Bash command started",
+                tool_name="Bash",
+                data={"tool_input": {"command": command}},
+            ),
+            AgentMessage(type="result", content="1 passed", data={"subtype": "success"}),
+            AgentMessage(type="result", content="Evidence follows", data={}),
+        ),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+
+    assert verdict.passed is False
+
+
 def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
     """A broad successful run cannot prove a node-id mentioned only by the agent."""
     started = AgentMessage(
@@ -1065,6 +1705,136 @@ def test_tests_passed_rejects_node_id_from_assistant_narration_only() -> None:
         messages=(started, narration),
         task_cwd=None,
     )
+
+
+def test_codex_completion_receipts_prove_exact_test_and_file_claims(tmp_path) -> None:
+    from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+    runtime = CodexCliRuntime(cli_path="codex", cwd=tmp_path)
+    command = "pytest -q tests/test_example.py"
+    success_messages = tuple(
+        runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-42",
+                    "type": "command_execution",
+                    "command": command,
+                    "stdout": "1 passed in 0.01s",
+                    "exit_code": 0,
+                },
+            },
+            current_handle=None,
+        )
+        + runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "change-7",
+                    "type": "file_change",
+                    "path": "src/example.py",
+                    "status": "completed",
+                },
+            },
+            current_handle=None,
+        )
+    )
+
+    assert _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=success_messages,
+        task_cwd=str(tmp_path),
+    )
+    assert _runtime_messages_support_file_claim(
+        "src/example.py",
+        success_messages,
+        task_cwd=str(tmp_path),
+    )
+    failed_messages = tuple(
+        runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-failed",
+                    "type": "command_execution",
+                    "command": command,
+                    "stderr": "1 failed in 0.01s",
+                    "exit_code": 1,
+                },
+            },
+            current_handle=None,
+        )
+    )
+    assert not _runtime_messages_support_test_claim(
+        value=command,
+        backed_commands=(command,),
+        messages=failed_messages,
+        task_cwd=str(tmp_path),
+    )
+    assert (
+        runtime._convert_event(
+            {"type": "item.completed", "item": {"id": "cmd-empty", "type": "command_execution"}},
+            current_handle=None,
+        )
+        == []
+    )
+
+
+def test_gemini_native_shell_result_passes_fat_harness_test_verifier() -> None:
+    from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+
+    command = "pytest -q tests/test_example.py"
+    runtime = GeminiCLIRuntime(cli_path="gemini")
+    messages: list[AgentMessage] = []
+    for raw_event in (
+        {"type": "tool_use", "name": "run_shell", "input": {"command": command}},
+        {
+            "type": "tool_result",
+            "name": "run_shell",
+            "output": "1 passed in 0.01s",
+            "is_error": False,
+        },
+    ):
+        event = runtime._parse_json_event(json.dumps(raw_event))
+        assert event is not None
+        messages.extend(runtime._convert_event(event, current_handle=None))
+
+    executor = ParallelACExecutor(
+        adapter=MagicMock(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        execution_profile=load_profile("code"),
+        fat_harness_mode=True,
+    )
+    verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=tuple(messages),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+
+    assert verdict.passed is True
+    assert all(message.tool_name == "Bash" for message in messages)
+    assert isinstance(messages[1].data["tool_result"], dict)
+    malformed_event = runtime._parse_json_event(
+        json.dumps(
+            {
+                "type": "tool_result",
+                "name": "run_shell",
+                "output": "1 passed in 0.01s",
+                "is_error": "true",
+            }
+        )
+    )
+    assert malformed_event is not None
+    malformed_result = runtime._convert_event(malformed_event, current_handle=None)[0]
+    malformed_verdict = executor._verify_atomic_evidence_against_runtime_messages(
+        messages=(messages[0], malformed_result),
+        typed_evidence=EvidenceRecord(data={"commands_run": [command], "tests_passed": [command]}),
+        ac_content="Run the focused test.",
+    )
+    assert malformed_verdict.passed is False
 
 
 @pytest.mark.parametrize(
@@ -1355,8 +2125,8 @@ def test_gradle_command_claim_supports_quoted_target_and_tail_pipe() -> None:
     )
 
 
-def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> None:
-    """Gradle BUILD SUCCESSFUL output can back a class-level tests_passed claim."""
+def test_gradle_tests_passed_claim_supports_class_target_and_case_result() -> None:
+    """A Gradle case result can back a class-level tests_passed claim."""
     command_message = AgentMessage(
         type="tool",
         content="Bash command started",
@@ -1370,13 +2140,14 @@ def test_gradle_tests_passed_claim_supports_class_target_and_build_success() -> 
             }
         },
     )
+    output = "com.example.app.unit.SomeNewTest > createsApp PASSED\nBUILD SUCCESSFUL in 8s"
     result_message = AgentMessage(
         type="tool_result",
-        content="> Task :test\nBUILD SUCCESSFUL in 8s",
+        content=output,
         tool_name=None,
         data={
             "subtype": "tool_result",
-            "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+            "output": output,
         },
     )
 
@@ -1503,11 +2274,16 @@ def test_atomic_verifier_classifies_dependent_masked_test_evidence_as_form_misma
             ),
             AgentMessage(
                 type="tool_result",
-                content="> Task :test\nBUILD SUCCESSFUL in 8s",
+                content=(
+                    "com.example.app.unit.SomeNewTest > createsApp PASSED\nBUILD SUCCESSFUL in 8s"
+                ),
                 tool_name=None,
                 data={
                     "subtype": "tool_result",
-                    "output": "> Task :test\nBUILD SUCCESSFUL in 8s",
+                    "output": (
+                        "com.example.app.unit.SomeNewTest > createsApp PASSED\n"
+                        "BUILD SUCCESSFUL in 8s"
+                    ),
                 },
             ),
         ),
@@ -2300,9 +3076,12 @@ def test_maven_tests_passed_supports_explicit_false_skip_properties(command: str
     )
     result_message = AgentMessage(
         type="tool_result",
-        content="[INFO] BUILD SUCCESS",
+        content="[INFO] Tests run: 1, Failures: 0, Errors: 0\n[INFO] BUILD SUCCESS",
         tool_name=None,
-        data={"subtype": "tool_result", "output": "[INFO] BUILD SUCCESS"},
+        data={
+            "subtype": "tool_result",
+            "output": "[INFO] Tests run: 1, Failures: 0, Errors: 0\n[INFO] BUILD SUCCESS",
+        },
     )
 
     assert _runtime_messages_support_test_claim(
@@ -2316,6 +3095,7 @@ def test_maven_tests_passed_supports_explicit_false_skip_properties(command: str
 @pytest.mark.parametrize(
     "output",
     (
+        "> Task :test\nBUILD SUCCESSFUL in 1s",
         "> Task :test NO-SOURCE\nBUILD SUCCESSFUL in 1s",
         "> Task :test SKIPPED\nBUILD SUCCESSFUL in 1s",
         "0 tests completed\nBUILD SUCCESSFUL",
@@ -2337,6 +3117,28 @@ def test_gradle_tests_passed_rejects_successful_build_with_no_tests(output: str)
     )
 
     assert not _runtime_messages_support_test_claim(
+        value="./gradlew test",
+        backed_commands=("./gradlew test",),
+        messages=(command_message, result_message),
+        task_cwd=None,
+    )
+
+
+def test_gradle_tests_passed_accepts_individual_test_case_result() -> None:
+    output = "com.example.AppTest > createsApp PASSED\nBUILD SUCCESSFUL in 1s"
+    command_message = AgentMessage(
+        type="tool",
+        content="Bash command started",
+        tool_name="Bash",
+        data={"tool_input": {"command": "./gradlew test"}},
+    )
+    result_message = AgentMessage(
+        type="tool_result",
+        content=output,
+        data={"subtype": "tool_result", "output": output},
+    )
+
+    assert _runtime_messages_support_test_claim(
         value="./gradlew test",
         backed_commands=("./gradlew test",),
         messages=(command_message, result_message),
@@ -3718,9 +4520,12 @@ class TestParallelACExecutor:
                 ),
                 AgentMessage(
                     type="tool",
-                    content="pytest passed",
+                    content="pytest passed\n1 passed in 0.01s",
                     tool_name="Bash",
-                    data={"input": {"command": "pytest"}},
+                    data={
+                        "input": {"command": "pytest"},
+                        "output": "1 passed in 0.01s",
+                    },
                 ),
             ),
         )
@@ -4344,9 +5149,9 @@ class TestParallelACExecutor:
                     data={"tool_input": {"command": "python -m pytest test_slugify.py"}},
                 ),
                 AgentMessage(
-                    type="result",
-                    content="test_slugify.py passed",
-                    data={"subtype": "success"},
+                    type="tool_result",
+                    content="test_slugify.py passed\n1 passed in 0.01s",
+                    data={"subtype": "tool_result"},
                 ),
             ),
         )
@@ -4429,9 +5234,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest test_hello.py"}},
                     ),
                     AgentMessage(
-                        type="result",
-                        content="test_hello.py::test_hello passed",
-                        data={"subtype": "success"},
+                        type="tool_result",
+                        content="test_hello.py::test_hello passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result"},
                     ),
                 ),
             ),
@@ -4592,9 +5397,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest tests/test_analysis.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="tests/test_analysis.py passed; 1 passed",
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -5020,9 +5825,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest tests/test_app.py"}},
                     ),
                     AgentMessage(
-                        type="result",
-                        content="tests/test_app.py passed",
-                        data={"subtype": "success"},
+                        type="tool_result",
+                        content="tests/test_app.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result"},
                     ),
                 ),
             ),
@@ -5083,9 +5888,9 @@ class TestParallelACExecutor:
                     data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                 ),
                 AgentMessage(
-                    type="result",
+                    type="tool_result",
                     content="Ran 6 tests in 0.002s\n\nOK",
-                    data={"subtype": "success", "exit_code": 0},
+                    data={"subtype": "tool_result", "exit_code": 0},
                 ),
             ),
         )
@@ -5162,9 +5967,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 6 tests in 0.002s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
             ),
@@ -5228,9 +6033,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 6 tests in 0.002s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
             ),
@@ -5352,12 +6157,12 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "pytest"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content=(
                             "generated.py updated; tests/test_generated.py passed; "
                             "0 failed, 0 errors, 1 passed"
                         ),
-                        data={"subtype": "success"},
+                        data={"subtype": "tool_result"},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -5423,9 +6228,9 @@ class TestParallelACExecutor:
                         data={"tool_input": {"command": "python -m unittest test_todo.py"}},
                     ),
                     AgentMessage(
-                        type="result",
+                        type="tool_result",
                         content="Ran 1 test in 0.001s\n\nOK",
-                        data={"subtype": "success", "exit_code": 0},
+                        data={"subtype": "tool_result", "exit_code": 0},
                     ),
                 ),
                 cwd=str(tmp_path),
@@ -5781,7 +6586,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="tool_result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
@@ -5856,7 +6661,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -5929,7 +6734,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6003,7 +6808,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="tests/test_generated.py passed",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
                     ),
                 ),
@@ -6039,8 +6844,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
-    async def test_fat_harness_verifier_accepts_exit_code_only_test_success(self, tmp_path) -> None:
-        """Regression for #978 observation: Codex may omit pytest stdout but keep exit_code=0."""
+    async def test_fat_harness_verifier_rejects_exit_code_only_test_success(self, tmp_path) -> None:
+        """A zero exit without execution output cannot prove that tests ran."""
         hello_file = tmp_path / "hello.py"
         test_file = tmp_path / "test_hello.py"
         hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")
@@ -6109,15 +6914,15 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is True
+        assert result.success is False
         assert result.atomic_verifier_verdict is not None
-        assert result.atomic_verifier_verdict.passed is True
+        assert result.atomic_verifier_verdict.passed is False
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_accepts_unittest_command_summary_claim(
@@ -7672,14 +8477,9 @@ class TestParallelACExecutor:
     async def test_contract_verify_gate_is_single_shot_across_atomic_and_final_gate(
         self, tmp_path: Any
     ) -> None:
-        """A cached atomic verify outcome prevents duplicate shell side effects."""
+        """A cached atomic verify outcome prevents duplicate command execution."""
         (tmp_path / "output.txt").write_text("OZO_RUN_SMOKE_OK\n", encoding="utf-8")
-        counter = tmp_path / "verify-count.txt"
-        command = (
-            "python3 -c \"from pathlib import Path; p=Path('verify-count.txt'); "
-            "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); "
-            'raise SystemExit(0 if n == 0 else 7)"'
-        )
+        command = "test -f output.txt"
         seed = Seed.from_dict(
             {
                 "goal": "Create output.txt",
@@ -7730,7 +8530,6 @@ class TestParallelACExecutor:
         )
         assert result.success is True
         assert result.verify_gate_outcome is not None
-        assert counter.read_text(encoding="utf-8") == "1"
 
         finalized = await executor._apply_verify_gate(
             seed=seed,
@@ -7741,7 +8540,6 @@ class TestParallelACExecutor:
         )
 
         assert finalized.success is True
-        assert counter.read_text(encoding="utf-8") == "1"
 
     @pytest.mark.asyncio
     async def test_verify_gate_recovers_failed_artifact_result_when_contract_passes(
@@ -8478,64 +9276,22 @@ class TestParallelACExecutor:
             (101, True, 1, 1),
         ]
 
-    @pytest.mark.asyncio
-    async def test_depth_three_forces_atomic_without_further_decomposition(self) -> None:
-        """Depth 2 may still recurse, but depth 3 must execute atomically."""
+    def test_depth_above_durable_max_uses_compatible_legacy_executor(self) -> None:
+        """Historical larger depths remain live without Routing D replay claims."""
+        adapter = MagicMock()
+
         executor = ProcessLocalTestExecutor(
-            adapter=MagicMock(),
+            adapter=adapter,
             event_store=AsyncMock(),
             console=MagicMock(),
             enable_decomposition=True,
-            max_decomposition_depth=3,
-        )
-        executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[
-                ["Depth 3 child A", "Depth 3 child B"],
-            ]
+            max_decomposition_depth=MAX_DECOMPOSITION_DEPTH + 1,
         )
 
-        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
-            return ACExecutionResult(
-                ac_index=int(kwargs["ac_index"]),
-                ac_content=str(kwargs["ac_content"]),
-                success=True,
-                final_message=f"{kwargs['ac_content']} complete",
-                depth=int(kwargs["depth"]),
-            )
-
-        execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
-        executor._execute_atomic_ac = execute_atomic_ac
-
-        result = await executor._execute_single_ac(
-            ac_index=0,
-            ac_content="Root AC",
-            session_id="sess_depth_limit",
-            tools=["Read"],
-            tool_catalog=None,
-            system_prompt="system",
-            seed_goal="Ship recursive decomposition",
-            depth=2,
-            execution_id="exec_depth_limit",
-        )
-
-        assert result.is_decomposed is True
-        assert result.decomposition_depth_warning is False
-        assert [sub_result.ac_content for sub_result in result.sub_results] == [
-            "Depth 3 child A",
-            "Depth 3 child B",
-        ]
-        assert [sub_result.depth for sub_result in result.sub_results] == [3, 3]
-        assert [sub_result.decomposition_depth_warning for sub_result in result.sub_results] == [
-            True,
-            True,
-        ]
-        executor._try_decompose_ac.assert_awaited_once()
-        assert execute_atomic_ac.await_count == 2
-        assert [call.kwargs["depth"] for call in execute_atomic_ac.await_args_list] == [
-            3,
-            3,
-        ]
+        assert executor._max_decomposition_depth == 5
+        assert executor._durable_decomposition_replay_enabled is False
+        assert executor._bounded_route_escalation_enabled is False
+        adapter.execute_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_parallel_skips_externally_satisfied_acs(self) -> None:
@@ -9642,9 +10398,12 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        assert resume_handle.native_session_id == "opencode-session-9"
+        # Foundation C rejects historical persisted handles without a durable
+        # capsule/dispatch authority; the fresh attempt must not inherit the
+        # provider session across an executor boundary.
+        assert resume_handle.native_session_id is None
         assert resume_handle.approval_mode == "bypassPermissions"
-        assert resume_handle.metadata["server_session_id"] == "server-99"
+        assert "server_session_id" not in resume_handle.metadata
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
@@ -9907,8 +10666,8 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        assert resume_handle.native_session_id == "opencode-session-resumed"
-        assert resume_handle.metadata["server_session_id"] == "server-resumed"
+        assert resume_handle.native_session_id is None
+        assert "server_session_id" not in resume_handle.metadata
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_2")
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
@@ -10943,7 +11702,7 @@ class TestParallelACExecutor:
 
         appended_events = [call.args[0] for call in executor._event_store.append.await_args_list]
         outcome_events = [
-            event for event in appended_events if event.type == "execution.ac.outcome_finalized"
+            event for event in appended_events if event.type == "execution.ac.attempt_judged"
         ]
         coordinator_events = [
             event for event in appended_events if event.type.startswith("execution.coordinator.")
@@ -10983,6 +11742,215 @@ class TestParallelACExecutor:
             coordinator_events[-1].data["artifact"]
             == '{"review_summary":"Resolved shared.py conflict","fixes_applied":["Merged overlapping import edits"],"warnings_for_next_level":["Verify shared.py integration paths"],"conflicts_resolved":["src/shared.py"]}'
         )
+
+    @pytest.mark.asyncio
+    async def test_coordinator_persists_all_post_effect_conflicts_without_fixed_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A valid stage result population stays serializable after provider effects."""
+
+        conflict_paths = tuple(f"src/generated_{index}.py" for index in range(4_097))
+
+        async def run_review(
+            _coordinator: LevelCoordinator,
+            execution_id: str,
+            conflicts: list[FileConflict],
+            level_context: LevelContext,
+            level_number: int,
+            **_kwargs: Any,
+        ) -> CoordinatorReview:
+            del level_context
+            runtime_scope = build_level_coordinator_runtime_scope(execution_id, level_number)
+            return CoordinatorReview(
+                level_number=level_number,
+                conflicts_detected=tuple(conflicts),
+                review_summary="Reviewed complete conflict population",
+                duration_seconds=1.0,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+                final_output="coordinator final output",
+            )
+
+        monkeypatch.setattr(LevelCoordinator, "run_review", run_review)
+        seed = _make_seed("Produce shared files", "Integrate shared files")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = LevelCoordinator.detect_file_conflicts
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"AC {ac_index} complete",
+                conflict_files=conflict_paths,
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-conflict-population",
+            execution_id="execution-conflict-population",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        coordinator_events = [
+            call.args[0]
+            for call in executor._event_store.append.await_args_list
+            if call.args[0].type
+            in {
+                "execution.coordinator.started",
+                "execution.coordinator.completed",
+            }
+        ]
+        assert result.success_count == 2
+        assert len(coordinator_events) == 2
+        assert coordinator_events[0].data["conflict_count"] == len(conflict_paths)
+        assert len(coordinator_events[0].data["conflicts"]) == len(conflict_paths)
+        assert len(coordinator_events[1].data["conflicts_detected"]) == len(conflict_paths)
+
+    @pytest.mark.asyncio
+    async def test_completed_coordinator_event_restores_without_repeating_provider_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The full started/completed population is the no-checkpoint replay owner."""
+
+        from ouroboros.orchestrator.execution_runtime_scope import (
+            build_level_coordinator_runtime_scope,
+        )
+
+        seed = _make_seed("Update shared.py", "Integrate shared.py")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        execution_id = "exec_coord_replay"
+        session_id = "sess_coord_replay"
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, 1)
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        completed_review = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=(
+                replace(
+                    conflict,
+                    resolved=True,
+                    resolution_description="Resolved by Coordinator",
+                ),
+            ),
+            review_summary="Reconciled shared.py once",
+            fixes_applied=("Merged overlapping edits",),
+            warnings_for_next_level=("Keep the merged interface",),
+            duration_seconds=1.25,
+            session_id="coordinator-native-session",
+            session_scope_id=runtime_scope.aggregate_id,
+            session_state_path=runtime_scope.state_path,
+            final_output="coordinator final output",
+        )
+        review_provider = AsyncMock(return_value=completed_review)
+        monkeypatch.setattr(LevelCoordinator, "run_review", review_provider)
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                conflict_files=("src/shared.py",),
+                final_message=f"AC {ac_index} complete",
+            )
+
+        first = _make_executor(reasoning_effort="low")
+        first._event_store.query_events = AsyncMock(return_value=[])
+        first._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        first._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        await first.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+        first_events = [call.args[0] for call in first._event_store.append.await_args_list]
+
+        async def replay_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            return [event for event in first_events if event.type == event_type]
+
+        resumed = _make_executor(reasoning_effort="low")
+        resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
+        resumed._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        resumed._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        replayed = await resumed.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id=session_id,
+            execution_id=execution_id,
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert review_provider.await_count == 1
+        assert resumed._coordinator._reasoning_effort == "low"
+        assert replayed.stages[0].coordinator_review is not None
+        assert replayed.stages[0].coordinator_review.review_summary == "Reconciled shared.py once"
+        replayed_coordinator_writes = [
+            call.args[0]
+            for call in resumed._event_store.append.await_args_list
+            if getattr(call.args[0], "type", "").startswith("execution.coordinator.")
+        ]
+        assert replayed_coordinator_writes == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("started_count", "completed_count"),
+        ((1, 0), (0, 1), (2, 1), (1, 2)),
+    )
+    async def test_incomplete_or_ambiguous_coordinator_population_fails_closed(
+        self,
+        started_count: int,
+        completed_count: int,
+    ) -> None:
+        executor = _make_executor()
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+
+        async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs["event_type"]
+            count = (
+                started_count if event_type == "execution.coordinator.started" else completed_count
+            )
+            return [
+                BaseEvent(
+                    type=event_type,
+                    aggregate_type="execution",
+                    aggregate_id="execution-1:l0:coord",
+                    data={},
+                )
+                for _ in range(count)
+            ]
+
+        executor._event_store.query_events = AsyncMock(side_effect=query)
+        with pytest.raises(RuntimeError, match="incomplete or ambiguous"):
+            await executor._restore_completed_coordinator_review(
+                execution_id="execution-1",
+                session_id="session-1",
+                level=1,
+                conflicts=[conflict],
+            )
 
     @pytest.mark.asyncio
     async def test_returns_reconciled_level_contexts_for_retry_handoff(
@@ -11311,6 +12279,238 @@ class TestParallelACExecutor:
         assert tool_completed.data["runtime_event_type"] == "tool.completed"
 
     @pytest.mark.asyncio
+    async def test_atomic_ac_projects_codex_completion_receipt_to_journal(self) -> None:
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        class StubRuntime:
+            _runtime_handle_backend = "codex_cli"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                runtime = CodexCliRuntime(cli_path="codex", cwd=self._cwd)
+                for message in runtime._convert_event(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "cmd-42",
+                            "type": "command_execution",
+                            "command": "pytest -q tests/test_example.py",
+                            "stdout": "1 passed in 0.01s",
+                            "exit_code": 0,
+                        },
+                    },
+                    current_handle=kwargs["resume_handle"],
+                ):
+                    yield message
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=StubRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Run the focused test",
+            session_id="sess_codex",
+            tools=["Bash"],
+            system_prompt="test",
+            seed_goal="Ship the fix",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        appended_events = [call.args[0] for call in event_store.append.await_args_list]
+        tool_started = next(
+            event for event in appended_events if event.type == "execution.tool.started"
+        )
+        tool_completed = next(
+            event for event in appended_events if event.type == "execution.tool.completed"
+        )
+
+        assert result.success is True
+        assert tool_started.data["tool_call_id"] == "cmd-42"
+        assert tool_started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
+        assert tool_completed.data["tool_call_id"] == "cmd-42"
+        assert tool_completed.data["runtime_event_type"] == "tool.result"
+        assert tool_completed.data["tool_result"]["is_error"] is False
+        assert tool_completed.data["tool_result"]["meta"]["exit_status"] == 0
+
+    @pytest.mark.asyncio
+    async def test_atomic_ac_projects_gemini_tool_result_to_completed_journal(self) -> None:
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+
+        class StubRuntime:
+            _runtime_handle_backend = "gemini_cli"
+            _cwd = "/tmp/project"
+            _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(self, **kwargs: Any):
+                runtime = GeminiCLIRuntime(cli_path="gemini", cwd=self._cwd)
+                raw_events = (
+                    {
+                        "type": "tool_use",
+                        "name": "run_shell",
+                        "input": {"command": "pytest -q tests/test_example.py"},
+                    },
+                    {
+                        "type": "tool_result",
+                        "name": "run_shell",
+                        "output": "1 passed in 0.01s",
+                        "is_error": False,
+                    },
+                )
+                for raw_event in raw_events:
+                    event = runtime._parse_json_event(json.dumps(raw_event))
+                    assert event is not None
+                    for message in runtime._convert_event(
+                        event,
+                        current_handle=kwargs["resume_handle"],
+                    ):
+                        yield message
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                )
+
+        event_store = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=StubRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Run the focused test with Gemini",
+            session_id="sess_gemini",
+            tools=["Bash"],
+            system_prompt="test",
+            seed_goal="Ship the fix",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        appended_events = [call.args[0] for call in event_store.append.await_args_list]
+        tool_started = next(
+            event for event in appended_events if event.type == "execution.tool.started"
+        )
+        tool_completed = next(
+            event for event in appended_events if event.type == "execution.tool.completed"
+        )
+
+        assert result.success is True
+        assert tool_started.data["tool_input"] == {"command": "pytest -q tests/test_example.py"}
+        assert tool_completed.data["tool_name"] == "Bash"
+        assert tool_completed.data["tool_result"]["is_error"] is False
+        assert tool_completed.data["tool_result"]["text_content"] == "1 passed in 0.01s"
+
+    def test_message_level_tool_completion_event_type_is_not_terminal(self) -> None:
+        """A finished tool must not classify the runtime handle as terminated.
+
+        Message-level `runtime_event_type` now takes priority over stale handle
+        metadata, so the adapter's completion vocabulary reaches lifecycle
+        classification directly. `_runtime_handle_lifecycle_state` maps any value
+        containing "completed" (outside the `message.`/`result.`/`turn.` prefixes)
+        onto the terminal `completed` state, so naming a per-tool completion
+        `tool.completed` would end the runtime after its first tool.
+        """
+        from ouroboros.orchestrator.adapter import (
+            _RUNTIME_TERMINAL_STATES,
+            _runtime_handle_lifecycle_state,
+        )
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        runtime = CodexCliRuntime()
+        messages = runtime._convert_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-99",
+                    "type": "command_execution",
+                    "command": "pytest -q",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            None,
+        )
+
+        event_types = [
+            message.data.get("runtime_event_type")
+            for message in messages
+            if message.data.get("runtime_event_type")
+        ]
+        assert event_types, "completion conversion must stamp a runtime_event_type"
+
+        for event_type in event_types:
+            lifecycle = _runtime_handle_lifecycle_state(event_type, has_session_id=True)
+            assert lifecycle not in _RUNTIME_TERMINAL_STATES, (
+                f"per-tool event type {event_type!r} classifies the runtime as "
+                f"{lifecycle!r}, which is terminal"
+            )
+
+    def test_codex_id_bearing_exit_only_test_completion_does_not_prove_file_claim(self) -> None:
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        command = "pytest -q tests/test_example.py"
+        messages = tuple(
+            CodexCliRuntime(cli_path="codex", cwd="/tmp/project")._convert_event(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "cmd-exit-only",
+                        "type": "command_execution",
+                        "command": command,
+                        "exit_code": 0,
+                    },
+                },
+                current_handle=None,
+            )
+        )
+
+        assert not _runtime_messages_support_test_claim(
+            value="tests/test_example.py",
+            backed_commands=(command,),
+            messages=messages,
+            task_cwd=None,
+        )
+
+    @pytest.mark.asyncio
     async def test_atomic_ac_projects_empty_tool_result_content_into_completion_events(
         self,
     ) -> None:
@@ -11514,9 +12714,10 @@ class TestParallelACExecutor:
 
         resume_handle = runtime.calls[0]["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
-        # Should have resumed from the valid (first) event, not the invalid (second) one
-        assert resume_handle.native_session_id == "opencode-session-valid"
-        assert resume_handle.metadata["server_session_id"] == "server-valid"
+        # Historical events without capsule authority are not eligible for
+        # cross-process continuation, even when one contains a valid handle.
+        assert resume_handle.native_session_id is None
+        assert "server_session_id" not in resume_handle.metadata
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata

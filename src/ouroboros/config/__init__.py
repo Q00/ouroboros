@@ -24,6 +24,7 @@ Usage:
 """
 
 from ouroboros.config.loader import (
+    MAX_USAGE_LIMIT_PAUSE_SECONDS,
     config_exists,
     create_default_config,
     credentials_file_secure,
@@ -182,6 +183,7 @@ __all__ = [
     "get_runtime_profile",
     "get_semantic_model",
     "get_usage_limit_pause_seconds",
+    "MAX_USAGE_LIMIT_PAUSE_SECONDS",
     "get_wonder_model",
     # Model helpers
     "get_config_dir",

@@ -23,7 +23,7 @@ from ouroboros.orchestrator.frugality_proof import (
     EVENT_MODEL_ROUTED,
     EVENT_TOKEN_ATTRIBUTION,
 )
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 
 
 def _event(event_type: str, event_id: str, **data: Any) -> BaseEvent:
@@ -272,6 +272,42 @@ class TestBuildFrugalityRetrospective:
         assert insufficient is not None
         assert insufficient["proof_reference"] == "proof-insufficient"
 
+    def test_shared_execution_filters_foreign_session_acceptance(self) -> None:
+        target_token = _token("ac-1", 0, 25.0)
+        target_token.data["session_id"] = "sess-a"
+        target_outcome = _outcome(0, False, outcome="failed")
+        target_outcome.data["session_id"] = "sess-a"
+        foreign_acceptance = _event(
+            "execution.ac.acceptance_finalized",
+            "acceptance-b",
+            execution_id="exec-1",
+            session_id="sess-b",
+            acceptance_generation_id=acceptance_generation_id_for_session("sess-b", "exec-1"),
+            root_ac_index=0,
+            final_retry_attempt=0,
+            accepted=True,
+            disposition="accepted",
+            outcome="succeeded",
+            terminal_status="completed",
+        )
+
+        report = build_frugality_retrospective(
+            [target_token, target_outcome, foreign_acceptance],
+            execution_id="exec-1",
+            session_id="sess-a",
+            terminal_status="failed",
+        )
+
+        assert report is not None
+        assert report["coverage"]["measured_attempts"] == 1
+        assert _signal(report, UNACCEPTED_SPEND) == {
+            "name": UNACCEPTED_SPEND,
+            "token_spend": 25.0,
+            "attempt_count": 1,
+            "latest_outcome": "failed",
+            "evidence_event_ids": ["out-0-0", "tok-ac-1-0"],
+        }
+
 
 class _MemoryStore:
     def __init__(self, events: list[BaseEvent] | None = None) -> None:
@@ -340,6 +376,30 @@ class TestReportFrugalityRetrospective:
         assert first.id == second.id
         assert first.aggregate_type == "execution"
         assert first.aggregate_id == "exec-1"
+
+    @pytest.mark.asyncio
+    async def test_shared_execution_emits_one_retrospective_per_session(self) -> None:
+        store = _MemoryStore()
+
+        assert await report_frugality_retrospective(
+            store,
+            execution_id="exec-1",
+            session_id="sess-a",
+            terminal_status="completed",
+        )
+        assert await report_frugality_retrospective(
+            store,
+            execution_id="exec-1",
+            session_id="sess-b",
+            terminal_status="completed",
+        )
+
+        emitted = [
+            event for event in store.events if event.type == FRUGALITY_RETROSPECTIVE_EVENT_TYPE
+        ]
+        assert len(emitted) == 2
+        assert {event.data["session_id"] for event in emitted} == {"sess-a", "sess-b"}
+        assert emitted[0].id != emitted[1].id
 
     @pytest.mark.asyncio
     async def test_event_store_replay_reconstructs_the_same_payload(self) -> None:

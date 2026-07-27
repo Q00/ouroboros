@@ -684,6 +684,7 @@ class TestFindOrphanedSessionsEdgeCases:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_events = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
         return store
 
@@ -913,6 +914,7 @@ class TestCancelOrphanedSessionsEdgeCases:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_events = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
         return store
 
@@ -943,7 +945,12 @@ class TestCancelOrphanedSessionsEdgeCases:
         ):
             call_count = 0
 
-            async def mock_mark_cancelled(session_id: str, reason: str, cancelled_by: str):
+            async def mock_mark_cancelled(
+                session_id: str,
+                reason: str,
+                cancelled_by: str,
+                **kwargs: object,
+            ):
                 nonlocal call_count
                 call_count += 1
                 from ouroboros.core.errors import PersistenceError
@@ -973,7 +980,12 @@ class TestCancelOrphanedSessionsEdgeCases:
 
         cancel_calls: list[dict] = []
 
-        async def capture_cancel(session_id: str, reason: str, cancelled_by: str):
+        async def capture_cancel(
+            session_id: str,
+            reason: str,
+            cancelled_by: str,
+            **kwargs: object,
+        ):
             from ouroboros.core.types import Result
 
             cancel_calls.append(
@@ -1018,7 +1030,12 @@ class TestCancelOrphanedSessionsEdgeCases:
 
         cancel_calls: list[dict] = []
 
-        async def capture_cancel(session_id: str, reason: str, cancelled_by: str):
+        async def capture_cancel(
+            session_id: str,
+            reason: str,
+            cancelled_by: str,
+            **kwargs: object,
+        ):
             from ouroboros.core.types import Result
 
             cancel_calls.append({"reason": reason})

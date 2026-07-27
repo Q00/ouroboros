@@ -33,6 +33,10 @@ from typing import TYPE_CHECKING, Any
 
 from ouroboros.config._model_defaults import normalize_tier_model
 from ouroboros.orchestrator.adapter import ParamSupport
+from ouroboros.orchestrator.contract_numbers import (
+    json_safe_nonnegative_int,
+    parse_positive_contract_int,
+)
 
 if TYPE_CHECKING:
     from ouroboros.config.models import EconomicsConfig
@@ -222,7 +226,7 @@ def serialize_model_router(router: ModelRouter | None) -> dict[str, Any]:
         "runtime_backend": router.runtime_backend,
         "child_tier": router.child_tier,
         "base_tier": router.base_tier,
-        "escalation_retry_threshold": router.escalation_retry_threshold,
+        "escalation_retry_threshold": json_safe_nonnegative_int(router.escalation_retry_threshold),
     }
     return payload
 
@@ -260,7 +264,7 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
     for raw_tier, raw_model in raw_tier_models.items():
         if not isinstance(raw_tier, str) or not raw_tier.strip():
             return False, None
-        if not isinstance(raw_model, str) or not raw_model.strip():
+        if not isinstance(raw_model, str) or not raw_model:
             return False, None
         normalized_tier = raw_tier.strip()
         if normalized_tier not in MODEL_TIER_LADDER:
@@ -271,12 +275,12 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
             # versioned execution contract must have one unambiguous model per
             # tier, so fail closed instead of accepting last-write-wins.
             return False, None
-        tier_models[normalized_tier] = raw_model.strip()
+        tier_models[normalized_tier] = raw_model
 
     runtime_backend = raw_router.get("runtime_backend")
     child_tier = raw_router.get("child_tier")
     base_tier = raw_router.get("base_tier")
-    threshold = raw_router.get("escalation_retry_threshold")
+    threshold = parse_positive_contract_int(raw_router.get("escalation_retry_threshold"))
     if (
         not isinstance(runtime_backend, str)
         or not runtime_backend.strip()
@@ -289,7 +293,7 @@ def deserialize_model_router(value: object) -> tuple[bool, ModelRouter | None]:
         return False, None
     # bool is an int subclass; accepting it here would make a corrupted payload
     # silently change retry escalation semantics.
-    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+    if threshold is None:
         return False, None
 
     return True, ModelRouter(

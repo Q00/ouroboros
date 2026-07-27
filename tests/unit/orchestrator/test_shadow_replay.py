@@ -37,7 +37,8 @@ from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_SHADOW_REPLAY,
     ProofStatus,
     assemble_triads,
@@ -53,6 +54,7 @@ from ouroboros.orchestrator.shadow_replay import (
     run_shadow_replay,
     shadow_replay_enabled_from_env,
 )
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -350,19 +352,42 @@ class _EmitterHarness:
         root_key = (run_id, 0)
         if root_key not in self._finalized_roots:
             self._finalized_roots.add(root_key)
-            self.events.append(
-                BaseEvent(
-                    type=EVENT_AC_OUTCOME_FINALIZED,
-                    aggregate_type="execution",
-                    aggregate_id=run_id,
-                    data={
-                        "execution_id": run_id,
-                        "root_ac_index": 0,
-                        "retry_attempt": 0,
-                        "success": True,
-                        "is_decomposed": True,
-                    },
-                )
+            self.events.extend(
+                [
+                    BaseEvent(
+                        type=EVENT_AC_ATTEMPT_JUDGED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "session_id": session_id,
+                            "root_ac_index": 0,
+                            "retry_attempt": 0,
+                            "attempt_number": 1,
+                            "success": True,
+                            "outcome": "succeeded",
+                            "is_decomposed": True,
+                        },
+                    ),
+                    BaseEvent(
+                        type=EVENT_AC_ACCEPTANCE_FINALIZED,
+                        aggregate_type="execution",
+                        aggregate_id=run_id,
+                        data={
+                            "execution_id": run_id,
+                            "session_id": session_id,
+                            "acceptance_generation_id": acceptance_generation_id_for_session(
+                                session_id, run_id
+                            ),
+                            "root_ac_index": 0,
+                            "final_retry_attempt": 0,
+                            "accepted": True,
+                            "disposition": "accepted",
+                            "outcome": "succeeded",
+                            "terminal_status": "completed",
+                        },
+                    ),
+                ]
             )
 
 

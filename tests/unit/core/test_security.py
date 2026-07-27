@@ -8,14 +8,18 @@ Tests cover:
 - Sanitization for logging
 """
 
+from time import perf_counter
+
 from ouroboros.core.security import (
     MAX_INITIAL_CONTEXT_LENGTH,
     MAX_LLM_RESPONSE_LENGTH,
     MAX_SEED_FILE_SIZE,
     MAX_USER_RESPONSE_LENGTH,
     InputValidator,
+    is_credential_shaped,
     is_sensitive_field,
     is_sensitive_value,
+    is_stable_authority_identity,
     mask_api_key,
     mask_sensitive_value,
     sanitize_for_logging,
@@ -117,6 +121,131 @@ class TestSensitiveDetection:
         assert is_sensitive_value("model-gpt-4") is False
         assert is_sensitive_value(123) is False
 
+    def test_credential_shapes_cover_common_provider_formats(self) -> None:
+        for value in (
+            "ghp_credential-shaped-value",
+            "sk_live_credential-shaped-value",
+            "AIza" + "A" * 35,
+            "AKIA" + "A" * 16,
+            "ASIA" + "A" * 16,
+            "github:ghp_namespaced-credential",
+            "api_key:opaque-provider-credential",
+            "access_token/opaque-provider-credential",
+            "accessToken:opaqueProviderSecret",
+            "clientSecret/opaqueProviderSecret",
+            "api_key.opaqueProviderSecret",
+            "access_token_opaque-provider-credential",
+            "access-token-opaque-provider-credential",
+            "credentials:opaquevalue",
+            "credentials_opaquevalue",
+            "passwd:opaquevalue",
+            "glpat-opaque-provider-credential",
+            "hf_opaque-provider-credential",
+            *(
+                f"runtime:auth{label}value"
+                for label in (
+                    "bearer",
+                    "credential",
+                    "key",
+                    "opaque",
+                    "password",
+                    "secret",
+                    "token",
+                    "value",
+                )
+            ),
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+            "SG." + "A" * 22 + "." + "B" * 43,
+            "hvs." + "A" * 24,
+        ):
+            assert is_credential_shaped(value) is True
+        assert is_credential_shaped("authority-session-123") is False
+        assert is_credential_shaped("github:read") is False
+        assert is_credential_shaped("token-budget") is False
+        assert is_credential_shaped("auth-plane:default") is False
+        assert is_credential_shaped("keycloak") is False
+        assert is_credential_shaped("tokenizer") is False
+        assert is_credential_shaped("privateer") is False
+
+        class HostileString(str):
+            def strip(self) -> str:
+                raise RuntimeError("hostile normalization")
+
+        assert is_credential_shaped(HostileString("runtime:apikey123")) is False
+        assert is_stable_authority_identity(HostileString("runtime:claude")) is False
+
+    def test_stable_authority_identity_is_allowlisted_and_non_secret(self) -> None:
+        for value in (
+            "authority-default",
+            "session-a",
+            "runtime:claude",
+            "runtime:claude_code",
+            "runtime:claude_mcp",
+            "runtime:codex_cli",
+            "runtime:codex_mcp",
+            "runtime:gemini_cli",
+            "runtime:keycloak",
+            "runtime:tokenizer",
+            "runtime:privateer",
+            "runtime:token-budget",
+            "runtime:auth-plane:default",
+            "workspace/project-1",
+            "default",
+        ):
+            assert is_stable_authority_identity(value) is True
+        for value in (
+            "opaque-provider-id",
+            "token-budget",
+            "SG." + "A" * 22 + "." + "B" * 43,
+            "hvs." + "A" * 24,
+            "runtime:SG." + "A" * 22 + "." + "B" * 43,
+            "runtime:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "runtime.hvs." + "A" * 24,
+            "runtime.SG." + "A" * 22 + "." + "B" * 43,
+            "runtime:access_token-abc123",
+            "runtime:api_key-abc123",
+            "runtime:client_secret-abc123",
+            "runtime:apikey123",
+            "runtime:accesstokenabc123",
+            "runtime:password123",
+            "runtime:keyabc123",
+            "runtime:openai-api-key-sk-abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-ghp_abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-sk_live_abcdefghijklmnopqrstuvwxyz",
+            "runtime:prod-hvs.abcdefghijklmnopqrstuvwxyz",
+            "runtime:secretopaquevalue",
+            "runtime:tokenopaquevalue",
+            "runtime:credentialopaquevalue",
+            *(
+                f"runtime:auth{label}value"
+                for label in (
+                    "bearer",
+                    "credential",
+                    "key",
+                    "opaque",
+                    "password",
+                    "secret",
+                    "token",
+                    "value",
+                )
+            ),
+            "runtime:clientsecret:opaquevalue",
+            "runtime:accesstoken:opaquevalue",
+            "runtime:accesskey:opaquevalue",
+            "runtime:privatekey:opaquevalue",
+            "runtime:" + "x" * 200,
+            "runtime:dop_v1_" + "x" * 64,
+            "runtime:opaqueprovider",
+        ):
+            assert is_stable_authority_identity(value) is False
+
+    def test_stable_authority_identity_rejects_hostile_input_in_linear_time(self) -> None:
+        hostile = "runtime:" + "a-" * 24 + ":"
+
+        started = perf_counter()
+        assert is_stable_authority_identity(hostile) is False
+        assert perf_counter() - started < 0.25
+
 
 class TestMaskSensitiveValue:
     """Tests for mask_sensitive_value function."""
@@ -134,6 +263,9 @@ class TestMaskSensitiveValue:
         result = mask_sensitive_value("sk-1234567890abcdef")
         assert "REDACTED" not in result  # Pattern detection uses mask_api_key
         assert "sk-" in result
+
+        compact_auth_result = mask_sensitive_value("runtime:authsecretvalue")
+        assert compact_auth_result != "runtime:authsecretvalue"
 
     def test_truncate_long_string(self) -> None:
         """Long strings are truncated."""

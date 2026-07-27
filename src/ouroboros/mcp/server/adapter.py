@@ -8,7 +8,7 @@ handling, and server lifecycle.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import inspect
 import keyword
 import os
@@ -17,6 +17,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from pydantic import Field
 import structlog
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
@@ -226,26 +227,108 @@ def _build_tool_signature_with_aliases(
         alias_to_original[parameter_name] = p.name
 
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        default: Any = inspect.Parameter.empty if p.required else p.default
+        if p.description or p.enum is not None or p.items is not None:
+            schema_extra: dict[str, Any] = {}
+            if p.enum is not None:
+                schema_extra["enum"] = list(p.enum)
+            if p.items is not None:
+                schema_extra["items"] = p.items
+            field_kwargs: dict[str, Any] = {
+                "description": p.description or None,
+                "json_schema_extra": schema_extra or None,
+            }
+            if p.required:
+                # A required parameter still validates as required, but JSON Schema
+                # permits a `default` annotation on it and
+                # `MCPToolDefinition.to_input_schema()` emits one. Pydantic drops
+                # the value along with `Field(default=...)`, so carry it through
+                # `json_schema_extra` to keep both surfaces describing the same tool.
+                field_kwargs["default"] = ...
+                if p.default is not None:
+                    schema_extra["default"] = p.default
+                    field_kwargs["json_schema_extra"] = schema_extra
+            else:
+                field_kwargs["default"] = p.default
+                if p.default is None:
+                    field_kwargs["json_schema_extra"] = lambda schema, extra=schema_extra: (
+                        schema.pop("default", None),
+                        schema.update(extra),
+                    )[-1]
+            default = Field(**field_kwargs)
+        elif not p.required and p.default is None:
+            default = Field(
+                default=None,
+                json_schema_extra=lambda schema: schema.pop("default", None),
+            )
+
         if p.required:
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     annotation=python_type,
+                    default=(
+                        default
+                        if p.description or p.enum is not None or p.items is not None
+                        else inspect.Parameter.empty
+                    ),
                 )
             )
         else:
-            default = p.default if p.default is not None else None
             sig_params.append(
                 inspect.Parameter(
                     name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     default=default,
-                    annotation=python_type | None,
+                    annotation=python_type,
                 )
             )
 
     return inspect.Signature(parameters=sig_params), alias_to_original
+
+
+def _validate_parameter_constraints(
+    parameters: tuple[MCPToolParameter, ...],
+    arguments: dict[str, Any],
+) -> None:
+    def _is_integer(item: Any) -> bool:
+        # JSON Schema `type: integer` matches any number with zero fractional
+        # part, so `1.0` is a valid integer while `1.5` is not. Booleans are
+        # excluded even though `bool` subclasses `int`.
+        if isinstance(item, bool):
+            return False
+        if isinstance(item, int):
+            return True
+        return isinstance(item, float) and item.is_integer()
+
+    def _is_number(item: Any) -> bool:
+        return not isinstance(item, bool) and isinstance(item, int | float)
+
+    item_validators: dict[str, Callable[[Any], bool]] = {
+        "string": lambda item: isinstance(item, str),
+        "integer": _is_integer,
+        "number": _is_number,
+        "boolean": lambda item: isinstance(item, bool),
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+    }
+    for parameter in parameters:
+        if parameter.name not in arguments:
+            continue
+        value = arguments[parameter.name]
+        if value is not None and parameter.enum is not None and value not in parameter.enum:
+            raise ValueError(
+                f"Invalid value for {parameter.name}: expected one of {parameter.enum}"
+            )
+        if parameter.items is None or not isinstance(value, list):
+            continue
+        item_type = parameter.items.get("type")
+        is_valid_item = item_validators.get(item_type or "")
+        if is_valid_item is None:
+            continue
+        if any(not is_valid_item(item) for item in value):
+            raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
 
 
 _PROJECT_ROOT_MARKERS = (
@@ -1019,7 +1102,22 @@ class MCPServerAdapter:
                         if alias_key in kwargs:
                             normalized_kwargs[original_key] = kwargs[alias_key]
                     for key, value in kwargs.items():
-                        normalized_kwargs.setdefault(key, value)
+                        normalized_kwargs.setdefault(alias_to_original.get(key, key), value)
+                    optional_parameter_names = {
+                        parameter.name
+                        for parameter in h.definition.parameters
+                        if not parameter.required
+                    }
+                    normalized_kwargs = {
+                        key: value
+                        for key, value in normalized_kwargs.items()
+                        if value is not None or key not in optional_parameter_names
+                    }
+
+                    _validate_parameter_constraints(
+                        h.definition.parameters,
+                        normalized_kwargs,
+                    )
 
                     # Route through call_tool() to enforce security checks.
                     # FastMCP does not provide credentials, so:

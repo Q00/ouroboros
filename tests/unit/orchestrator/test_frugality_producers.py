@@ -44,7 +44,8 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import build_ac_runtime_identity
 from ouroboros.orchestrator.frugality_proof import (
-    EVENT_AC_OUTCOME_FINALIZED,
+    EVENT_AC_ACCEPTANCE_FINALIZED,
+    EVENT_AC_ATTEMPT_JUDGED,
     EVENT_DELIVER_VERDICT,
     EVENT_EFFORT_ROUTED,
     EVENT_MODEL_ROUTED,
@@ -63,6 +64,7 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionTracker
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.event_store import acceptance_generation_id_for_session
 
 
 # -- Shared doubles -----------------------------------------------------------
@@ -577,6 +579,7 @@ def _tool_completed_event(
     event_id: str,
     tool_name: str,
     tool_call_id: str,
+    output: str | None = None,
 ) -> BaseEvent:
     return BaseEvent(
         id=event_id,
@@ -584,11 +587,16 @@ def _tool_completed_event(
         aggregate_type="execution",
         aggregate_id=identity.ac_id,
         data={
-            **identity.to_metadata(),
-            "execution_id": execution_id,
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "tool_result": {"is_error": False},
+            key: value
+            for key, value in {
+                **identity.to_metadata(),
+                "execution_id": execution_id,
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "tool_result": {"is_error": False},
+                "output": output,
+            }.items()
+            if value is not None
         },
     )
 
@@ -624,6 +632,14 @@ class TestDeliverVerdict:
                 tool_name="Bash",
                 tool_input={"command": command},
                 runtime_cwd=str(tmp_path),
+            ),
+            _tool_completed_event(
+                identity=identity,
+                execution_id="exec_frugal",
+                event_id="evt-test-completed",
+                tool_name="Bash",
+                tool_call_id="evt-test",
+                output="1 passed in 0.01s",
             ),
             # Same command from a different failed attempt must not make the
             # accepted attempt ambiguous.
@@ -717,13 +733,32 @@ class TestDeliverVerdict:
                 },
             },
             {
-                "type": EVENT_AC_OUTCOME_FINALIZED,
+                "type": EVENT_AC_ATTEMPT_JUDGED,
                 "data": {
                     "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
                     "root_ac_index": 0,
                     "retry_attempt": 0,
+                    "attempt_number": 1,
                     "success": True,
+                    "outcome": "succeeded",
                     "is_decomposed": True,
+                },
+            },
+            {
+                "type": EVENT_AC_ACCEPTANCE_FINALIZED,
+                "data": {
+                    "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
+                    "root_ac_index": 0,
+                    "final_retry_attempt": 0,
+                    "accepted": True,
+                    "disposition": "accepted",
+                    "outcome": "succeeded",
+                    "terminal_status": "completed",
                 },
             },
         ]
@@ -1094,13 +1129,32 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
             },
         },
         {
-            "type": EVENT_AC_OUTCOME_FINALIZED,
+            "type": EVENT_AC_ATTEMPT_JUDGED,
             "data": {
                 "execution_id": run_id,
+                "session_id": f"session-{run_id}",
                 "root_ac_index": root_ac_index,
                 "retry_attempt": 0,
+                "attempt_number": 1,
                 "success": True,
+                "outcome": "succeeded",
                 "is_decomposed": True,
+            },
+        },
+        {
+            "type": EVENT_AC_ACCEPTANCE_FINALIZED,
+            "data": {
+                "execution_id": run_id,
+                "session_id": f"session-{run_id}",
+                "acceptance_generation_id": acceptance_generation_id_for_session(
+                    f"session-{run_id}", run_id
+                ),
+                "root_ac_index": root_ac_index,
+                "final_retry_attempt": 0,
+                "accepted": True,
+                "disposition": "accepted",
+                "outcome": "succeeded",
+                "terminal_status": "completed",
             },
         },
     ]
@@ -1409,11 +1463,31 @@ class TestProducedEventsMatchProofContract:
             baseline_tier="standard",
             decomposition_trustworthy=True,
         )
-        await executor._emit_ac_outcome_finalized(
+        await executor._emit_ac_attempt_judged(
             result=replace(result, is_decomposed=True),
             root_ac_index=0,
             session_id="sess_frugal",
             execution_id="exec_frugal",
+        )
+        events.append(
+            BaseEvent(
+                type=EVENT_AC_ACCEPTANCE_FINALIZED,
+                aggregate_type="execution",
+                aggregate_id="exec_frugal",
+                data={
+                    "execution_id": "exec_frugal",
+                    "session_id": "sess_frugal",
+                    "acceptance_generation_id": acceptance_generation_id_for_session(
+                        "sess_frugal", "exec_frugal"
+                    ),
+                    "root_ac_index": 0,
+                    "final_retry_attempt": 0,
+                    "accepted": True,
+                    "disposition": "accepted",
+                    "outcome": "succeeded",
+                    "terminal_status": "completed",
+                },
+            )
         )
 
         assert result.success is True

@@ -603,6 +603,27 @@ The Foundation A implementation must demonstrate all of the following:
     lock before the retained runner can produce an effect, even when the
     caller passes `use_worktree=false`; that flag cannot bypass authoritative
     workspace exclusion, and missing restoration fails closed before claim.
+86. a direct Routing D quota boundary publishes `route_paused` and `PAUSED`
+    only after a nonterminal provider resume handle is durably stored; missing,
+    terminal, or unpersisted continuity becomes one `BLOCKED` Final Gate handoff
+    and cannot authorize a fresh provider call on resume.
+87. parallel quota cancellation leaves only pre-entry siblings pending; every
+    sibling cancelled after execution-authority entry seals its dispatch and
+    persists an uncertain-effect `BLOCKED` handoff that replay treats as
+    terminal human ownership.
+88. durable `PAUSED` and `pause_persistence_pending` transfer an exact runtime
+    handle out of the returning execution/resume coroutine; its unconditional
+    cleanup cannot terminate the provider session that owns future resume.
+89. direct and parallel resumability require both a reconnect identifier and a
+    nonterminal runtime lifecycle state; a failed/completed/cancelled/terminated
+    handle cannot authorize a pause or another provider effect.
+90. execution contract v9 fingerprints the complete runtime capability and
+    reasoning-effort vocabulary population, and direct/parallel provider choke
+    points revalidate it after pre-dispatch awaits before effect entry.
+91. both public recovery ingresses replay a retained persistence-pending
+    lifecycle intent before normal execution admission: `resume_session` and
+    `execute_precreated_session` cannot treat the deliberately retained durable
+    `RUNNING` snapshot as permission for another provider effect.
 
 This exit matrix is intentionally narrower than an arbitrary-code sandbox and
 broader than a cosmetic fingerprint: it makes the only cross-process claim

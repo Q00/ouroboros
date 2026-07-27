@@ -70,6 +70,9 @@ _OPENCODE_PERSISTED_METADATA_KEYS = frozenset(
     {
         "ac_id",
         "ac_index",
+        "ac_capsule_fingerprint",
+        "ac_dispatch_id",
+        "ac_session_origin",
         "attempt_number",
         "depth",
         "display_path",
@@ -90,6 +93,7 @@ _OPENCODE_PERSISTED_METADATA_KEYS = frozenset(
         "parent_ac_index",
         "parent_node_id",
         "path",
+        "process_local_resume_nonce",
         "recovery_discontinuity",
         "retry_attempt",
         "root_ac_index",

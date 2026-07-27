@@ -93,6 +93,25 @@ name further.
 | `ac_id` | `string` | Legacy source acceptance-criterion identifier for the execution unit |
 | `status` | `string` | Legacy worker completion status: `"passed"` means completed, `"failed"` means failed |
 
+### execution.ac.capsule.compiled
+
+Authority-bearing event written before an AC provider attempt. It stores only
+the versioned redacted capsule manifest and its fingerprint; raw prompts,
+credentials, transcripts, and absolute workspace paths are never persisted.
+
+### execution.ac.attempt.dispatched
+
+Authority-bearing provider-entry boundary written immediately before a runtime
+is invoked. It carries a unique `ac_dispatch_id`, the capsule fingerprint, and
+the minimal reconnect handle. A missing prerequisite capsule or a mismatched
+fingerprint is not recoverable.
+
+### execution.ac.dispatch.sealed
+
+Fail-closed marker for a provider boundary whose effects may have occurred but
+whose terminal result is not yet durable. Recovery must not redispatch a sealed
+attempt; a later terminal lifecycle event supersedes the seal.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.

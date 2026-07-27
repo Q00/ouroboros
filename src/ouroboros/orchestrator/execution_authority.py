@@ -10,7 +10,7 @@ exact live object for this process; it is never made portable by introspection.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -28,6 +28,7 @@ from typing import Any
 import uuid
 
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
 from ouroboros.orchestrator.runtime_param_negotiation import runtime_capabilities_for
 from ouroboros.orchestrator.verifier import Verifier, structural_atomic_verifier
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
@@ -69,6 +70,7 @@ _RATE_GATE_BUCKET_HELPER_NAMES = (
 _PROCESS_LOCAL_AUTHORITY_CONSTRUCTION_TOKEN = object()
 _SAFE_PROCESS_LOCAL_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _LOG = logging.getLogger(__name__)
+_ACCEPTANCE_ROOT_INDICES_KEY = "acceptance_root_indices"
 
 
 async def _await_process_local_cleanup(awaitable: Awaitable[Any]) -> Any:
@@ -169,6 +171,7 @@ class _ProcessLocalAuthorityLifecycle:
     registration: _ProcessLocalAuthorityRegistration
     state: _ProcessLocalAuthorityLifecycleState
     terminal_finalizers: dict[object, Callable[[], object]]
+    prepared_contract_json: str | None = None
     terminalization_retryable: bool = False
 
 
@@ -243,6 +246,83 @@ class _ProcessLocalAuthorityRegistry:
                 "scope": "process_local",
                 "correlation_id": generation.correlation_id,
             }
+
+    @staticmethod
+    def _canonical_prepared_contract(value: object) -> str:
+        """Encode one prepared contract without lossy Python coercions."""
+        if not isinstance(value, Mapping):
+            raise ValueError("prepared execution contract must be a mapping")
+        try:
+            return json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("prepared execution contract must be canonical JSON") from exc
+
+    def seal_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> None:
+        """Seal the exact contract only after its durable publication succeeds."""
+        canonical_contract = self._canonical_prepared_contract(value)
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.REGISTERED
+            ):
+                raise ValueError("prepared contract requires its exact registered authority")
+            if (
+                lifecycle.prepared_contract_json is not None
+                and lifecycle.prepared_contract_json != canonical_contract
+            ):
+                raise ValueError("process-local authority already seals a different contract")
+            lifecycle.prepared_contract_json = canonical_contract
+
+    def authenticate_prepared_contract(
+        self,
+        session_id: str,
+        execution_id: str,
+        generation: _ProcessLocalAuthorityGeneration,
+        adapter: object,
+        value: object,
+    ) -> dict[str, Any] | None:
+        """Return a fresh trusted snapshot iff the claimed caller copy is exact."""
+        try:
+            canonical_contract = self._canonical_prepared_contract(value)
+        except ValueError:
+            return None
+        with self._lock:
+            lifecycle = self._lifecycles.get(session_id)
+            entry = lifecycle.registration if lifecycle is not None else None
+            if (
+                entry is None
+                or entry.creator_pid != os.getpid()
+                or entry.execution_id != execution_id
+                or entry.generation is not generation
+                or entry.adapter is not adapter
+                or not self._is_issued_here(generation)
+                or lifecycle.state is not _ProcessLocalAuthorityLifecycleState.CLAIMED
+                or lifecycle.prepared_contract_json != canonical_contract
+            ):
+                return None
+            sealed_contract = lifecycle.prepared_contract_json
+        restored = json.loads(sealed_contract)
+        return restored if isinstance(restored, dict) else None
 
     def register(
         self,
@@ -642,6 +722,38 @@ def _register_process_local_authority_generation(
     _PROCESS_LOCAL_AUTHORITY_REGISTRY.register(session_id, execution_id, generation, adapter)
 
 
+def _seal_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> None:
+    _PROCESS_LOCAL_AUTHORITY_REGISTRY.seal_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
+
+
+def _authenticate_process_local_prepared_contract(
+    session_id: str,
+    execution_id: str,
+    generation: _ProcessLocalAuthorityGeneration,
+    adapter: object,
+    value: object,
+) -> dict[str, Any] | None:
+    return _PROCESS_LOCAL_AUTHORITY_REGISTRY.authenticate_prepared_contract(
+        session_id,
+        execution_id,
+        generation,
+        adapter,
+        value,
+    )
+
+
 def _live_process_local_authority_generation(
     session_id: str,
     execution_id: str,
@@ -784,6 +896,438 @@ def _retire_process_local_authority_generation(
     return _PROCESS_LOCAL_AUTHORITY_REGISTRY.retire(session_id, execution_id, adapter)
 
 
+async def collect_terminal_acceptance_plan(
+    *,
+    session_id: str,
+    execution_id: str,
+    event_store: Any,
+    terminal_status: str,
+    expected_root_indices: Iterable[int] | None = None,
+    fallback_outcome: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build the one terminal acceptance plan used by every terminal writer.
+
+    The collector is intentionally independent of runner-global state and of
+    Foundation A's process-local correlation ID.  It derives a deterministic
+    Foundation B generation from the durable session/execution identity, then
+    selects the latest provisional judgment for each observed root.  Read
+    failures, malformed judgments, and conflicting duplicates fail closed so
+    cancellation cannot commit a terminal winner without its exact decision
+    set. Current-format preparation failures reconstruct explicit rejecting
+    decisions for every durable root; zero-AC sessions use an explicit empty
+    plan. Terminal retries reconstruct the same plan from durable telemetry.
+    """
+    from ouroboros.core.errors import PersistenceError
+    from ouroboros.persistence.event_store import acceptance_generation_id_for_session
+
+    if terminal_status not in {"completed", "failed", "cancelled"}:
+        raise PersistenceError(
+            "Terminal acceptance planning requires a hard terminal status.",
+            operation="collect_terminal_acceptance_plan",
+            details={"terminal_status": terminal_status},
+        )
+
+    acceptance_generation_id = acceptance_generation_id_for_session(session_id, execution_id)
+    query_events = getattr(event_store, "query_events", None)
+    if not callable(query_events):
+        raise PersistenceError(
+            "Cannot finalize cancellation without readable attempt telemetry.",
+            operation="collect_terminal_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        )
+
+    durable_root_indices: set[int] | None = None
+    replay = getattr(event_store, "replay", None)
+    if not callable(replay):
+        raise PersistenceError(
+            "Cannot finalize a terminal session without readable session-start metadata.",
+            operation="collect_terminal_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        )
+    try:
+        replay_result = replay("session", session_id)
+        if inspect.isawaitable(replay_result):
+            session_events = await replay_result
+        elif isinstance(replay_result, list):
+            # A historical repository adapter exposed replay synchronously.
+            # Keep that compatibility only for the legacy path; the current
+            # EventStore implementation is asynchronous and therefore remains
+            # fail-closed on unreadable durable metadata below.
+            session_events = replay_result
+        else:
+            session_events = None
+    except Exception as exc:
+        raise PersistenceError(
+            "Cannot finalize a terminal session while session-start metadata is unreadable.",
+            operation="collect_terminal_acceptance_plan",
+            details={"session_id": session_id, "execution_id": execution_id},
+        ) from exc
+    if not isinstance(session_events, list):
+        # A legacy/mock repository may not implement session replay yet.  Keep
+        # that compatibility path only when no current-format root contract is
+        # available; a durable current session remains fail-closed below.
+        if expected_root_indices is not None:
+            raise PersistenceError(
+                "Session replay returned an invalid event stream.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        session_events = []
+    start_event = next(
+        (
+            item
+            for item in session_events
+            if getattr(item, "type", None) == "orchestrator.session.started"
+        ),
+        None,
+    )
+    if start_event is not None:
+        start_data = getattr(start_event, "data", {})
+        if not isinstance(start_data, Mapping):
+            raise PersistenceError(
+                "Durable session-start metadata is malformed.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id},
+            )
+        if start_data.get("execution_id") != execution_id:
+            raise PersistenceError(
+                "Durable session-start execution identity does not match.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if _ACCEPTANCE_ROOT_INDICES_KEY in start_data:
+            raw_roots = start_data[_ACCEPTANCE_ROOT_INDICES_KEY]
+            if isinstance(raw_roots, (str, bytes, bytearray)) or not isinstance(
+                raw_roots, Iterable
+            ):
+                raise PersistenceError(
+                    "Durable acceptance root set is malformed.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id},
+                )
+            durable_root_indices = set()
+            durable_root_values: list[int] = []
+            for raw_root in raw_roots:
+                if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+                    raise PersistenceError(
+                        "Durable acceptance root set contains an invalid root.",
+                        operation="collect_terminal_acceptance_plan",
+                        details={"session_id": session_id},
+                    )
+                durable_root_values.append(raw_root)
+                durable_root_indices.add(raw_root)
+            if len(durable_root_values) != len(durable_root_indices):
+                raise PersistenceError(
+                    "Durable acceptance root set contains duplicate roots.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+
+    attempts: list[Any] = []
+    for event_type in ("execution.ac.attempt_judged", "execution.ac.outcome_finalized"):
+        try:
+            attempts.extend(
+                await query_events(
+                    aggregate_id=execution_id,
+                    event_type=event_type,
+                    limit=None,
+                )
+            )
+        except Exception as exc:
+            # Some legacy/test stores expose replay but not the newer filtered
+            # query API.  Replay is still the same durable source of truth; use
+            # it before treating telemetry as unreadable.
+            replay = getattr(event_store, "replay", None)
+            try:
+                replayed = await replay("execution", execution_id) if callable(replay) else None
+            except Exception:
+                replayed = None
+            if isinstance(replayed, list):
+                attempts.extend(
+                    item for item in replayed if getattr(item, "type", None) == event_type
+                )
+                continue
+            if durable_root_indices is None and expected_root_indices is None:
+                # Historical/mock stores without a readable execution stream
+                # cannot contribute observed roots; the terminal fallback plan
+                # remains explicit and is still validated by EventStore when a
+                # durable current session exists.
+                continue
+            _LOG.warning(
+                "process_local_authority.cancellation_acceptance_scan_failed",
+                extra={"session_id": session_id, "execution_id": execution_id},
+            )
+            raise PersistenceError(
+                "Cannot finalize cancellation while attempt telemetry is unreadable.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            ) from exc
+
+    event_priority = {
+        "execution.ac.attempt_judged": 1,
+        "execution.ac.outcome_finalized": 0,
+    }
+    latest_by_root: dict[int, tuple[int, int]] = {}
+    for item in attempts:
+        data = getattr(item, "data", {})
+        aggregate_id = getattr(item, "aggregate_id", None)
+        if not isinstance(data, Mapping):
+            raise PersistenceError(
+                "Cancellation attempt telemetry must contain a mapping payload.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        if aggregate_id is not None and aggregate_id != execution_id:
+            # A shared execution aggregate may contain attempts from another
+            # orchestration session.  Query/replay selection must scope those
+            # records out before validating their payload.
+            continue
+        event_session_id = data.get("session_id")
+        event_execution_id = data.get("execution_id")
+        if event_session_id != session_id:
+            if event_session_id is None:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry is missing its session identity.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            # Telemetry for a different session is unrelated to this terminal
+            # acceptance plan, even when the execution aggregate is shared.
+            continue
+        if event_execution_id != execution_id:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has a mismatched execution identity.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        event_type = getattr(item, "type", None)
+        if event_type not in event_priority:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has an invalid event type.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        try:
+            judgment = validate_attempt_judgment_payload(
+                data,
+                event_type=event_type,
+                aggregate_id=aggregate_id if isinstance(aggregate_id, str) else None,
+                expected_execution_id=execution_id,
+                expected_session_id=session_id,
+            )
+        except ValueError as exc:
+            raise PersistenceError(
+                f"Cancellation attempt telemetry violates the attempt contract: {exc}",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            ) from exc
+        candidate = (judgment.retry_attempt, event_priority[event_type])
+        latest_by_root[judgment.root_ac_index] = max(
+            latest_by_root.get(judgment.root_ac_index, (-1, -1)), candidate
+        )
+
+    selected_by_root: dict[int, list[Any]] = {}
+    for item in attempts:
+        data = getattr(item, "data", {})
+        event_type = getattr(item, "type", None)
+        aggregate_id = getattr(item, "aggregate_id", None)
+        if aggregate_id is not None and aggregate_id != execution_id:
+            continue
+        if not isinstance(data, Mapping):
+            raise PersistenceError(
+                "Cancellation attempt telemetry must contain a mapping payload.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        event_session_id = data.get("session_id")
+        event_execution_id = data.get("execution_id")
+        if event_session_id != session_id:
+            if event_session_id is None:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry is missing its session identity.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"session_id": session_id, "execution_id": execution_id},
+                )
+            continue
+        if event_execution_id != execution_id:
+            raise PersistenceError(
+                "Cancellation attempt telemetry has a mismatched execution identity.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        try:
+            judgment = validate_attempt_judgment_payload(
+                data,
+                event_type=event_type,
+                aggregate_id=(aggregate_id if isinstance(aggregate_id, str) else None),
+                expected_execution_id=execution_id,
+                expected_session_id=session_id,
+            )
+        except ValueError as exc:
+            raise PersistenceError(
+                f"Cancellation attempt telemetry violates the attempt contract: {exc}",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            ) from exc
+        root = judgment.root_ac_index
+        if root not in latest_by_root:
+            continue
+        candidate = (judgment.retry_attempt, event_priority.get(event_type, -1))
+        if candidate == latest_by_root[root]:
+            selected_by_root.setdefault(root, []).append(item)
+
+    canonical_outcomes = {
+        "succeeded",
+        "satisfied_externally",
+        "failed",
+        "blocked",
+        "invalid",
+        "cancelled",
+    }
+    if fallback_outcome is None:
+        fallback_outcome = {
+            "completed": "failed",
+            "failed": "blocked",
+            "cancelled": "cancelled",
+        }[terminal_status]
+    if fallback_outcome not in canonical_outcomes:
+        raise PersistenceError(
+            "Terminal acceptance planning has a non-canonical fallback outcome.",
+            operation="collect_terminal_acceptance_plan",
+            details={"fallback_outcome": fallback_outcome},
+        )
+
+    expected_roots: set[int] = set()
+    if expected_root_indices is not None:
+        expected_root_values: list[int] = []
+        for raw_root in expected_root_indices:
+            if isinstance(raw_root, bool) or not isinstance(raw_root, int) or raw_root < 0:
+                raise PersistenceError(
+                    "Terminal acceptance planning has an invalid expected root.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={"root_ac_index": raw_root},
+                )
+            expected_root_values.append(raw_root)
+            expected_roots.add(raw_root)
+        if len(expected_root_values) != len(expected_roots):
+            raise PersistenceError(
+                "Terminal acceptance planning has duplicate expected roots.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+    if durable_root_indices is not None:
+        if expected_root_indices is not None and expected_roots != durable_root_indices:
+            raise PersistenceError(
+                "Terminal acceptance plan does not match the durable session root set.",
+                operation="collect_terminal_acceptance_plan",
+                details={"session_id": session_id, "execution_id": execution_id},
+            )
+        unexpected_roots = set(latest_by_root) - durable_root_indices
+        if unexpected_roots:
+            raise PersistenceError(
+                "Attempt telemetry contains roots outside the durable session root set.",
+                operation="collect_terminal_acceptance_plan",
+                details={
+                    "session_id": session_id,
+                    "execution_id": execution_id,
+                    "unexpected_root_indices": sorted(unexpected_roots),
+                },
+            )
+        expected_roots = durable_root_indices
+
+    plan: list[dict[str, Any]] = []
+    for root in sorted(latest_by_root.keys() | expected_roots):
+        retry, _priority = latest_by_root.get(root, (0, -1))
+        selected = selected_by_root.get(root, [])
+        if not selected:
+            # A root can be decided without an attempt event (for example a
+            # dependency-blocked or externally-satisfied AC).  When the
+            # caller supplies the durable seed root set, retain a deterministic
+            # non-accepting decision rather than silently dropping that root.
+            retry = 0
+            outcome = fallback_outcome
+        else:
+            normalized_outcomes: set[str] = set()
+            for item in selected:
+                data = getattr(item, "data", {})
+                raw_outcome = data.get("outcome")
+                if isinstance(raw_outcome, str) and raw_outcome in canonical_outcomes:
+                    outcome = raw_outcome
+                elif (raw_outcome is None or raw_outcome == "") and isinstance(
+                    data.get("success"), bool
+                ):
+                    outcome = "succeeded" if data["success"] else "cancelled"
+                else:
+                    raise PersistenceError(
+                        "Cancellation attempt telemetry has a non-canonical outcome.",
+                        operation="collect_terminal_acceptance_plan",
+                        details={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "root_ac_index": root,
+                            "retry_attempt": retry,
+                        },
+                    )
+                normalized_outcomes.add(outcome)
+            if len(normalized_outcomes) != 1:
+                raise PersistenceError(
+                    "Cancellation attempt telemetry has conflicting latest judgments.",
+                    operation="collect_terminal_acceptance_plan",
+                    details={
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                        "root_ac_index": root,
+                        "retry_attempt": retry,
+                    },
+                )
+            outcome = next(iter(normalized_outcomes))
+        accepted = terminal_status == "completed" and outcome in {
+            "succeeded",
+            "satisfied_externally",
+        }
+        disposition = (
+            "accepted"
+            if accepted
+            else (
+                "cancelled"
+                if terminal_status == "cancelled"
+                else ("rejected" if outcome in {"succeeded", "satisfied_externally"} else outcome)
+            )
+        )
+        plan.append(
+            {
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "acceptance_generation_id": acceptance_generation_id,
+                "root_ac_index": root,
+                "final_retry_attempt": retry,
+                "accepted": accepted,
+                "disposition": disposition,
+                "outcome": outcome,
+                "terminal_status": terminal_status,
+            }
+        )
+    return plan
+
+
+async def collect_cancellation_acceptance_plan(
+    *,
+    session_id: str,
+    execution_id: str,
+    event_store: Any,
+    expected_root_indices: Iterable[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the cancellation plan used by every cancellation writer."""
+    return await collect_terminal_acceptance_plan(
+        session_id=session_id,
+        execution_id=execution_id,
+        event_store=event_store,
+        terminal_status="cancelled",
+        expected_root_indices=expected_root_indices,
+        fallback_outcome="cancelled",
+    )
+
+
 async def request_process_local_cancellation(
     tracker: object,
     session_repo: Any,
@@ -803,6 +1347,11 @@ async def request_process_local_cancellation(
     session_id = getattr(tracker, "session_id", None)
     execution_id = getattr(tracker, "execution_id", None)
     progress = getattr(tracker, "progress", None)
+    expected_root_indices: tuple[int, ...] | None = None
+    if isinstance(progress, Mapping):
+        raw_root_indices = progress.get(_ACCEPTANCE_ROOT_INDICES_KEY)
+        if isinstance(raw_root_indices, (list, tuple)):
+            expected_root_indices = tuple(raw_root_indices)
     authority = (
         progress.get("execution_contract", {}).get("foundation_a_authority")
         if isinstance(progress, Mapping) and isinstance(progress.get("execution_contract"), Mapping)
@@ -976,10 +1525,17 @@ async def request_process_local_cancellation(
             cancelled_by=cancelled_by,
         )
         cancellation_request_published = True
+        acceptance_finalizations = await collect_cancellation_acceptance_plan(
+            session_id=session_id,
+            execution_id=execution_id,
+            event_store=getattr(session_repo, "_event_store", None),
+            expected_root_indices=expected_root_indices,
+        )
         cancel_result = await session_repo.mark_cancelled_if_active(
             session_id=session_id,
             reason=reason,
             cancelled_by=cancelled_by,
+            acceptance_finalizations=acceptance_finalizations,
         )
     except BaseException as operation_error:
         cleanup_cancellation: asyncio.CancelledError | None = None
@@ -1494,26 +2050,122 @@ def runtime_execution_proves_effective_model(value: object) -> bool:
     return isinstance(identity, Mapping) and identity.get("effective_model_observed") is True
 
 
+_RUNTIME_EFFECT_CAPABILITY_KEYS = frozenset(
+    {
+        "version",
+        "skill_dispatch",
+        "targeted_resume",
+        "structured_output",
+        "system_prompt_support",
+        "tool_restriction_support",
+        "permission_mode_support",
+        "reasoning_effort_support",
+        "enforceable_reasoning_efforts",
+        "model_override_support",
+        "subagent_orchestration",
+        "session_signals",
+    }
+)
+_PARAM_SUPPORT_VALUES = frozenset({"native", "translated", "ignored"})
+_REASONING_EFFORT_VALUES = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+_SUBAGENT_ORCHESTRATION_VALUES = frozenset(
+    {
+        "none",
+        "internal",
+        "external_host_bridge",
+        "external_leader_driven",
+    }
+)
+_SESSION_SIGNAL_CAPABILITY_KEYS = frozenset(
+    {
+        "inform_delivery",
+        "background_reply",
+        "after_turn_delivery",
+        "checkpoint_redirect",
+        "owned_turn_abort",
+        "replacement_resume",
+    }
+)
+
+
+def valid_runtime_effect_capabilities_contract(value: object) -> bool:
+    """Validate every declared runtime capability that can change a live effect."""
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _RUNTIME_EFFECT_CAPABILITY_KEYS
+        or value.get("version") != 1
+        or type(value.get("version")) is not int
+    ):
+        return False
+    if any(
+        type(value.get(key)) is not bool
+        for key in ("skill_dispatch", "targeted_resume", "structured_output")
+    ):
+        return False
+    if any(
+        value.get(key) not in _PARAM_SUPPORT_VALUES
+        for key in (
+            "system_prompt_support",
+            "tool_restriction_support",
+            "permission_mode_support",
+            "reasoning_effort_support",
+            "model_override_support",
+        )
+    ):
+        return False
+    if value.get("subagent_orchestration") not in _SUBAGENT_ORCHESTRATION_VALUES:
+        return False
+    raw_levels = value.get("enforceable_reasoning_efforts")
+    if raw_levels is not None and (
+        type(raw_levels) is not list
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+        or len(set(raw_levels)) != len(raw_levels)
+        or raw_levels != sorted(raw_levels)
+    ):
+        return False
+    raw_signals = value.get("session_signals")
+    return bool(
+        isinstance(raw_signals, Mapping)
+        and set(raw_signals) == _SESSION_SIGNAL_CAPABILITY_KEYS
+        and all(type(raw_signals.get(key)) is bool for key in _SESSION_SIGNAL_CAPABILITY_KEYS)
+    )
+
+
+def runtime_effect_capabilities_contract(adapter: object) -> dict[str, object]:
+    """Return the complete closed runtime-capability population used by effects."""
+    capabilities = runtime_capabilities_for(adapter)
+    raw_levels = capabilities.enforceable_reasoning_efforts
+    if raw_levels is not None and (
+        not isinstance(raw_levels, frozenset)
+        or any(
+            type(level) is not str or level not in _REASONING_EFFORT_VALUES for level in raw_levels
+        )
+    ):
+        raise ValueError("runtime reasoning-effort vocabulary must be a closed immutable set")
+    contract: dict[str, object] = {
+        "version": 1,
+        "skill_dispatch": capabilities.skill_dispatch,
+        "targeted_resume": capabilities.targeted_resume,
+        "structured_output": capabilities.structured_output,
+        "system_prompt_support": capabilities.system_prompt_support.value,
+        "tool_restriction_support": capabilities.tool_restriction_support.value,
+        "permission_mode_support": capabilities.permission_mode_support.value,
+        "reasoning_effort_support": capabilities.reasoning_effort_support.value,
+        "enforceable_reasoning_efforts": sorted(raw_levels) if raw_levels is not None else None,
+        "model_override_support": capabilities.model_override_support.value,
+        "subagent_orchestration": capabilities.subagent_orchestration.value,
+        "session_signals": capabilities.session_signals.to_event_data(),
+    }
+    if not valid_runtime_effect_capabilities_contract(contract):
+        raise ValueError("runtime effect capabilities are not canonical")
+    return contract
+
+
 def _runtime_capabilities_descriptor(adapter: object) -> dict[str, object]:
     try:
-        capabilities = runtime_capabilities_for(adapter)
-        value = {
-            "skill_dispatch": capabilities.skill_dispatch,
-            "targeted_resume": capabilities.targeted_resume,
-            "structured_output": capabilities.structured_output,
-            "system_prompt_support": capabilities.system_prompt_support.value,
-            "tool_restriction_support": capabilities.tool_restriction_support.value,
-            "permission_mode_support": capabilities.permission_mode_support.value,
-            "reasoning_effort_support": capabilities.reasoning_effort_support.value,
-            "enforceable_reasoning_efforts": (
-                sorted(capabilities.enforceable_reasoning_efforts)
-                if capabilities.enforceable_reasoning_efforts is not None
-                else None
-            ),
-            "model_override_support": capabilities.model_override_support.value,
-            "subagent_orchestration": capabilities.subagent_orchestration.value,
-            "session_signals": capabilities.session_signals.to_event_data(),
-        }
+        value = runtime_effect_capabilities_contract(adapter)
     except Exception:
         return {"observed": False}
     return _digest_descriptor(value, field="runtime capabilities")
@@ -2177,6 +2829,7 @@ class ExecutionAuthorityLiveBinding:
         expected_coordinator_review_root: object | None = None,
         expected_coordinator_review_code: object | None = None,
         force_runtime_process_local: bool = False,
+        runtime_instance_nonce: str | None = None,
     ) -> ExecutionAuthorityLiveBinding:
         executor_attribute_resolution_observable = (
             executor is None or _uses_default_instance_attribute_resolution(executor)
@@ -2448,7 +3101,12 @@ class ExecutionAuthorityLiveBinding:
             )
             else uuid.uuid4().hex
         )
-        runtime_instance_nonce = uuid.uuid4().hex
+        if runtime_instance_nonce is not None and (
+            len(runtime_instance_nonce) != 32
+            or any(char not in "0123456789abcdef" for char in runtime_instance_nonce)
+        ):
+            raise ValueError("runtime instance nonce must be 32 lowercase hex characters")
+        runtime_instance_nonce = runtime_instance_nonce or uuid.uuid4().hex
         contract = ExecutionAuthorityContract.build(
             adapter=adapter,
             verifier=verifier,
@@ -2780,10 +3438,12 @@ __all__ = [
     "execution_policy_authority_contract",
     "executor_authority_contract",
     "runtime_authority_contract",
+    "runtime_effect_capabilities_contract",
     "runtime_execution_identity_contract",
     "runtime_execution_proves_effective_model",
     "valid_constructor_model_contract",
     "valid_process_local_authority_contract",
+    "valid_runtime_effect_capabilities_contract",
     "valid_runtime_execution_identity_contract",
     "verifier_authority_contract",
 ]

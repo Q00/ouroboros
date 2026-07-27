@@ -104,6 +104,11 @@ class TestRuntimeWiring:
 
         assert rt.working_directory == str(tmp_path)
 
+    def test_exposes_effective_cli_path(self) -> None:
+        rt = build_claude_worker_runtime(cli_path="/tmp/claude", cwd="/tmp")
+
+        assert rt.cli_path == "/tmp/claude"
+
     def test_declares_native_model_override(self) -> None:
         # The transport routes a per-call model to ``claude --model``, so the
         # worker enforces a model-tier override natively (RFC #1405 sibling).

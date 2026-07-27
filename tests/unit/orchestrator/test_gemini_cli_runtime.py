@@ -22,6 +22,7 @@ from ouroboros.orchestrator.gemini_cli_runtime import (
     GeminiCLIRuntime,
 )
 from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
 
 # ---------------------------------------------------------------------------
 # _convert_event: terminal `result` event
@@ -82,6 +83,64 @@ def test_convert_event_routes_normalizer_response_field_through_result() -> None
     assert len(messages) == 1
     assert messages[0].type == "assistant"
     assert messages[0].content == "final answer text"
+
+
+def test_convert_event_projects_tool_result_as_successful_completion() -> None:
+    runtime = _make_runtime()
+    event = {
+        "type": "tool_result",
+        "content": "1 passed in 0.01s",
+        "metadata": {"name": "Bash"},
+        "is_error": False,
+        "raw": {"type": "tool_result", "name": "Bash"},
+    }
+
+    messages = runtime._convert_event(event, current_handle=None)
+    projected = project_runtime_message(messages[0])
+
+    assert messages[0].type == "tool_result"
+    assert messages[0].data["subtype"] == "tool_result"
+    assert projected.is_tool_result is True
+    assert projected.tool_name == "Bash"
+    assert projected.tool_result is not None
+    assert projected.tool_result["is_error"] is False
+    assert projected.tool_result["text_content"] == "1 passed in 0.01s"
+
+
+def test_convert_event_normalizes_native_shell_tool_name() -> None:
+    runtime = _make_runtime()
+    tool_use = runtime._parse_json_event(
+        '{"type":"tool_use","name":"run_shell","input":{"command":"pytest -q"}}'
+    )
+    tool_result = runtime._parse_json_event(
+        '{"type":"tool_result","name":"run_shell","output":"1 passed"}'
+    )
+
+    assert tool_use is not None
+    assert tool_result is not None
+    started = runtime._convert_event(tool_use, current_handle=None)[0]
+    completed = runtime._convert_event(tool_result, current_handle=None)[0]
+
+    assert started.tool_name == "Bash"
+    assert completed.tool_name == "Bash"
+    assert isinstance(completed.data["tool_result"], dict)
+
+
+def test_convert_event_preserves_malformed_error_status_as_invalid() -> None:
+    runtime = _make_runtime()
+    event = runtime._parse_json_event(
+        '{"type":"tool_result","name":"run_shell","output":"1 passed","is_error":"true"}'
+    )
+
+    assert event is not None
+    message = runtime._convert_event(event, current_handle=None)[0]
+    projected = project_runtime_message(message)
+
+    assert message.data["is_error"] == "invalid"
+    assert message.data["tool_result"]["is_error"] == "invalid"
+    assert projected.runtime_metadata["is_error_invalid"] is True
+    assert projected.tool_result is not None
+    assert projected.tool_result["is_error_invalid"] is True
 
 
 # ---------------------------------------------------------------------------

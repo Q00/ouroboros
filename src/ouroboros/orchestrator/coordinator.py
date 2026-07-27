@@ -25,9 +25,11 @@ Usage:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import json
+import math
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +61,59 @@ _LEVEL_COORDINATOR_SESSION_KIND = "level_coordinator"
 _COORDINATOR_SCOPE = "level"
 _COORDINATOR_SESSION_ROLE = "coordinator"
 _COORDINATOR_ARTIFACT_TYPE = "coordinator_review"
+_MAX_COORDINATOR_STRING_ITEMS = 1_024
+_MAX_COORDINATOR_ID_CHARS = 1_024
+_MAX_COORDINATOR_PATH_CHARS = 4_096
+_MAX_COORDINATOR_CONFLICT_PATH_CHARS = 32_768
+_MAX_COORDINATOR_ITEM_CHARS = 8_192
+_MAX_COORDINATOR_SUMMARY_CHARS = 64_000
+_MAX_COORDINATOR_ARTIFACT_CHARS = 256_000
+_REASONING_EFFORT_UNSET = object()
+
+
+def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    """Inspect at most one key beyond a finite coordinator schema."""
+
+    if not isinstance(value, Mapping):
+        return False
+    try:
+        iterator = iter(value)
+    except Exception:
+        return False
+    seen: set[str] = set()
+    for index in range(len(expected) + 1):
+        try:
+            key = next(iterator)
+        except StopIteration:
+            return len(seen) == len(expected)
+        except Exception:
+            return False
+        if index >= len(expected) or type(key) is not str or key not in expected or key in seen:
+            return False
+        seen.add(key)
+    return False
+
+
+def _require_bounded_string(
+    value: object,
+    *,
+    field_name: str,
+    max_chars: int,
+    optional: bool = False,
+) -> str | None:
+    if optional and value is None:
+        return None
+    if type(value) is not str or len(value) > max_chars:
+        raise ValueError(f"coordinator artifact {field_name} exceeds its string bound")
+    return value
+
+
+def _require_bounded_string_tuple(value: object, *, field_name: str) -> tuple[str, ...]:
+    if type(value) is not list or len(value) > _MAX_COORDINATOR_STRING_ITEMS:
+        raise ValueError(f"coordinator artifact {field_name} exceeds its population bound")
+    if any(type(item) is not str or len(item) > _MAX_COORDINATOR_ITEM_CHARS for item in value):
+        raise ValueError(f"coordinator artifact {field_name} contains an invalid item")
+    return tuple(value)
 
 
 # System prompt for the Coordinator agent
@@ -97,6 +152,173 @@ class FileConflict:
     ac_indices: tuple[int, ...]
     resolved: bool = False
     resolution_description: str = ""
+
+
+def _validate_file_conflict(conflict: object) -> FileConflict:
+    if not isinstance(conflict, FileConflict):
+        raise ValueError("coordinator conflict must use the closed FileConflict schema")
+    if (
+        type(conflict.file_path) is not str
+        or not conflict.file_path
+        or len(conflict.file_path) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
+        or type(conflict.ac_indices) is not tuple
+        or any(type(index) is not int or index < 0 for index in conflict.ac_indices)
+        or tuple(sorted(set(conflict.ac_indices))) != conflict.ac_indices
+        or type(conflict.resolved) is not bool
+        or type(conflict.resolution_description) is not str
+        or len(conflict.resolution_description) > _MAX_COORDINATOR_ITEM_CHARS
+    ):
+        raise ValueError("coordinator conflict exceeds its durable bounds")
+    return conflict
+
+
+def build_coordinator_started_payload(
+    *,
+    execution_id: str,
+    session_id: str,
+    level_number: int,
+    session_scope_id: str,
+    session_state_path: str,
+    conflicts: list[FileConflict],
+) -> dict[str, object]:
+    """Build the one bounded producer shape admitted by coordinator replay."""
+
+    _require_bounded_string(
+        execution_id,
+        field_name="execution_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_id,
+        field_name="session_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_scope_id,
+        field_name="session_scope_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_state_path,
+        field_name="session_state_path",
+        max_chars=_MAX_COORDINATOR_PATH_CHARS,
+    )
+    if type(level_number) is not int or level_number < 1:
+        raise ValueError("coordinator level_number is invalid")
+    if type(conflicts) is not list or not conflicts:
+        raise ValueError("coordinator conflict population is invalid")
+    validated_conflicts = [_validate_file_conflict(conflict) for conflict in conflicts]
+    return {
+        "schema_version": 1,
+        "execution_id": execution_id,
+        "session_id": session_id,
+        "scope": "level",
+        "session_role": "coordinator",
+        "stage_index": level_number - 1,
+        "level_number": level_number,
+        "session_scope_id": session_scope_id,
+        "session_state_path": session_state_path,
+        "conflict_count": len(validated_conflicts),
+        "conflicts": [
+            {
+                "file_path": conflict.file_path,
+                "ac_indices": list(conflict.ac_indices),
+            }
+            for conflict in validated_conflicts
+        ],
+    }
+
+
+def validate_coordinator_started_payload(
+    payload: object,
+    *,
+    execution_id: str,
+    session_id: str,
+    level_number: int,
+    session_scope_id: str,
+    session_state_path: str,
+    expected_conflicts: tuple[FileConflict, ...],
+) -> None:
+    """Validate the complete started population without open-ended traversal."""
+
+    _require_bounded_string(
+        execution_id,
+        field_name="execution_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_id,
+        field_name="session_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_scope_id,
+        field_name="session_scope_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        session_state_path,
+        field_name="session_state_path",
+        max_chars=_MAX_COORDINATOR_PATH_CHARS,
+    )
+    if type(level_number) is not int or level_number < 1 or type(expected_conflicts) is not tuple:
+        raise ValueError("current coordinator owner is invalid")
+
+    expected_keys = frozenset(
+        {
+            "schema_version",
+            "execution_id",
+            "session_id",
+            "scope",
+            "session_role",
+            "stage_index",
+            "level_number",
+            "session_scope_id",
+            "session_state_path",
+            "conflict_count",
+            "conflicts",
+        }
+    )
+    if not _mapping_has_exact_keys(payload, expected_keys):
+        raise ValueError("coordinator started fields do not match schema v1")
+    assert isinstance(payload, Mapping)
+    expected_values = {
+        "schema_version": 1,
+        "execution_id": execution_id,
+        "session_id": session_id,
+        "scope": "level",
+        "session_role": "coordinator",
+        "stage_index": level_number - 1,
+        "level_number": level_number,
+        "session_scope_id": session_scope_id,
+        "session_state_path": session_state_path,
+        "conflict_count": len(expected_conflicts),
+    }
+    for key, expected in expected_values.items():
+        value = payload.get(key)
+        if type(value) is not type(expected) or value != expected:
+            raise ValueError(f"coordinator started {key} drifted from its owner")
+
+    raw_conflicts = payload.get("conflicts")
+    if type(raw_conflicts) is not list or len(raw_conflicts) != len(expected_conflicts):
+        raise ValueError("coordinator started conflict population drifted")
+    conflict_keys = frozenset({"file_path", "ac_indices"})
+    for raw_conflict, expected in zip(raw_conflicts, expected_conflicts, strict=True):
+        _validate_file_conflict(expected)
+        if not _mapping_has_exact_keys(raw_conflict, conflict_keys):
+            raise ValueError("coordinator started conflict fields are invalid")
+        assert isinstance(raw_conflict, Mapping)
+        raw_indices = raw_conflict.get("ac_indices")
+        if (
+            raw_conflict.get("file_path") != expected.file_path
+            or type(raw_conflict.get("file_path")) is not str
+            or len(raw_conflict["file_path"]) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
+            or type(raw_indices) is not list
+            or len(raw_indices) != len(expected.ac_indices)
+            or any(type(index) is not int or index < 0 for index in raw_indices)
+            or tuple(raw_indices) != expected.ac_indices
+        ):
+            raise ValueError("coordinator started conflict drifted from the current stage")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +397,7 @@ class CoordinatorReview:
 
     def to_artifact_payload(self) -> dict[str, Any]:
         """Build normalized persisted artifact metadata for coordinator output."""
+        _validate_coordinator_review(self)
         return {
             "scope": self.scope,
             "session_role": self.session_role,
@@ -189,6 +412,287 @@ class CoordinatorReview:
             "artifact_type": self.artifact_type,
         }
 
+    def to_completed_event_payload(
+        self,
+        *,
+        execution_id: str,
+        session_id: str,
+    ) -> dict[str, object]:
+        """Build the complete bounded artifact consumed by crash replay."""
+
+        _validate_coordinator_review(self)
+        _require_bounded_string(
+            execution_id,
+            field_name="execution_id",
+            max_chars=_MAX_COORDINATOR_ID_CHARS,
+        )
+        _require_bounded_string(
+            session_id,
+            field_name="session_id",
+            max_chars=_MAX_COORDINATOR_ID_CHARS,
+        )
+        return {
+            "schema_version": 1,
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "coordinator_session_id": self.session_id,
+            **self.to_artifact_payload(),
+            "conflicts_detected": [
+                {
+                    "file_path": conflict.file_path,
+                    "ac_indices": list(conflict.ac_indices),
+                    "resolved": conflict.resolved,
+                    "resolution_description": conflict.resolution_description,
+                }
+                for conflict in self.conflicts_detected
+            ],
+            "review_summary": self.review_summary,
+            "fixes_applied": list(self.fixes_applied),
+            "warnings_for_next_level": list(self.warnings_for_next_level),
+            "duration_seconds": self.duration_seconds,
+        }
+
+    @classmethod
+    def from_artifact_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        level_number: int,
+        expected_conflicts: tuple[FileConflict, ...],
+        execution_id: str,
+        session_id: str,
+        session_scope_id: str,
+        session_state_path: str,
+    ) -> CoordinatorReview:
+        """Restore one exact completed coordinator effect from durable data.
+
+        Coordinator reconciliation can mutate the workspace, so replay cannot
+        reinterpret a partial or loosely-shaped artifact.  This parser admits
+        only the closed producer schema and binds the artifact to the current
+        level, conflict population, and deterministic runtime scope.
+        """
+
+        _require_bounded_string(
+            execution_id,
+            field_name="execution_id",
+            max_chars=_MAX_COORDINATOR_ID_CHARS,
+        )
+        _require_bounded_string(
+            session_id,
+            field_name="session_id",
+            max_chars=_MAX_COORDINATOR_ID_CHARS,
+        )
+        _require_bounded_string(
+            session_scope_id,
+            field_name="session_scope_id",
+            max_chars=_MAX_COORDINATOR_ID_CHARS,
+        )
+        _require_bounded_string(
+            session_state_path,
+            field_name="session_state_path",
+            max_chars=_MAX_COORDINATOR_PATH_CHARS,
+        )
+        if (
+            type(level_number) is not int
+            or level_number < 1
+            or type(expected_conflicts) is not tuple
+        ):
+            raise ValueError("current coordinator owner is invalid")
+        for conflict in expected_conflicts:
+            _validate_file_conflict(conflict)
+
+        expected_keys = frozenset(
+            {
+                "schema_version",
+                "execution_id",
+                "session_id",
+                "coordinator_session_id",
+                "scope",
+                "session_role",
+                "stage_index",
+                "level_number",
+                "session_scope_id",
+                "session_state_path",
+                "artifact_scope",
+                "artifact_owner",
+                "artifact_owner_id",
+                "artifact",
+                "artifact_type",
+                "conflicts_detected",
+                "review_summary",
+                "fixes_applied",
+                "warnings_for_next_level",
+                "duration_seconds",
+            }
+        )
+        if not _mapping_has_exact_keys(payload, expected_keys):
+            raise ValueError("coordinator artifact fields do not match schema v1")
+
+        def require_exact(key: str, expected: object) -> None:
+            value = payload.get(key)
+            if type(value) is not type(expected) or value != expected:
+                raise ValueError(f"coordinator artifact {key} does not match its owner")
+
+        require_exact("schema_version", 1)
+        require_exact("execution_id", execution_id)
+        require_exact("session_id", session_id)
+        require_exact("scope", "level")
+        require_exact("session_role", "coordinator")
+        require_exact("stage_index", level_number - 1)
+        require_exact("level_number", level_number)
+        require_exact("session_scope_id", session_scope_id)
+        require_exact("session_state_path", session_state_path)
+        require_exact("artifact_scope", "level")
+        require_exact("artifact_owner", "coordinator")
+        require_exact("artifact_owner_id", session_scope_id)
+        require_exact("artifact_type", "coordinator_review")
+
+        raw_conflicts = payload.get("conflicts_detected")
+        if type(raw_conflicts) is not list or len(raw_conflicts) != len(expected_conflicts):
+            raise ValueError("coordinator artifact conflict population drifted")
+        restored_conflicts: list[FileConflict] = []
+        for raw_conflict, expected_conflict in zip(
+            raw_conflicts,
+            expected_conflicts,
+            strict=True,
+        ):
+            if not _mapping_has_exact_keys(
+                raw_conflict,
+                frozenset(
+                    {
+                        "file_path",
+                        "ac_indices",
+                        "resolved",
+                        "resolution_description",
+                    }
+                ),
+            ):
+                raise ValueError("coordinator artifact conflict fields are invalid")
+            assert isinstance(raw_conflict, Mapping)
+            file_path = raw_conflict.get("file_path")
+            raw_indices = raw_conflict.get("ac_indices")
+            resolved = raw_conflict.get("resolved")
+            resolution = raw_conflict.get("resolution_description")
+            if (
+                type(file_path) is not str
+                or not file_path
+                or len(file_path) > _MAX_COORDINATOR_CONFLICT_PATH_CHARS
+                or file_path != expected_conflict.file_path
+            ):
+                raise ValueError("coordinator artifact conflict path is invalid")
+            if (
+                type(raw_indices) is not list
+                or len(raw_indices) != len(expected_conflict.ac_indices)
+                or any(type(index) is not int or index < 0 for index in raw_indices)
+                or tuple(raw_indices) != expected_conflict.ac_indices
+            ):
+                raise ValueError("coordinator artifact conflict indices are invalid")
+            if (
+                type(resolved) is not bool
+                or type(resolution) is not str
+                or len(resolution) > _MAX_COORDINATOR_ITEM_CHARS
+            ):
+                raise ValueError("coordinator artifact conflict result is invalid")
+            restored_conflicts.append(
+                FileConflict(
+                    file_path=file_path,
+                    ac_indices=tuple(raw_indices),
+                    resolved=resolved,
+                    resolution_description=resolution,
+                )
+            )
+
+        duration = payload.get("duration_seconds")
+        if (
+            not isinstance(duration, int | float)
+            or isinstance(duration, bool)
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
+            raise ValueError("coordinator artifact duration_seconds is invalid")
+
+        return cls(
+            level_number=level_number,
+            conflicts_detected=tuple(restored_conflicts),
+            review_summary=_require_bounded_string(
+                payload.get("review_summary"),
+                field_name="review_summary",
+                max_chars=_MAX_COORDINATOR_SUMMARY_CHARS,
+            )
+            or "",
+            fixes_applied=_require_bounded_string_tuple(
+                payload.get("fixes_applied"),
+                field_name="fixes_applied",
+            ),
+            warnings_for_next_level=_require_bounded_string_tuple(
+                payload.get("warnings_for_next_level"),
+                field_name="warnings_for_next_level",
+            ),
+            duration_seconds=float(duration),
+            session_id=_require_bounded_string(
+                payload.get("coordinator_session_id"),
+                field_name="coordinator_session_id",
+                max_chars=_MAX_COORDINATOR_ID_CHARS,
+                optional=True,
+            ),
+            session_scope_id=session_scope_id,
+            session_state_path=session_state_path,
+            final_output=_require_bounded_string(
+                payload.get("artifact"),
+                field_name="artifact",
+                max_chars=_MAX_COORDINATOR_ARTIFACT_CHARS,
+            )
+            or "",
+        )
+
+
+def _validate_coordinator_review(review: object) -> CoordinatorReview:
+    """Validate every field persisted by the completed-event producer."""
+
+    if not isinstance(review, CoordinatorReview):
+        raise ValueError("coordinator review must use the closed review schema")
+    if (
+        type(review.level_number) is not int
+        or review.level_number < 1
+        or type(review.conflicts_detected) is not tuple
+        or type(review.fixes_applied) is not tuple
+        or len(review.fixes_applied) > _MAX_COORDINATOR_STRING_ITEMS
+        or type(review.warnings_for_next_level) is not tuple
+        or len(review.warnings_for_next_level) > _MAX_COORDINATOR_STRING_ITEMS
+        or type(review.review_summary) is not str
+        or len(review.review_summary) > _MAX_COORDINATOR_SUMMARY_CHARS
+        or type(review.final_output) is not str
+        or len(review.final_output) > _MAX_COORDINATOR_ARTIFACT_CHARS
+        or any(
+            type(item) is not str or len(item) > _MAX_COORDINATOR_ITEM_CHARS
+            for item in (*review.fixes_applied, *review.warnings_for_next_level)
+        )
+        or not isinstance(review.duration_seconds, int | float)
+        or isinstance(review.duration_seconds, bool)
+        or not math.isfinite(review.duration_seconds)
+        or review.duration_seconds < 0
+    ):
+        raise ValueError("coordinator review exceeds its durable bounds")
+    for conflict in review.conflicts_detected:
+        _validate_file_conflict(conflict)
+    _require_bounded_string(
+        review.session_id,
+        field_name="coordinator_session_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+        optional=True,
+    )
+    _require_bounded_string(
+        review.artifact_owner_id,
+        field_name="artifact_owner_id",
+        max_chars=_MAX_COORDINATOR_ID_CHARS,
+    )
+    _require_bounded_string(
+        review.artifact_state_path,
+        field_name="session_state_path",
+        max_chars=_MAX_COORDINATOR_PATH_CHARS,
+    )
+    return review
+
 
 class LevelCoordinator:
     """Coordinates between parallel execution levels.
@@ -202,6 +706,7 @@ class LevelCoordinator:
         adapter: AgentRuntime,
         inherited_runtime_handle: RuntimeHandle | None = None,
         task_cwd: str | None = None,
+        reasoning_effort: object = _REASONING_EFFORT_UNSET,
     ) -> None:
         """Initialize coordinator.
 
@@ -209,6 +714,8 @@ class LevelCoordinator:
             adapter: Agent runtime for conflict resolution sessions.
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions.
+            reasoning_effort: Frozen execution-contract effort. Omitting it
+                        preserves standalone coordinator config lookup behavior.
         """
         self._adapter = adapter
         approval_mode = getattr(adapter, "permission_mode", None)
@@ -226,9 +733,15 @@ class LevelCoordinator:
         # is a top-level unit (never a decomposed child), so it runs at the base
         # level on runtimes that enforce it. None ⇒ dormant. No effort_routed
         # event is emitted here because a review is not an acceptance criterion.
-        from ouroboros.config import get_agent_reasoning_effort
+        if reasoning_effort is _REASONING_EFFORT_UNSET:
+            from ouroboros.config import get_agent_reasoning_effort
 
-        self._reasoning_effort = get_agent_reasoning_effort()
+            resolved_effort: str | None = get_agent_reasoning_effort()
+        elif reasoning_effort is None or type(reasoning_effort) is str:
+            resolved_effort = reasoning_effort
+        else:
+            raise TypeError("reasoning_effort must be a string or None")
+        self._reasoning_effort = resolved_effort
 
     def _build_level_runtime_handle(
         self,
@@ -424,12 +937,21 @@ class LevelCoordinator:
                         level_number,
                         runtime_handle,
                     )
-                if message.resume_handle is not None and message.resume_handle.native_session_id:
-                    session_id = message.resume_handle.native_session_id
-                elif message.data.get("session_id"):
-                    session_id = message.data["session_id"]
+                native_session_id = (
+                    message.resume_handle.native_session_id
+                    if message.resume_handle is not None
+                    else None
+                )
+                metadata_session_id = message.data.get("session_id")
+                for candidate_session_id in (native_session_id, metadata_session_id):
+                    if (
+                        type(candidate_session_id) is str
+                        and 0 < len(candidate_session_id) <= _MAX_COORDINATOR_ID_CHARS
+                    ):
+                        session_id = candidate_session_id
+                        break
                 if message.is_final:
-                    final_text = message.content
+                    final_text = message.content[:_MAX_COORDINATOR_ARTIFACT_CHARS]
             self._remember_level_runtime_handle(execution_id, level_number, runtime_handle)
 
         except Exception as e:
@@ -440,15 +962,16 @@ class LevelCoordinator:
             )
             self._remember_level_runtime_handle(execution_id, level_number, runtime_handle)
             duration = (datetime.now(UTC) - start_time).total_seconds()
+            failure_text = f"Coordinator review failed: {e}"[:_MAX_COORDINATOR_SUMMARY_CHARS]
             return CoordinatorReview(
                 level_number=level_number,
                 conflicts_detected=tuple(conflicts),
-                review_summary=f"Coordinator review failed: {e}",
+                review_summary=failure_text,
                 duration_seconds=duration,
                 session_scope_id=runtime_scope.aggregate_id,
                 session_state_path=runtime_scope.state_path,
                 session_id=session_id,
-                final_output=f"Coordinator review failed: {e}",
+                final_output=failure_text,
                 messages=tuple(messages),
             )
 
@@ -492,23 +1015,29 @@ def _collect_file_modifications(
         result: AC execution result to scan.
         file_to_acs: Accumulator mapping file_path → ac_indices.
     """
-    # Check direct messages for Write/Edit tool calls
-    for msg in result.messages:
-        if msg.tool_name in ("Write", "Edit"):
-            tool_input = msg.data.get("tool_input", {})
-            file_path = tool_input.get("file_path")
-            if file_path:
-                file_to_acs.setdefault(file_path, set()).add(result.ac_index)
+    # Every durable node stores only its local canonical file projection. Walk
+    # the complete tree for both live transcripts and replayed projections so a
+    # grandchild has identical coordinator semantics before and after resume.
+    root_ac_index = result.ac_index
 
-    # Recurse into Sub-AC results
-    for sub_result in result.sub_results:
-        # Sub-ACs inherit the parent AC index for conflict tracking
-        for msg in sub_result.messages:
-            if msg.tool_name in ("Write", "Edit"):
+    def visit(current: ACExecutionResult) -> None:
+        if current.conflict_files is not None:
+            for file_path in current.conflict_files:
+                file_to_acs.setdefault(file_path, set()).add(root_ac_index)
+        else:
+            for msg in current.messages:
+                if msg.tool_name not in ("Write", "Edit"):
+                    continue
                 tool_input = msg.data.get("tool_input", {})
+                if not isinstance(tool_input, Mapping):
+                    continue
                 file_path = tool_input.get("file_path")
-                if file_path:
-                    file_to_acs.setdefault(file_path, set()).add(result.ac_index)
+                if isinstance(file_path, str) and file_path:
+                    file_to_acs.setdefault(file_path, set()).add(root_ac_index)
+        for sub_result in current.sub_results:
+            visit(sub_result)
+
+    visit(result)
 
 
 def _build_review_prompt(
@@ -585,35 +1114,56 @@ def _parse_review_response(
     Returns:
         CoordinatorReview populated from the parsed response.
     """
+    bounded_response = response_text[:_MAX_COORDINATOR_ARTIFACT_CHARS]
     review_summary = ""
     fixes_applied: list[str] = []
     warnings: list[str] = []
     resolved_files: set[str] = set()
 
     # Try to extract JSON from the response
-    json_match = re.search(r"```json\s*\n(.*?)\n```", response_text, re.DOTALL)
+    json_match = re.search(r"```json\s*\n(.*?)\n```", bounded_response, re.DOTALL)
     if not json_match:
         # Try bare JSON object
-        json_match = re.search(r"\{[^{}]*\}", response_text, re.DOTALL)
+        json_match = re.search(r"\{[^{}]*\}", bounded_response, re.DOTALL)
 
     if json_match:
         try:
             data = json.loads(
                 json_match.group(1) if "```" in json_match.group() else json_match.group()
             )
-            review_summary = data.get("review_summary", "")
-            fixes_applied = data.get("fixes_applied", [])
-            warnings = data.get("warnings_for_next_level", [])
-            resolved_files = set(data.get("conflicts_resolved", []))
-        except (json.JSONDecodeError, IndexError):
+            raw_summary = data.get("review_summary", "")
+            raw_fixes = data.get("fixes_applied", [])
+            raw_warnings = data.get("warnings_for_next_level", [])
+            raw_resolved = data.get("conflicts_resolved", [])
+            if type(raw_summary) is str:
+                review_summary = raw_summary[:_MAX_COORDINATOR_SUMMARY_CHARS]
+            if type(raw_fixes) is list:
+                fixes_applied = [
+                    item[:_MAX_COORDINATOR_ITEM_CHARS]
+                    for item in raw_fixes[:_MAX_COORDINATOR_STRING_ITEMS]
+                    if type(item) is str
+                ]
+            if type(raw_warnings) is list:
+                warnings = [
+                    item[:_MAX_COORDINATOR_ITEM_CHARS]
+                    for item in raw_warnings[:_MAX_COORDINATOR_STRING_ITEMS]
+                    if type(item) is str
+                ]
+            if type(raw_resolved) is list:
+                resolved_files = {
+                    item
+                    for item in raw_resolved
+                    if type(item) is str and 0 < len(item) <= _MAX_COORDINATOR_CONFLICT_PATH_CHARS
+                }
+        except (AttributeError, json.JSONDecodeError, IndexError):
             log.warning(
                 "coordinator.parse_failed",
-                response_preview=response_text[:200],
+                response_preview=bounded_response[:200],
             )
 
     # Fallback: use raw text as summary
     if not review_summary:
-        review_summary = response_text[:500].strip() if response_text else "No review output"
+        review_summary = bounded_response[:500].strip() if bounded_response else "No review output"
 
     # Mark conflicts as resolved based on Coordinator's report
     updated_conflicts: list[FileConflict] = []
@@ -645,5 +1195,7 @@ __all__ = [
     "CoordinatorReview",
     "FileConflict",
     "LevelCoordinator",
+    "build_coordinator_started_payload",
     "derive_coordinator_tools",
+    "validate_coordinator_started_payload",
 ]

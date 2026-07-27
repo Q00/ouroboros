@@ -8,6 +8,7 @@ honest mode — that is what these tests pin.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -110,6 +111,44 @@ class _AdvisedRuntime:
         )
 
 
+class _CancelledRuntime(_EnforcedRuntime):
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        raise asyncio.CancelledError
+        yield AgentMessage(type="result", content="unreachable", data={})
+
+
+class _FreshHandleRuntime(_EnforcedRuntime):
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        # Simulate runtimes that return a new handle object on first entry and
+        # do not copy orchestrator metadata themselves.
+        yield AgentMessage(
+            type="result",
+            content="[TASK_COMPLETE]",
+            data={"subtype": "success"},
+            resume_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id="fresh-provider-session",
+                cwd=self.working_directory,
+            ),
+        )
+
+
 def _effort_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.effort_routed"]
 
@@ -118,12 +157,17 @@ def _investment_events(events: list) -> list:
     return [e for e in events if getattr(e, "type", None) == "execution.ac.investment_assessed"]
 
 
+def _capsule_events(events: list) -> list:
+    return [e for e in events if getattr(e, "type", None) == "execution.ac.capsule.compiled"]
+
+
 async def _run_one_ac(
     executor: ParallelACExecutor,
     *,
     is_sub_ac: bool,
     retry_attempt: int = 0,
     investment_spec: InvestmentSpec | None = None,
+    sibling_acs: list[tuple[int | None, str]] | None = None,
 ):
     return await executor._execute_atomic_ac(
         ac_index=1,
@@ -140,6 +184,7 @@ async def _run_one_ac(
         sub_ac_index=0 if is_sub_ac else None,
         retry_attempt=retry_attempt,
         investment_spec=investment_spec,
+        sibling_acs=sibling_acs,
     )
 
 
@@ -261,6 +306,90 @@ async def test_authorized_low_investment_lowers_effort_and_records_exact_inputs(
 
 
 @pytest.mark.asyncio
+async def test_capsule_authority_fingerprint_changes_with_investment_spec() -> None:
+    """Different investment authority must produce different durable capsules."""
+    low_store, low_events = _capturing_event_store()
+    high_store, high_events = _capturing_event_store()
+    low_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=low_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+    high_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=high_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        reasoning_effort="high",
+    )
+
+    await _run_one_ac(
+        low_executor,
+        is_sub_ac=False,
+        investment_spec=InvestmentSpec(
+            difficulty="low",
+            stakes="low",
+            provenance="measured",
+            confidence="high",
+        ),
+    )
+    await _run_one_ac(
+        high_executor,
+        is_sub_ac=False,
+        investment_spec=InvestmentSpec(
+            difficulty="high",
+            stakes="high",
+            provenance="declared",
+            confidence="high",
+        ),
+    )
+
+    low_capsule = _capsule_events(low_events)
+    high_capsule = _capsule_events(high_events)
+    assert len(low_capsule) == len(high_capsule) == 1
+    assert low_capsule[0].data["capsule_fingerprint"] != high_capsule[0].data["capsule_fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_capsule_authority_fingerprint_changes_with_sibling_prompt_scope() -> None:
+    first_store, first_events = _capturing_event_store()
+    second_store, second_events = _capturing_event_store()
+    first_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=first_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    second_executor = ParallelACExecutor(
+        adapter=_EnforcedRuntime(),
+        event_store=second_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    await _run_one_ac(
+        first_executor,
+        is_sub_ac=False,
+        sibling_acs=[(0, "Implement the API"), (1, "Implement the CLI")],
+    )
+    await _run_one_ac(
+        second_executor,
+        is_sub_ac=False,
+        sibling_acs=[(0, "Implement the API"), (1, "Write the deployment docs")],
+    )
+
+    first_capsule = _capsule_events(first_events)
+    second_capsule = _capsule_events(second_events)
+    assert len(first_capsule) == len(second_capsule) == 1
+    assert (
+        first_capsule[0].data["capsule_fingerprint"]
+        != second_capsule[0].data["capsule_fingerprint"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_high_stakes_short_ac_raises_to_high_effort() -> None:
     store, events = _capturing_event_store()
     runtime = _EnforcedRuntime()
@@ -306,6 +435,64 @@ async def test_advised_runtime_records_advised_and_does_not_pass_kwarg() -> None
     assert len(routed) == 1
     assert routed[0].data["effort_mode"] == "advised"
     assert routed[0].data["effort_level"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_seals_dispatch_boundary() -> None:
+    store, events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_CancelledRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_one_ac(executor, is_sub_ac=False)
+
+    sealed = [event for event in events if event.type == "execution.ac.dispatch.sealed"]
+    assert len(sealed) == 1
+    assert "cancelled" in sealed[0].data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_runtime_handle_inherits_pre_dispatch_authority() -> None:
+    store, events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_FreshHandleRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+
+    await _run_one_ac(executor, is_sub_ac=False)
+
+    started = next(event for event in events if event.type == "execution.session.started")
+    runtime_payload = started.data["runtime"]
+    assert runtime_payload["metadata"]["ac_capsule_fingerprint"].startswith("sha256:")
+    assert len(runtime_payload["metadata"]["ac_dispatch_id"]) == 32
+    assert (
+        runtime_payload["metadata"]["process_local_resume_nonce"]
+        == executor._process_local_resume_nonce
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_seal_failure_is_fail_closed() -> None:
+    """Cancellation must surface a seal failure instead of leaving replayable state."""
+    store, _events = _capturing_event_store()
+    executor = ParallelACExecutor(
+        adapter=_CancelledRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    executor._event_emitter.emit_ac_dispatch_sealed = AsyncMock(
+        side_effect=RuntimeError("ledger unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="cancellation seal failed"):
+        await _run_one_ac(executor, is_sub_ac=False)
 
 
 @pytest.mark.asyncio

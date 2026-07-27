@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
 from ouroboros.core.session_signal import (
     SessionSignal,
     SessionSignalCapabilities,
@@ -21,7 +22,9 @@ from ouroboros.core.session_signal import (
 )
 from ouroboros.core.session_signal_projection import project_session_signal
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.model_routing import ModelRouter
 from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
     ParallelACExecutor,
     _bounded_session_signal_runtime_reply,
 )
@@ -83,6 +86,39 @@ class _TwoTurnRuntime:
             type="result",
             content="[TASK_COMPLETE] redirected",
             data={"subtype": "success"},
+            resume_handle=handle,
+        )
+
+
+class _QuotaEndingRuntime(_TwoTurnRuntime):
+    async def execute_task(self, **kwargs: Any):
+        prompt = str(kwargs["prompt"])
+        resume_handle = kwargs.get("resume_handle")
+        self.prompts.append(prompt)
+        if len(self.prompts) > 1:  # pragma: no cover - asserted by the regression
+            raise AssertionError("quota pause dispatched a SessionSignal follow-up")
+        handle = RuntimeHandle(
+            backend="codex_mcp",
+            kind="agent_runtime",
+            native_session_id="thread_quota_pause",
+            cwd=self.working_directory,
+            metadata=(dict(resume_handle.metadata) if resume_handle is not None else {}),
+        )
+        self.first_turn_started.set()
+        yield AgentMessage(
+            type="assistant",
+            content="Work reached the provider quota boundary.",
+            resume_handle=handle,
+        )
+        await self.release_first_turn.wait()
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Retry after 2 hours.",
+            data={
+                "subtype": "error",
+                "error_type": "UsageLimitError",
+                "retry_after_seconds": 7200,
+            },
             resume_handle=handle,
         )
 
@@ -245,9 +281,29 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
         result = await asyncio.wait_for(execution_task, timeout=5)
         signal_events = await store.replay("session_signal", signal.signal_id)
         projection = project_session_signal(signal_events)
+        execution_events = await store.replay("execution", scope_id)
+        dispatch_events = [
+            event for event in execution_events if event.type == "execution.ac.attempt.dispatched"
+        ]
+        follow_up_dispatch = dispatch_events[-1]
+        follow_up_dispatch_id = follow_up_dispatch.data["ac_dispatch_id"]
+        completed_event = next(
+            event
+            for event in reversed(execution_events)
+            if event.type == "execution.session.completed"
+        )
 
         assert result.success is True
         assert len(runtime.prompts) == 2
+        assert len(dispatch_events) == 2
+        assert follow_up_dispatch.data["dispatch_kind"] == "session_signal_followup"
+        assert (
+            follow_up_dispatch.data["runtime"]["metadata"]["ac_dispatch_id"]
+            == follow_up_dispatch_id
+        )
+        assert completed_event.data["runtime"]["metadata"]["ac_dispatch_id"] == (
+            follow_up_dispatch_id
+        )
         assert projection.state is SessionSignalState.COMPLETED
         assert projection.effective_mode is SessionSignalMode.AFTER_TURN
         assert [event.type for event in signal_events] == [
@@ -258,6 +314,282 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
             "control.session.signal.applied",
             "control.session.signal.completed",
         ]
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_ending_turn_rejects_queued_signal_before_follow_up_provider(
+    tmp_path: Path,
+) -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub(event_store=store)
+    runtime = _QuotaEndingRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+    signal = SessionSignal(
+        signal_id="sig_quota_boundary",
+        target_session_scope_id="exec_quota_boundary_ac_1",
+        target_session_attempt_id="exec_quota_boundary_ac_1_attempt_1",
+        expected_execution_id="exec_quota_boundary",
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Apply this only after a non-paused provider turn.",
+        source=SessionSignalSource.USER,
+        reason="Prove quota owns the next-effect boundary.",
+        idempotency_key="quota_boundary_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Stop exactly at quota",
+            session_id="orch_quota_boundary",
+            execution_id="exec_quota_boundary",
+            tools=[],
+            system_prompt="test",
+            seed_goal="Never dispatch after a pause boundary",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        signal_events = await store.replay("session_signal", signal.signal_id)
+
+        assert result.success is False
+        assert len(runtime.prompts) == 1
+        assert "Usage limit reached" in result.messages[-1].content
+        assert project_session_signal(signal_events).state is SessionSignalState.REJECTED
+        assert signal_events[-1].data["rejection_code"] == "target_ended_before_boundary"
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_follow_up_route_drift_is_durably_terminal_before_provider(
+    tmp_path: Path,
+) -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub(event_store=store)
+    runtime = _TwoTurnRuntime(tmp_path)
+    router = ModelRouter(
+        tier_models={
+            "frugal": "codex-mini",
+            "standard": "codex-standard",
+            "frontier": "codex-frontier",
+        },
+        runtime_backend="codex_mcp",
+        child_tier="frugal",
+        base_tier="standard",
+        escalation_retry_threshold=2,
+    )
+    economics = EconomicsConfig(
+        default_tier="frugal",
+        escalation_threshold=2,
+        tiers={
+            tier: TierConfig(
+                cost_factor=cost,
+                models=[ModelConfig(provider="openai", model=model)],
+            )
+            for tier, cost, model in (
+                ("frugal", 1, "codex-mini"),
+                ("standard", 10, "codex-standard"),
+                ("frontier", 30, "codex-frontier"),
+            )
+        },
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+        model_router=router,
+        route_economics=economics,
+    )
+    original_append = store.append
+    dispatch_count = 0
+
+    async def _append_and_drift_after_follow_up(event) -> None:
+        nonlocal dispatch_count
+        await original_append(event)
+        if event.type == "execution.ac.attempt.dispatched":
+            dispatch_count += 1
+            if dispatch_count == 2:
+                executor._model_router = replace(router, base_tier="frontier")
+
+    store.append = _append_and_drift_after_follow_up  # type: ignore[method-assign]
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+    execution_id = "exec_synapse_route_drift"
+    scope_id = f"{execution_id}_ac_1"
+    attempt_id = f"{scope_id}_attempt_1"
+    signal = SessionSignal(
+        signal_id="sig_route_drift",
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Apply only through current route authority.",
+        source=SessionSignalSource.USER,
+        reason="Exercise the follow-up provider boundary.",
+        idempotency_key="route_drift_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Verify route-bound follow-up",
+            session_id="orch_synapse_route_drift",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Never reuse stale route authority",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        queued = await mailbox.request(signal)
+        assert queued.state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        execution_events = await store.replay("execution", scope_id)
+        signal_events = await store.replay("session_signal", signal.signal_id)
+
+        assert result.outcome is ACExecutionOutcome.BLOCKED
+        assert len(runtime.prompts) == 1
+        assert (
+            len(
+                [
+                    event
+                    for event in execution_events
+                    if event.type == "execution.ac.attempt.dispatched"
+                ]
+            )
+            == 2
+        )
+        assert "execution.ac.dispatch.sealed" in {event.type for event in execution_events}
+        assert "execution.session.failed" in {event.type for event in execution_events}
+        assert project_session_signal(signal_events).state is SessionSignalState.REJECTED
+        assert executor._ac_runtime_handles == {}
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_follow_up_dispatch_append_failure_keeps_last_durable_runtime_handle(
+    tmp_path: Path,
+) -> None:
+    """A rejected follow-up append must not terminalize a phantom dispatch handle."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    original_append = store.append
+    dispatch_append_count = 0
+
+    async def _append_with_follow_up_failure(event) -> None:
+        nonlocal dispatch_append_count
+        if event.type == "execution.ac.attempt.dispatched":
+            dispatch_append_count += 1
+            if dispatch_append_count == 2:
+                raise RuntimeError("follow-up dispatch append failed")
+        await original_append(event)
+
+    store.append = _append_with_follow_up_failure  # type: ignore[method-assign]
+    hub = SessionSignalHub(event_store=store)
+    runtime = _TwoTurnRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    target_resolver = EventStoreSessionSignalTargetResolver(
+        event_store=store,
+        capabilities_by_backend={runtime.runtime_backend: runtime.capabilities.session_signals},
+    )
+    mailbox = SessionSignalMailbox(event_store=store, target_resolver=target_resolver)
+    execution_id = "exec_synapse_follow_up_failure"
+    scope_id = f"{execution_id}_ac_1"
+    attempt_id = f"{scope_id}_attempt_1"
+    signal = SessionSignal(
+        signal_id=derive_session_signal_id(
+            expected_execution_id=execution_id,
+            target_session_scope_id=scope_id,
+            target_session_attempt_id=attempt_id,
+            idempotency_key="follow_up_append_failure",
+        ),
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Make the confirmation copy explicit.",
+        source=SessionSignalSource.USER,
+        reason="The user clarified the desired UX.",
+        idempotency_key="follow_up_append_failure",
+    )
+
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement the confirmation interaction",
+            session_id="orch_synapse_follow_up_failure",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Deliver a friendly confirmation UX",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        queued = await mailbox.request(signal)
+        assert queued.state is SessionSignalState.QUEUED
+        runtime.release_first_turn.set()
+
+        result = await asyncio.wait_for(execution_task, timeout=5)
+        execution_events = await store.replay("execution", scope_id)
+        dispatch_events = [
+            event for event in execution_events if event.type == "execution.ac.attempt.dispatched"
+        ]
+        lifecycle_events = [
+            event
+            for event in execution_events
+            if event.type
+            in {
+                "execution.session.started",
+                "execution.session.failed",
+                "execution.session.completed",
+            }
+        ]
+
+        assert result.success is False
+        assert len(dispatch_events) == 1
+        durable_dispatch_id = dispatch_events[0].data["ac_dispatch_id"]
+        assert all(
+            event.data["runtime"]["metadata"]["ac_dispatch_id"] == durable_dispatch_id
+            for event in lifecycle_events
+            if isinstance(event.data.get("runtime"), dict)
+        )
     finally:
         if not execution_task.done():
             execution_task.cancel()

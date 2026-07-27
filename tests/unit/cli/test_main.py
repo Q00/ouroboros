@@ -94,6 +94,57 @@ class TestRunCommands:
         assert "runtime" in result.output.lower()
         assert "hermes" in result.output.lower()
 
+    def test_run_workflow_accepts_legacy_depth_above_durable_replay_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The primary CLI preserves the historical non-negative depth contract."""
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - test\n")
+
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=AsyncMock(),
+        ) as run_orchestrator:
+            result = runner.invoke(
+                app,
+                [
+                    "run",
+                    "workflow",
+                    str(seed_file),
+                    "--max-decomposition-depth",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert run_orchestrator.await_args.kwargs["max_decomposition_depth"] == 5
+
+    def test_zcode_run_accepts_legacy_depth_above_durable_replay_contract(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The Zcode convenience CLI preserves the same compatibility path."""
+
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - test\n")
+
+        with patch("ouroboros.cli.commands.zcode.run_command.workflow") as workflow:
+            result = runner.invoke(
+                app,
+                [
+                    "zcode",
+                    "run",
+                    str(seed_file),
+                    "--max-decomposition-depth",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert workflow.call_args.kwargs["max_decomposition_depth"] == 5
+
     def test_run_resume_help(self) -> None:
         """Test run resume command help."""
         result = runner.invoke(app, ["run", "resume", "--help"])

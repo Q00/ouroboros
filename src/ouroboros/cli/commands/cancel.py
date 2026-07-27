@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import inspect
 import os
 from typing import Annotated
 from uuid import uuid4
@@ -33,8 +34,10 @@ from ouroboros.events.hitl import (
 )
 from ouroboros.orchestrator.execution_authority import (
     ProcessLocalCancellationDisposition,
+    collect_cancellation_acceptance_plan,
     request_process_local_cancellation,
 )
+from ouroboros.orchestrator.session import ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY
 
 app = typer.Typer(
     name="cancel",
@@ -182,11 +185,28 @@ async def _cancel_session(
         return None
 
     # Historical sessions have no live Foundation A capability to coordinate.
-    cancel_result = await repo.mark_cancelled(
-        session_id=session_id,
-        reason=reason,
-        cancelled_by="user",
+    raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
+    expected_root_indices = (
+        tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
     )
+    try:
+        acceptance_finalizations = await collect_cancellation_acceptance_plan(
+            session_id=session_id,
+            execution_id=tracker.execution_id,
+            event_store=event_store,
+            expected_root_indices=expected_root_indices,
+        )
+    except Exception as exc:
+        print_error(f"Failed to build cancellation acceptance plan: {exc}")
+        return None
+    mark_cancelled_kwargs = {
+        "session_id": session_id,
+        "reason": reason,
+        "cancelled_by": "user",
+    }
+    if "acceptance_finalizations" in inspect.signature(repo.mark_cancelled).parameters:
+        mark_cancelled_kwargs["acceptance_finalizations"] = acceptance_finalizations
+    cancel_result = await repo.mark_cancelled(**mark_cancelled_kwargs)
 
     if cancel_result.is_err:
         print_error(f"Failed to cancel session {session_id}: {cancel_result.error}")
@@ -300,11 +320,31 @@ async def _cancel_all_running(
             continue
 
         # Historical sessions have no live Foundation A capability to coordinate.
-        cancel_result = await repo.mark_cancelled(
-            session_id=session_id,
-            reason=reason,
-            cancelled_by="user",
+        raw_root_indices = tracker.progress.get(ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY)
+        expected_root_indices = (
+            tuple(raw_root_indices) if isinstance(raw_root_indices, (list, tuple)) else None
         )
+        try:
+            acceptance_finalizations = await collect_cancellation_acceptance_plan(
+                session_id=session_id,
+                execution_id=tracker.execution_id,
+                event_store=event_store,
+                expected_root_indices=expected_root_indices,
+            )
+        except Exception as exc:
+            retryable_failed += 1
+            console.print(
+                f"  [yellow]Retry required:[/] {session_id} (acceptance plan failed: {exc})"
+            )
+            continue
+        mark_cancelled_kwargs = {
+            "session_id": session_id,
+            "reason": reason,
+            "cancelled_by": "user",
+        }
+        if "acceptance_finalizations" in inspect.signature(repo.mark_cancelled).parameters:
+            mark_cancelled_kwargs["acceptance_finalizations"] = acceptance_finalizations
+        cancel_result = await repo.mark_cancelled(**mark_cancelled_kwargs)
 
         if cancel_result.is_ok and cancel_result.value is not False:
             cancelled += 1
