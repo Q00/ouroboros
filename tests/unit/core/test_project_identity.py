@@ -348,6 +348,88 @@ def test_external_dot_git_explicit_owner_joins_direct_linked_and_managed_identit
     assert direct_identity.workspace_path == "packages/app"
 
 
+def test_standard_dot_git_explicit_owner_joins_direct_linked_and_managed_identity(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    common_git = primary / ".git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[core]\n\tbare = false\n\tworktree = {primary}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "generated" / "packages" / "app"
+    generated.mkdir(parents=True)
+
+    direct_identity = resolve_project_identity(primary_workspace)
+    linked_identity = resolve_project_identity(linked_workspace)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked_workspace,
+    )
+
+    assert direct_identity == linked_identity == managed_identity
+    assert direct_identity.project_root == str(primary.resolve())
+    assert direct_identity.workspace_path == "packages/app"
+
+
+def test_real_standard_dot_git_explicit_owner_joins_all_execution_modes(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    generated = tmp_path / "generated" / "packages" / "app"
+
+    _git("init", "-q", str(primary))
+    _git(
+        "-c",
+        "user.name=Project Identity Test",
+        "-c",
+        "user.email=project-identity@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=primary,
+    )
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
+    _git("config", "core.worktree", str(primary), cwd=primary)
+    primary_workspace = primary / "packages" / "app"
+    linked_workspace = linked / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    linked_workspace.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    direct_identity = resolve_project_identity(primary_workspace)
+    linked_identity = resolve_project_identity(linked_workspace)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked_workspace,
+    )
+
+    assert direct_identity == linked_identity == managed_identity
+    assert direct_identity.project_root == str(primary.resolve())
+    assert direct_identity.workspace_path == "packages/app"
+
+
 def test_tilde_core_worktree_is_literal_and_independent_of_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

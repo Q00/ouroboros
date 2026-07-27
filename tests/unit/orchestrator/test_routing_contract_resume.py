@@ -2045,6 +2045,67 @@ def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     assert resumed._project_identity() == managed
 
 
+def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    common_git = primary / ".git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        f"[core]\n\tbare = false\n\tworktree = {primary}\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "managed" / "run-1"
+    (generated / "packages" / "app").mkdir(parents=True)
+    task_workspace = _workspace(
+        durable_id="run-1",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+
+    direct = _runner(cwd=str(primary_workspace))._project_identity()
+    linked_direct = _runner(cwd=str(linked_workspace))._project_identity()
+    original = _runner(task_workspace=task_workspace)
+    managed = original._project_identity()
+
+    assert direct == linked_direct == managed
+    assert managed is not None
+    assert managed.project_root == str(primary.resolve())
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=managed,
+    )
+    resumed = _runner(task_workspace=task_workspace)
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "anchored-standard-dot-git",
+                "seed_id": "seed-routing-contract",
+                **managed.to_event_data(),
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == managed
+
+
 def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     primary_git = primary / ".git"
