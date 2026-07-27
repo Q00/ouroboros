@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Decide whether a pull request body carries a visible issue reference.
+"""Extract the issue numbers a pull request body visibly references.
 
 Per Q00/ouroboros#1777, every non-exempt PR must be traceable to an issue.
 A board audit on 2026-07-28 closed 11 issues, 6 of which were already fully
 implemented on `main` -- the work had landed but no PR linked back.
 
-This script owns the *body* half of that gate. The other half is GitHub's
-own ``closingIssuesReferences``, which the workflow queries first and which
-also covers issues linked through the Development sidebar.
+This script owns one half of that gate: *which numbers does a reader of the
+rendered body actually see?* It deliberately does not decide whether those
+numbers exist or whether they are issues rather than pull requests --
+`#N` is a shared namespace, and only GitHub can resolve it. The workflow
+does that resolution on the numbers reported here, and separately consults
+GitHub's own ``closingIssuesReferences`` for sidebar-linked issues.
 
 Why this is not a one-line grep:
     ``.github/PULL_REQUEST_TEMPLATE.md`` mentions ``#1234``, ``#1256``, and
@@ -16,11 +19,16 @@ Why this is not a one-line grep:
     exactly the PRs it exists to catch. Non-rendered regions must be removed
     before scanning, so the check sees what a reviewer sees.
 
-Stripped before scanning:
+Stripped before scanning, in this order:
     - HTML comments ``<!-- ... -->`` (the template's instructions live here)
+    - raw-text HTML blocks ``<pre>``/``<code>``/``<script>``/``<style>``,
+      content included -- ``<pre>#4242</pre>`` renders as a literal
     - fenced code blocks ``` / ~~~ (sample diffs, logs, shell transcripts)
+    - indented code blocks (four spaces or a tab), e.g. a pasted traceback
     - inline code spans ``` `...` `` (e.g. a literal ``#1234`` in prose)
     - autolinks and URLs (``.../pull/1234#issuecomment-...`` fragments)
+    - remaining HTML tags, then HTML entities -- ``&#1234;`` is a character
+      reference, not an issue reference, and its digits must not survive
 
 A reference is any ``#<digits>`` that survives. Both ``Closes #123`` and
 ``Part of #123`` qualify: most PRs here are slices of an epic and must not
@@ -32,9 +40,12 @@ Run locally:
 CI:
     .github/workflows/pr-hygiene.yml runs this on every PR.
 
+Output:
+    One candidate issue number per line on stdout, ascending, deduplicated.
+
 Exit codes:
-    0 -- a visible issue reference was found
-    1 -- no visible issue reference
+    0 -- at least one candidate reference is visible
+    1 -- none
 """
 
 from __future__ import annotations
@@ -44,33 +55,64 @@ from pathlib import Path
 import re
 import sys
 
-# Order matters: fenced blocks are removed before inline spans so that a
-# stray backtick inside a fence cannot split an unrelated span.
+# Order matters. Raw-text HTML blocks and fences are removed with their
+# content before inline spans, so a backtick inside a fence cannot split an
+# unrelated span. Entities are removed last, after tags, because stripping
+# `<...>` first would otherwise leave a bare `&#1234;` looking like prose.
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RAW_TEXT_HTML = re.compile(
+    r"<(pre|code|script|style|kbd|samp)\b[^>]*>.*?</\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_UNCLOSED_RAW_TEXT_HTML = re.compile(
+    r"<(pre|code|script|style|kbd|samp)\b[^>]*>.*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
 _FENCED_BLOCK = re.compile(
     r"^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)", re.DOTALL | re.MULTILINE
 )
+# A line indented by four spaces or a tab renders as code in Markdown. This is
+# intentionally conservative: it can also swallow a reference buried in a
+# deeply indented list, which costs a contributor one body edit. The opposite
+# error -- a pasted traceback silently satisfying the gate -- costs the gate.
+_INDENTED_CODE = re.compile(r"^(?: {4,}|\t).*$", re.MULTILINE)
 _INLINE_CODE = re.compile(r"(`+)(?:.|\n)*?\1")
 # Any http(s) token, so `#123` appearing as a URL fragment is not a reference.
 _URL = re.compile(r"<?https?://\S+>?")
+_HTML_TAG = re.compile(r"<[^>\n]{1,200}>")
+# Numeric (`&#1234;`), hex (`&#x4d2;`), and named (`&amp;`) character
+# references. The numeric form is why this matters: its digits follow a `#`.
+_HTML_ENTITY = re.compile(r"&#?[0-9A-Za-z]{1,32};")
 
-# `#123` not preceded by a word character, `/`, or another `#`. The `/` guard
-# drops leftovers like `owner/repo#12`; the `#` guard drops Markdown headings.
-_ISSUE_REF = re.compile(r"(?<![0-9A-Za-z_/#])#(\d+)")
+# `#123` not preceded by a word character, `/`, `&`, or another `#`. The `/`
+# guard drops leftovers like `owner/repo#12`; `#` drops Markdown headings; `&`
+# is belt-and-braces for an entity that somehow escaped _HTML_ENTITY.
+_ISSUE_REF = re.compile(r"(?<![0-9A-Za-z_/#&])#(\d+)")
 
 
 def visible_text(body: str) -> str:
-    """Return `body` with every non-rendered region removed."""
+    """Return `body` with every region a reader would not see as prose removed."""
     text = _HTML_COMMENT.sub(" ", body)
+    text = _RAW_TEXT_HTML.sub(" ", text)
+    text = _UNCLOSED_RAW_TEXT_HTML.sub(" ", text)
     text = _FENCED_BLOCK.sub(" ", text)
+    text = _INDENTED_CODE.sub(" ", text)
     text = _INLINE_CODE.sub(" ", text)
     text = _URL.sub(" ", text)
+    text = _HTML_TAG.sub(" ", text)
+    text = _HTML_ENTITY.sub(" ", text)
     return text
 
 
 def find_issue_references(body: str) -> list[int]:
-    """Return every issue number visible to a reader of `body`, in order."""
-    return [int(match.group(1)) for match in _ISSUE_REF.finditer(visible_text(body))]
+    """Return every candidate issue number visible to a reader, ascending.
+
+    "Candidate" is precise: `#N` cannot distinguish an issue from a pull
+    request, and this function does not know which numbers exist. Resolving
+    that is the workflow's job.
+    """
+    seen = {int(match.group(1)) for match in _ISSUE_REF.finditer(visible_text(body))}
+    return sorted(seen)
 
 
 def main() -> int:
@@ -87,16 +129,16 @@ def main() -> int:
 
     references = find_issue_references(body)
     if references:
-        rendered = ", ".join(f"#{number}" for number in references)
-        sys.stdout.write(f"pr-issue-link: found {rendered}\n")
+        sys.stdout.write("".join(f"{number}\n" for number in references))
         return 0
 
     sys.stderr.write(
         "pr-issue-link: no visible issue reference in the PR body.\n"
         "\n"
-        "References inside HTML comments, fenced code blocks, inline code, or\n"
-        "URLs do not count -- the unedited PR template contains several such\n"
-        "examples, and accepting them would let any template-created PR pass.\n"
+        "References inside HTML comments, code (fenced, indented, or inline),\n"
+        "raw-text HTML, URLs, or character entities do not count -- the\n"
+        "unedited PR template contains several such examples, and accepting\n"
+        "them would let any template-created PR pass.\n"
     )
     return 1
 

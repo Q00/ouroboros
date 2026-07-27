@@ -4,13 +4,21 @@ The load-bearing case is `test_unedited_pull_request_template_is_rejected`:
 `.github/PULL_REQUEST_TEMPLATE.md` mentions #1234, #1256, and #1258 inside
 HTML comments, so a naive scan passes an unedited template and the gate
 becomes a no-op for exactly the PRs it exists to catch.
+
+The script reports *candidates* only. Whether a number exists, and whether it
+is an issue rather than a pull request, is resolved by the workflow against
+the GitHub API -- `#N` is a shared namespace and no amount of text parsing can
+settle it.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import sys
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "check-pr-issue-link.py"
@@ -23,6 +31,15 @@ def run(body: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def references(body: str) -> list[int]:
+    """Candidate numbers the script reports, as integers."""
+    result = run(body)
+    return [int(line) for line in result.stdout.split()]
+
+
+# ── the regression this gate exists for ──────────────────────────────
 
 
 def test_unedited_pull_request_template_is_rejected() -> None:
@@ -39,78 +56,95 @@ def test_unedited_pull_request_template_is_rejected() -> None:
 
 def test_template_actually_contains_issue_numbers() -> None:
     """Guard the guard: if the template stops mentioning #N, the test above passes vacuously."""
-    import re
-
     assert re.search(r"#\d+", TEMPLATE.read_text(encoding="utf-8")), (
         "The PR template no longer contains any #N, so the regression test "
         "above would pass for the wrong reason. Point it at a fixture instead."
     )
 
 
+# ── accepted ─────────────────────────────────────────────────────────
+
+
 def test_closing_reference_is_accepted() -> None:
-    result = run("## Summary\n\nDoes the thing.\n\nCloses #1777.\n")
-    assert result.returncode == 0
-    assert "#1777" in result.stdout
+    assert references("## Summary\n\nDoes the thing.\n\nCloses #1777.\n") == [1777]
 
 
 def test_plain_reference_is_accepted() -> None:
     """Epic slices reference without closing; the gate wants a trail, not a closure."""
-    result = run("## Summary\n\nOne slice.\n\nPart of #1465.\n")
-    assert result.returncode == 0
-    assert "#1465" in result.stdout
+    assert references("## Summary\n\nOne slice.\n\nPart of #1465.\n") == [1465]
 
 
-def test_empty_body_is_rejected() -> None:
-    assert run("").returncode == 1
-
-
-def test_body_without_any_reference_is_rejected() -> None:
-    result = run("## Summary\n\nRefactors the parser. No issue for this.\n")
-    assert result.returncode == 1
-
-
-def test_reference_only_inside_html_comment_is_rejected() -> None:
-    result = run("## Summary\n\nDoes the thing.\n\n<!-- e.g. Fixes #1234 -->\n")
-    assert result.returncode == 1
-
-
-def test_reference_only_inside_fenced_code_is_rejected() -> None:
-    body = "## Summary\n\nSee the log:\n\n```\nerror at #4242\n```\n"
-    assert run(body).returncode == 1
-
-
-def test_reference_only_inside_tilde_fence_is_rejected() -> None:
-    body = "## Summary\n\n~~~text\nrefs #4242\n~~~\n"
-    assert run(body).returncode == 1
-
-
-def test_reference_only_inside_inline_code_is_rejected() -> None:
-    result = run("## Summary\n\nThe literal token `#1234` is parsed verbatim.\n")
-    assert result.returncode == 1
-
-
-def test_url_fragment_is_not_a_reference() -> None:
-    body = (
-        "## Summary\n\nSee https://github.com/Q00/ouroboros/pull/1700#issuecomment-1 for context.\n"
-    )
-    assert run(body).returncode == 1
-
-
-def test_markdown_heading_is_not_a_reference() -> None:
-    assert run("# Title\n\n## Summary\n\n### 3. Detail\n").returncode == 1
-
-
-def test_cross_repository_reference_is_not_counted() -> None:
-    """`owner/repo#12` points elsewhere; this gate is about local traceability."""
-    assert run("## Summary\n\nMirrors astral-sh/ruff#12345.\n").returncode == 1
+def test_multiple_references_are_reported_sorted_and_deduplicated() -> None:
+    body = "Refs #1777, #1465, and #1777 again.\n"
+    assert references(body) == [1465, 1777]
 
 
 def test_reference_outside_a_fence_still_counts() -> None:
     body = "## Summary\n\nCloses #1777.\n\n```\nunrelated #4242\n```\n"
-    result = run(body)
-    assert result.returncode == 0
-    assert "#1777" in result.stdout
-    assert "#4242" not in result.stdout
+    assert references(body) == [1777]
+
+
+# ── rejected: nothing there ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("## Summary\n\nRefactors the parser. No issue for this.\n", id="no-number"),
+        pytest.param("# Title\n\n## Summary\n\n### 3. Detail\n", id="markdown-headings"),
+        pytest.param("## Summary\n\nMirrors astral-sh/ruff#12345.\n", id="cross-repository"),
+    ],
+)
+def test_bodies_without_a_reference_are_rejected(body: str) -> None:
+    assert run(body).returncode == 1
+
+
+# ── rejected: present, but not visible as prose ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("## Summary\n\n<!-- e.g. Fixes #1234 -->\n", id="html-comment"),
+        pytest.param("## Summary\n\n```\nerror at #4242\n```\n", id="fenced-backtick"),
+        pytest.param("## Summary\n\n~~~text\nrefs #4242\n~~~\n", id="fenced-tilde"),
+        pytest.param("## Summary\n\nThe token `#1234` is parsed verbatim.\n", id="inline-code"),
+        pytest.param(
+            "## Summary\n\nSee https://github.com/Q00/ouroboros/pull/1700#issuecomment-1 here.\n",
+            id="url-fragment",
+        ),
+        pytest.param("## Summary\n\n<pre>error at #4242</pre>\n", id="pre-block"),
+        pytest.param("## Summary\n\n<code>#4242</code>\n", id="code-block"),
+        pytest.param("## Summary\n\n<samp>#4242</samp>\n", id="samp-block"),
+        pytest.param("## Summary\n\n<pre>\nlog #4242\n", id="unclosed-pre-block"),
+        pytest.param("## Summary\n\n    traceback at #4242\n", id="indented-code-spaces"),
+        pytest.param("## Summary\n\n\tlog line #4242\n", id="indented-code-tab"),
+        pytest.param("## Summary\n\nAn off-by-one: &#1234; in the output.\n", id="entity-decimal"),
+        pytest.param("## Summary\n\nThe byte &#x4d2; appears here.\n", id="entity-hex"),
+    ],
+)
+def test_non_rendered_regions_do_not_count(body: str) -> None:
+    """A reader of the rendered body sees none of these as an issue link."""
+    assert run(body).returncode == 1
+
+
+def test_a_real_reference_survives_alongside_every_masked_form() -> None:
+    """The stripping must not be so eager that it swallows the genuine link."""
+    body = (
+        "## Summary\n\nCloses #1777.\n\n"
+        "<!-- Fixes #1234 -->\n"
+        "<pre>#4242</pre>\n"
+        "Entity &#5555; here.\n"
+        "    indented #6666\n"
+        "```\nfenced #7777\n```\n"
+        "Inline `#8888` token.\n"
+        "https://example.com/x/9999#frag\n"
+    )
+    assert references(body) == [1777]
+
+
+# ── I/O contract ─────────────────────────────────────────────────────
 
 
 def test_body_file_input_matches_literal_input(tmp_path: Path) -> None:
@@ -123,4 +157,10 @@ def test_body_file_input_matches_literal_input(tmp_path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0
-    assert "#1681" in result.stdout
+    assert result.stdout.split() == ["1681"]
+
+
+def test_candidates_are_emitted_one_per_line_for_the_shell_loop() -> None:
+    """The workflow iterates stdout with `for number in ${candidates}`."""
+    result = run("Refs #12, #7.\n")
+    assert result.stdout == "7\n12\n"

@@ -101,12 +101,42 @@ jobs:
           # audited PRs looked linked while leaving their issues orphaned.
           printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
 
-          if python3 scripts/check-pr-issue-link.py --body-file "${RUNNER_TEMP}/pr-body.md"; then
+          candidates=$(python3 scripts/check-pr-issue-link.py \
+            --body-file "${RUNNER_TEMP}/pr-body.md" || true)
+
+          # `#N` is a shared namespace: issues and pull requests draw from it,
+          # and nothing stops an author writing `Refs #0` or `See PR #1735`.
+          # A number that is missing, or that resolves to a pull request, is
+          # not an issue trail. Resolve each candidate before accepting it.
+          # Capped so a body full of numbers cannot fan out into API calls.
+          checked=0
+          for number in ${candidates}; do
+            if [ "${checked}" -ge 10 ]; then
+              echo "::warning::More than 10 candidate references; stopped resolving after 10."
+              break
+            fi
+            checked=$((checked + 1))
+
+            if ! payload=$(gh api "repos/${OWNER}/${REPO}/issues/${number}" 2>/dev/null); then
+              echo "  #${number}: no such issue or pull request in this repository"
+              continue
+            fi
+            # The REST issues endpoint also serves pull requests; only a pull
+            # request carries a `pull_request` object.
+            if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
+              echo "  #${number}: resolves to a pull request, not an issue"
+              continue
+            fi
+
+            echo "OK: body references issue #${number}."
             echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
             exit 0
-          fi
+          done
 
           # --- fail ------------------------------------------------------------
+          if [ -n "${candidates}" ]; then
+            echo "::error::The PR body mentions $(printf '%s' "${candidates}" | wc -w | tr -d ' ') number(s), but none resolve to an issue in this repository."
+          fi
           echo "::error::No issue link found. Do one of the following:"
           echo "::error::  1. Add 'Closes #123' to the PR body (this PR completes the issue)."
           echo "::error::  2. Add 'Refs #123' or 'Part of #123' (this PR is one slice of it)."
