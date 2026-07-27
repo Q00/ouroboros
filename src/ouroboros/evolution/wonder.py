@@ -428,7 +428,9 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             # Extract the JSON payload, tolerating markdown fences and prose
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
             json_str = extract_json_payload(content)
-            data = json.loads(json_str if json_str is not None else content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
             if not isinstance(data, dict):
                 raise TypeError(f"Expected JSON object, got {type(data).__name__}")
             raw_questions = data.get("questions", [])
@@ -459,7 +461,7 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 should_continue=should_continue,
                 reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
             scope_hint = f" for goal: {seed.goal}" if seed else ""
             fallback = f"What assumptions remain untested{scope_hint}?"

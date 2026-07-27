@@ -22,6 +22,11 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"score": 0.85' in result
 
+    @pytest.mark.parametrize("fence_info", ["json", ""])
+    def test_json_in_tilde_code_fence(self, fence_info: str) -> None:
+        text = f'~~~{fence_info}\n{{"score": 0.85}}\n~~~'
+        assert extract_json_payload(text) == '{"score": 0.85}'
+
     def test_json_fence_with_literal_backticks_after_brace_in_string(self):
         text = (
             '```json\n{"message": "literal }``` marker", "questions": ["keep outer object"]}\n```'
@@ -62,6 +67,10 @@ class TestExtractJsonPayload:
 
     def test_inline_backticks_do_not_suppress_prose_json_fallback(self) -> None:
         text = 'Use ``` as prose, then {"actual": true}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_inline_tildes_do_not_suppress_prose_json_fallback(self) -> None:
+        text = 'Use ~~~ as prose, then {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'
 
     def test_inline_backticks_do_not_hide_later_indented_crlf_fence(self) -> None:
@@ -173,6 +182,14 @@ class TestExtractJsonPayload:
     def test_supported_fallback_excludes_well_formed_unsupported_fence_body(self):
         text = '```python\nEXAMPLE = {"stale": true}\n```\nActual: {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_fallback_excludes_well_formed_unsupported_tilde_fence_body(self) -> None:
+        text = '~~~python\nEXAMPLE = {"stale": true}\n~~~\nActual: {"actual": true}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_unclosed_unsupported_tilde_fence_fails_closed(self) -> None:
+        text = '~~~python\nEXAMPLE = {"stale": true}\nActual: {"actual": true}'
+        assert extract_json_payload(text) is None
 
     def test_fallback_excludes_multiple_well_formed_unsupported_fence_bodies(self):
         text = (

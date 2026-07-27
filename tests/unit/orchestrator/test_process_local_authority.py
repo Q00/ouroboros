@@ -1675,7 +1675,7 @@ async def test_terminal_precreated_tracker_uses_verified_durable_running_state()
     stale_terminal = prepared.with_status(SessionStatus.COMPLETED).with_progress(
         {EXECUTION_CONTRACT_PROGRESS_KEY: {"stale": "terminal progress must not execute"}}
     )
-    expected = Result.ok(
+    expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
         OrchestratorResult(
             success=True,
             session_id=prepared.session_id,

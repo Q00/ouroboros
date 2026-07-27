@@ -151,7 +151,9 @@ class AssertionExtractor:
             # Extract the JSON payload, tolerating markdown fences and prose
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
             json_str = extract_json_payload(content)
-            data = json.loads(json_str if json_str is not None else content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
             if not isinstance(data, list):
                 logger.warning("Expected JSON array, got: %s", type(data))
                 return ()
@@ -242,7 +244,7 @@ class AssertionExtractor:
 
             return tuple(assertions)
 
-        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse extraction response: %s", e)
             return ()
 

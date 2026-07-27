@@ -1562,7 +1562,7 @@ class TestOrchestratorRunner:
             nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
             execution_levels=((0,),),
         )
-        cancellation_result = Result.ok(
+        cancellation_result: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=False,
                 session_id=tracker.session_id,
@@ -3731,7 +3731,7 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
-        expected = Result.ok(
+        expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
             OrchestratorResult(
                 success=True,
                 session_id=tracker.session_id,
@@ -5443,7 +5443,7 @@ class TestOrchestratorRunner:
         execution_contract = runner._build_execution_contract(seed=sample_seed)
         semantics = execution_contract["execution_semantics"]
         executor_cls = MagicMock()
-        cancellation_result = Result.err(
+        cancellation_result: Result[OrchestratorResult, OrchestratorError] = Result.err(
             OrchestratorError(message="cancelled after constructor inspection")
         )
 

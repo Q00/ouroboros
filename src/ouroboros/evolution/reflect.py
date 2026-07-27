@@ -703,7 +703,9 @@ Guidelines:
             # Extract the JSON payload, tolerating markdown fences and prose
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
             json_str = extract_json_payload(content)
-            data = json.loads(json_str if json_str is not None else content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
             if not isinstance(data, dict):
                 raise TypeError(f"Expected JSON object, got {type(data).__name__}")
 
@@ -746,7 +748,7 @@ Guidelines:
                 ontology_mutations=tuple(mutations),
                 reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning(
                 "reflect.parse_failed",
                 extra={

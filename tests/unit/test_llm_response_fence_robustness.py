@@ -33,6 +33,7 @@ _ONTOLOGY = OntologySchema(
 )
 
 LONG_FENCE_CASES = [(4, "json"), (4, ""), (5, "json"), (5, "")]
+OVERSIZED_JSON_INTEGER = "9" * 5000
 
 
 def _seed(num_acs: int = 3) -> Seed:
@@ -53,6 +54,10 @@ def _wrap(variant: str, payload: str) -> str:
         return f"```json\n{payload}\n```\nLet me know if you need anything else."
     if variant == "bare_fence":
         return f"```\n{payload}\n```"
+    if variant == "tilde_json_fence":
+        return f"~~~json\n{payload}\n~~~"
+    if variant == "tilde_bare_fence":
+        return f"~~~\n{payload}\n~~~"
     if variant == "long_json_fence":
         return _wrap_long_supported_fence(payload, 4, "json")
     if variant == "long_bare_fence":
@@ -118,6 +123,27 @@ def _wrap_unsupported_fence_then_prose(stale_payload: str, actual_payload: str) 
     )
 
 
+def _wrap_unsupported_tilde_fence_then_prose(stale_payload: str, actual_payload: str) -> str:
+    return (
+        "Do not use this example:\n"
+        "~~~python\n"
+        f"EXAMPLE = {stale_payload}\n"
+        "~~~\n"
+        "Actual answer:\n"
+        f"{actual_payload}"
+    )
+
+
+def _wrap_unclosed_unsupported_tilde_fence(stale_payload: str, actual_payload: str) -> str:
+    return (
+        "Do not use this example:\n"
+        "~~~python\n"
+        f"EXAMPLE = {stale_payload}\n"
+        "The real answer appears later but the fence never closes:\n"
+        f"{actual_payload}"
+    )
+
+
 def _wrap_invalid_json_fence_then_prose(actual_payload: str) -> str:
     return f"```json\n{{not json}}\n```\n{actual_payload}"
 
@@ -133,6 +159,8 @@ FENCE_VARIANTS = [
     "prose_prefix_fence",
     "fence_trailing_prose",
     "bare_fence",
+    "tilde_json_fence",
+    "tilde_bare_fence",
     "long_json_fence",
     "long_bare_fence",
     "longer_json_fence",
@@ -238,7 +266,11 @@ class TestWonderFenceRobustness:
         assert out.should_continue is True
         assert out.questions == ("actual token refresh question",)
 
-    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+    @pytest.mark.parametrize(
+        "content_factory",
+        [_wrap_unsupported_fence_then_prose, _wrap_unsupported_tilde_fence_then_prose],
+    )
+    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self, content_factory) -> None:
         stale_payload = json.dumps(
             {
                 "questions": [{"question": "stale example question", "kind": "gap"}],
@@ -255,7 +287,7 @@ class TestWonderFenceRobustness:
         )
 
         out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
-            _wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
+            content_factory(stale_payload, actual_payload),
             _seed(),
         )
 
@@ -267,6 +299,7 @@ class TestWonderFenceRobustness:
         "content_factory",
         [
             _wrap_unclosed_unsupported_fence,
+            _wrap_unclosed_unsupported_tilde_fence,
             lambda _stale, actual: _wrap_invalid_json_fence_then_prose(actual),
         ],
     )
@@ -292,6 +325,19 @@ class TestWonderFenceRobustness:
             content_factory(stale_payload, actual_payload),
             _seed(),
         )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert out.questions == (
+            "What assumptions remain untested for goal: Build a login system?",
+        )
+
+    def test_oversized_json_integer_uses_seed_scoped_fallback(self) -> None:
+        content = (
+            '{"questions": [], "should_continue": true, "reasoning": "ignored", '
+            f'"oversized": {OVERSIZED_JSON_INTEGER}}}'
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(content, _seed())
 
         assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
         assert out.questions == (
@@ -467,7 +513,13 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    async def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+    @pytest.mark.parametrize(
+        "content_factory",
+        [_wrap_unsupported_fence_then_prose, _wrap_unsupported_tilde_fence_then_prose],
+    )
+    async def test_unsupported_fence_body_is_excluded_from_prose_fallback(
+        self, content_factory
+    ) -> None:
         stale_payload = json.dumps(
             {
                 "refined_goal": "Stale example",
@@ -488,7 +540,7 @@ class TestReflectFenceRobustness:
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             CompletionResponse(
-                content=_wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
+                content=content_factory(stale_payload, actual_payload),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
@@ -516,6 +568,7 @@ class TestReflectFenceRobustness:
         "content_factory",
         [
             _wrap_unclosed_unsupported_fence,
+            _wrap_unclosed_unsupported_tilde_fence,
             lambda _stale, actual: _wrap_invalid_json_fence_then_prose(actual),
         ],
     )
@@ -558,6 +611,38 @@ class TestReflectFenceRobustness:
                 ac_results=(),
             ),
             wonder_output=WonderOutput(questions=("What handles token refresh?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_oversized_json_integer_returns_parse_error(self) -> None:
+        content = (
+            '{"refined_goal": "ignored", "refined_constraints": [], '
+            '"ontology_mutations": [], "reasoning": "ignored", '
+            f'"oversized": {OVERSIZED_JSON_INTEGER}}}'
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=content,
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
             lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
         )
 
@@ -755,7 +840,11 @@ class TestAssertionExtractorFenceRobustness:
         assert len(assertions) == 1
         assert assertions[0].description == "actual assertion"
 
-    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self) -> None:
+    @pytest.mark.parametrize(
+        "content_factory",
+        [_wrap_unsupported_fence_then_prose, _wrap_unsupported_tilde_fence_then_prose],
+    )
+    def test_unsupported_fence_body_is_excluded_from_prose_fallback(self, content_factory) -> None:
         stale_payload = json.dumps(
             [
                 {
@@ -778,7 +867,7 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
-            _wrap_unsupported_fence_then_prose(stale_payload, actual_payload),
+            content_factory(stale_payload, actual_payload),
             ("AC number 1",),
         )
 
@@ -789,6 +878,7 @@ class TestAssertionExtractorFenceRobustness:
         "content_factory",
         [
             _wrap_unclosed_unsupported_fence,
+            _wrap_unclosed_unsupported_tilde_fence,
             lambda _stale, actual: _wrap_invalid_json_fence_then_prose(actual),
         ],
     )
@@ -819,6 +909,19 @@ class TestAssertionExtractorFenceRobustness:
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             content_factory(stale_payload, actual_payload),
             ("AC number 1",),
+        )
+
+        assert assertions == ()
+
+    def test_oversized_json_integer_returns_empty(self) -> None:
+        content = (
+            '[{"ac_index": 0, "tier": "t4_unverifiable", '
+            '"description": "ignored", '
+            f'"oversized": {OVERSIZED_JSON_INTEGER}}}]'
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            content, ("AC number 1",)
         )
 
         assert assertions == ()

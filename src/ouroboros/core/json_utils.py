@@ -14,6 +14,9 @@ class _FenceScanState(Enum):
     MALFORMED = "malformed"
 
 
+_FENCE_MARKERS = ("`", "~")
+
+
 def extract_json_payload(text: str) -> str | None:
     """Extract the first valid JSON object or array from text.
 
@@ -52,7 +55,7 @@ def _extract_fenced_json_payload(
             fallback_parts.append(text[fence_start:])
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
-        opener, opener_length = opening
+        opener, opener_length, marker = opening
         info_start = opener + opener_length
         line_end = text.find("\n", info_start)
         if line_end == -1:
@@ -60,7 +63,7 @@ def _extract_fenced_json_payload(
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
-            closing = _find_closing_fence(text, line_end + 1, opener_length)
+            closing = _find_closing_fence(text, line_end + 1, opener_length, marker)
             if closing is None:
                 return (_FenceScanState.MALFORMED, None, ())
             closing_start, closing_length = closing
@@ -69,7 +72,7 @@ def _extract_fenced_json_payload(
             continue
 
         body_start = line_end + 1
-        closing = _find_closing_fence(text, body_start, opener_length)
+        closing = _find_closing_fence(text, body_start, opener_length, marker)
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
         closing_start, _ = closing
@@ -87,39 +90,49 @@ def _extract_fenced_json_payload(
         return (_FenceScanState.MALFORMED, None, ())
 
 
-def _backtick_run_length(text: str, start: int) -> int:
+def _fence_run_length(text: str, start: int, marker: str) -> int:
     end = start
-    while end < len(text) and text[end] == "`":
+    while end < len(text) and text[end] == marker:
         end += 1
     return end - start
 
 
-def _find_opening_fence(text: str, start: int) -> tuple[int, int] | None:
-    """Return the next start-of-line fence, ignoring inline backtick runs."""
+def _find_opening_fence(text: str, start: int) -> tuple[int, int, str] | None:
+    """Return the next line-start backtick or tilde fence."""
     pos = start
     while True:
-        candidate = text.find("```", pos)
-        if candidate == -1:
+        candidates = [
+            (candidate, marker)
+            for marker in _FENCE_MARKERS
+            if (candidate := text.find(marker * 3, pos)) != -1
+        ]
+        if not candidates:
             return None
 
-        candidate_length = _backtick_run_length(text, candidate)
+        candidate, marker = min(candidates, key=lambda item: item[0])
+        candidate_length = _fence_run_length(text, candidate, marker)
         line_start = text.rfind("\n", 0, candidate) + 1
         prefix = text[line_start:candidate]
         if prefix.strip() == "":
-            return candidate, candidate_length
+            return candidate, candidate_length, marker
 
         pos = candidate + candidate_length
 
 
-def _find_closing_fence(text: str, start: int, opener_length: int) -> tuple[int, int] | None:
-    """Return the next clean line-start fence at least as long as the opener."""
+def _find_closing_fence(
+    text: str,
+    start: int,
+    opener_length: int,
+    marker: str,
+) -> tuple[int, int] | None:
+    """Return a clean same-marker fence at least as long as the opener."""
     pos = start
     while True:
-        candidate = text.find("```", pos)
+        candidate = text.find(marker * 3, pos)
         if candidate == -1:
             return None
 
-        candidate_length = _backtick_run_length(text, candidate)
+        candidate_length = _fence_run_length(text, candidate, marker)
         line_start = text.rfind("\n", 0, candidate) + 1
         line_end = text.find("\n", candidate + candidate_length)
         if line_end == -1:

@@ -96,7 +96,7 @@ def test_route_progress_and_exhaustion_surface_to_the_human() -> None:
         },
     )
 
-    relays = classify_relay_events([escalated, exhausted], job_id="job_1")
+    relays = cast(list[Relay], classify_relay_events([escalated, exhausted], job_id="job_1"))
 
     progress = next(relay for relay in relays if relay.get("subtype") == "route_escalated")
     assert progress["evidence"]["from_route_id"] == "cheap"
@@ -127,7 +127,7 @@ def test_hard_block_is_not_mislabeled_as_route_exhaustion() -> None:
         },
     )
 
-    relays = classify_relay_events([blocked], job_id="job_1")
+    relays = cast(list[Relay], classify_relay_events([blocked], job_id="job_1"))
 
     attention = next(relay for relay in relays if relay.get("trigger") == "route_blocked")
     assert attention["evidence"]["reason"] == "human_handoff_required"
@@ -346,10 +346,13 @@ def test_legacy_level_producers_use_session_aggregate_scope() -> None:
         data={"level": 0, "successful": 1, "failed": 0, "outcome": "succeeded"},
     )
 
-    relays = classify_relay_events(
-        [level_started, level_completed],
-        job_id="job_1",
-        session_id="orch_1",
+    relays = cast(
+        list[Relay],
+        classify_relay_events(
+            [level_started, level_completed],
+            job_id="job_1",
+            session_id="orch_1",
+        ),
     )
 
     assert [relay["subtype"] for relay in relays] == ["level_started", "level_completed"]
@@ -409,10 +412,13 @@ def test_legacy_frugality_proof_uses_single_session_execution_scope() -> None:
         },
     )
 
-    relays = classify_relay_events(
-        [configuration, proof],
-        job_id="job_1",
-        session_id="orch_1",
+    relays = cast(
+        list[Relay],
+        classify_relay_events(
+            [configuration, proof],
+            job_id="job_1",
+            session_id="orch_1",
+        ),
     )
 
     attention = next(relay for relay in relays if relay["kind"] == "attention_required")

@@ -160,7 +160,9 @@ class TestComposition:
         # LLM omits index 2 entirely — implicit keep must fill it.
         data = {"ac_patches": [{"op": "keep", "index": 0}, {"op": "keep", "index": 1}]}
         refined, patches, _ = _compose(data)
-        keep_revise_indices = [p.index for p in patches if p.op in ("keep", "revise")]
+        keep_revise_indices = [
+            p.index for p in patches if p.op in ("keep", "revise") and p.index is not None
+        ]
         assert sorted(keep_revise_indices) == [0, 1, 2]
         assert len(refined) == 3
 
