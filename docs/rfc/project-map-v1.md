@@ -58,6 +58,10 @@ core config names the active checkout as `core.worktree` and that checkout
 points back to the same Git directory. An alias to another checkout `.git` or
 configured submodule Git directory therefore stays separate. Core section names
 are interpreted case-insensitively with later values winning, matching Git.
+The bounded core parser accepts Git section comments, valueless boolean
+shorthand, empty boolean values, quoted values, documented escapes, inline
+comments, and backslash continuations. Includes fail closed because they escape
+the bounded config file used for identity proof.
 
 Git does not persist the primary working-tree path for a non-bare repository
 created with `--separate-git-dir` unless `core.worktree` is configured. Without

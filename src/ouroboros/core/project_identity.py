@@ -8,21 +8,14 @@ repository while retaining a repository-relative workspace filter.
 
 from __future__ import annotations
 
-from configparser import Error as ConfigError
-from configparser import RawConfigParser
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-import re
 from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
 _MAX_GIT_POINTER_LENGTH = 4096
 _MAX_GIT_CONFIG_LENGTH = 65_536
-_CORE_SECTION_HEADER = re.compile(
-    r"^(?P<indent>[ \t]*)\[[ \t]*core[ \t]*\](?P<trailing>[ \t]*)(?P<cr>\r?)$",
-    flags=re.IGNORECASE | re.MULTILINE,
-)
 
 
 class ProjectIdentityError(ValueError):
@@ -187,6 +180,211 @@ class _GitCoreConfig:
     worktree: Path | None
 
 
+def _git_config_comment_index(value: str) -> int | None:
+    """Return the first unquoted Git comment marker in one logical line."""
+    in_quotes = False
+    escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            in_quotes = not in_quotes
+            continue
+        if not in_quotes and character in "#;":
+            return index
+    return None
+
+
+def _git_config_logical_lines(raw_config: str) -> tuple[str, ...] | None:
+    """Fold Git backslash continuations without accepting non-CRLF CRs."""
+    logical_lines: list[str] = []
+    current = ""
+    continuation_pending = False
+    physical_lines = raw_config.split("\n")
+    for index, physical_line in enumerate(physical_lines):
+        has_line_feed = index < len(physical_lines) - 1
+        if physical_line.endswith("\r"):
+            physical_line = physical_line[:-1]
+        if "\r" in physical_line:
+            return None
+        candidate = current + physical_line
+        comment_index = _git_config_comment_index(candidate)
+        uncommented = candidate if comment_index is None else candidate[:comment_index]
+        trailing_backslashes = len(uncommented) - len(uncommented.rstrip("\\"))
+        continues = comment_index is None and trailing_backslashes % 2 == 1
+        if continues:
+            if not has_line_feed:
+                return None
+            current = candidate[:-1]
+            continuation_pending = True
+            continue
+        logical_lines.append(candidate)
+        current = ""
+        continuation_pending = False
+    if continuation_pending:
+        return None
+    return tuple(logical_lines)
+
+
+def _parse_git_config_section(value: str) -> tuple[str, str] | None:
+    """Parse a section header and return its relevant kind plus remainder."""
+    in_quotes = False
+    escaped = False
+    closing_index: int | None = None
+    for index, character in enumerate(value[1:], start=1):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            in_quotes = not in_quotes
+            continue
+        if character == "]" and not in_quotes:
+            closing_index = index
+            break
+    if closing_index is None or in_quotes or escaped:
+        return None
+    section = value[1:closing_index].strip(" \t")
+    if not section:
+        return None
+    section_name = section.split(maxsplit=1)[0]
+    if not section_name or any(
+        not character.isascii() or not (character.isalnum() or character in "-.")
+        for character in section_name
+    ):
+        return None
+    section_suffix = section[len(section_name) :].lstrip(" \t")
+    if section_suffix and not (section_suffix.startswith('"') and section_suffix.endswith('"')):
+        return None
+    folded = section_name.casefold()
+    if folded == "core" and not section_suffix:
+        kind = "core"
+    elif folded in {"include", "includeif"}:
+        kind = "include"
+    else:
+        kind = "other"
+    return kind, value[closing_index + 1 :]
+
+
+def _parse_git_config_value(value: str) -> tuple[bool, str]:
+    """Decode Git quotes, comments, and the documented value escapes."""
+    decoded: list[tuple[str, bool]] = []
+    in_quotes = False
+    index = 0
+    escapes = {
+        "b": "\b",
+        "n": "\n",
+        "t": "\t",
+        '"': '"',
+        "\\": "\\",
+    }
+    while index < len(value):
+        character = value[index]
+        if not in_quotes and character in "#;":
+            break
+        if character == '"':
+            in_quotes = not in_quotes
+            index += 1
+            continue
+        if character == "\\":
+            index += 1
+            if index >= len(value) or value[index] not in escapes:
+                return False, ""
+            decoded.append((escapes[value[index]], True))
+            index += 1
+            continue
+        decoded.append((character, in_quotes))
+        index += 1
+    if in_quotes:
+        return False, ""
+    start = 0
+    end = len(decoded)
+    while start < end and decoded[start][0] in " \t" and not decoded[start][1]:
+        start += 1
+    while end > start and decoded[end - 1][0] in " \t" and not decoded[end - 1][1]:
+        end -= 1
+    return True, "".join(character for character, _quoted in decoded[start:end])
+
+
+def _parse_git_config_assignment(value: str) -> tuple[str, str | None] | None:
+    """Parse one Git variable assignment; ``None`` value means boolean true."""
+    candidate = value.lstrip(" \t")
+    if (
+        not candidate
+        or candidate[0] in "#;"
+        or not candidate[0].isascii()
+        or not candidate[0].isalpha()
+    ):
+        return None
+    index = 1
+    while (
+        index < len(candidate)
+        and candidate[index].isascii()
+        and (candidate[index].isalnum() or candidate[index] == "-")
+    ):
+        index += 1
+    key = candidate[:index].casefold()
+    remainder = candidate[index:].lstrip(" \t")
+    if not remainder or remainder[0] in "#;":
+        return key, None
+    if remainder[0] != "=":
+        return None
+    valid, parsed_value = _parse_git_config_value(remainder[1:])
+    return (key, parsed_value) if valid else None
+
+
+def _parse_git_core_values(raw_config: str) -> dict[str, str | None] | None:
+    """Return later-wins core values under the bounded Git grammar subset."""
+    logical_lines = _git_config_logical_lines(raw_config)
+    if logical_lines is None:
+        return None
+    current_section: str | None = None
+    core_values: dict[str, str | None] = {}
+    for logical_line in logical_lines:
+        candidate = logical_line.lstrip(" \t")
+        if not candidate or candidate[0] in "#;":
+            continue
+        if candidate.startswith("["):
+            parsed_section = _parse_git_config_section(candidate)
+            if parsed_section is None:
+                return None
+            current_section, candidate = parsed_section
+            if current_section == "include":
+                # Includes escape the bounded file and cannot prove identity.
+                return None
+            candidate = candidate.lstrip(" \t")
+            if not candidate or candidate[0] in "#;":
+                continue
+        if current_section is None:
+            return None
+        assignment = _parse_git_config_assignment(candidate)
+        if assignment is None:
+            return None
+        key, parsed_value = assignment
+        if current_section == "core" and key in {"bare", "worktree"}:
+            core_values[key] = parsed_value
+    return core_values
+
+
+def _parse_git_boolean(value: str | None) -> bool | None:
+    if value is None:
+        return True
+    normalized = value.casefold()
+    if not normalized:
+        return False
+    if normalized in {"true", "yes", "on", "1"}:
+        return True
+    if normalized in {"false", "no", "off", "0"}:
+        return False
+    return None
+
+
 def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     """Read only the bounded core fields needed to prove a common-dir root."""
     raw_config = _read_bounded_utf8(
@@ -195,38 +393,25 @@ def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
     )
     if raw_config is None:
         return None
-    # Git section names are case-insensitive.  Canonicalizing only an exact
-    # ``core`` header lets ConfigParser retain file order and later-value wins
-    # semantics across repeated ``[core]`` / ``[CORE]`` sections.
-    raw_config = _CORE_SECTION_HEADER.sub(
-        lambda match: f"{match.group('indent')}[core]{match.group('trailing')}{match.group('cr')}",
-        raw_config,
-    )
-    parser = RawConfigParser(interpolation=None, strict=False, allow_no_value=True)
-    try:
-        parser.read_string(raw_config)
-        core_section = next(
-            (section for section in parser.sections() if section.casefold() == "core"),
-            None,
-        )
-        if core_section is None:
-            return None
-        bare = parser.getboolean(core_section, "bare", fallback=None)
-        if bare is None:
-            return None
-        raw_worktree = parser.get(core_section, "worktree", fallback=None)
-    except (ConfigError, ValueError):
+    core_values = _parse_git_core_values(raw_config)
+    if core_values is None or "bare" not in core_values:
         return None
-    if raw_worktree is None:
+    bare = _parse_git_boolean(core_values["bare"])
+    if bare is None:
+        return None
+    if "worktree" not in core_values:
         return _GitCoreConfig(bare=bare, worktree=None)
-    if not isinstance(raw_worktree, str) or not raw_worktree.strip():
+    raw_worktree = core_values["worktree"]
+    if raw_worktree is None or not raw_worktree:
         return None
     try:
-        worktree = Path(raw_worktree.strip()).expanduser()
+        worktree = Path(raw_worktree)
+        if raw_worktree.startswith("~"):
+            worktree = worktree.expanduser()
         if not worktree.is_absolute():
             worktree = git_dir / worktree
         worktree = _canonical_directory(worktree)
-    except ProjectIdentityError:
+    except (OSError, ProjectIdentityError, RuntimeError, ValueError):
         return None
     return _GitCoreConfig(bare=bare, worktree=worktree)
 
