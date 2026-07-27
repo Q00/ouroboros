@@ -56,6 +56,10 @@ with only one optional final line ending. Extra records, oversized content,
 NULs, invalid UTF-8, target-leading or surrounding whitespace, and symlinked
 records invalidate the topology proof; a valid first line cannot hide malformed
 trailing data, and pointer paths never receive shell-style `~` expansion.
+The repository `HEAD` record additionally accepts Git's
+`core.preferSymlinkRefs` representation when the link resolves to a bounded
+regular record contained within the canonical Git directory. Escaping,
+malformed, or oversized targets cannot prove repository ownership.
 
 A direct gitfile without `commondir` proves ownership only when its bounded Git
 core config names the active checkout as `core.worktree` and that checkout
@@ -66,6 +70,8 @@ The bounded core parser accepts Git section comments, valueless boolean
 shorthand, empty boolean values, quoted values, documented escapes, inline
 comments, variable-value backslash continuations, and Git's signed 32-bit
 numeric boolean forms, including octal, hexadecimal, and `k`/`m`/`g` scaling.
+It skips exactly one leading UTF-8 BOM independently in the common config and
+the worktree-specific overlay; repeated or embedded BOMs remain malformed.
 Boolean tokens are ASCII-bounded before case normalization. Section headers
 cannot span physical lines and fail closed before continuation folding, while a
 same-line section assignment may continue its value after the closing bracket.

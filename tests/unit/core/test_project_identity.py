@@ -282,6 +282,56 @@ def test_bare_repository_named_dot_git_joins_direct_linked_and_managed_identity(
 
 
 @pytest.mark.parametrize(
+    "head_shape",
+    ["contained", "outside", "oversized"],
+)
+def test_symlink_head_population_controls_bare_common_identity(
+    tmp_path: Path,
+    head_shape: str,
+) -> None:
+    common_git = tmp_path / "common.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs" / "heads").mkdir(parents=True)
+    (common_git / "config").write_text("[core]\n\tbare = true\n", encoding="utf-8")
+    if head_shape == "outside":
+        head_target = tmp_path / "outside-head"
+        symlink_target = Path("../outside-head")
+    else:
+        head_target = common_git / "refs" / "heads" / "main"
+        symlink_target = Path("refs/heads/main")
+    head_target.write_text(
+        "a" * (4097 if head_shape == "oversized" else 40),
+        encoding="utf-8",
+    )
+    (common_git / "HEAD").symlink_to(symlink_target)
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    direct_identity = resolve_project_identity(common_git)
+    linked_identity = resolve_project_identity(linked)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked,
+    )
+
+    assert managed_identity == linked_identity
+    if head_shape == "contained":
+        assert linked_identity == direct_identity
+        assert linked_identity.project_root == str(common_git.resolve())
+    else:
+        assert linked_identity != direct_identity
+        assert linked_identity.project_root == str(linked.resolve())
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         (None, True),
@@ -568,6 +618,70 @@ def test_complete_subsection_grammar_controls_identity_claims(
     assert managed_identity == linked_identity
     if valid:
         assert linked_identity == direct_identity
+    else:
+        assert linked_identity != direct_identity
+        assert linked_identity.project_root == str(linked.resolve())
+
+
+@pytest.mark.parametrize(
+    ("bom_location", "bom", "valid"),
+    [
+        ("common", "\ufeff", True),
+        ("worktree", "\ufeff", True),
+        ("common", "\ufeff\ufeff", False),
+        ("worktree", "\ufeff\ufeff", False),
+    ],
+    ids=[
+        "common-single",
+        "worktree-single",
+        "common-repeated",
+        "worktree-repeated",
+    ],
+)
+def test_config_bom_population_controls_explicit_owner_identity(
+    tmp_path: Path,
+    bom_location: str,
+    bom: str,
+    valid: bool,
+) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    (owner / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    if bom_location == "common":
+        common_config = f"{bom}[core]\n\tbare = false\n\tworktree = {owner}\n"
+    else:
+        common_config = "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+        (common_git / "config.worktree").write_text(
+            f"{bom}[core]\n\tworktree = {owner}\n",
+            encoding="utf-8",
+        )
+    (common_git / "config").write_text(common_config, encoding="utf-8")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(f"{linked / '.git'}\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    direct_identity = resolve_project_identity(owner)
+    linked_identity = resolve_project_identity(linked)
+    managed_identity = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked,
+    )
+
+    assert managed_identity == linked_identity
+    if valid:
+        assert linked_identity == direct_identity
+        assert linked_identity.project_root == str(owner.resolve())
     else:
         assert linked_identity != direct_identity
         assert linked_identity.project_root == str(linked.resolve())

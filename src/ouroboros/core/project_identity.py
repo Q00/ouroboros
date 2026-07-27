@@ -168,6 +168,38 @@ def _read_bounded_record(path: Path) -> str | None:
     return value
 
 
+def _read_bounded_head_record(git_dir: Path) -> str | None:
+    """Read a regular HEAD or one contained symlink-backed HEAD record."""
+    head = git_dir / "HEAD"
+    try:
+        if not head.is_symlink():
+            return _read_bounded_record(head)
+        raw_target = str(head.readlink())
+        encoded_target = raw_target.encode("utf-8", errors="strict")
+    except (OSError, UnicodeError):
+        return None
+    if (
+        not raw_target
+        or len(encoded_target) > _MAX_GIT_POINTER_LENGTH
+        or "\x00" in raw_target
+        or "\r" in raw_target
+        or "\n" in raw_target
+    ):
+        return None
+    try:
+        target = Path(raw_target)
+        if not target.is_absolute():
+            target = head.parent / target
+        canonical_git_dir = git_dir.resolve(strict=False)
+        canonical_target = target.resolve(strict=False)
+        canonical_target.relative_to(canonical_git_dir)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    # Resolution above proves the final target stays contained; the target must
+    # then be one complete regular record rather than another external input.
+    return _read_bounded_record(canonical_target)
+
+
 def _git_pointer_target(checkout_root: Path) -> Path | None:
     """Return the bounded gitdir target named by a checkout's gitfile."""
     marker = checkout_root / ".git"
@@ -412,6 +444,10 @@ def _parse_git_config_values(
     raw_config: str,
 ) -> dict[tuple[str, str], str | None] | None:
     """Return identity-relevant later-wins values from one bounded config."""
+    # Git skips one UTF-8 BOM at the start of each config file.  Removing only
+    # one preserves fail-closed behavior for repeated or embedded BOMs.
+    if raw_config.startswith("\ufeff"):
+        raw_config = raw_config[1:]
     logical_lines = _git_config_logical_lines(raw_config)
     if logical_lines is None:
         return None
@@ -588,7 +624,7 @@ def _is_proven_bare_repository(git_dir: Path) -> bool:
         core is not None
         and core.bare
         and core.worktree is None
-        and _read_bounded_record(git_dir / "HEAD")
+        and _read_bounded_head_record(git_dir)
         and (git_dir / "objects").is_dir()
         and (git_dir / "refs").is_dir()
     )
@@ -606,7 +642,14 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
     """Return one source identity root positively owned by a common gitdir."""
     core = _read_git_core_config(common_dir)
     if core is not None and core.bare:
-        return common_dir if _is_proven_bare_repository(common_dir) else None
+        if (
+            core.worktree is None
+            and _read_bounded_head_record(common_dir)
+            and (common_dir / "objects").is_dir()
+            and (common_dir / "refs").is_dir()
+        ):
+            return common_dir
+        return None
 
     # An explicit, positively proven owner outranks directory naming.  Its
     # checkout may use either a bounded gitfile or the standard regular ``.git``
@@ -629,7 +672,7 @@ def _common_git_source_root(common_dir: Path) -> Path | None:
     # Without an explicit core.worktree, only callers that already proved a
     # common-dir worktree record and backlink may use this stable common root.
     if (
-        _read_bounded_record(common_dir / "HEAD")
+        _read_bounded_head_record(common_dir)
         and (common_dir / "objects").is_dir()
         and (common_dir / "refs").is_dir()
     ):
