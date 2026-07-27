@@ -214,10 +214,12 @@ class TestSessionRepository:
             "/tmp/project-map",
             workspace_path="packages/app",
         )
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
 
         result = await repository.create_session(
             execution_id="exec_123",
             seed_id="seed_456",
+            execution_contract=execution_contract,
             project_identity=identity,
         )
 
@@ -226,6 +228,54 @@ class TestSessionRepository:
         assert {
             key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
         } == identity.to_event_data()
+        assert event.data["execution_contract"] == execution_contract
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "publication",
+        ["top-only", "nested-only", "absent-with-contract", "partial", "conflict"],
+    )
+    async def test_create_session_rejects_non_atomic_project_identity(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        publication: str,
+    ) -> None:
+        identity = ProjectIdentity.from_root(
+            "/tmp/project-map",
+            workspace_path="packages/app",
+        )
+        other = ProjectIdentity.from_root(
+            "/tmp/other-project-map",
+            workspace_path="packages/app",
+        )
+        project_identity = (
+            None if publication in {"nested-only", "absent-with-contract"} else identity
+        )
+        if publication == "top-only":
+            execution_contract = None
+        elif publication == "absent-with-contract":
+            execution_contract = {"frugality_proof": {}}
+        elif publication == "partial":
+            execution_contract = {"frugality_proof": {"project_root": identity.project_root}}
+        else:
+            execution_contract = {
+                "frugality_proof": (
+                    other.to_workspace_data()
+                    if publication == "conflict"
+                    else identity.to_workspace_data()
+                )
+            }
+
+        with pytest.raises(ValueError, match="project identity"):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract=execution_contract,
+                project_identity=project_identity,
+            )
+
+        mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_session_with_custom_id(

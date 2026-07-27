@@ -44,73 +44,44 @@ remote-based identity is explicitly deferred.
 The resolver walks from the effective cwd to the nearest `.git` directory
 entry. Every entry shape is a discovery boundary: a broken symlink or other
 malformed child marker stays scoped to that child instead of inheriting a
-parent repository. A positively proven bare repository is detected before a
-directory literally named `.git` can be interpreted as its parent's marker. A
-normal checkout uses its resolved owner. A linked worktree is joined to its
-primary source checkout only when its bounded `.git` pointer, `commondir`,
-worktree record, and backlink prove the relationship. Submodules use their
-configured worktree and therefore remain separate projects.
+parent repository.
 
-Each Git pointer is parsed as one complete UTF-8 record bounded to 4,096 bytes,
-with only one optional final line ending. Extra records, oversized content,
-NULs, invalid UTF-8, target-leading or surrounding whitespace, and symlinked
-records invalidate the topology proof; a valid first line cannot hide malformed
-trailing data, and pointer paths never receive shell-style `~` expansion.
-The repository `HEAD` record additionally accepts Git's
-`core.preferSymlinkRefs` representation when the link resolves to a bounded
-regular record contained within the canonical Git directory. Escaping,
-malformed, or oversized targets cannot prove repository ownership.
+Git owns every Git-format decision. The resolver invokes the installed `git`
+binary with argv rather than a shell and asks it for:
 
-A direct gitfile without `commondir` proves ownership only when its bounded Git
-core config names the active checkout as `core.worktree` and that checkout
-points back to the same Git directory. An alias to another checkout `.git` or
-configured submodule Git directory therefore stays separate. Core section names
-are interpreted case-insensitively with later values winning, matching Git.
-The bounded core parser accepts Git section comments, valueless boolean
-shorthand, empty boolean values, quoted values, documented escapes, inline
-comments, variable-value backslash continuations, and Git's signed 32-bit
-numeric boolean forms, including octal, hexadecimal, and `k`/`m`/`g` scaling.
-It skips exactly one leading UTF-8 BOM independently in the common config and
-the worktree-specific overlay; repeated or embedded BOMs remain malformed.
-Boolean tokens are ASCII-bounded before case normalization. Section headers
-cannot span physical lines and fail closed before continuation folding, while a
-same-line section assignment may continue its value after the closing bracket.
-Modern subsection suffixes must be consumed completely as one quoted value;
-embedded quotes and backslashes use Git's `\"` and `\\` escapes, while a
-backslash before another character is discarded as Git specifies. Raw interior
-quotes or trailing subsection junk cannot authorize later identity data.
-Includes fail
-closed because they escape the bounded config file used for identity proof.
+- the absolute common directory via `rev-parse --path-format=absolute
+  --git-common-dir`;
+- bare status via `rev-parse --is-bare-repository`;
+- the primary checkout via `worktree list --porcelain -z`; and
+- the configured top level via `rev-parse --path-format=absolute
+  --show-toplevel`.
 
-When the common config enables `extensions.worktreeConfig`, the resolver reads
-the bounded, regular, non-symlink main-worktree `config.worktree` after the
-common `config`, matching Git's later-value override order for `core.bare` and
-`core.worktree`. A missing worktree config is an empty overlay; malformed,
-oversized, or including worktree config cannot prove an identity owner. This
-keeps direct, positively proven linked, and managed paths on the same explicit
-main-worktree owner when Git stores that owner outside the common config.
-`core.worktree` is interpreted verbatim: absolute values stay absolute and all
-relative values, including a leading `~` component, resolve from the Git
-directory without consulting process `HOME`. A positively proven explicit
-owner is evaluated before the common directory's basename; an external common
-directory named `.git` therefore cannot be mistaken for its parent checkout.
-The explicit owner must point back to the common directory through either a
-bounded regular gitfile or its exact regular, non-symlink `.git` directory;
-both standard and external Git-directory representations therefore converge.
-A directory-backed checkout passes through this same owner resolver rather than
-receiving an early parent-directory identity.
+The process environment removes caller-supplied `GIT_*` overrides, disables
+global/system config and prompting, and sets a five-second timeout. Only
+complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
+accepted. When a checkout marker is present, it is passed back to Git explicitly
+as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor
+of a parent repository.
 
-Git does not persist the primary working-tree path for a non-bare repository
-created with `--separate-git-dir` unless `core.worktree` is configured. Without
-that owner, the direct checkout stays scoped to itself; copying its gitfile
-cannot claim a durable identity. Linked peers that separately prove membership
-through `commondir`, one worktree record, and a backlink may share the validated
-external common directory. When `core.worktree` is configured, the direct and
-linked paths share that explicit owner. A bare common repository that positively
-owns linked worktrees likewise uses its common directory for those peers.
-Malformed or unproven metadata stays scoped to the active checkout. Non-Git
-directories remain valid local-first projects and use their canonical cwd with
-`workspace_path="."`.
+This deliberately does not reimplement `config.c`. BOM handling, whitespace,
+comments, quoting, continuations, numeric booleans, later-value precedence,
+`extensions.worktreeConfig`, includes, `core.worktree`, gitfiles, `commondir`,
+`HEAD`, and submodule/worktree metadata all have exactly the semantics of the
+installed Git version. A rejected config or topology cannot contribute a
+cross-checkout identity and falls back to the nearest active checkout boundary.
+
+A standard checkout and its linked worktrees use Git's primary configured top
+level. An explicit `core.worktree` owner therefore wins for direct, linked, and
+managed callers. A bare repository and its linked worktrees use the absolute
+common directory, including when that directory is literally named `.git`.
+Bare attribution additionally requires Git to validate `HEAD` as either a
+symbolic/unborn ref (`symbolic-ref HEAD`) or a detached object
+(`rev-parse --verify HEAD^{object}`); an arbitrary nonempty record cannot join
+linked worktrees.
+A non-bare `--separate-git-dir` repository without a recoverable primary owner
+uses its Git-reported common identity. Submodules use their own Git-reported
+top level and remain separate projects. Non-Git directories remain valid
+local-first projects and use their canonical cwd with `workspace_path="."`.
 
 ### Managed task worktrees
 
@@ -133,9 +104,13 @@ contract. That same immutable value supplies:
 - the existing nested `execution_contract.frugality_proof.project_root` and
   `.workspace_path` fields.
 
-The unresolved input state and the resolved-absence result are distinct. If a
-runner has no identity, that single result is preserved on both publication
-surfaces and is never interpreted as permission to invoke the resolver again.
+Runner-owned new sessions must resolve an identity before publication. Resolved
+absence fails session creation, so it cannot be confused with a historical
+start event that predates these fields. `SessionRepository.create_session`
+also rejects identity-free execution contracts, top-level-only, nested-only,
+partial, or conflicting identity payloads before appending the immutable start
+event. Contract-free utility sessions remain valid; historical events are read
+without being recreated through this API.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

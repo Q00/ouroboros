@@ -9,15 +9,16 @@ repository while retaining a repository-relative workspace filter.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path, PurePosixPath
+import subprocess
+import tempfile
 from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
-_MAX_GIT_POINTER_LENGTH = 4096
-_MAX_GIT_CONFIG_LENGTH = 65_536
-_GIT_INT_MIN = -(2**31)
-_GIT_INT_MAX = 2**31 - 1
+_MAX_GIT_OUTPUT_LENGTH = 65_536
+_GIT_TIMEOUT_SECONDS = 5.0
 
 
 class ProjectIdentityError(ValueError):
@@ -116,18 +117,13 @@ class ProjectIdentity:
 
 
 def _nearest_git_checkout_root(start: Path) -> Path | None:
+    """Return the nearest checkout marker without interpreting Git metadata."""
     for candidate in (start, *start.parents):
-        # A positively proven bare repository is itself the checkout boundary,
-        # even when its directory is literally named ``.git``.  Without this
-        # check, resolving ``/storage/.git`` would mistake that repository for
-        # the marker owned by ``/storage``.
-        if candidate.name == ".git" and _is_proven_bare_repository(candidate):
-            return candidate
         marker = candidate / ".git"
         try:
-            # Any directory entry is a boundary.  Its shape is validated later;
-            # discovery must not skip a broken symlink, socket, or other
-            # malformed child marker and silently inherit a parent repository.
+            # Even a malformed child marker is a discovery boundary.  If Git
+            # rejects it, attribution remains scoped to this child instead of
+            # silently inheriting an ancestor repository.
             marker.lstat()
         except FileNotFoundError:
             continue
@@ -137,613 +133,180 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
     return None
 
 
-def _read_bounded_utf8(path: Path, *, max_bytes: int) -> str | None:
-    """Return one complete, bounded UTF-8 file or ``None`` when untrusted."""
-    try:
-        if path.is_symlink() or not path.is_file():
-            return None
-        with path.open("rb") as stream:
-            raw_value = stream.read(max_bytes + 1)
-    except OSError:
-        return None
-    if len(raw_value) > max_bytes or b"\x00" in raw_value:
-        return None
-    try:
-        return raw_value.decode("utf-8", errors="strict")
-    except UnicodeError:
-        return None
-
-
-def _read_bounded_record(path: Path) -> str | None:
-    """Read one complete Git pointer record with an optional final newline."""
-    value = _read_bounded_utf8(path, max_bytes=_MAX_GIT_POINTER_LENGTH)
-    if value is None:
-        return None
-    if value.endswith("\r\n"):
-        value = value[:-2]
-    elif value.endswith(("\r", "\n")):
-        value = value[:-1]
-    if not value or "\r" in value or "\n" in value or value != value.strip():
-        return None
-    return value
-
-
-def _read_bounded_head_record(git_dir: Path) -> str | None:
-    """Read a regular HEAD or one contained symlink-backed HEAD record."""
-    head = git_dir / "HEAD"
-    try:
-        if not head.is_symlink():
-            return _read_bounded_record(head)
-        raw_target = str(head.readlink())
-        encoded_target = raw_target.encode("utf-8", errors="strict")
-    except (OSError, UnicodeError):
-        return None
-    if (
-        not raw_target
-        or len(encoded_target) > _MAX_GIT_POINTER_LENGTH
-        or "\x00" in raw_target
-        or "\r" in raw_target
-        or "\n" in raw_target
-    ):
-        return None
-    try:
-        target = Path(raw_target)
-        if not target.is_absolute():
-            target = head.parent / target
-        canonical_git_dir = git_dir.resolve(strict=False)
-        canonical_target = target.resolve(strict=False)
-        canonical_target.relative_to(canonical_git_dir)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    # Resolution above proves the final target stays contained; the target must
-    # then be one complete regular record rather than another external input.
-    return _read_bounded_record(canonical_target)
-
-
-def _git_pointer_target(checkout_root: Path) -> Path | None:
-    """Return the bounded gitdir target named by a checkout's gitfile."""
-    marker = checkout_root / ".git"
-    if not marker.is_file():
-        return None
-    pointer = _read_bounded_record(marker)
-    if pointer is None or not pointer.startswith("gitdir: "):
-        return None
-    raw_git_dir = pointer.removeprefix("gitdir: ")
-    if not raw_git_dir or raw_git_dir != raw_git_dir.strip():
-        return None
-    try:
-        # Git pointer records are paths, not shell input: ``~`` is literal.
-        git_dir = Path(raw_git_dir)
-        if not git_dir.is_absolute():
-            git_dir = checkout_root / git_dir
-        git_dir = git_dir.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return git_dir if git_dir.is_dir() else None
-
-
-def _checkout_owns_git_dir(checkout_root: Path, git_dir: Path) -> bool:
-    """Return whether one checkout points to an exact, regular Git directory."""
-    marker = checkout_root / ".git"
-    try:
-        if marker.is_symlink():
-            return False
-        if marker.is_dir():
-            return marker.resolve(strict=False) == git_dir
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return _git_pointer_target(checkout_root) == git_dir
-
-
-@dataclass(frozen=True, slots=True)
-class _GitCoreConfig:
-    bare: bool
-    worktree: Path | None
-
-
-def _git_config_comment_index(value: str) -> int | None:
-    """Return the first unquoted Git comment marker in one logical line."""
-    in_quotes = False
-    escaped = False
-    for index, character in enumerate(value):
-        if escaped:
-            escaped = False
-            continue
-        if character == "\\":
-            escaped = True
-            continue
-        if character == '"':
-            in_quotes = not in_quotes
-            continue
-        if not in_quotes and character in "#;":
-            return index
-    return None
-
-
-def _git_config_logical_lines(raw_config: str) -> tuple[str, ...] | None:
-    """Fold value continuations while rejecting multiline section headers."""
-    logical_lines: list[str] = []
-    current = ""
-    continuation_pending = False
-    physical_lines = raw_config.split("\n")
-    for index, physical_line in enumerate(physical_lines):
-        has_line_feed = index < len(physical_lines) - 1
-        if physical_line.endswith("\r"):
-            physical_line = physical_line[:-1]
-        if "\r" in physical_line:
-            return None
-        candidate = current + physical_line
-        comment_index = _git_config_comment_index(candidate)
-        uncommented = candidate if comment_index is None else candidate[:comment_index]
-        trailing_backslashes = len(uncommented) - len(uncommented.rstrip("\\"))
-        continues = comment_index is None and trailing_backslashes % 2 == 1
-        if continues:
-            if not has_line_feed:
-                return None
-            # Git permits continuations for variable values, but explicitly
-            # forbids section headers from spanning physical lines.  Check the
-            # accumulated candidate before discarding the newline so malformed
-            # ``[co\\\nre]`` cannot become a trusted ``[core]`` section.  A
-            # closed same-line header may already contain a continued assignment.
-            stripped_candidate = candidate.lstrip(" \t")
-            if (
-                stripped_candidate.startswith("[")
-                and _parse_git_config_section(stripped_candidate) is None
-            ):
-                return None
-            current = candidate[:-1]
-            continuation_pending = True
-            continue
-        stripped_candidate = candidate.lstrip(" \t")
-        if (
-            continuation_pending
-            and stripped_candidate.startswith("[")
-            and _parse_git_config_section(stripped_candidate) is None
-        ):
-            return None
-        logical_lines.append(candidate)
-        current = ""
-        continuation_pending = False
-    if continuation_pending:
-        return None
-    return tuple(logical_lines)
-
-
-def _parse_git_config_section(value: str) -> tuple[str, str] | None:
-    """Parse a section header and return its relevant kind plus remainder."""
-    in_quotes = False
-    escaped = False
-    closing_index: int | None = None
-    for index, character in enumerate(value[1:], start=1):
-        if escaped:
-            escaped = False
-            continue
-        if character == "\\":
-            escaped = True
-            continue
-        if character == '"':
-            in_quotes = not in_quotes
-            continue
-        if character == "]" and not in_quotes:
-            closing_index = index
-            break
-    if closing_index is None or in_quotes or escaped:
-        return None
-    section = value[1:closing_index].strip(" \t")
-    if not section:
-        return None
-    section_name = section.split(maxsplit=1)[0]
-    if not section_name or any(
-        not character.isascii() or not (character.isalnum() or character in "-.")
-        for character in section_name
-    ):
-        return None
-    section_suffix = section[len(section_name) :].lstrip(" \t")
-    if section_suffix and not _valid_git_config_subsection(section_suffix):
-        return None
-    folded = section_name.casefold()
-    if folded == "core" and not section_suffix:
-        kind = "core"
-    elif folded == "extensions" and not section_suffix:
-        kind = "extensions"
-    elif folded in {"include", "includeif"}:
-        kind = "include"
-    else:
-        kind = "other"
-    return kind, value[closing_index + 1 :]
-
-
-def _valid_git_config_subsection(value: str) -> bool:
-    """Return whether one modern Git subsection consumes its complete suffix."""
-    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
-        return False
-    index = 1
-    while index < len(value) - 1:
-        character = value[index]
-        if character == '"' or character in "\r\n\x00":
-            return False
-        if character == "\\":
-            index += 1
-            # Git preserves ``\"`` and ``\\`` in subsection names and drops
-            # the backslash before every other character.  All are grammatical;
-            # only an incomplete escape can consume the required closing quote.
-            if index >= len(value) - 1:
-                return False
-        index += 1
-    return True
-
-
-def _parse_git_config_value(value: str) -> tuple[bool, str]:
-    """Decode Git quotes, comments, and the documented value escapes."""
-    decoded: list[tuple[str, bool]] = []
-    in_quotes = False
-    index = 0
-    escapes = {
-        "b": "\b",
-        "n": "\n",
-        "t": "\t",
-        '"': '"',
-        "\\": "\\",
-    }
-    while index < len(value):
-        character = value[index]
-        if not in_quotes and character in "#;":
-            break
-        if character == '"':
-            in_quotes = not in_quotes
-            index += 1
-            continue
-        if character == "\\":
-            index += 1
-            if index >= len(value) or value[index] not in escapes:
-                return False, ""
-            decoded.append((escapes[value[index]], True))
-            index += 1
-            continue
-        decoded.append((character, in_quotes))
-        index += 1
-    if in_quotes:
-        return False, ""
-    start = 0
-    end = len(decoded)
-    while start < end and decoded[start][0] in " \t" and not decoded[start][1]:
-        start += 1
-    while end > start and decoded[end - 1][0] in " \t" and not decoded[end - 1][1]:
-        end -= 1
-    return True, "".join(character for character, _quoted in decoded[start:end])
-
-
-def _parse_git_config_assignment(value: str) -> tuple[str, str | None] | None:
-    """Parse one Git variable assignment; ``None`` value means boolean true."""
-    candidate = value.lstrip(" \t")
-    if (
-        not candidate
-        or candidate[0] in "#;"
-        or not candidate[0].isascii()
-        or not candidate[0].isalpha()
-    ):
-        return None
-    index = 1
-    while (
-        index < len(candidate)
-        and candidate[index].isascii()
-        and (candidate[index].isalnum() or candidate[index] == "-")
-    ):
-        index += 1
-    key = candidate[:index].casefold()
-    remainder = candidate[index:].lstrip(" \t")
-    if not remainder or remainder[0] in "#;":
-        return key, None
-    if remainder[0] != "=":
-        return None
-    valid, parsed_value = _parse_git_config_value(remainder[1:])
-    return (key, parsed_value) if valid else None
-
-
-def _parse_git_config_values(
-    raw_config: str,
-) -> dict[tuple[str, str], str | None] | None:
-    """Return identity-relevant later-wins values from one bounded config."""
-    # Git skips one UTF-8 BOM at the start of each config file.  Removing only
-    # one preserves fail-closed behavior for repeated or embedded BOMs.
-    if raw_config.startswith("\ufeff"):
-        raw_config = raw_config[1:]
-    logical_lines = _git_config_logical_lines(raw_config)
-    if logical_lines is None:
-        return None
-    current_section: str | None = None
-    relevant_values: dict[tuple[str, str], str | None] = {}
-    for logical_line in logical_lines:
-        candidate = logical_line.lstrip(" \t")
-        if not candidate or candidate[0] in "#;":
-            continue
-        if candidate.startswith("["):
-            parsed_section = _parse_git_config_section(candidate)
-            if parsed_section is None:
-                return None
-            current_section, candidate = parsed_section
-            if current_section == "include":
-                # Includes escape the bounded file and cannot prove identity.
-                return None
-            candidate = candidate.lstrip(" \t")
-            if not candidate or candidate[0] in "#;":
-                continue
-        if current_section is None:
-            return None
-        assignment = _parse_git_config_assignment(candidate)
-        if assignment is None:
-            return None
-        key, parsed_value = assignment
-        if current_section == "core" and key in {"bare", "worktree"}:
-            relevant_values[("core", key)] = parsed_value
-        elif current_section == "extensions" and key == "worktreeconfig":
-            relevant_values[("extensions", key)] = parsed_value
-    return relevant_values
-
-
-def _parse_git_numeric_boolean(value: str) -> bool | None:
-    """Parse the signed 32-bit integer grammar accepted for Git booleans."""
-    candidate = value
-    sign = 1
-    if candidate.startswith(("+", "-")):
-        if candidate[0] == "-":
-            sign = -1
-        candidate = candidate[1:]
-    if not candidate:
-        return None
-
-    multiplier = 1
-    if candidate[-1].casefold() in {"k", "m", "g"}:
-        multiplier = 1024 ** ({"k": 1, "m": 2, "g": 3}[candidate[-1].casefold()])
-        candidate = candidate[:-1]
-    if not candidate:
-        return None
-
-    if candidate.casefold().startswith("0x"):
-        digits = candidate[2:]
-        base = 16
-        valid_digits = "0123456789abcdefABCDEF"
-    elif len(candidate) > 1 and candidate.startswith("0"):
-        digits = candidate
-        base = 8
-        valid_digits = "01234567"
-    else:
-        digits = candidate
-        base = 10
-        valid_digits = "0123456789"
-    if not digits or any(character not in valid_digits for character in digits):
-        return None
-
-    significant_digits = digits.lstrip("0") or "0"
-    max_significant_digits = {8: 11, 10: 10, 16: 8}[base]
-    if len(significant_digits) > max_significant_digits:
-        return None
-    parsed = sign * int(significant_digits, base) * multiplier
-    if not _GIT_INT_MIN <= parsed <= _GIT_INT_MAX:
-        return None
-    return parsed != 0
-
-
-def _parse_git_boolean(value: str | None) -> bool | None:
-    if value is None:
-        return True
-    if not value.isascii():
-        return None
-    normalized = value.casefold()
-    if not normalized:
-        return False
-    if normalized in {"true", "yes", "on"}:
-        return True
-    if normalized in {"false", "no", "off"}:
-        return False
-    return _parse_git_numeric_boolean(value)
-
-
-def _read_git_core_config(git_dir: Path) -> _GitCoreConfig | None:
-    """Read bounded common and applicable main-worktree core configuration."""
-    raw_config = _read_bounded_utf8(
-        git_dir / "config",
-        max_bytes=_MAX_GIT_CONFIG_LENGTH,
+def _git_environment() -> dict[str, str]:
+    """Return a stable environment without caller-supplied Git overrides."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+        }
     )
-    if raw_config is None:
-        return None
-    common_values = _parse_git_config_values(raw_config)
-    if common_values is None:
-        return None
+    return environment
 
-    worktree_config_enabled = False
-    worktree_config_key = ("extensions", "worktreeconfig")
-    if worktree_config_key in common_values:
-        parsed_extension = _parse_git_boolean(common_values[worktree_config_key])
-        if parsed_extension is None:
-            return None
-        worktree_config_enabled = parsed_extension
 
-    core_values = {
-        key: value for (section, key), value in common_values.items() if section == "core"
-    }
-    if worktree_config_enabled:
-        # For the main worktree, ``git rev-parse --git-path
-        # config.worktree`` names ``<common-dir>/config.worktree``.  Git reads
-        # it after the common config, so its core values override earlier
-        # values.  A missing file is a valid empty overlay; a present symlink,
-        # non-file, oversized, malformed, or including file cannot prove
-        # ownership and fails closed.
-        worktree_config_path = git_dir / "config.worktree"
-        try:
-            if worktree_config_path.is_symlink():
-                return None
-            worktree_config_exists = worktree_config_path.exists()
-        except OSError:
-            return None
-        if worktree_config_exists:
-            raw_worktree_config = _read_bounded_utf8(
-                worktree_config_path,
-                max_bytes=_MAX_GIT_CONFIG_LENGTH,
+def _run_git(start: Path, *arguments: str) -> bytes | None:
+    """Run one bounded, non-interactive Git query and return complete stdout."""
+    try:
+        with tempfile.TemporaryFile() as output:
+            completed = subprocess.run(
+                ["git", "-C", str(start), *arguments],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                env=_git_environment(),
+                shell=False,
             )
-            if raw_worktree_config is None:
+            if completed.returncode != 0 or output.tell() > _MAX_GIT_OUTPUT_LENGTH:
                 return None
-            worktree_values = _parse_git_config_values(raw_worktree_config)
-            if worktree_values is None:
-                return None
-            core_values.update(
-                {
-                    key: value
-                    for (section, key), value in worktree_values.items()
-                    if section == "core"
-                }
-            )
+            output.seek(0)
+            return output.read()
+    except (OSError, subprocess.SubprocessError):
+        return None
 
-    if "bare" not in core_values:
+
+def _git_path(output: bytes | None) -> Path | None:
+    """Decode one newline-terminated Git path without trimming valid spaces."""
+    if output is None or not output.endswith(b"\n"):
         return None
-    bare = _parse_git_boolean(core_values["bare"])
-    if bare is None:
-        return None
-    if "worktree" not in core_values:
-        return _GitCoreConfig(bare=bare, worktree=None)
-    raw_worktree = core_values["worktree"]
-    if raw_worktree is None or not raw_worktree:
+    record = output[:-1]
+    if not record or b"\n" in record or b"\r" in record or b"\x00" in record:
         return None
     try:
-        # Git stores ``core.worktree`` verbatim.  Relative values, including
-        # leading ``~`` components, are resolved from the Git directory and
-        # never through the process environment.
-        worktree = Path(raw_worktree)
-        if not worktree.is_absolute():
-            worktree = git_dir / worktree
-        worktree = _canonical_directory(worktree)
-    except (OSError, ProjectIdentityError, RuntimeError, ValueError):
+        return _canonical_directory(record.decode("utf-8", errors="strict"))
+    except (UnicodeError, ProjectIdentityError):
         return None
-    return _GitCoreConfig(bare=bare, worktree=worktree)
 
 
-def _is_proven_bare_repository(git_dir: Path) -> bool:
-    """Return whether one directory positively proves the bounded bare shape."""
-    core = _read_git_core_config(git_dir)
-    return bool(
-        core is not None
-        and core.bare
-        and core.worktree is None
-        and _read_bounded_head_record(git_dir)
-        and (git_dir / "objects").is_dir()
-        and (git_dir / "refs").is_dir()
+def _git_dir_argument(checkout_root: Path | None) -> tuple[str, ...]:
+    if checkout_root is None:
+        return ()
+    return (f"--git-dir={checkout_root / '.git'}",)
+
+
+def _git_head_is_valid(git_dir: Path) -> bool:
+    """Ask Git to validate either a symbolic/unborn or detached HEAD."""
+    git_dir_argument = f"--git-dir={git_dir}"
+    symbolic_head = _run_git(
+        git_dir,
+        git_dir_argument,
+        "symbolic-ref",
+        "--quiet",
+        "HEAD",
     )
+    if symbolic_head is not None:
+        return True
+    detached_head = _run_git(
+        git_dir,
+        git_dir_argument,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD^{object}",
+    )
+    return detached_head is not None
 
 
-def _direct_gitfile_source_root(checkout_root: Path, git_dir: Path) -> Path | None:
-    """Return a direct gitfile owner only when the target names it explicitly."""
-    core = _read_git_core_config(git_dir)
-    if core is None or core.bare or core.worktree != checkout_root:
+def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | None:
+    """Ask Git for the primary worktree (or bare common directory)."""
+    git_dir_argument = _git_dir_argument(checkout_root)
+    common_output = _run_git(
+        start,
+        *git_dir_argument,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    )
+    common_dir = _git_path(common_output)
+    if common_dir is None:
         return None
-    return checkout_root if _checkout_owns_git_dir(checkout_root, git_dir) else None
-
-
-def _common_git_source_root(common_dir: Path) -> Path | None:
-    """Return one source identity root positively owned by a common gitdir."""
-    core = _read_git_core_config(common_dir)
-    if core is not None and core.bare:
-        if (
-            core.worktree is None
-            and _read_bounded_head_record(common_dir)
-            and (common_dir / "objects").is_dir()
-            and (common_dir / "refs").is_dir()
-        ):
-            return common_dir
-        return None
-
-    # An explicit, positively proven owner outranks directory naming.  Its
-    # checkout may use either a bounded gitfile or the standard regular ``.git``
-    # directory representation.  An external common directory may itself be
-    # named ``.git`` without being the metadata directory of its parent checkout.
-    if core is not None and core.worktree is not None:
-        return core.worktree if _checkout_owns_git_dir(core.worktree, common_dir) else None
-
-    if common_dir.name == ".git":
-        normal_checkout = common_dir.parent
-        try:
-            if (normal_checkout / ".git").resolve(strict=False) == common_dir:
-                return normal_checkout.resolve(strict=False)
-        except (OSError, RuntimeError, ValueError):
-            return None
-
-    if core is None:
+    common_bare = _run_git(
+        common_dir,
+        f"--git-dir={common_dir}",
+        "rev-parse",
+        "--is-bare-repository",
+    )
+    if common_bare == b"true\n":
+        return common_dir if _git_head_is_valid(common_dir) else None
+    if common_bare != b"false\n":
         return None
 
-    # Without an explicit core.worktree, only callers that already proved a
-    # common-dir worktree record and backlink may use this stable common root.
-    if (
-        _read_bounded_head_record(common_dir)
-        and (common_dir / "objects").is_dir()
-        and (common_dir / "refs").is_dir()
-    ):
-        return common_dir
-    return None
-
-
-def _linked_worktree_source_root(checkout_root: Path) -> Path:
-    """Resolve a gitfile checkout to one common source root when provable.
-
-    A normal repository has a ``.git`` directory and is already its source
-    root.  A linked worktree has a ``.git`` pointer to a per-worktree gitdir;
-    that directory's bounded ``commondir`` pointer and backlink prove shared
-    ownership.  Standard repositories use the primary checkout; submodules
-    use their configured worktree; repositories created with an external Git
-    directory and bare repositories that own worktrees use the validated common
-    directory because no primary worktree exists for peers to recover.
-    Malformed metadata degrades conservatively to the active checkout root.
-    """
-    marker = checkout_root / ".git"
+    output = _run_git(
+        start,
+        *git_dir_argument,
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+    )
+    if output is None:
+        return None
+    first_record = output.split(b"\x00", 1)[0]
+    prefix = b"worktree "
+    if not first_record.startswith(prefix):
+        return None
     try:
-        if marker.is_symlink():
-            return checkout_root
-        if marker.is_dir():
-            # Directory-backed repositories consume the same common-directory
-            # owner resolver as linked worktrees.  This preserves explicit
-            # ``core.worktree`` precedence instead of assuming the parent owns
-            # the Git directory merely from its basename.
-            common_dir = marker.resolve(strict=False)
-            return _common_git_source_root(common_dir) or checkout_root
-    except (OSError, RuntimeError, ValueError):
-        return checkout_root
-    if not marker.is_file():
-        return checkout_root
+        raw_root = first_record.removeprefix(prefix).decode("utf-8", errors="strict")
+        main_worktree = _canonical_directory(raw_root)
+    except (UnicodeError, ProjectIdentityError):
+        return None
+    # ``worktree list`` identifies the primary checkout, while rev-parse asks
+    # Git's own config parser to apply an explicit ``core.worktree`` owner.
+    # It fails for a bare primary, where the worktree-list path is the desired
+    # stable common-directory identity.
+    main_checkout = main_worktree if (main_worktree / ".git").exists() else None
+    top_level = _run_git(
+        main_worktree,
+        *_git_dir_argument(main_checkout),
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel",
+    )
+    if top_level is None:
+        return main_worktree
+    return _git_path(top_level)
 
-    git_dir = _git_pointer_target(checkout_root)
-    if git_dir is None:
-        return checkout_root
 
-    raw_common_dir = _read_bounded_record(git_dir / "commondir")
-    if not raw_common_dir:
-        return _direct_gitfile_source_root(checkout_root, git_dir) or checkout_root
-    try:
-        common_dir = Path(raw_common_dir)
-        if not common_dir.is_absolute():
-            common_dir = git_dir / common_dir
-        common_dir = common_dir.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return checkout_root
-    if not common_dir.is_dir():
-        return checkout_root
-    worktrees_dir = common_dir / "worktrees"
-    try:
-        git_dir_relative = git_dir.relative_to(worktrees_dir)
-    except ValueError:
-        return checkout_root
-    if len(git_dir_relative.parts) != 1 or not git_dir.is_dir():
-        return checkout_root
-    raw_checkout_marker = _read_bounded_record(git_dir / "gitdir")
-    if not raw_checkout_marker:
-        return checkout_root
-    try:
-        checkout_marker = Path(raw_checkout_marker)
-        if not checkout_marker.is_absolute():
-            checkout_marker = git_dir / checkout_marker
-        backlink_matches = checkout_marker.resolve(strict=False) == marker.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        return checkout_root
-    if not backlink_matches:
-        return checkout_root
-    return _common_git_source_root(common_dir) or checkout_root
+def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
+    output = _run_git(
+        start,
+        *_git_dir_argument(checkout_root),
+        "rev-parse",
+        "--is-bare-repository",
+    )
+    return output == b"true\n"
+
+
+def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
+    """Resolve Git-owned topology, conservatively falling back to one checkout."""
+    checkout_root = _nearest_git_checkout_root(start)
+    project_root = _git_project_root(start, checkout_root)
+    if project_root is None:
+        fallback = checkout_root or start
+        return fallback, fallback
+    # A bare repository can itself be named ``.git``; in that case filesystem
+    # marker discovery sees its parent, while Git correctly identifies the bare
+    # directory as both the project and checkout root.
+    if _active_repository_is_bare(start, checkout_root):
+        return project_root, project_root
+    if checkout_root is not None:
+        return project_root, checkout_root
+    top_level = _run_git(
+        start,
+        *_git_dir_argument(checkout_root),
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel",
+    )
+    if top_level is None:
+        return start, start
+    decoded_top_level = _git_path(top_level)
+    return (project_root, decoded_top_level) if decoded_top_level is not None else (start, start)
 
 
 def _relative_workspace_path(workspace: Path, checkout_root: Path) -> str:
@@ -778,13 +341,10 @@ def resolve_project_identity(
             source_root if source_workspace is None else source_workspace
         )
         workspace_path = _relative_workspace_path(workspace, checkout_root)
-        project_root = _linked_worktree_source_root(checkout_root)
+        project_root, _ = _project_and_checkout_roots(checkout_root)
         return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
 
-    checkout_root = _nearest_git_checkout_root(effective)
-    if checkout_root is None:
-        return ProjectIdentity.from_root(effective)
-    source = _linked_worktree_source_root(checkout_root)
+    source, checkout_root = _project_and_checkout_roots(effective)
     workspace_path = _relative_workspace_path(effective, checkout_root)
     return ProjectIdentity.from_root(source, workspace_path=workspace_path)
 
