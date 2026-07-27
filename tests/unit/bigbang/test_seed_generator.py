@@ -598,15 +598,39 @@ class TestSeedGeneratorExtraction:
         assert criterion.has_success_contract is False
 
     @pytest.mark.parametrize(
-        "verify_command",
+        "line,field_name",
         (
-            "printf READY | arti facts: literal",
-            'printf READY | arti"facts": literal',
-            r"printf READY | arti\facts: literal",
-            "printf READY | ver ify: literal",
+            (
+                "AC: Command output is checked | verify: printf WAITING | ex pect: READY",
+                "expect",
+            ),
+            (
+                "AC: Output file exists | verify: true | arti facts: missing.txt",
+                "artifacts",
+            ),
+            (
+                "AC: Command status is enforced | verify: true | ver ify: exit 1",
+                "verify",
+            ),
         ),
     )
-    def test_acceptance_contract_parser_preserves_split_markers_after_real_field(
+    def test_acceptance_contract_parser_rejects_split_reserved_fields_after_real_field(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            'sh -c \'printf "%s\\n" "| ex pect: literal"\'',
+            "bash -lc \"printf '%s\\n' '| arti facts: literal'\"",
+            r"printf \|\ ver\ ify:\ literal",
+        ),
+    )
+    def test_acceptance_contract_parser_preserves_quoted_or_escaped_split_marker_literals(
         self,
         verify_command: str,
     ) -> None:
@@ -1511,9 +1535,25 @@ class TestSeedGeneratorExtraction:
                 "artifacts: NONE | expect: READY",
                 "output_assertion",
             ),
+            (
+                "AC: Command output is checked | verify: printf WAITING | ex pect: READY",
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+            (
+                "AC: Output file exists | verify: true | arti facts: missing.txt",
+                "AC: Output file exists | verify: true | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                "AC: Command status is enforced | verify: true | ver ify: exit 1",
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
         ),
     )
-    async def test_generate_retries_pre_field_contract_bypasses_before_runtime_gate(
+    async def test_generate_retries_reserved_contract_bypasses_before_runtime_gate(
         self,
         representation: str,
         bypass_attempt: str,

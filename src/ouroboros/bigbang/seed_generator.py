@@ -255,7 +255,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             )
             index = fragment.end
             continue
-        if fragment is not None and (not structured_payload_started or fragment.canonical):
+        if fragment is not None:
             raise ValueError(f"Malformed {fragment.name} field in acceptance criterion")
         index += 1
     if (quote is not None or escaped) and _find_pipe_led_ac_field_fragment(body):
