@@ -142,11 +142,11 @@ def test_case_variant_core_sections_use_later_git_value(
     (common_git / "config").write_text(
         line_ending.join(
             (
-                "[core]",
-                "\tbare = false",
-                f"\tworktree = {first}",
-                "[CORE]",
-                f"\tworktree = {primary}",
+                "[CORE] # stale owner",
+                "\tbare = false ; non-bare repository",
+                f'\tworktree = "{first}" # stale owner',
+                "[core] ; later owner",
+                f'\tworktree = "{primary}" ; active owner',
                 "",
             )
         ),
@@ -168,6 +168,66 @@ def test_case_variant_core_sections_use_later_git_value(
 
     assert primary_identity == linked_identity
     assert primary_identity.project_root == str(primary.resolve())
+
+
+def test_valueless_bare_config_joins_direct_and_linked_identity(tmp_path: Path) -> None:
+    common_git = tmp_path / "common.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        "[CORE] # Git boolean shorthand\n\tbare\n",
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+
+    direct_identity = resolve_project_identity(common_git)
+    linked_identity = resolve_project_identity(linked)
+
+    assert direct_identity == linked_identity
+    assert direct_identity.project_root == str(common_git.resolve())
+
+
+def test_quoted_continued_core_worktree_keeps_direct_linked_parity(tmp_path: Path) -> None:
+    common_git = tmp_path / "storage.git"
+    (common_git / "objects").mkdir(parents=True)
+    (common_git / "refs").mkdir()
+    (common_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    primary = tmp_path / "primary with space"
+    primary.mkdir()
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    (common_git / "config").write_text(
+        "[core]\n"
+        "\tbare = false\n"
+        f'\tworktree = "{tmp_path}/primary \\\n'
+        'with space" # continued quoted path\n',
+        encoding="utf-8",
+    )
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    linked_git_dir = common_git / "worktrees" / "linked"
+    linked_git_dir.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {linked_git_dir}\n", encoding="utf-8")
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (linked_git_dir / "gitdir").write_text(
+        f"{linked / '.git'}\n",
+        encoding="utf-8",
+    )
+
+    direct_identity = resolve_project_identity(primary)
+    linked_identity = resolve_project_identity(linked)
+
+    assert direct_identity == linked_identity
+    assert direct_identity.project_root == str(primary.resolve())
 
 
 def test_bare_common_repository_joins_direct_and_managed_worktrees(
