@@ -16,6 +16,7 @@ from ouroboros.orchestrator.decomposition_policy import (
     DecompositionChild,
     DecompositionDecisionRecord,
     DecompositionDisposition,
+    DecompositionProposal,
     DecompositionSource,
     DecompositionTraceSummary,
     SemanticAttestationStatus,
@@ -75,10 +76,30 @@ def _executor(*, max_depth: int = 2) -> ProcessLocalTestExecutor:
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
         event_store=AsyncMock(),
         console=MagicMock(),
-        decomposition_mode="bounce_only",
         max_decomposition_depth=max_depth,
         cross_harness_redispatch=False,
     )
+
+
+def test_default_executor_decomposition_mode_is_bounce_only() -> None:
+    """The live low-level default cannot run a pre-execution decomposition."""
+    executor = _executor()
+
+    assert executor._decomposition_mode == "bounce_only"
+
+
+def test_executor_rejects_direct_preflight_override_before_provider_effect() -> None:
+    runtime = MagicMock()
+
+    with pytest.raises(ValueError, match="Unsupported decomposition_mode"):
+        ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            decomposition_mode="preflight",  # type: ignore[arg-type]
+        )
+
+    runtime.execute_task.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -102,6 +123,42 @@ async def test_successful_first_attempt_never_calls_decomposer() -> None:
     )
 
     assert result.success is True
+    executor._try_decompose_ac.assert_not_awaited()
+    executor._request_bounce_classification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_pause_never_calls_bounce_classifier_or_decomposer() -> None:
+    executor = _executor()
+    executor._execute_atomic_ac = AsyncMock(
+        return_value=ACExecutionResult(
+            ac_index=0,
+            ac_content="Parent work",
+            success=False,
+            messages=(
+                AgentMessage(
+                    type="result",
+                    content="Usage limit reached. Please try again in 5 hours.",
+                    data={"subtype": "error", "error_type": "CodexCliError"},
+                ),
+            ),
+        )
+    )
+    executor._try_decompose_ac = AsyncMock()
+    executor._request_bounce_classification = AsyncMock()
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Parent work",
+        session_id="session-quota",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="goal",
+        execution_id="exec-quota",
+    )
+
+    assert result.success is False
     executor._try_decompose_ac.assert_not_awaited()
     executor._request_bounce_classification.assert_not_awaited()
 
@@ -180,9 +237,7 @@ async def test_abandoned_stall_runs_bounce_recovery_without_losing_semantic_key(
             depth=kwargs["depth"],
         )
     )
-    executor._request_bounce_classification = AsyncMock(
-        return_value=(BounceCause.UNKNOWN, "No decomposition evidence.", (), False)
-    )
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.UNKNOWN, False))
 
     result = await executor._execute_single_ac(
         ac_index=0,
@@ -207,9 +262,7 @@ async def test_evidence_backed_too_big_bounce_dispatches_trusted_children(
 ) -> None:
     executor = _executor()
     node = ExecutionNodeIdentity.root(execution_context_id="exec-too-big", ac_index=0)
-    executor._request_bounce_classification = AsyncMock(
-        return_value=(BounceCause.TOO_BIG, "Distinct parent scope remains.", ("remaining:1",), True)
-    )
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
     executor._try_decompose_ac = AsyncMock(return_value=_trusted_split(node.node_id))
     executor._maybe_redispatch_alt_harness = AsyncMock()
 
@@ -263,12 +316,60 @@ async def test_evidence_backed_too_big_bounce_dispatches_trusted_children(
 
 
 @pytest.mark.asyncio
+async def test_bounce_persistence_failure_prevents_decomposition_provider_effect() -> None:
+    executor = _executor()
+    executor._execute_atomic_ac = AsyncMock(return_value=_failed_result())
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
+    executor._try_decompose_ac = AsyncMock()
+    executor._event_store.append.side_effect = RuntimeError("event store unavailable")
+
+    with pytest.raises(RuntimeError, match="event store unavailable"):
+        await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Parent work",
+            session_id="session-bounce-persist",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="goal",
+            execution_id="exec-bounce-persist",
+        )
+
+    executor._try_decompose_ac.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_decision_persistence_failure_prevents_child_dispatch() -> None:
+    executor = _executor()
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-decision-persist", ac_index=0)
+    executor._execute_atomic_ac = AsyncMock(return_value=_failed_result())
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
+    executor._try_decompose_ac = AsyncMock(return_value=_trusted_split(node.node_id))
+    executor._event_store.append.side_effect = [None, RuntimeError("decision append failed")]
+    executor._execute_decomposition_children = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="decision append failed"):
+        await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Parent work",
+            session_id="session-decision-persist",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="goal",
+            execution_id="exec-decision-persist",
+            node_identity=node,
+        )
+
+    executor._execute_decomposition_children.assert_not_awaited()
+    assert node.node_id not in executor._decomposition_decisions
+
+
+@pytest.mark.asyncio
 async def test_too_big_at_depth_cap_records_escalated_compromise() -> None:
     executor = _executor(max_depth=0)
     executor._execute_atomic_ac = AsyncMock(return_value=_failed_result())
-    executor._request_bounce_classification = AsyncMock(
-        return_value=(BounceCause.TOO_BIG, "Distinct parent scope remains.", (), True)
-    )
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
     executor._try_decompose_ac = AsyncMock()
 
     result = await executor._execute_single_ac(
@@ -495,7 +596,10 @@ def test_trace_summary_is_bounded_and_does_not_copy_tool_inputs() -> None:
     assert "hunter2" not in trace.summary
     assert "abc123" not in trace.summary
     assert "secret-value" not in trace.summary
-    assert "Read, Bash" in trace.summary
+    assert "attempt_message_count=2" in trace.summary
+    assert "attempted_tool_count=2" in trace.summary
+    assert "verifier_reason_count=1" in trace.summary
+    assert trace.evidence_refs == ()
 
 
 class _SequenceRuntime:
@@ -520,15 +624,14 @@ class _SequenceRuntime:
 
 
 @pytest.mark.asyncio
-async def test_classifier_output_is_bounded_and_redacted_before_use() -> None:
+async def test_classifier_rejects_oversized_output_instead_of_normalizing_authority() -> None:
     runtime = _SequenceRuntime(
         [
             json.dumps(
                 {
                     "cause": "TOO_BIG",
-                    "reason": "token=secret-value " + ("x" * 500),
-                    "evidence_refs": [f"ref-{index}: password=hunter2" for index in range(20)],
                     "has_remaining_scope": True,
+                    "explanation": "token=secret-value " + ("x" * 500),
                 }
             )
         ]
@@ -541,16 +644,53 @@ async def test_classifier_output_is_bounded_and_redacted_before_use() -> None:
         cross_harness_redispatch=False,
     )
 
-    cause, reason, refs, remaining = await executor._request_bounce_classification(
+    cause, remaining = await executor._request_bounce_classification(
         trace=DecompositionTraceSummary(summary="attempted_tools=Read")
     )
 
-    assert cause is BounceCause.TOO_BIG
-    assert remaining is True
-    assert len(reason) <= 240
-    assert "secret-value" not in reason
-    assert len(refs) == 8
-    assert all("hunter2" not in ref for ref in refs)
+    assert cause is BounceCause.UNKNOWN
+    assert remaining is False
+
+
+@pytest.mark.asyncio
+async def test_classifier_admits_only_closed_cause_and_scope_metadata() -> None:
+    runtime = _SequenceRuntime([json.dumps({"cause": "TOO_BIG", "has_remaining_scope": True})])
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        cross_harness_redispatch=False,
+    )
+
+    result = await executor._request_bounce_classification(
+        trace=DecompositionTraceSummary(summary="attempted_tool_count=1")
+    )
+
+    assert result == (BounceCause.TOO_BIG, True)
+
+
+@pytest.mark.asyncio
+async def test_classifier_requires_exact_bounded_schema() -> None:
+    payload = {
+        "cause": "TOO_BIG",
+        "has_remaining_scope": True,
+        "decompose_now": True,
+    }
+    runtime = _SequenceRuntime([json.dumps(payload)])
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        cross_harness_redispatch=False,
+    )
+
+    result = await executor._request_bounce_classification(
+        trace=DecompositionTraceSummary(summary="attempted_tools=Read")
+    )
+
+    assert result == (BounceCause.UNKNOWN, False)
 
 
 @pytest.mark.asyncio
@@ -570,9 +710,7 @@ async def test_classifier_cannot_self_author_attempt_evidence() -> None:
         ),
     )
     trace = executor._build_decomposition_trace_summary(result=result, ac_spec=None)
-    executor._request_bounce_classification = AsyncMock(
-        return_value=(BounceCause.TOO_BIG, "Scope remains.", ("invented:ref",), True)
-    )
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
 
     classification = await executor._classify_bounce_result(result=result, trace=trace)
 
@@ -608,19 +746,41 @@ def _attestation(*, established: bool) -> str:
             "coverage_established": established,
             "non_overlap_established": established,
             "simpler_units_established": established,
-            "reasons": [] if established else ["siblings overlap"],
         }
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "source",
-    [DecompositionSource.BOUNCE, DecompositionSource.PREFLIGHT],
-)
-async def test_generic_structured_proposal_requires_independent_attestation(
-    source: DecompositionSource,
-) -> None:
+@pytest.mark.parametrize("mutation", ["unknown_field", "non_boolean"])
+async def test_semantic_attestation_rejects_non_strict_payloads(mutation: str) -> None:
+    payload = json.loads(_attestation(established=True))
+    if mutation == "unknown_field":
+        payload["authorizes_child_dispatch"] = True
+    else:
+        payload["non_overlap_established"] = 1
+    runtime = _SequenceRuntime([json.dumps(payload)])
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        cross_harness_redispatch=False,
+    )
+    proposal = DecompositionProposal.from_dict(json.loads(_generic_proposal()))
+    assert proposal is not None
+
+    established, reasons = await executor._attest_decomposition_proposal(
+        parent_text="Produce output and verify integration",
+        proposal=proposal,
+        trace_summary="remaining_artifacts=report.json",
+        system_prompt="system",
+    )
+
+    assert established is False
+    assert reasons == ("semantic_attestation_unparseable",)
+
+
+@pytest.mark.asyncio
+async def test_generic_structured_proposal_requires_independent_attestation() -> None:
     runtime = _SequenceRuntime([_generic_proposal(), _attestation(established=True)])
     inherited_handle = RuntimeHandle(backend="claude", native_session_id="proposal-session")
     executor = ParallelACExecutor(
@@ -638,8 +798,8 @@ async def test_generic_structured_proposal_requires_independent_attestation(
         seed_goal="goal",
         tools=[],
         system_prompt="system",
-        source=source,
-        cause=BounceCause.TOO_BIG if source is DecompositionSource.BOUNCE else None,
+        source=DecompositionSource.BOUNCE,
+        cause=BounceCause.TOO_BIG,
         trace_summary="attempted_tools=Read; remaining_artifacts=report.json",
     )
 
@@ -648,6 +808,30 @@ async def test_generic_structured_proposal_requires_independent_attestation(
     assert result.semantic_status is SemanticAttestationStatus.ESTABLISHED
     assert len(runtime.prompts) == 2
     assert runtime.resume_handles == [inherited_handle, None]
+
+
+@pytest.mark.asyncio
+async def test_live_decomposer_rejects_preflight_invocation_before_provider_effect() -> None:
+    runtime = _SequenceRuntime([_generic_proposal()])
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        cross_harness_redispatch=False,
+    )
+
+    with pytest.raises(RuntimeError, match="TOO_BIG bounce"):
+        await executor._try_decompose_ac(
+            ac_content="Produce output and verify integration",
+            ac_index=0,
+            seed_goal="goal",
+            tools=[],
+            system_prompt="system",
+            source=DecompositionSource.PREFLIGHT,
+        )
+
+    assert runtime.prompts == []
 
 
 @pytest.mark.asyncio
@@ -682,7 +866,7 @@ async def test_failed_semantic_attestation_repairs_once_then_admits() -> None:
     assert result.disposition is DecompositionDisposition.SPLIT
     assert result.trustworthy is True
     assert result.repair_count == 1
-    assert "siblings overlap" in runtime.prompts[2]
+    assert "non_overlap_not_established" in runtime.prompts[2]
     assert len(runtime.prompts) == 4
 
 

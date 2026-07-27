@@ -862,7 +862,7 @@ class OrchestratorRunner:
         mcp_tool_prefix: str = "",
         debug: bool = False,
         enable_decomposition: bool = True,
-        decomposition_mode: Literal["preflight", "bounce_only", "off"] | None = None,
+        decomposition_mode: Literal["bounce_only", "off"] | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         inherited_tools: list[str] | None = None,
         task_cwd: str | None = None,
@@ -892,6 +892,8 @@ class OrchestratorRunner:
             decomposition_mode: Optional decomposition mode override. When omitted,
                 the runner uses ``execution.decomposition_mode`` from config.
                 ``enable_decomposition=False`` forces the effective mode to ``off``.
+                Legacy config files are migrated while loading; direct preflight
+                overrides are rejected instead of authorizing a provider effect.
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions that should fork a session.
             inherited_tools: Optional effective tool set inherited from a
@@ -1023,14 +1025,16 @@ class OrchestratorRunner:
         self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
         self._context_pack_enabled = get_context_pack_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
-        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
-            "off"
-            if not enable_decomposition
-            else (
-                _execution_config.decomposition_mode
-                if decomposition_mode is None
-                else decomposition_mode
-            )
+        configured_decomposition_mode = (
+            _execution_config.decomposition_mode
+            if decomposition_mode is None
+            else decomposition_mode
+        )
+        if configured_decomposition_mode not in {"bounce_only", "off"}:
+            msg = f"Unsupported decomposition_mode: {configured_decomposition_mode!r}"
+            raise ValueError(msg)
+        self._decomposition_mode: Literal["bounce_only", "off"] = (
+            "off" if not enable_decomposition else configured_decomposition_mode
         )
         if not _model_routing_disabled:
             from ouroboros.orchestrator.model_routing import build_model_router
@@ -3832,7 +3836,7 @@ class OrchestratorRunner:
             and 1 <= effective_workers <= max_workers
             and effective_workers == expected_effective_workers
             and isinstance(mode, str)
-            and mode in {"preflight", "bounce_only", "off"}
+            and mode in {"bounce_only", "off"}
             and (value.get("enable_decomposition") is True or mode == "off")
             and isinstance(backend, str)
             and bool(backend)

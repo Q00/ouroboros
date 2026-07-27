@@ -30,10 +30,12 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
+    DecompositionChild,
     DecompositionDecisionRecord,
     DecompositionDisposition,
     DecompositionSource,
-    legacy_unverified_split_decision,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
@@ -335,10 +337,21 @@ def _split_decision(
     identity = node_identity or ExecutionNodeIdentity.root(
         execution_context_id=execution_id, ac_index=root_ac_index
     )
-    return legacy_unverified_split_decision(
+    return DecompositionDecisionRecord(
         node_id=identity.node_id,
         source=DecompositionSource.PREFLIGHT,
-        child_descriptions=child_descriptions,
+        disposition=DecompositionDisposition.SPLIT,
+        children=tuple(
+            DecompositionChild(
+                description=description,
+                coverage_claims=(f"scope-{index}",),
+                verification_hint=f"verify scope {index}",
+            )
+            for index, description in enumerate(child_descriptions)
+        ),
+        structural_status=StructuralCheckStatus.PASSED,
+        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+        trustworthy=True,
     )
 
 
@@ -1214,6 +1227,12 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
                 data={"subtype": "success" if resume_succeeds else "error"},
                 resume_handle=handle,
             )
+        elif call_number == 4 and not resume_succeeds:
+            assert kwargs.get("resume_handle") is None
+            yield AgentMessage(
+                type="result",
+                content=('{"cause":"BAD_SPEC","has_remaining_scope":false}'),
+            )
         else:  # pragma: no cover - the assertion below is the primary guard
             raise AssertionError("a completed child was redispatched")
 
@@ -1299,7 +1318,7 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
         execution_counters=None,
     )
 
-    assert len(provider_resume_handles) == 3
+    assert len(provider_resume_handles) == (3 if resume_succeeds else 4)
     restored = resumed[0]
     assert isinstance(restored, ACExecutionResult)
     assert restored.success is resume_succeeds
@@ -2994,7 +3013,7 @@ async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> N
 
 
 @pytest.mark.asyncio
-async def test_durable_route_override_bypasses_preflight_decomposition_effect() -> None:
+async def test_durable_route_override_creates_no_preflight_decomposition_state() -> None:
     executor, _store, _events = _executor(enable_decomposition=True)
     candidate = _candidate(executor, "compat:claude:frugal")
 
@@ -3016,9 +3035,7 @@ async def test_durable_route_override_bypasses_preflight_decomposition_effect() 
 
     assert result.success is False
     assert "execute_task" in (result.error or "")
-    decision = next(iter(executor._decomposition_decisions.values()))
-    assert decision.disposition.value == "ATOMIC"
-    assert decision.reasons == ("durable_route_history_proves_atomic",)
+    assert executor._decomposition_decisions == {}
 
 
 @pytest.mark.asyncio

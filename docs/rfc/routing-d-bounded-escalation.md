@@ -371,13 +371,16 @@ total cap smaller than its producer domain.
 
 ## Parallel and direct scope
 
-Cheapest-first bounded routing applies to top-level atomic ACs. Decomposed
-children remain on legacy child routing until [#1466](https://github.com/Q00/ouroboros/issues/1466)
-provides live Verified-MECE trust. Cheapening untrusted children before that
-slice would let decomposition output expand dispatch authority prematurely.
+Cheapest-first bounded routing applies to top-level atomic ACs. The Verified-MECE
+live path from [#1466](https://github.com/Q00/ouroboros/issues/1466) can now grant a
+finalized child trust signal only after an evidence-backed `TOO_BIG` bounce,
+exact structural validation, fresh-session semantic attestation, and at most one
+repair. Untrusted splits never receive child cheapening.
 
-After #1466, explicitly trusted children can enter the same Admission Kernel and
-bounded escalation loop without changing the authority model.
+Decomposed children still use the legacy child retry path in this slice: they do
+not yet have a complete child-scoped durable route episode and replay owner.
+Verified-MECE establishes the prerequisite trust boundary; it does not silently
+expand Routing D's provider-effect authority.
 
 ## Seed/result and spend semantics
 
@@ -401,7 +404,7 @@ than silently retrying while the host is asked to inspect or intervene.
 
 ## Deferred roadmap
 
-- Verified-MECE child trust and live decomposition: #1466
+- Verified-MECE child trust and live decomposition: #1466 (implemented prerequisite)
 - shared cross-run projection: #1389
 - cross-run advisory memory
 - actual token/spend attribution and guardrails: #1396

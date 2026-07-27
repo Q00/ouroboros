@@ -743,6 +743,17 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+def test_current_execution_semantics_rejects_retired_preflight_authority() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 @pytest.mark.parametrize(
     "field",
     [
