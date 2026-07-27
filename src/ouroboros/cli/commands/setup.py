@@ -248,6 +248,28 @@ def _claude_setup_backup_requires_private_mode(path: Path) -> bool:
     return path.name in {"mcp.json", "credentials.yaml"}
 
 
+def _claude_setup_mode_is_replay_safe(mode: int) -> bool:
+    return 0 <= mode <= 0o777 and mode & 0o022 == 0
+
+
+def _canonical_claude_setup_replay_mode(
+    name: str,
+    path: Path,
+    pre: _ClaudeSetupFileSnapshot,
+    operation: str,
+) -> int | None:
+    if operation == "write" and name == "credentials" and pre.existed:
+        return None
+    if operation == "write" and (
+        name == "credentials"
+        or (not pre.existed and _claude_setup_backup_requires_private_mode(path))
+    ):
+        return 0o600
+    if not pre.existed:
+        return 0o600
+    return pre.mode if _claude_setup_mode_is_replay_safe(pre.mode) else None
+
+
 def _claude_mcp_file_identity(stat_result: os.stat_result) -> dict[str, int]:
     return {
         "dev": int(stat_result.st_dev),
@@ -756,7 +778,17 @@ def _promote_text_cas(
                 backup_path=preserved_backup,
                 promoted_snapshot=promoted,
             ) from exc
-        remove_backup = True
+        if backup_path is not None and backup_path.exists():
+            try:
+                backup_path.unlink()
+                _fsync_parent_dir(backup_path)
+            except OSError as exc:
+                raise _ClaudeSetupPromotionError(
+                    f"Could not remove Claude setup backup after promoting {path}: {exc}",
+                    backup_path=backup_path if backup_path.exists() else None,
+                    promoted_snapshot=promoted,
+                ) from exc
+            claimed_existing = False
         return promoted
     except OSError as exc:
         if claimed_existing and not published and backup_path is not None and not path.exists():
@@ -960,6 +992,9 @@ def _manifest_target(
         return None
     pre = _snapshot_from_manifest(raw_pre)
     if pre is None:
+        return None
+    canonical_mode = _canonical_claude_setup_replay_mode(name, path, pre, raw_operation)
+    if canonical_mode is None or raw_mode != canonical_mode:
         return None
     if not _manifest_backup_record_is_valid(path, pre, raw_operation, raw.get("backup")):
         return None

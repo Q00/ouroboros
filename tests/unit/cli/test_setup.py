@@ -2459,6 +2459,72 @@ class TestClaudeSetup:
         assert credentials_path.read_text(encoding="utf-8") == "providers: {}\n"
         assert "incomplete" in warning.call_args.args[0]
 
+    @pytest.mark.parametrize("forged_mode", [0o666, 0o777, 0o1600])
+    def test_setup_claude_recovery_rejects_forged_credentials_replay_mode(
+        self, tmp_path: Path, forged_mode: int
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="config_written")
+        )
+        credentials_path.unlink()
+        missing_credentials = setup_cmd._read_claude_setup_file_snapshot(credentials_path)
+        assert missing_credentials is not None
+        staged_credentials = b"providers: {}\n"
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        credentials_target = targets["credentials"]
+        assert isinstance(credentials_target, dict)
+        credentials_target["pre"] = setup_cmd._snapshot_to_manifest(missing_credentials)
+        credentials_target["operation"] = "write"
+        credentials_target["mode"] = forged_mode
+        credentials_target["content_b64"] = base64.b64encode(staged_credentials).decode("ascii")
+        credentials_target["sha256"] = hashlib.sha256(staged_credentials).hexdigest()
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert not credentials_path.exists()
+        assert "incomplete" in warning.call_args.args[0]
+
+    def test_setup_claude_recovery_rejects_credentials_write_over_existing_preimage(
+        self, tmp_path: Path
+    ) -> None:
+        claude_dir, _mcp_path, _config_path, credentials_path, manifest = (
+            self._make_valid_claude_recovery_manifest(tmp_path, phase="config_written")
+        )
+        original_credentials = credentials_path.read_bytes()
+        staged_credentials = b"providers: {}\n"
+        targets = manifest["targets"]
+        assert isinstance(targets, dict)
+        credentials_target = targets["credentials"]
+        assert isinstance(credentials_target, dict)
+        credentials_target["operation"] = "write"
+        credentials_target["mode"] = 0o600
+        credentials_target["content_b64"] = base64.b64encode(staged_credentials).decode("ascii")
+        credentials_target["sha256"] = hashlib.sha256(staged_credentials).hexdigest()
+
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        recovery_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_warning") as warning,
+        ):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is False
+        assert recovery_path.exists()
+        assert credentials_path.read_bytes() == original_credentials
+        assert "incomplete" in warning.call_args.args[0]
+
     def test_setup_claude_recovery_rejects_completed_phase_without_post_snapshot(
         self, tmp_path: Path
     ) -> None:
@@ -3174,6 +3240,67 @@ class TestClaudeSetup:
         manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
         backup_path = Path(manifest["targets"]["mcp"]["backup"]["path"])
         assert backup_path.read_bytes() == original_mcp
+        success.assert_not_called()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            recovered = setup_cmd._recover_claude_mcp_activation()
+
+        assert recovered is True
+        assert not recovery_path.exists()
+        assert not backup_path.exists()
+        assert list(claude_dir.glob(".mcp.json.ouroboros-pre.*.tmp")) == []
+
+    def test_setup_claude_journals_backup_after_successful_promotion_unlink_failure(
+        self, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+        (config_dir / "credentials.yaml").write_text("providers: {}\n", encoding="utf-8")
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        mcp_path = claude_dir / "mcp.json"
+        original_mcp = b'{"mcpServers": {}}\n'
+        mcp_path.write_bytes(original_mcp)
+        recovery_path = claude_dir / "mcp.json.ouroboros-recovery"
+        real_unlink = Path.unlink
+        backup_unlink_failed = False
+
+        def fail_mcp_backup_unlink(path: Path, *args: object, **kwargs: object) -> None:
+            nonlocal backup_unlink_failed
+            if (
+                not backup_unlink_failed
+                and path.parent == claude_dir
+                and path.name.startswith(".mcp.json.ouroboros-pre.")
+                and path.name.endswith(".tmp")
+            ):
+                backup_unlink_failed = True
+                raise OSError("backup unlink denied")
+            real_unlink(path, *args, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]"]},
+            ),
+            patch("pathlib.Path.unlink", fail_mcp_backup_unlink),
+            patch("ouroboros.cli.commands.setup.print_success") as success,
+        ):
+            configured = setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        assert configured is False
+        assert backup_unlink_failed is True
+        assert recovery_path.exists()
+        manifest = json.loads(recovery_path.read_text(encoding="utf-8"))
+        backup_path = Path(manifest["targets"]["mcp"]["backup"]["path"])
+        assert backup_path.read_bytes() == original_mcp
+        assert (
+            manifest["targets"]["mcp"]["backup"]["pre_sha256"]
+            == hashlib.sha256(original_mcp).hexdigest()
+        )
         success.assert_not_called()
 
         with patch("pathlib.Path.home", return_value=tmp_path):
