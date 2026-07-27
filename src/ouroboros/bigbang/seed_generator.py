@@ -99,7 +99,9 @@ def _parse_string_array_values(
         return ()
     if strict:
         try:
-            decoded = json.loads(text)
+            decoded = json.loads(
+                text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken
+            )
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"{field_label} must be a single-line JSON array of strings: {e}. Value: {text[:200]}"
@@ -125,6 +127,39 @@ def _parse_string_array_values(
             if isinstance(decoded, list):
                 return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
+
+
+class _JsonNonFiniteToken:
+    """Marks a non-standard JSON constant (NaN/Infinity) seen during decoding.
+
+    These tokens are not JSON numbers, so strict extraction must retry them
+    while lenient parsing falls back to the default weight — unlike genuine
+    numeric overflow, which saturates by sign (review round three).
+    """
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def __repr__(self) -> str:
+        return self.token
+
+
+_JSON_INT_SATURATION_DIGITS = 400
+
+
+def _bounded_json_int(text: str) -> int | float:
+    """Decode a JSON integer, saturating past a fixed digit bound.
+
+    CPython raises a plain ``ValueError`` (not ``JSONDecodeError``) when an
+    integer literal exceeds its conversion digit limit, which would escape the
+    lenient never-raises contract and turn a syntactically valid number into a
+    strict retry. Anything beyond the bound saturates to a signed infinity so
+    the weight clamp resolves it deterministically in both modes.
+    """
+    digits = text.lstrip("+-")
+    if len(digits) > _JSON_INT_SATURATION_DIGITS:
+        return float("-inf") if text.lstrip().startswith("-") else float("inf")
+    return int(text)
 
 
 def _require_object_string(
@@ -165,21 +200,33 @@ def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> floa
             numeric = float(str(raw_weight).strip())
         except (ValueError, OverflowError):
             return 1.0
-        return min(1.0, max(0.0, numeric)) if math.isfinite(numeric) else 1.0
+        if math.isnan(numeric):
+            return 1.0
+        if math.isinf(numeric):
+            # Saturate overflow by sign so a negative overflow keeps the
+            # historical 0.0 clamp (review round three).
+            return 1.0 if numeric > 0 else 0.0
+        return min(1.0, max(0.0, numeric))
     if isinstance(raw_weight, int):
         # Clamp in integer space: arbitrary-precision JSON integers would
         # overflow float() (an OverflowError the retry path does not catch),
         # and the clamp result is what any out-of-range number gets anyway.
         return float(min(max(raw_weight, 0), 1))
     if not math.isfinite(raw_weight):
-        # Python's json.loads accepts the non-standard NaN/Infinity tokens;
-        # they are not JSON numbers, so strict extraction retries and lenient
-        # parsing keeps the historical 1.0 fallback.
-        if strict:
-            raise ValueError(
-                f"{field_label} entry field 'weight' must be a finite number; got {raw_weight!r}."
-            )
-        return 1.0
+        # A NaN float cannot come from a JSON number (the non-standard tokens
+        # decode to _JsonNonFiniteToken and are handled above), so it only
+        # appears in pre-decoded input: strict retries it, lenient defaults.
+        if math.isnan(raw_weight):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entry field 'weight' must be a finite number; "
+                    f"got {raw_weight!r}."
+                )
+            return 1.0
+        # Genuine numeric overflow (e.g. 1e999 or an integer past the decode
+        # bound) is a valid JSON number and follows the clamp contract in both
+        # modes, saturating by sign (review round three).
+        return 1.0 if raw_weight > 0 else 0.0
     return min(1.0, max(0.0, raw_weight))
 
 
@@ -193,7 +240,9 @@ def _decode_object_array(text: str, *, field_label: str, strict: bool) -> list |
     """
     if strict:
         try:
-            decoded = json.loads(text)
+            decoded = json.loads(
+                text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken
+            )
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"{field_label} must be a single-line JSON array of objects: {e}. "
@@ -208,8 +257,8 @@ def _decode_object_array(text: str, *, field_label: str, strict: bool) -> list |
     if not text.startswith("["):
         return None
     try:
-        decoded = json.loads(text)
-    except json.JSONDecodeError:
+        decoded = json.loads(text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken)
+    except (json.JSONDecodeError, ValueError):
         return None
     return decoded if isinstance(decoded, list) else None
 

@@ -1535,6 +1535,33 @@ class TestObjectArrayExtractionContract:
             ":description:0.5 | complete::0.4 | valid:Description:0.25"
         ) == (EvaluationPrinciple(name="valid", description="Description", weight=0.25),)
 
+    def test_weights_beyond_interpreter_digit_limit_never_raise(self) -> None:
+        huge = "9" * 5000
+        lenient = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]'
+        )
+        assert lenient[0].weight == 1.0
+        strict = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]', strict=True
+        )
+        assert strict[0].weight == 1.0
+        negative = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": -{huge}}}]', strict=True
+        )
+        assert negative[0].weight == 0.0
+
+    def test_overflowed_negative_weights_keep_their_sign(self) -> None:
+        legacy = _parse_evaluation_principles("x:d:-1e999 | y:d:1e999")
+        assert [p.weight for p in legacy] == [0.0, 1.0]
+        json_neg = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]'
+        )
+        assert json_neg[0].weight == 0.0
+        json_neg_strict = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]', strict=True
+        )
+        assert json_neg_strict[0].weight == 0.0
+
     def test_lenient_null_weight_defaults_without_raising(self) -> None:
         principles = _parse_evaluation_principles(
             '[{"name": "x", "description": "d", "weight": null}]'
@@ -1580,7 +1607,7 @@ class TestObjectArrayExtractionContract:
 
     def test_strict_rejects_nonfinite_weights(self) -> None:
         for token in ("NaN", "Infinity", "-Infinity"):
-            with pytest.raises(ValueError, match="finite"):
+            with pytest.raises(ValueError, match="weight"):
                 _parse_evaluation_principles(
                     f'[{{"name": "x", "description": "d", "weight": {token}}}]',
                     strict=True,
