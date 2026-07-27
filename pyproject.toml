@@ -14,11 +14,14 @@ dependencies = [
     "jsonschema>=4.21.0,<5.0.0",
     "pydantic>=2.0.0,<3.0.0",
     "prompt-toolkit>=3.0.0,<4.0.0",
-    # Exact-pinned rather than range-pinned like its neighbours: this parses
-    # `.env`, a documented trust boundary (see `_UNTRUSTED_ENV_DENYLIST` in
-    # config/loader.py), so an unreviewed upgrade is a supply-chain path.
-    # Same rationale as the AI-stack pins from #1347.
-    "python-dotenv==1.2.2",
+    # Ceiling is deliberately tighter than the major-version bounds around it:
+    # this parses `.env`, a documented trust boundary (see
+    # `_UNTRUSTED_ENV_DENYLIST` in config/loader.py), so only patch releases
+    # flow without review. An exact pin would be tighter still, but
+    # `test_runtime_and_optional_dependencies_have_upper_bounds` reserves
+    # `==` for the optional extras; core runtime deps stay bounded ranges.
+    # uv.lock pins the exact version for reproducible installs regardless.
+    "python-dotenv>=1.2.2,<1.3.0",
     "pyyaml>=6.0.0,<7.0.0",
     "rich>=13.0.0,<16.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
