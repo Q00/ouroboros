@@ -144,6 +144,11 @@ def _runner(runtime: _CountingRuntime | None = None) -> OrchestratorRunner:
     return OrchestratorRunner(runtime or _CountingRuntime(), event_store, MagicMock())
 
 
+def _bind_task_workspace(runner: OrchestratorRunner, workspace: TaskWorkspace) -> None:
+    runner._task_workspace = workspace
+    runner._adapter.working_directory = workspace.effective_cwd
+
+
 async def _prepare(
     runner: OrchestratorRunner,
     *,
@@ -2693,8 +2698,8 @@ async def test_prepare_collision_preserves_existing_owner_workspace_lock(tmp_pat
         branch="test/live-owner-collision",
         lock_path="/tmp/live-owner-collision.lock",
     )
-    original_runner._task_workspace = workspace
-    colliding_runner._task_workspace = workspace
+    _bind_task_workspace(original_runner, workspace)
+    _bind_task_workspace(colliding_runner, workspace)
     session_id = "session-live-owner-collision"
     original_execution_id = "exec-live-owner-original"
     collision_execution_id = "exec-live-owner-collision"
@@ -2738,7 +2743,7 @@ async def test_exact_identity_prepare_collision_preserves_original_generation(tm
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'exact-owner-collision.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    runner._task_workspace = TaskWorkspace(
+    workspace = TaskWorkspace(
         durable_id="exact-owner-collision",
         repo_root="/tmp/repo",
         repo_name="repo",
@@ -2748,6 +2753,7 @@ async def test_exact_identity_prepare_collision_preserves_original_generation(tm
         branch="test/exact-owner-collision",
         lock_path="/tmp/exact-owner-collision.lock",
     )
+    _bind_task_workspace(runner, workspace)
     session_id = "session-exact-owner-collision"
     execution_id = "exec-exact-owner-collision"
     original = await runner.prepare_session(
@@ -2786,7 +2792,7 @@ async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path)
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-users.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    runner._task_workspace = TaskWorkspace(
+    workspace = TaskWorkspace(
         durable_id="workspace-users",
         repo_root="/tmp/repo",
         repo_name="repo",
@@ -2796,6 +2802,7 @@ async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path)
         branch="test/workspace-users",
         lock_path="/tmp/workspace-users.lock",
     )
+    _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
         execution_id="exec-workspace-first",
@@ -2853,7 +2860,7 @@ async def test_inflight_preparation_reserves_workspace_before_registration(tmp_p
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-prepare-race.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    runner._task_workspace = TaskWorkspace(
+    workspace = TaskWorkspace(
         durable_id="workspace-prepare-race",
         repo_root="/tmp/repo",
         repo_name="repo",
@@ -2863,6 +2870,7 @@ async def test_inflight_preparation_reserves_workspace_before_registration(tmp_p
         branch="test/workspace-prepare-race",
         lock_path="/tmp/workspace-prepare-race.lock",
     )
+    _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
         execution_id="exec-workspace-prepare-first",
@@ -2940,7 +2948,7 @@ async def test_resume_handoff_reserves_workspace_before_reclaim(tmp_path) -> Non
         branch="test/workspace-resume-race",
         lock_path="/tmp/workspace-resume-race.lock",
     )
-    runner._task_workspace = workspace
+    _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
         execution_id="exec-workspace-resume-first",
@@ -2969,7 +2977,7 @@ async def test_resume_handoff_reserves_workspace_before_reclaim(tmp_path) -> Non
             )
             release_lock_mock.assert_not_called()
 
-            runner._task_workspace = workspace
+            _bind_task_workspace(runner, workspace)
             contract = first.value.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
             generation, already_claimed = runner._claim_process_local_authority_generation(
                 first.value.session_id,
@@ -3006,7 +3014,7 @@ async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_pa
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-cancel-workspace.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    runner._task_workspace = TaskWorkspace(
+    workspace = TaskWorkspace(
         durable_id="terminal-cancel-workspace",
         repo_root="/tmp/repo",
         repo_name="repo",
@@ -3016,6 +3024,7 @@ async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_pa
         branch="test/terminal-cancel-workspace",
         lock_path="/tmp/terminal-cancel-workspace.lock",
     )
+    _bind_task_workspace(runner, workspace)
     execution_id = "exec-terminal-cancel-workspace"
     session_id = "session-terminal-cancel-workspace"
     prepared = await runner.prepare_session(
@@ -6115,7 +6124,7 @@ async def test_retained_resume_restores_persisted_workspace_lock_when_worktree_f
         lock_path=str(tmp_path / "retained-resume.lock"),
     )
     runner = _runner()
-    runner._task_workspace = workspace
+    _bind_task_workspace(runner, workspace)
     tracker = await _prepare(
         runner,
         session_id="session-retained-resume-lock",

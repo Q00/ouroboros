@@ -267,6 +267,7 @@ class MockClaudeAgentAdapter:
     message_sequences: list[list[AgentMessage]] = field(default_factory=list)
     _execution_count: int = field(default=0, init=False)
     _execution_history: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _cwd: str | None = field(default=None, init=False)
 
     @property
     def runtime_backend(self) -> str:
@@ -280,7 +281,7 @@ class MockClaudeAgentAdapter:
     def working_directory(self) -> str | None:
         # Executing adapters must identify the workspace they mutate.  The
         # production adapters do so; keep the E2E double on the same contract.
-        return str(Path.cwd())
+        return self._cwd or str(Path.cwd())
 
     @property
     def permission_mode(self) -> str | None:
@@ -529,6 +530,7 @@ async def persisted_session(
     # Resume validation requires a concrete constructor-level model pin. The
     # real CLI adapters expose ``_model``; this minimal E2E adapter does not.
     mock_claude_agent_adapter._model = "test-model"
+    mock_claude_agent_adapter._cwd = str(temp_dir)
     runner = OrchestratorRunner(
         adapter=mock_claude_agent_adapter,
         event_store=event_store,

@@ -43,8 +43,8 @@ remote-based identity is explicitly deferred.
 
 The resolver walks from the effective cwd to the nearest `.git` directory
 entry. Every entry shape is a discovery boundary: a broken symlink or other
-malformed child marker stays scoped to that child instead of inheriting a
-parent repository.
+malformed child marker cannot inherit a parent repository or publish an
+identity while Git cannot validate that boundary.
 
 Git owns every Git-format decision. The resolver invokes the installed `git`
 binary with argv rather than a shell and asks it for:
@@ -71,21 +71,28 @@ ancestor checkout. Acceptance of that argument is not ownership proof: the
 active checkout must also appear in Git's returned worktree population or equal
 Git's configured top level for an explicit `core.worktree` owner.
 
-Git availability is a separate outcome from topology rejection. The resolver
-first proves that the installed Git command can run without depending on the
-candidate path. Spawn errors, timeouts, and oversized output raise a transient
-identity-unavailable error; they never publish the active checkout as a local
-fallback. A paused public resume preserves its durable state and live authority
-generation while releasing the exclusive claim for retry. Git successfully
-answering but rejecting a repository/config/topology remains the only path to
-the conservative local boundary.
+Git availability is a separate outcome from positive topology proof. The
+resolver first proves that the installed Git command can run without depending
+on the candidate path. Spawn errors, timeouts, oversized output, and every
+unproven nonzero query after a repository marker or bare-repository shape is
+discovered raise a transient identity-unavailable error; Git has no portable
+exit-code distinction between malformed topology and temporary repository I/O,
+so neither may publish a fallback identity. The expected `symbolic-ref` miss for
+a detached `HEAD` is accepted only when a second `rev-parse --verify
+HEAD^{object}` succeeds. A paused public resume preserves its durable state and
+live authority generation while releasing the exclusive claim for retry. A
+genuine local directory is selected without a repository query only when
+neither a checkout marker nor the standard bare `HEAD`/`objects`/`refs` shape
+exists. Successful Git responses that do not positively prove ownership may
+still use the conservative active-checkout boundary.
 
 This deliberately does not reimplement `config.c`. BOM handling, whitespace,
 comments, quoting, continuations, numeric booleans, later-value precedence,
 `extensions.worktreeConfig`, includes, `core.worktree`, gitfiles, `commondir`,
 `HEAD`, and submodule/worktree metadata all have exactly the semantics of the
-installed Git version. A rejected config or topology cannot contribute a
-cross-checkout identity and falls back to the nearest active checkout boundary.
+installed Git version. A config or topology query that exits nonzero cannot
+contribute any durable identity. A successful query whose returned worktree
+population does not own the active checkout remains scoped to that checkout.
 
 A standard checkout and its linked worktrees use Git's primary configured top
 level. An explicit `core.worktree` owner therefore wins for direct, linked, and
@@ -138,12 +145,14 @@ without being recreated through this API.
 The shared provider-neutral worker cwd boundary normalizes direct runtimes,
 leader-driven runtimes, and runner/executor `task_cwd` overrides to one absolute
 path, resolving relative inputs against construction-time process cwd. If an
-omitted cwd is unavailable, the boundary preserves `None`; the runner may still
-select an explicit task/runtime path and raises its domain error only when no
-usable workspace exists. Persistent Claude transport and runtime objects share
-the same normalized value for both spawn and resume. The resulting concrete
-workspace is therefore available before a runner-owned session publishes its
-mandatory identity and remains the path passed to provider subprocesses.
+omitted provider cwd is unavailable, the boundary preserves `None`; an explicit
+task path does not silently replace it because the provider would still execute
+with its retained value. Preparation instead requires task, runtime-handle, and
+provider cwd owners to agree before publication. Persistent Claude transport
+and runtime objects share the same normalized value for both spawn and resume.
+The resulting concrete workspace is therefore available before a runner-owned
+session publishes its mandatory identity and remains the path passed to
+provider subprocesses.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after
