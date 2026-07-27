@@ -92,6 +92,7 @@ from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
     RuntimeHandle,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
@@ -2998,7 +2999,7 @@ class ParallelACExecutor:
             and approval_mode.strip()
             else inherited_runtime_handle
         )
-        self._task_cwd = task_cwd
+        self._task_cwd = resolve_worker_cwd(task_cwd) if task_cwd else None
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
         self._run_verify_commands = run_verify_commands
@@ -3053,7 +3054,7 @@ class ParallelACExecutor:
         self._coordinator = _foundation_a_roots.level_coordinator_type(
             adapter,
             inherited_runtime_handle=self._inherited_runtime_handle,
-            task_cwd=task_cwd,
+            task_cwd=self._task_cwd,
             reasoning_effort=self._reasoning_effort,
         )
         self._authority_coordinator = self._coordinator
@@ -3068,7 +3069,7 @@ class ParallelACExecutor:
         self._ac_runtime_handle_manager = ACRuntimeHandleManager(
             adapter,
             event_store,
-            task_cwd=task_cwd,
+            task_cwd=self._task_cwd,
             process_local_resume_nonce=self._process_local_resume_nonce,
         )
         self._ac_runtime_handles = self._ac_runtime_handle_manager.runtime_handles

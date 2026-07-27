@@ -1086,6 +1086,14 @@ TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
 )
 
 
+def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
+    """Resolve one stable worker cwd, preserving absence when cwd is unavailable."""
+    try:
+        return str(Path(cwd).expanduser().resolve(strict=False)) if cwd is not None else os.getcwd()
+    except OSError:
+        return None
+
+
 class ClaudeAgentAdapter:
     """Adapter for Claude Agent SDK with streaming support.
 
@@ -1142,7 +1150,7 @@ class ClaudeAgentAdapter:
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._permission_mode = permission_mode
         self._model = model
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._cli_path = str(Path(cli_path).expanduser()) if cli_path is not None else None
         self._rate_limit_bucket = self._build_rate_limit_bucket()
 
@@ -2042,4 +2050,5 @@ __all__ = [
     "runtime_handle_tool_catalog",
     "runtime_handle_capability_graph",
     "runtime_handle_control_plane",
+    "resolve_worker_cwd",
 ]

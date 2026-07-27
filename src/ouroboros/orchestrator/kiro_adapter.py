@@ -11,7 +11,6 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 import contextlib
-import os
 from pathlib import Path
 import re
 
@@ -33,6 +32,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
@@ -116,7 +116,7 @@ class KiroAgentAdapter:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._model = model
         self._permission_mode_requested = permission_mode is not None
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._permission_mode = permission_mode or "acceptEdits"
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or "kiro"

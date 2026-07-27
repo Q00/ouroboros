@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import ModuleType
 from typing import Any, get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock, patch
@@ -26,6 +27,8 @@ from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.rate_limit import RateLimitSnapshot, SharedRateLimitBucket
 from ouroboros.router import Resolved
+
+_EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
 
 
 # Helper function to create mock SDK messages with correct class names
@@ -740,7 +743,7 @@ class TestClaudeAgentAdapter:
     def test_init_with_custom_cwd_and_cli_path(self) -> None:
         """Test initialization stores backend-neutral runtime construction data."""
         adapter = ClaudeAgentAdapter(cwd="/tmp/project", cli_path="/tmp/claude")
-        assert adapter._cwd == "/tmp/project"
+        assert adapter._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert adapter._cli_path == "/tmp/claude"
 
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "env_key"})
@@ -1087,7 +1090,7 @@ class TestClaudeAgentAdapter:
         assert messages[0].resume_handle is not None
         assert messages[0].resume_handle.backend == "claude"
         assert messages[0].resume_handle.native_session_id == "sess_456"
-        assert messages[0].resume_handle.cwd == "/tmp/project"
+        assert messages[0].resume_handle.cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert messages[0].resume_handle.approval_mode == "acceptEdits"
         assert messages[0].resume_handle.updated_at is not None
         assert messages[1].type == "result"
@@ -1143,7 +1146,7 @@ class TestClaudeAgentAdapter:
         assert runtime_handle is not None
         assert runtime_handle.backend == "claude"
         assert runtime_handle.native_session_id == "sess_456"
-        assert runtime_handle.cwd == "/tmp/project"
+        assert runtime_handle.cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime_handle.approval_mode == "acceptEdits"
         assert runtime_handle.updated_at is not None
         assert [message.type for message in task_result.messages] == [
@@ -1368,7 +1371,7 @@ class TestClaudeAgentAdapter:
         assert runtime_handle is not None
         assert runtime_handle.backend == "claude"
         assert runtime_handle.native_session_id == "sess_456"
-        assert runtime_handle.cwd == "/tmp/project"
+        assert runtime_handle.cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime_handle.approval_mode == "acceptEdits"
         assert runtime_handle.updated_at is not None
         assert runtime_handle.to_dict()["backend"] == "claude"
@@ -1458,7 +1461,7 @@ class TestBuildRuntimeHandleFreshPath:
         assert handle.backend == "claude"
         assert handle.kind == "agent_runtime"
         assert handle.native_session_id == "sess_789"
-        assert handle.cwd == "/tmp/project"
+        assert handle.cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert handle.approval_mode == "acceptEdits"
         assert handle.metadata == {}
         assert handle.updated_at is not None

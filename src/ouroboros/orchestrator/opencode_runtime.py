@@ -45,6 +45,7 @@ from ouroboros.orchestrator.adapter import (
     SkillDispatchHandler,
     SubagentOrchestration,
     TaskResult,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.opencode_event_normalizer import (
     OpenCodeEventContext,
@@ -228,7 +229,7 @@ class OpenCodeRuntime:
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "bypassPermissions"
         self._model = model
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend

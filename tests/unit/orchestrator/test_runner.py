@@ -86,6 +86,7 @@ _LONG_WINDOW_429_ENCODINGS = tuple(
     )
     for value in (429, "429")
 )
+_EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
 
 
 def _task_workspace() -> TaskWorkspace:
@@ -3024,6 +3025,57 @@ class TestOrchestratorRunner:
         assert runner._effective_cwd() == str(launch_cwd)
         assert runner._project_identity() == resolve_project_identity(launch_cwd)
 
+    def test_relative_task_cwd_is_frozen_before_process_cwd_changes(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        mock_adapter.working_directory = "workspace"
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd="workspace",
+        )
+        monkeypatch.chdir(later_cwd)
+
+        assert runner._effective_cwd() == str(workspace)
+        assert runner._project_identity() == resolve_project_identity(workspace)
+
+    def test_relative_adapter_cwd_is_frozen_until_the_adapter_changes_it(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        replacement = later_cwd / "replacement"
+        workspace.mkdir(parents=True)
+        replacement.mkdir(parents=True)
+        monkeypatch.chdir(launch_cwd)
+        mock_adapter.working_directory = "workspace"
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        monkeypatch.chdir(later_cwd)
+        assert runner._effective_cwd() == str(workspace)
+
+        mock_adapter.working_directory = "replacement"
+        assert runner._effective_cwd() == str(replacement)
+
     def test_unavailable_process_cwd_does_not_override_adapter_cwd(
         self,
         mock_adapter: MagicMock,
@@ -3207,7 +3259,7 @@ class TestOrchestratorRunner:
         resume_handle = captured_kwargs["resume_handle"]
         assert isinstance(resume_handle, RuntimeHandle)
         assert resume_handle.backend == "opencode"
-        assert resume_handle.cwd == "/tmp/project"
+        assert resume_handle.cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
         assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
         assert resume_handle.metadata["capability_graph"][0]["name"] == "Read"
@@ -7383,7 +7435,7 @@ class TestOrchestratorRunner:
             backend="opencode",
             permission_mode="bypassPermissions",
             cli_path=None,
-            cwd="/tmp/project",
+            cwd=_EXPECTED_CANONICAL_PROJECT_CWD,
             max_turns=1,
             allowed_tools=[],
         )
@@ -7422,7 +7474,7 @@ class TestOrchestratorRunner:
             backend="codex",
             permission_mode="bypassPermissions",
             cli_path="/tmp/real-codex",
-            cwd="/tmp/project",
+            cwd=_EXPECTED_CANONICAL_PROJECT_CWD,
             max_turns=1,
             allowed_tools=[],
         )
@@ -7519,7 +7571,7 @@ class TestOrchestratorRunner:
             backend="codex",
             permission_mode="bypassPermissions",
             cli_path=None,
-            cwd="/tmp/project",
+            cwd=_EXPECTED_CANONICAL_PROJECT_CWD,
             max_turns=1,
             allowed_tools=[],
         )
@@ -7555,7 +7607,7 @@ class TestOrchestratorRunner:
             backend="opencode",
             permission_mode="bypassPermissions",
             cli_path=None,
-            cwd="/tmp/project",
+            cwd=_EXPECTED_CANONICAL_PROJECT_CWD,
             max_turns=1,
             allowed_tools=[],
         )

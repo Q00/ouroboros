@@ -56,6 +56,7 @@ from ouroboros.core.execution_preferences import (
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
+    ProjectIdentityUnavailableError,
     resolve_project_identity,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
@@ -74,6 +75,7 @@ from ouroboros.orchestrator.adapter import (
     AgentRuntime,
     ParamSupport,
     RuntimeHandle,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
@@ -942,6 +944,13 @@ class OrchestratorRunner:
             self._launch_cwd: str | None = os.getcwd()
         except OSError:
             self._launch_cwd = None
+        adapter_cwd = adapter.working_directory
+        self._adapter_launch_cwd = adapter_cwd
+        self._resolved_adapter_launch_cwd = (
+            resolve_worker_cwd(adapter_cwd)
+            if isinstance(adapter_cwd, str) and adapter_cwd
+            else self._launch_cwd
+        )
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
         self._checkpoint_store = checkpoint_store
@@ -955,7 +964,7 @@ class OrchestratorRunner:
             inherited_runtime_handle
         )
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
-        self._task_cwd = task_cwd
+        self._task_cwd = resolve_worker_cwd(task_cwd) if task_cwd else None
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
@@ -3185,9 +3194,11 @@ class OrchestratorRunner:
         if self._task_workspace is not None:
             return self._task_workspace.effective_cwd
         if runtime_handle is not None and runtime_handle.cwd:
-            return runtime_handle.cwd
+            return resolve_worker_cwd(runtime_handle.cwd)
         cwd = self._adapter.working_directory
-        return cwd if isinstance(cwd, str) and cwd else self._launch_cwd
+        if cwd == self._adapter_launch_cwd:
+            return self._resolved_adapter_launch_cwd
+        return resolve_worker_cwd(cwd) if isinstance(cwd, str) and cwd else self._launch_cwd
 
     @staticmethod
     def _canonical_path(value: str) -> str:
@@ -3229,6 +3240,16 @@ class OrchestratorRunner:
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():
                 return None
             return resolve_project_identity(effective_cwd)
+        except ProjectIdentityUnavailableError as exc:
+            raise OrchestratorError(
+                message="Cannot resolve project identity",
+                details={
+                    "invalid": "project_identity",
+                    "cause": str(exc),
+                    "resume_blocked": "project_identity_unavailable",
+                    "retryable": True,
+                },
+            ) from exc
         except ProjectIdentityError as exc:
             raise OrchestratorError(
                 message="Cannot resolve project identity",
@@ -8973,6 +8994,12 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if exc.details.get("resume_blocked") == "project_identity_unavailable":
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                return Result.err(exc)
             _, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
@@ -10920,6 +10947,12 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if exc.details.get("resume_blocked") == "project_identity_unavailable":
+                self._preserve_process_local_owner_for_retry(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                return Result.err(exc)
             _, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=session_id,
                 execution_id=tracker.execution_id,

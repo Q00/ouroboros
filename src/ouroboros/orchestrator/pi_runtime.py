@@ -29,6 +29,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import (
@@ -87,7 +88,7 @@ class PiRuntime:
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
