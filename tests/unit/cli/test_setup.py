@@ -4401,3 +4401,97 @@ class TestNonInteractiveAutoSelect:
             available={"codex": "/usr/bin/codex", "hermes": "/usr/bin/hermes"},
         )
         assert selected == "codex"
+
+
+class TestSourceTreeDetection:
+    """Tests for `_is_source_tree_ouroboros_build`.
+
+    Every other case in this file mocks this function out, so its real
+    behaviour had no direct coverage. It gates which Codex MCP command block
+    setup writes, so a misread of `pyproject.toml` silently downgrades a dev
+    install back to the published release.
+    """
+
+    @staticmethod
+    def _build_tree(root: Path, pyproject_body: str) -> Path:
+        """Lay out a fake source tree and return the fake `setup.py` path."""
+        (root / "pyproject.toml").write_text(pyproject_body, encoding="utf-8")
+        module_dir = root / "src" / "ouroboros" / "cli" / "commands"
+        module_dir.mkdir(parents=True)
+        module_path = module_dir / "setup.py"
+        module_path.write_text("", encoding="utf-8")
+        return module_path
+
+    def _detect(self, monkeypatch: pytest.MonkeyPatch, root: Path, body: str) -> bool:
+        module_path = self._build_tree(root, body)
+        monkeypatch.setattr(setup_cmd, "__file__", str(module_path))
+        return setup_cmd._is_source_tree_ouroboros_build()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param('[project]\nname = "ouroboros-ai"\n', id="canonical"),
+            pytest.param('[project]\nname="ouroboros-ai"\n', id="no-spaces"),
+            pytest.param("[project]\nname = 'ouroboros-ai'\n", id="single-quotes"),
+            pytest.param('[project]\nname  =   "ouroboros-ai"\n', id="extra-whitespace"),
+            pytest.param('[project]\nname = """ouroboros-ai"""\n', id="multi-line-string"),
+        ],
+    )
+    def test_valid_spellings_of_the_name_are_detected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+    ) -> None:
+        """TOML does not guarantee one spelling; all of these declare the same name."""
+        assert self._detect(monkeypatch, tmp_path, body) is True
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(
+                '[project]\nname = "something-else"\n# name = "ouroboros-ai"\n',
+                id="only-in-comment",
+            ),
+            pytest.param(
+                '[project]\nname = "something-else"\n\n[tool.whatever]\nname = "ouroboros-ai"\n',
+                id="only-in-tool-table",
+            ),
+            pytest.param(
+                '[project]\nname = "downstream"\ndependencies = ["ouroboros-ai==0.1"]\n',
+                id="only-in-dependency-pin",
+            ),
+        ],
+    )
+    def test_the_literal_outside_project_name_is_not_detected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+    ) -> None:
+        """A consumer project that merely depends on Ouroboros is not a source tree."""
+        assert self._detect(monkeypatch, tmp_path, body) is False
+
+    def test_malformed_toml_continues_the_walk_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Preserves the pre-existing control flow for unreadable metadata."""
+        assert self._detect(monkeypatch, tmp_path, "[project\nname = broken") is False
+
+    def test_missing_project_table_is_not_detected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        assert (
+            self._detect(monkeypatch, tmp_path, '[tool.poetry]\nname = "ouroboros-ai"\n') is False
+        )
+
+    def test_module_outside_the_source_package_is_not_detected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An installed wheel sitting next to a pyproject.toml is not a source tree."""
+        self._build_tree(tmp_path, '[project]\nname = "ouroboros-ai"\n')
+        elsewhere = tmp_path / "site-packages" / "ouroboros" / "cli" / "commands"
+        elsewhere.mkdir(parents=True)
+        installed = elsewhere / "setup.py"
+        installed.write_text("", encoding="utf-8")
+
+        monkeypatch.setattr(setup_cmd, "__file__", str(installed))
+        assert setup_cmd._is_source_tree_ouroboros_build() is False
+
+    def test_real_repository_checkout_is_detected(self) -> None:
+        """Guards the fixtures: the actual checkout running these tests must pass."""
+        assert setup_cmd._is_source_tree_ouroboros_build() is True
