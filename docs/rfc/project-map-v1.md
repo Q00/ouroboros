@@ -61,15 +61,24 @@ a fixed neutral `HOME`, so home-relative local includes cannot change identity
 between start and resume. The central untrusted-project `.env` boundary rejects
 platform home selectors and dynamic-loader controls (`LD_*`, `DYLD_*`, and
 platform equivalents). Git queries disable global/system config and prompting
-and set a five-second timeout. Only
-complete UTF-8 paths from successful commands with at most 64 KiB of stdout are
-accepted. When a checkout marker is present, it is passed back to Git explicitly
-as `--git-dir`; a malformed nested marker therefore cannot be skipped in favor
-of a parent repository. Primary-top-level discovery is likewise bound to the
-already validated common directory, so a markerless reported path cannot fall
-through to an unrelated ancestor checkout. Acceptance of that argument is not ownership proof:
-the active checkout must also appear in Git's returned worktree population or
-equal Git's configured top level for an explicit `core.worktree` owner.
+and set a five-second timeout. Only complete UTF-8 paths from successful
+commands with at most 1 MiB of stdout are accepted. When a checkout marker is
+present, it is passed back to Git explicitly as `--git-dir`; a malformed nested
+marker therefore cannot be skipped in favor of a parent repository.
+Primary-top-level discovery is likewise bound to the already validated common
+directory, so a markerless reported path cannot fall through to an unrelated
+ancestor checkout. Acceptance of that argument is not ownership proof: the
+active checkout must also appear in Git's returned worktree population or equal
+Git's configured top level for an explicit `core.worktree` owner.
+
+Git availability is a separate outcome from topology rejection. The resolver
+first proves that the installed Git command can run without depending on the
+candidate path. Spawn errors, timeouts, and oversized output raise a transient
+identity-unavailable error; they never publish the active checkout as a local
+fallback. A paused public resume preserves its durable state and live authority
+generation while releasing the exclusive claim for retry. Git successfully
+answering but rejecting a repository/config/topology remains the only path to
+the conservative local boundary.
 
 This deliberately does not reimplement `config.c`. BOM handling, whitespace,
 comments, quoting, continuations, numeric booleans, later-value precedence,
@@ -126,15 +135,15 @@ partial, or conflicting identity payloads before appending the immutable start
 event. Contract-free utility sessions remain valid; historical events are read
 without being recreated through this API.
 
-The shared provider-neutral worker constructor normalizes every Codex, Claude,
-or future leader-driven runtime working directory to one absolute path,
-resolving relative inputs against that instant's process cwd. If an omitted cwd
-is unavailable, the constructor preserves `None`; the runner may still select
-an explicit task/runtime path and raises its domain error only when no usable
-workspace exists. Persistent Claude transport and runtime objects share the
-same normalized value for both spawn and resume. The resulting concrete
+The shared provider-neutral worker cwd boundary normalizes direct runtimes,
+leader-driven runtimes, and runner/executor `task_cwd` overrides to one absolute
+path, resolving relative inputs against construction-time process cwd. If an
+omitted cwd is unavailable, the boundary preserves `None`; the runner may still
+select an explicit task/runtime path and raises its domain error only when no
+usable workspace exists. Persistent Claude transport and runtime objects share
+the same normalized value for both spawn and resume. The resulting concrete
 workspace is therefore available before a runner-owned session publishes its
-mandatory identity.
+mandatory identity and remains the path passed to provider subprocesses.
 
 The start event is already the immutable run-ownership record. Adding the
 project fields there avoids a second write and makes a crash immediately after

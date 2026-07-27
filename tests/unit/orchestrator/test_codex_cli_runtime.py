@@ -24,7 +24,7 @@ from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
 
 _EXPECTED_CODEX_PATH = str(Path("/usr/local/bin/codex"))
-_EXPECTED_PROJECT_CWD = str(Path("/tmp/project"))
+_EXPECTED_PROJECT_CWD = str(Path("/tmp/project").resolve())
 
 
 def test_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
@@ -299,6 +299,40 @@ class TestCodexCliRuntime:
             encoding="utf-8",
         )
         return skill_md
+
+    @pytest.mark.asyncio
+    async def test_relative_cwd_is_frozen_for_command_and_subprocess(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        runtime = CodexCliRuntime(cli_path="codex", cwd="workspace")
+        captured: dict[str, object] = {}
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+        monkeypatch.chdir(later_cwd)
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("run")]
+
+        command = captured["command"]
+        assert isinstance(command, tuple)
+        assert runtime.working_directory == str(workspace)
+        assert captured["cwd"] == str(workspace)
+        assert command[command.index("-C") + 1] == str(workspace)
+        assert messages[-1].data["subtype"] == "success"
 
     def test_build_command_for_new_session(self) -> None:
         """Builds a new-session exec command (prompt fed via stdin, not args)."""

@@ -117,7 +117,7 @@ class TestRuntimeWiring:
                 raise FileNotFoundError
             return str(tmp_path / f"moving-cwd-{len(calls)}")
 
-        monkeypatch.setattr("ouroboros.orchestrator.worker_runtime.os.getcwd", unavailable_cwd)
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", unavailable_cwd)
 
         runtime = build_claude_worker_runtime(persist_sessions=True)
         assert runtime.working_directory is None

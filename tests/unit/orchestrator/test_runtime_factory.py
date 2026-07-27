@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +18,8 @@ from ouroboros.orchestrator.runtime_factory import (
     resolve_agent_runtime_backend,
 )
 from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
+
+_EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
 
 
 class TestResolveAgentRuntimeBackend:
@@ -87,7 +90,7 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, CodexCliRuntime)
         assert runtime._cli_path == "/tmp/codex"
-        assert runtime._cwd == "/tmp/project"
+        assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._skill_dispatcher is mock_dispatcher
         assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
         assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "codex"
@@ -165,7 +168,7 @@ class TestCreateAgentRuntime:
             runtime = create_agent_runtime(backend="claude", cwd="/tmp/project")
 
         assert isinstance(runtime, ClaudeAgentAdapter)
-        assert runtime._cwd == "/tmp/project"
+        assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._cli_path == "/tmp/claude"
 
     def test_create_opencode_runtime_uses_configured_cli_path(self) -> None:
@@ -179,7 +182,7 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._cli_path == "/tmp/opencode"
-        assert runtime._cwd == "/tmp/project"
+        assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
 
     def test_create_runtime_uses_configured_opencode_alias_when_backend_omitted(self) -> None:
         """Configured OpenCode aliases should resolve through the shared runtime factory."""
@@ -200,7 +203,7 @@ class TestCreateAgentRuntime:
             runtime = create_agent_runtime(cwd="/tmp/project")
 
         assert isinstance(runtime, OpenCodeRuntime)
-        assert runtime._cwd == "/tmp/project"
+        assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._permission_mode == "acceptEdits"
         assert mock_get_permission_mode.call_args.kwargs["backend"] == "opencode"
 
@@ -273,7 +276,7 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, HermesCliRuntime)
         assert runtime._cli_path == "/tmp/hermes"
-        assert runtime._cwd == "/tmp/project"
+        assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._skill_dispatcher is mock_dispatcher
         assert runtime._llm_backend == "codex"
 
@@ -407,7 +410,7 @@ def test_create_goose_runtime_uses_configured_cli_path() -> None:
 
     assert isinstance(runtime, GooseCliRuntime)
     assert runtime._cli_path == "/tmp/goose"
-    assert runtime._cwd == "/tmp/project"
+    assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
     assert runtime._skill_dispatcher is mock_dispatcher
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "goose"
 
@@ -435,7 +438,7 @@ def test_create_gjc_runtime_uses_configured_cli_path() -> None:
 
     assert isinstance(runtime, GjcRuntime)
     assert runtime._cli_path == "/tmp/gjc"
-    assert runtime._cwd == "/tmp/project"
+    assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
     assert runtime._skill_dispatcher is mock_dispatcher
     assert runtime._llm_backend == "gjc"
     assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "gjc"

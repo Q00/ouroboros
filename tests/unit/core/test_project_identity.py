@@ -12,6 +12,7 @@ import pytest
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
+    ProjectIdentityUnavailableError,
     _git_environment,
     _git_path,
     _git_project_root,
@@ -527,11 +528,49 @@ def test_top_level_query_stays_bound_to_validated_common_directory(tmp_path: Pat
 def test_git_output_is_bounded(tmp_path: Path) -> None:
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         output = kwargs["stdout"]
-        output.write(b"x" * 65_537)  # type: ignore[union-attr]
+        output.write(b"x" * 1_048_577)  # type: ignore[union-attr]
         return subprocess.CompletedProcess(args[0], 0)
 
     with patch("ouroboros.core.project_identity.subprocess.run", side_effect=fake_run):
-        assert _run_git(tmp_path, "rev-parse", "--show-toplevel") is None
+        with pytest.raises(ProjectIdentityUnavailableError, match="output"):
+            _run_git(tmp_path, "rev-parse", "--show-toplevel")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("git"),
+        subprocess.TimeoutExpired(["git", "--version"], timeout=5),
+    ],
+    ids=["missing", "timeout"],
+)
+def test_git_operational_failure_cannot_become_a_fallback_identity(
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    with (
+        patch("ouroboros.core.project_identity.subprocess.run", side_effect=failure),
+        pytest.raises(ProjectIdentityUnavailableError, match="unavailable"),
+    ):
+        resolve_project_identity(tmp_path)
+
+
+def test_linked_identity_does_not_drift_when_git_disappears_from_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    _init_repo(primary)
+    _add_linked(primary, linked)
+    stable = resolve_project_identity(linked)
+
+    with monkeypatch.context() as context:
+        context.setenv("PATH", str(tmp_path / "empty-path"))
+        with pytest.raises(ProjectIdentityUnavailableError, match="unavailable"):
+            resolve_project_identity(linked)
+
+    assert resolve_project_identity(linked) == stable
 
 
 def test_git_path_preserves_spaces_and_rejects_extra_records(tmp_path: Path) -> None:

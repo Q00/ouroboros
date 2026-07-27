@@ -20,7 +20,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import os
-from pathlib import Path
 from typing import Any, Protocol
 
 from ouroboros.core.errors import ProviderError
@@ -34,6 +33,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     SubagentOrchestration,
     TaskResult,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.subagent_label import derive_session_label
 
@@ -116,14 +116,6 @@ class LeaderDrivenWorkerTransport(Protocol):
     ) -> WorkerTurn:
         """Continue an existing worker, applying supported per-turn controls."""
         ...
-
-
-def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
-    """Resolve one stable worker cwd, preserving absence when cwd is unavailable."""
-    try:
-        return str(Path(cwd).expanduser().resolve(strict=False)) if cwd is not None else os.getcwd()
-    except OSError:
-        return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,13 +17,17 @@ from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
-_MAX_GIT_OUTPUT_LENGTH = 65_536
+_MAX_GIT_OUTPUT_LENGTH = 1_048_576
 _GIT_TIMEOUT_SECONDS = 5.0
 _GIT_NEUTRAL_HOME = str(Path(Path(__file__).anchor) / ".ouroboros-git-neutral-home")
 
 
 class ProjectIdentityError(ValueError):
     """Raised when a project/workspace identity cannot be represented safely."""
+
+
+class ProjectIdentityUnavailableError(ProjectIdentityError):
+    """Raised when the installed Git boundary cannot answer deterministically."""
 
 
 def _canonical_directory(value: str | Path) -> Path:
@@ -164,12 +168,16 @@ def _run_git(start: Path, *arguments: str) -> bytes | None:
                 env=_git_environment(),
                 shell=False,
             )
-            if completed.returncode != 0 or output.tell() > _MAX_GIT_OUTPUT_LENGTH:
+            if completed.returncode != 0:
                 return None
+            if output.tell() > _MAX_GIT_OUTPUT_LENGTH:
+                raise ProjectIdentityUnavailableError("Git query output exceeds its bound")
             output.seek(0)
             return output.read()
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except ProjectIdentityUnavailableError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProjectIdentityUnavailableError("Git query is temporarily unavailable") from exc
 
 
 def _git_path(output: bytes | None) -> Path | None:
@@ -359,6 +367,8 @@ def resolve_project_identity(
     path from splitting one source project into a new project on every run.
     """
     effective = _canonical_directory(effective_cwd)
+    if _run_git(Path(Path(__file__).anchor), "--version") is None:
+        raise ProjectIdentityUnavailableError("installed Git cannot answer identity queries")
     if source_root is not None:
         checkout_root = _canonical_directory(source_root)
         workspace = _canonical_directory(
@@ -377,6 +387,7 @@ __all__ = [
     "PROJECT_ID_PREFIX",
     "ProjectIdentity",
     "ProjectIdentityError",
+    "ProjectIdentityUnavailableError",
     "project_id_for_root",
     "resolve_project_identity",
 ]

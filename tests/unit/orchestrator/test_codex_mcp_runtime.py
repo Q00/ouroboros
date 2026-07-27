@@ -123,7 +123,7 @@ class TestRuntimeWiring:
         def unavailable_cwd() -> str:
             raise FileNotFoundError
 
-        monkeypatch.setattr("ouroboros.orchestrator.worker_runtime.os.getcwd", unavailable_cwd)
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", unavailable_cwd)
 
         assert build_codex_mcp_worker_runtime().working_directory is None
 
