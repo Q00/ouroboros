@@ -47,14 +47,24 @@ child contract required to execute and replay the split.
 Both `bounce_classified` and `decision_finalized` are required persistence
 boundaries, not best-effort telemetry. Failure to append the bounce prevents the
 decomposition provider call; failure to append the finalized decision prevents
-child dispatch. Before any resumed effect, the executor strictly replays the
-exact finalized-event population and then permits checkpoints/composite records
-to confirm—but never replace or contradict—the same canonical decision.
+child dispatch. Before any resumed effect, the executor chronologically replays
+and validates the bounded bounce-event population, then strictly replays the
+exact finalized-event population. A pending durable `TOO_BIG` phase resumes at
+the decomposer/attestation boundary without repeating the atomic parent or
+classifier. Every finalized `BOUNCE` decision must consume an earlier matching
+`TOO_BIG` event for the same node and evidence; a final event without that
+trigger fails closed. Checkpoints and composite completion/pause projections may
+then confirm—but never create, replace, or contradict—the event-owned canonical
+decision.
 Malformed, truncated, unknown-field, duplicated, or conflicting durable
 decisions fail closed. A historical non-split `PREFLIGHT` record may transition
 once to a new `BOUNCE` record; a finalized live bounce decision is immutable. A
 forced-atomic/escalated compromise therefore cannot continue without its
 required event.
+
+A trustworthy live `BOUNCE` split is valid only with `cause=TOO_BIG`. The
+classifier always starts a fresh tool-free runtime session, so an inherited
+conversation cannot supplement the closed server-derived trace.
 
 When Routing D is active, its bounded loop offers each failed atomic result to
 this gate before selecting a successor route. A trustworthy `TOO_BIG` split

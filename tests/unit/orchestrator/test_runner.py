@@ -7823,6 +7823,7 @@ class TestOrchestratorRunnerWithMCP:
         store = AsyncMock()
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
+        store.query_execution_related_events = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture

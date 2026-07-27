@@ -9207,10 +9207,12 @@ class TestParallelACExecutor:
         )
         executor._emit_subtask_event = AsyncMock()
         root = ExecutionNodeIdentity.root(execution_context_id="exec_decompose", ac_index=1)
-        executor._decomposition_decisions[root.node_id] = _trusted_preflight_split(
-            root.node_id,
-            "Extract parser",
-            "Wire parser",
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
         executor._try_decompose_ac = AsyncMock()
 
@@ -9273,10 +9275,12 @@ class TestParallelACExecutor:
         )
         executor._emit_subtask_event = AsyncMock()
         root = ExecutionNodeIdentity.root(execution_context_id="exec_sub_ac_runtime", ac_index=1)
-        executor._decomposition_decisions[root.node_id] = _trusted_preflight_split(
-            root.node_id,
-            "Extract parser",
-            "Wire parser",
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
         executor._try_decompose_ac = AsyncMock()
 
@@ -9535,10 +9539,12 @@ class TestParallelACExecutor:
         root = ExecutionNodeIdentity.root(
             execution_context_id="exec_atomic_retry_scope", ac_index=1
         )
-        executor._decomposition_decisions[root.node_id] = _trusted_preflight_split(
-            root.node_id,
-            "Retry leaf",
-            "Stable leaf",
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Retry leaf",
+                "Stable leaf",
+            )
         )
         executor._try_decompose_ac = AsyncMock()
 

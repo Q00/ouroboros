@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -73,6 +74,72 @@ def _trusted_split(node_id: str) -> DecompositionDecisionRecord:
         semantic_status=SemanticAttestationStatus.ESTABLISHED,
         trustworthy=True,
     )
+
+
+_BOUNCE_EVENT_TIME = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _bounce_event(
+    node: ExecutionNodeIdentity,
+    *,
+    execution_id: str,
+    session_id: str,
+    evidence_refs: tuple[str, ...] = (),
+) -> BaseEvent:
+    return BaseEvent(
+        type="execution.decomposition.bounce_classified",
+        timestamp=_BOUNCE_EVENT_TIME,
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            **node.to_event_metadata(),
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "cause": "TOO_BIG",
+            "rationale": "Attempt evidence shows distinct parent scope remains.",
+            "failure_class": "SCOPE_CREEP",
+            "retry_admission": "REDISPATCH",
+            "evidence_refs": list(evidence_refs),
+            "trace_summary": "attempted_tool_count=1\nremaining_artifact_count=1",
+        },
+    )
+
+
+def _finalized_event(
+    node: ExecutionNodeIdentity,
+    decision: DecompositionDecisionRecord,
+    *,
+    execution_id: str,
+    session_id: str,
+) -> BaseEvent:
+    return BaseEvent(
+        type="execution.decomposition.decision_finalized",
+        timestamp=_BOUNCE_EVENT_TIME + timedelta(seconds=1),
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            **node.to_event_metadata(),
+            **decision.to_dict(),
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "mode": "bounce_only",
+            "child_count": len(decision.children),
+        },
+    )
+
+
+def _replay_store(*events: BaseEvent) -> AsyncMock:
+    store = AsyncMock()
+
+    async def query_events(
+        _execution_id: str,
+        event_type: str | None = None,
+        **_kwargs: Any,
+    ) -> list[BaseEvent]:
+        return [event for event in events if event.type == event_type]
+
+    store.query_execution_related_events.side_effect = query_events
+    return store
 
 
 def _executor(*, max_depth: int = 2) -> ProcessLocalTestExecutor:
@@ -408,7 +475,7 @@ async def test_too_big_at_depth_cap_records_escalated_compromise() -> None:
 async def test_restored_trusted_bounce_decision_dispatches_without_reclassification() -> None:
     executor = _executor()
     node = ExecutionNodeIdentity.root(execution_context_id="exec-restored", ac_index=0)
-    executor._decomposition_decisions[node.node_id] = _trusted_split(node.node_id)
+    executor._publish_event_owned_decomposition_decision(_trusted_split(node.node_id))
     execute_atomic_ac = AsyncMock(
         side_effect=lambda **kwargs: ACExecutionResult(
             ac_index=kwargs["ac_index"],
@@ -441,6 +508,98 @@ async def test_restored_trusted_bounce_decision_dispatches_without_reclassificat
 
 
 @pytest.mark.asyncio
+async def test_cache_only_trusted_split_fails_before_parent_or_child_provider_entry() -> None:
+    executor = _executor()
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-cache-only", ac_index=0)
+    executor._decomposition_decisions[node.node_id] = _trusted_split(node.node_id)
+    execute_atomic = AsyncMock()
+    execute_children = AsyncMock()
+    executor._execute_atomic_ac = execute_atomic
+    executor._execute_decomposition_children = execute_children
+
+    with pytest.raises(RuntimeError, match="finalized-event authority"):
+        await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Parent work",
+            session_id="session-cache-only",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="goal",
+            execution_id="exec-cache-only",
+            node_identity=node,
+        )
+
+    execute_atomic.assert_not_awaited()
+    execute_children.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_too_big_replay_resumes_decomposer_before_atomic_parent() -> None:
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-pending", ac_index=0)
+    bounce_event = _bounce_event(
+        node,
+        execution_id="exec-pending",
+        session_id="session-pending",
+    )
+    executor = ProcessLocalTestExecutor(
+        adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
+        event_store=_replay_store(bounce_event),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        cross_harness_redispatch=False,
+    )
+    seed = Seed(
+        goal="Resume pending bounce",
+        constraints=(),
+        acceptance_criteria=("Parent work",),
+        ontology_schema=OntologySchema(name="Replay", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+    await executor._restore_bounce_classifications(
+        seed=seed,
+        execution_id="exec-pending",
+        session_id="session-pending",
+    )
+    decision = _trusted_split(node.node_id)
+    try_decompose = AsyncMock(return_value=decision)
+    execute_atomic = AsyncMock(side_effect=AssertionError("parent reran"))
+    classify = AsyncMock(side_effect=AssertionError("classifier reran"))
+    execute_children = AsyncMock(
+        return_value=ACExecutionResult(
+            ac_index=0,
+            ac_content="Parent work",
+            success=True,
+            is_decomposed=True,
+            decomposition_decision=decision,
+        )
+    )
+    executor._try_decompose_ac = try_decompose
+    executor._execute_atomic_ac = execute_atomic
+    executor._request_bounce_classification = classify
+    executor._execute_decomposition_children = execute_children
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Parent work",
+        session_id="session-pending",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal=seed.goal,
+        execution_id="exec-pending",
+        node_identity=node,
+    )
+
+    assert result.success and result.is_decomposed
+    try_decompose.assert_awaited_once()
+    execute_atomic.assert_not_awaited()
+    classify.assert_not_awaited()
+    assert executor._pending_bounce_decompositions == {}
+    assert executor._event_owned_decomposition_decisions[node.node_id] == decision
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_persists_and_restores_decision_by_stable_node_id() -> None:
     node = ExecutionNodeIdentity.root(execution_context_id="exec-checkpoint", ac_index=0)
     decision = _trusted_split(node.node_id)
@@ -458,15 +617,25 @@ async def test_checkpoint_persists_and_restores_decision_by_stable_node_id() -> 
     store = MagicMock()
     store.load.return_value = SimpleNamespace(is_ok=False)
     store.save.return_value = SimpleNamespace(is_ok=True)
+    bounce_event = _bounce_event(
+        node,
+        execution_id="exec-checkpoint",
+        session_id="session-checkpoint",
+    )
+    finalized_event = _finalized_event(
+        node,
+        decision,
+        execution_id="exec-checkpoint",
+        session_id="session-checkpoint",
+    )
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
-        event_store=AsyncMock(),
+        event_store=_replay_store(bounce_event, finalized_event),
         console=MagicMock(),
         decomposition_mode="bounce_only",
         checkpoint_store=store,
         cross_harness_redispatch=False,
     )
-    executor._decomposition_decisions[node.node_id] = decision
     executor._run_batch_with_verify_and_retry = AsyncMock(
         return_value=[ACExecutionResult(ac_index=0, ac_content="Parent work", success=True)]
     )
@@ -487,7 +656,7 @@ async def test_checkpoint_persists_and_restores_decision_by_stable_node_id() -> 
     restore_store.load.return_value = SimpleNamespace(is_ok=True, value=checkpoint)
     restored_executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
-        event_store=AsyncMock(),
+        event_store=_replay_store(bounce_event, finalized_event),
         console=MagicMock(),
         decomposition_mode="bounce_only",
         checkpoint_store=restore_store,
@@ -523,24 +692,19 @@ async def test_finalized_event_restores_decision_before_batch_execution() -> Non
         nodes=(ACNode(index=0, content="Parent work"),),
         stages=(ExecutionStage(index=0, ac_indices=(0,)),),
     )
-    producer_store = AsyncMock()
-    producer = ParallelACExecutor(
-        adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
-        event_store=producer_store,
-        console=MagicMock(),
-        decomposition_mode="bounce_only",
-        cross_harness_redispatch=False,
-    )
-    await producer._finalize_decomposition_decision(
-        decision=decision,
-        node_identity=node,
+    bounce_event = _bounce_event(
+        node,
         execution_id="exec-event-replay",
         session_id="session-event-replay",
     )
-    finalized_event = producer_store.append.await_args.args[0]
+    finalized_event = _finalized_event(
+        node,
+        decision,
+        execution_id="exec-event-replay",
+        session_id="session-event-replay",
+    )
 
-    replay_store = AsyncMock()
-    replay_store.query_execution_related_events.return_value = [finalized_event]
+    replay_store = _replay_store(bounce_event, finalized_event)
     replay = ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
         event_store=replay_store,
@@ -674,6 +838,39 @@ async def test_historical_preflight_event_replays_without_new_preflight_effect()
 
 
 @pytest.mark.asyncio
+async def test_bounce_finalized_event_without_prior_too_big_fails_replay() -> None:
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-orphan-final", ac_index=0)
+    decision = _trusted_split(node.node_id)
+    replay = _executor()
+    replay._event_store = _replay_store(
+        _finalized_event(
+            node,
+            decision,
+            execution_id="exec-orphan-final",
+            session_id="session-orphan-final",
+        )
+    )
+    replay._event_emitter = replay._event_emitter.__class__(
+        replay._event_store,
+        safe_emit_event=replay._safe_emit_event,
+    )
+    seed = Seed(
+        goal="Reject orphan final",
+        constraints=(),
+        acceptance_criteria=("Parent work",),
+        ontology_schema=OntologySchema(name="Replay", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+
+    with pytest.raises(RuntimeError, match="prior TOO_BIG"):
+        await replay._restore_finalized_decomposition_decisions(
+            seed=seed,
+            execution_id="exec-orphan-final",
+            session_id="session-orphan-final",
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("malformed_kind", ["unknown", "truncated", "container"])
 async def test_checkpoint_malformed_decomposition_decisions_fail_before_execution(
     malformed_kind: str,
@@ -737,6 +934,57 @@ async def test_checkpoint_malformed_decomposition_decisions_fail_before_executio
     executor._run_batch_with_verify_and_retry.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_valid_cache_only_checkpoint_fails_before_execution() -> None:
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-cache-checkpoint", ac_index=0)
+    decision = _trusted_split(node.node_id)
+    seed = Seed(
+        goal="Reject cache-only checkpoint",
+        constraints=(),
+        acceptance_criteria=("Parent work",),
+        ontology_schema=OntologySchema(name="Checkpoint", description="Test schema"),
+        metadata=SeedMetadata(ambiguity_score=0.05),
+    )
+    plan = StagedExecutionPlan(
+        nodes=(ACNode(index=0, content="Parent work"),),
+        stages=(ExecutionStage(index=0, ac_indices=(0,)),),
+    )
+    checkpoint = CheckpointData.create(
+        getattr(seed, "id", "session-cache-checkpoint"),
+        "parallel_execution",
+        {
+            "session_id": "session-cache-checkpoint",
+            "execution_id": "exec-cache-checkpoint",
+            "workspace_identity": canonical_workspace_authority("/tmp/project"),
+            "completed_levels": 0,
+            "decomposition_decisions": {node.node_id: decision.to_dict()},
+        },
+    )
+    checkpoint_store = MagicMock()
+    checkpoint_store.load.return_value = SimpleNamespace(is_ok=True, value=checkpoint)
+    executor = ParallelACExecutor(
+        adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
+        event_store=_replay_store(),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        checkpoint_store=checkpoint_store,
+        cross_harness_redispatch=False,
+    )
+    executor._run_batch_with_verify_and_retry = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="checkpoint.*finalized-event authority"):
+        await executor.execute_parallel(
+            seed,
+            session_id="session-cache-checkpoint",
+            execution_id="exec-cache-checkpoint",
+            tools=[],
+            system_prompt="system",
+            execution_plan=plan,
+        )
+
+    executor._run_batch_with_verify_and_retry.assert_not_awaited()
+
+
 def test_mismatched_decision_identity_fails_closed() -> None:
     executor = _executor()
     node = ExecutionNodeIdentity.root(execution_context_id="exec-identity", ac_index=0)
@@ -756,7 +1004,13 @@ def test_mismatched_decision_identity_fails_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_finalized_decision_event_is_idempotent_for_equal_record() -> None:
-    store = AsyncMock()
+    node = ExecutionNodeIdentity.root(execution_context_id="exec-event", ac_index=0)
+    bounce_event = _bounce_event(
+        node,
+        execution_id="exec-event",
+        session_id="session-event",
+    )
+    store = _replay_store(bounce_event)
     executor = ParallelACExecutor(
         adapter=MagicMock(working_directory="/tmp/project", runtime_backend="claude"),
         event_store=store,
@@ -764,8 +1018,18 @@ async def test_finalized_decision_event_is_idempotent_for_equal_record() -> None
         decomposition_mode="bounce_only",
         cross_harness_redispatch=False,
     )
-    node = ExecutionNodeIdentity.root(execution_context_id="exec-event", ac_index=0)
     decision = _trusted_split(node.node_id)
+    await executor._restore_bounce_classifications(
+        seed=Seed(
+            goal="Finalize once",
+            constraints=(),
+            acceptance_criteria=("Parent work",),
+            ontology_schema=OntologySchema(name="Finalize", description="Test schema"),
+            metadata=SeedMetadata(ambiguity_score=0.05),
+        ),
+        execution_id="exec-event",
+        session_id="session-event",
+    )
 
     await executor._finalize_decomposition_decision(
         decision=decision,
@@ -901,6 +1165,31 @@ async def test_classifier_admits_only_closed_cause_and_scope_metadata() -> None:
     )
 
     assert result == (BounceCause.TOO_BIG, True)
+
+
+@pytest.mark.asyncio
+async def test_classifier_uses_fresh_session_when_executor_inherits_runtime_handle() -> None:
+    runtime = _SequenceRuntime([json.dumps({"cause": "TOO_BIG", "has_remaining_scope": True})])
+    inherited = RuntimeHandle(
+        backend="claude",
+        native_session_id="parent-conversation",
+        cwd="/tmp/project",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        decomposition_mode="bounce_only",
+        inherited_runtime_handle=inherited,
+        cross_harness_redispatch=False,
+    )
+
+    result = await executor._request_bounce_classification(
+        trace=DecompositionTraceSummary(summary="attempted_tool_count=1")
+    )
+
+    assert result == (BounceCause.TOO_BIG, True)
+    assert runtime.resume_handles == [None]
 
 
 @pytest.mark.asyncio

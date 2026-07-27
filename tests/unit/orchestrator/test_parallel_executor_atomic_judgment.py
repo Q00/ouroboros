@@ -85,11 +85,13 @@ async def test_historical_atomic_judgment_replays_without_preflight_at_any_depth
         execution_context_id=f"exec_atomic_depth_{depth}",
         ac_index=depth + 1,
     )
-    executor._decomposition_decisions[node.node_id] = DecompositionDecisionRecord(
-        node_id=node.node_id,
-        source=DecompositionSource.PREFLIGHT,
-        disposition=DecompositionDisposition.ATOMIC,
-        reasons=("explicit_atomic",),
+    executor._publish_event_owned_decomposition_decision(
+        DecompositionDecisionRecord(
+            node_id=node.node_id,
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.ATOMIC,
+            reasons=("explicit_atomic",),
+        )
     )
     executor._try_decompose_ac = AsyncMock()
     execute_atomic_ac = AsyncMock(

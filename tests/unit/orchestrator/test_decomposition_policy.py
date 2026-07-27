@@ -168,6 +168,31 @@ class TestEnumsAndSerialization:
 
 
 class TestTrustInvariant:
+    def test_trustworthy_bounce_split_requires_too_big_cause_on_construct_and_parse(self) -> None:
+        with pytest.raises(ValueError, match="TOO_BIG"):
+            DecompositionDecisionRecord(
+                node_id="n1",
+                source=DecompositionSource.BOUNCE,
+                disposition=DecompositionDisposition.SPLIT,
+                cause=BounceCause.ENVIRONMENT,
+                children=_children(),
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            )
+
+        payload = DecompositionDecisionRecord(
+            node_id="n1",
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.SPLIT,
+            children=_children(),
+            structural_status=StructuralCheckStatus.PASSED,
+            semantic_status=SemanticAttestationStatus.ESTABLISHED,
+            trustworthy=True,
+        ).to_dict()
+        payload.update(source="bounce", cause="ENVIRONMENT")
+        assert DecompositionDecisionRecord.from_dict(payload) is None
+
     def test_trust_requires_split_statuses_children_and_low_repair_count(self) -> None:
         with pytest.raises(ValueError, match="repair_count"):
             DecompositionDecisionRecord(

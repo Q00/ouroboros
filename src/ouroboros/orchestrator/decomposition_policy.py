@@ -407,6 +407,13 @@ class DecompositionDecisionRecord:
                 "semantic ESTABLISHED, at least 2 children, and repair_count <= 1"
             )
             raise ValueError(msg)
+        if (
+            self.trustworthy
+            and self.source is DecompositionSource.BOUNCE
+            and self.cause is not BounceCause.TOO_BIG
+        ):
+            msg = "trustworthy BOUNCE splits require a TOO_BIG cause"
+            raise ValueError(msg)
 
     def _meets_trust_invariant(self) -> bool:
         return (

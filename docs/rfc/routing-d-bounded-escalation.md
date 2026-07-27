@@ -124,11 +124,15 @@ failed atomic result
 ```
 
 `decision_finalized` is replay authority, not telemetry. Parallel execution
-restores its exact event stream before checkpoints or route projections; a
-checkpoint and composite completion may confirm the same canonical decision but
-cannot replace or contradict it. A historical non-split `PREFLIGHT` decision may
-transition once to a new bounce decision after migration. No finalized live
-bounce decision can mutate.
+first replays canonical `bounce_classified` events chronologically and then
+restores the exact finalized event stream before checkpoints or route
+projections. A persisted `TOO_BIG` bounce without its final decision resumes the
+decomposer and independent attestation before any atomic or route provider
+effect. Every `BOUNCE` final must consume an earlier matching `TOO_BIG` phase. A
+checkpoint or composite completion/pause may confirm the same event-owned
+canonical decision but cannot mint, replace, or contradict it. A historical
+non-split `PREFLIGHT` decision may transition once to a new bounce decision after
+migration. No finalized live bounce decision can mutate.
 
 ## Resume and drift rules
 
