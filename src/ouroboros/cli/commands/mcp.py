@@ -407,13 +407,17 @@ def _process_start_marker(pid: int) -> float | None:
     if sys.platform == "darwin":
         # ps lstart does not drift; reuse the shared helper there.
         return process_start_time(pid)
+    # Read bytes: comm carries the raw process name, which the kernel accepts
+    # as arbitrary non-NUL bytes. read_text() would raise UnicodeDecodeError —
+    # not an OSError — on a legal name like b"bad-\xff-name", and that would
+    # escape _resolve_client_identity and abort server startup.
     try:
-        raw = Path(f"/proc/{pid}/stat").read_text()
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
     except OSError:
         return None
     # Field 2 (comm) is parenthesised and may itself contain spaces and ')',
     # so split only what follows the LAST ')' — field 3 (state) onwards.
-    close = raw.rfind(")")
+    close = raw.rfind(b")")
     if close == -1:
         return None
     fields = raw[close + 1 :].split()
