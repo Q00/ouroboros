@@ -1092,6 +1092,21 @@ class ResolvedWorkerCwd:
 
     value: str | None
 
+    def __post_init__(self) -> None:
+        if self.value is None:
+            return
+        if not isinstance(self.value, str) or not self.value:
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+        path = Path(self.value).expanduser()
+        if not path.is_absolute():
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+        try:
+            canonical = str(path.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("resolved worker cwd must be a canonical absolute path") from exc
+        if canonical != self.value:
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+
 
 def resolve_worker_cwd(
     cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None,

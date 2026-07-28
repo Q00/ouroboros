@@ -17,6 +17,7 @@ import yaml
 
 from ouroboros.cli.commands.cancel import _cancel_session
 from ouroboros.core.errors import PersistenceError
+from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -328,6 +329,127 @@ async def test_precreated_session_rejects_durable_nested_input_with_stale_finger
         runner._retire_process_local_authority(
             session_id=prepared.value.session_id,
             execution_id=prepared.value.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("anchor_mutation", ["partial", "malformed", "conflicting"])
+async def test_precreated_session_rejects_reconstructed_durable_project_anchor_before_effects(
+    tmp_path: Path,
+    anchor_mutation: str,
+) -> None:
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'prepared-anchor-{anchor_mutation}.db'}"
+    )
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-prepared-anchor-{anchor_mutation}",
+        session_id=f"session-prepared-anchor-{anchor_mutation}",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    reconstruct = runner._reconstruct_precreated_durable_tracker
+    conflicting_root = tmp_path / "conflicting-project"
+    conflicting_root.mkdir()
+
+    async def reconstruct_with_corrupt_anchor(receipt: SessionTracker):
+        durable = await reconstruct(receipt)
+        assert durable.is_ok
+        progress = deepcopy(dict(durable.value.progress))
+        raw_anchor = progress[SESSION_START_IDENTITY_PROGRESS_KEY]
+        assert isinstance(raw_anchor, dict)
+        anchor = dict(raw_anchor)
+        if anchor_mutation == "partial":
+            anchor.pop("project_id")
+        elif anchor_mutation == "malformed":
+            anchor["project_root"] = 42
+        else:
+            anchor.update(ProjectIdentity.from_root(conflicting_root).to_event_data())
+        progress[SESSION_START_IDENTITY_PROGRESS_KEY] = anchor
+        return Result.ok(durable.value.with_progress(progress))
+
+    try:
+        with patch.object(
+            runner,
+            "_reconstruct_precreated_durable_tracker",
+            side_effect=reconstruct_with_corrupt_anchor,
+        ):
+            result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert result.is_err
+        assert "project identity" in result.error.message
+        assert runtime.execute_calls == 0
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_precreated_session_rejects_reconstructed_durable_contract_mismatch(
+    tmp_path: Path,
+) -> None:
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepared-durable-contract.db'}")
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-prepared-durable-contract",
+        session_id="session-prepared-durable-contract",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    reconstruct = runner._reconstruct_precreated_durable_tracker
+
+    async def reconstruct_with_corrupt_contract(receipt: SessionTracker):
+        durable = await reconstruct(receipt)
+        assert durable.is_ok
+        progress = deepcopy(dict(durable.value.progress))
+        durable_contract = deepcopy(progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+        durable_contract["execution_inputs"]["context_pack_fragment"] += "\nchanged"
+        progress[EXECUTION_CONTRACT_PROGRESS_KEY] = durable_contract
+        return Result.ok(durable.value.with_progress(progress))
+
+    try:
+        with patch.object(
+            runner,
+            "_reconstruct_precreated_durable_tracker",
+            side_effect=reconstruct_with_corrupt_contract,
+        ):
+            result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+        assert runtime.execute_calls == 0
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
         )
         await event_store.close()
 

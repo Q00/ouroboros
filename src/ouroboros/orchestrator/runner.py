@@ -9012,13 +9012,20 @@ class OrchestratorRunner:
             return Result.err(durable_status_error)
 
         try:
-            authenticated_contract = self._authenticate_process_local_prepared_contract(
+            caller_contract = self._authenticate_process_local_prepared_contract(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 generation=authority_generation,
                 execution_contract=raw_contract,
             )
-            if authenticated_contract is None:
+            durable_progress = deepcopy(dict(durable_tracker.progress))
+            durable_contract = self._authenticate_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=durable_progress.get(EXECUTION_CONTRACT_PROGRESS_KEY),
+            )
+            if caller_contract is None or durable_contract is None:
                 raise OrchestratorError(
                     message=(
                         "Caller-supplied execution contract does not match the "
@@ -9030,9 +9037,10 @@ class OrchestratorRunner:
                         "resume_blocked": "prepared_execution_contract_mismatch",
                     },
                 )
+            durable_progress[EXECUTION_CONTRACT_PROGRESS_KEY] = durable_contract
             contract_changed, validated_contract = await asyncio.to_thread(
                 self._restore_execution_contract_snapshot,
-                {EXECUTION_CONTRACT_PROGRESS_KEY: authenticated_contract},
+                durable_progress,
                 seed=seed,
                 authority_generation=authority_generation,
                 require_bound_execution_inputs=False,
