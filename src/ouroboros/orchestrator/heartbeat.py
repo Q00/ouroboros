@@ -111,29 +111,6 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_clear_held_leases_after_fork)
 
 
-_BTIME_CACHE: int | None = None
-
-
-def _linux_btime() -> int | None:
-    """Boot time from ``/proc/stat``, read once per process.
-
-    btime is boot time — a constant — but WSL2 re-derives it from a clock that
-    resyncs, so successive reads drift upward by seconds. Recomputing a process
-    start time as ``btime + starttime`` on every call therefore returns a
-    *moving* value for a live, unchanged pid, and identity comparisons against
-    a recorded start time eventually exceed their tolerance and declare a live
-    process dead — the stdio MCP orphan watchdog then exits a healthy server.
-    Caching the first read keeps every comparison in this process consistent.
-    """
-    global _BTIME_CACHE
-    if _BTIME_CACHE is None:
-        for line in Path("/proc/stat").read_text().splitlines():
-            if line.startswith("btime"):
-                _BTIME_CACHE = int(line.split()[1])
-                break
-    return _BTIME_CACHE
-
-
 def _get_process_start_time(pid: int) -> float | None:
     """Get the start time of a process to detect PID recycling.
 
@@ -166,9 +143,11 @@ def _get_process_start_time(pid: int) -> float | None:
                 clock_ticks = int(fields[21])
                 # Convert to seconds using system clock tick rate
                 hz = os.sysconf("SC_CLK_TCK")
-                btime = _linux_btime()
-                if btime is not None:
-                    return btime + clock_ticks / hz
+                boot_time = Path("/proc/stat").read_text()
+                for line in boot_time.splitlines():
+                    if line.startswith("btime"):
+                        btime = int(line.split()[1])
+                        return btime + clock_ticks / hz
     except Exception:
         pass
     return None
