@@ -147,6 +147,10 @@ directory, foreign checkout, moved worktree, or nested root that collapses a
 real subdirectory to `.` therefore cannot reuse persisted `TaskWorkspace`
 metadata to claim the source identity on a fresh run or resume. All source and
 execution directories are revalidated together after both topology queries.
+At publication, the provider cwd and frozen task cwd must name the same live
+directory, not merely have equal raw strings; canonical-equivalent symlinked
+worktree paths are then validated through the managed resolver using the actual
+provider cwd.
 Omission of `source_workspace` intentionally selects the source root, while an
 explicit empty or otherwise malformed workspace value fails validation instead
 of silently widening scope to `workspace_path="."`.
