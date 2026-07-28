@@ -70,6 +70,10 @@ Git's final LF terminator, so a legal POSIX newline inside a checkout path is
 preserved rather than mistaken for a second record. An undecodable, truncated,
 NUL-bearing, or otherwise unrepresentable successful response is transient
 identity unavailability, never evidence for a fallback identity.
+Fresh resolver inputs and every Git-reported ownership path must also still be
+an actual directory at resolution time. Historical anchors may describe a path
+that no longer exists, but a missing path can never be published as a new
+identity.
 Primary-top-level discovery is likewise bound to the already validated common
 directory, so a markerless reported path cannot fall through to an unrelated
 ancestor checkout. Acceptance of that argument is not ownership proof: the

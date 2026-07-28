@@ -621,6 +621,8 @@ def test_git_path_removes_only_the_final_terminator(tmp_path: Path) -> None:
         _git_path(str(root).encode())
     with pytest.raises(ProjectIdentityUnavailableError, match="representable"):
         _git_path(f"{root}\x00\n".encode())
+    with pytest.raises(ProjectIdentityUnavailableError, match="representable"):
+        _git_path(f"{tmp_path / 'missing'}\n".encode())
 
 
 def test_git_environment_disables_global_and_system_config(
@@ -673,6 +675,11 @@ def test_existing_file_cannot_become_a_project_root(tmp_path: Path) -> None:
 
     with pytest.raises(ProjectIdentityError, match="directory"):
         resolve_project_identity(file_path)
+
+
+def test_missing_directory_cannot_become_a_fresh_project_root(tmp_path: Path) -> None:
+    with pytest.raises(ProjectIdentityError, match="directory"):
+        resolve_project_identity(tmp_path / "missing")
 
 
 @pytest.mark.parametrize("raw_path", ["x" * 4097, "bad\x00path"])
