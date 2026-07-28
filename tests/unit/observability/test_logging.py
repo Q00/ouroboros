@@ -12,6 +12,7 @@ from unittest.mock import patch
 import warnings
 
 import pytest
+import structlog
 
 from ouroboros.observability.logging import (
     LoggingConfig,
@@ -498,6 +499,32 @@ class TestResetLogging:
 
         captured = capsys.readouterr()
         assert "test_value" not in captured.err
+
+    def test_reset_does_not_leave_the_process_louder_than_configured(self, capsys: Any) -> None:
+        """A reset must not re-enable debug output, least of all on stdout.
+
+        ``structlog.reset_defaults()`` alone restores the library defaults,
+        which emit every level through a ``PrintLogger`` bound to stdout.
+        Most modules bind their logger once at import time with a bare
+        ``structlog.get_logger``, so they never route through
+        :func:`get_logger` and never trigger the lazy reconfiguration that
+        clearing ``_configured`` sets up — they just keep logging through
+        whatever the reset left behind.
+
+        The observable damage is stdout contamination: ``ouroboros job
+        wait`` emits debug events, and its output is parsed by callers and
+        asserted on verbatim in ``tests/unit/cli``. Because a reset only
+        happens in tests, this surfaced as an order-dependent failure in
+        the full parallel suite rather than anywhere reproducible.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        structlog.get_logger("reset.probe").debug("reset.debug.must.stay.silent")
+
+        captured = capsys.readouterr()
+        assert "reset.debug.must.stay.silent" not in captured.out
+        assert "reset.debug.must.stay.silent" not in captured.err
 
 
 class TestIsConfigured:

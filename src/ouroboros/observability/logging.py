@@ -610,6 +610,25 @@ def reset_logging() -> None:
 
     This is primarily for testing purposes. It resets the module state
     but does not reconfigure the loggers.
+
+    A reset must never leave the process *louder* than a configured one.
+    ``structlog.reset_defaults()`` restores the library defaults, which
+    emit every level — including debug — through a ``PrintLogger`` bound
+    to stdout, while a configured Ouroboros logger filters at
+    ``LoggingConfig.log_level`` and writes to stderr so stdout stays
+    reserved for command output.
+
+    That gap is not self-healing. Most modules bind their logger once at
+    import time via a bare ``structlog.get_logger``, which never routes
+    through :func:`get_logger` and so never triggers the lazy
+    reconfiguration that clearing ``_configured`` sets up. Once those
+    proxies exist, a reset silently turns every ``log.debug`` in the
+    process into stdout output, which contaminates any CLI result parsed
+    by a caller or asserted on by a later test.
+
+    So restore the default filter alongside the reset. ``_configured``
+    stays false and ``_current_config`` stays ``None``, so the next
+    :func:`get_logger` still performs a full reconfiguration.
     """
     global _configured, _current_config
     _configured = False
@@ -619,3 +638,8 @@ def reset_logging() -> None:
     structlog.contextvars.clear_contextvars()
     # Reset structlog configuration
     structlog.reset_defaults()
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(
+            _get_log_level(LoggingConfig().log_level)
+        )
+    )
