@@ -1182,6 +1182,50 @@ class TestServeTransport:
             await captured_wrapper(input="../../../etc/passwd")
 
     @pytest.mark.asyncio
+    async def test_fastmcp_forwards_annotations_only_when_present(self):
+        """Annotated handlers reach FastMCP without changing legacy registrations."""
+        from unittest.mock import MagicMock, patch
+
+        from mcp.types import ToolAnnotations
+
+        class AnnotatedHandler(MockToolHandler):
+            annotations = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler(name="legacy_tool"))
+        annotated = AnnotatedHandler(name="annotated_tool")
+        adapter.register_tool(annotated)
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        registrations: dict[str, dict[str, Any]] = {}
+
+        def capture_tool_decorator(**kwargs):
+            registrations[kwargs["name"]] = kwargs
+            return lambda func: func
+
+        mock_instance.tool = capture_tool_decorator
+        mock_instance.resource = MagicMock(return_value=lambda func: func)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        assert "annotations" not in registrations["legacy_tool"]
+        assert registrations["annotated_tool"]["annotations"] is annotated.annotations
+
+    @pytest.mark.asyncio
     async def test_fastmcp_registers_base_resource_uri_template(self) -> None:
         """FastMCP path exposes child URIs for base resource handlers."""
         from unittest.mock import MagicMock, patch

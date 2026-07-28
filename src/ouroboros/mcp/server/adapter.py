@@ -651,6 +651,10 @@ class MCPServerAdapter:
         self._tool_handlers[name] = handler
         log.info("mcp.server.tool_registered", tool=name)
 
+    def get_tool_handler(self, name: str) -> ToolHandler | None:
+        """Return a registered handler for composition by a narrower server."""
+        return self._tool_handlers.get(name)
+
     def register_resource(self, handler: ResourceHandler) -> None:
         """Register a resource handler.
 
@@ -967,10 +971,14 @@ class MCPServerAdapter:
                 return tool_wrapper
 
             wrapper = _make_tool_wrapper(handler)
-            self._mcp_server.tool(
-                name=defn.name,
-                description=defn.description,
-            )(wrapper)
+            tool_kwargs: dict[str, Any] = {
+                "name": defn.name,
+                "description": defn.description,
+            }
+            annotations = getattr(handler, "annotations", None)
+            if annotations is not None:
+                tool_kwargs["annotations"] = annotations
+            self._mcp_server.tool(**tool_kwargs)(wrapper)
 
         # Register resources with FastMCP
         for uri, res_handler in self._resource_handlers.items():
