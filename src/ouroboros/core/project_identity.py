@@ -307,8 +307,13 @@ def _git_project_root(
     if not worktrees or not worktrees[0].is_dir():
         raise ProjectIdentityUnavailableError("Git worktree output is not representable")
     if common_bare == b"true\n":
-        active_is_common = start == common_dir or common_dir in start.parents
-        owned = checkout_root is None or checkout_root in worktrees or active_is_common
+        # A marker proves only registered membership; markerless discovery
+        # proves only exact common-directory ownership. Ancestry is not evidence.
+        owned = (
+            checkout_root in worktrees
+            if checkout_root is not None
+            else git_dir is not None and start == git_dir == common_dir
+        )
         return common_dir if owned and _git_head_is_valid(common_dir) else None
 
     main_worktree = worktrees[0]

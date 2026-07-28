@@ -244,21 +244,23 @@ def test_explicit_core_worktree_owner_is_resolved_by_git(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("bare_owner", [False, True], ids=["standard", "bare"])
 @pytest.mark.parametrize("marker_kind", ["gitfile", "symlink"])
+@pytest.mark.parametrize("nested_under_owner", [False, True], ids=["external", "nested"])
 def test_unowned_git_marker_cannot_adopt_another_repository(
     tmp_path: Path,
     marker_kind: str,
     bare_owner: bool,
+    nested_under_owner: bool,
 ) -> None:
     owner = tmp_path / "owner"
-    unowned = tmp_path / "unowned"
-    unowned_workspace = unowned / "packages" / "app"
-    generated = tmp_path / "generated"
     if bare_owner:
         _git("init", "-q", "--bare", str(owner))
         owner_git_dir = owner
     else:
         _init_repo(owner)
         owner_git_dir = owner / ".git"
+    unowned = (owner if nested_under_owner else tmp_path) / "unowned"
+    unowned_workspace = unowned / "packages" / "app"
+    generated = tmp_path / "generated"
     unowned_workspace.mkdir(parents=True)
     generated.mkdir()
     marker = unowned / ".git"
@@ -278,6 +280,25 @@ def test_unowned_git_marker_cannot_adopt_another_repository(
     assert direct.project_root == str(unowned.resolve())
     assert direct.workspace_path == "packages/app"
     assert direct.project_id != project_id_for_root(owner)
+
+
+def test_markerless_bare_candidate_cannot_redirect_common_directory(tmp_path: Path) -> None:
+    owner = tmp_path / "owner.git"
+    redirected = owner / "redirected.git"
+    generated = tmp_path / "generated"
+    _git("init", "-q", "--bare", str(owner))
+    _git("init", "-q", "--bare", str(redirected))
+    (redirected / "commondir").write_text(f"{owner}\n", encoding="utf-8")
+    generated.mkdir()
+
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(redirected)
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(
+            generated,
+            source_root=redirected,
+            source_workspace=redirected,
+        )
 
 
 def test_git_owns_bom_tab_and_value_continuation_grammar(tmp_path: Path) -> None:

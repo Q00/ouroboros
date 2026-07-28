@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
-from ouroboros.core.project_identity import project_id_for_root
+from ouroboros.core.project_identity import ProjectIdentity, project_id_for_root
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -2365,6 +2365,32 @@ def test_unowned_gitfile_cannot_resume_as_its_target_repository(tmp_path: Path) 
             {
                 EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
                 SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_unregistered_child_cannot_resume_with_enclosing_bare_anchor(tmp_path: Path) -> None:
+    owner = tmp_path / "owner.git"
+    unowned = owner / "unregistered"
+    workspace = unowned / "packages" / "app"
+    _git("init", "-q", "--bare", str(owner))
+    workspace.mkdir(parents=True)
+    (unowned / ".git").write_text(f"gitdir: {owner}\n", encoding="utf-8")
+    claimed = ProjectIdentity.from_root(
+        owner,
+        workspace_path="unregistered/packages/app",
+    )
+    persisted = _runner(cwd=str(workspace))._build_execution_contract(
+        seed=_seed(),
+        project_identity=claimed,
+    )
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        _runner(cwd=str(workspace))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: claimed.to_event_data(),
             },
             seed=_seed(),
         )
