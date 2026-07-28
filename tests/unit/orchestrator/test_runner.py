@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import copy
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 from pathlib import Path
@@ -127,14 +126,9 @@ def _init_git_repo(root: Path) -> None:
 
 
 def _runtime_owned_task_workspace(adapter: Any) -> TaskWorkspace:
-    cwd = str(Path.cwd())
-    workspace = replace(
-        _task_workspace(),
-        repo_root=cwd,
-        original_cwd=cwd,
-        effective_cwd=cwd,
-        worktree_path=cwd,
-    )
+    workspace = _task_workspace()
+    Path(workspace.repo_root).mkdir(parents=True, exist_ok=True)
+    Path(workspace.effective_cwd).mkdir(parents=True, exist_ok=True)
     adapter.working_directory = workspace.effective_cwd
     return workspace
 
@@ -618,6 +612,7 @@ class TestOrchestratorRunner:
     @pytest.fixture
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
+        Path("/tmp/project").mkdir(parents=True, exist_ok=True)
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
         adapter.llm_backend = "test-llm"
@@ -8159,6 +8154,7 @@ class TestOrchestratorRunnerWithMCP:
     @pytest.fixture
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
+        Path("/tmp/project").mkdir(parents=True, exist_ok=True)
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
         adapter.llm_backend = "test-llm"
@@ -8610,6 +8606,7 @@ class TestCancellationPolling:
     @pytest.fixture
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
+        Path("/tmp/project").mkdir(parents=True, exist_ok=True)
         adapter = MagicMock()
         adapter.runtime_backend = "opencode"
         adapter.llm_backend = "test-llm"
