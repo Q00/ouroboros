@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import copy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 from pathlib import Path
@@ -126,7 +127,14 @@ def _init_git_repo(root: Path) -> None:
 
 
 def _runtime_owned_task_workspace(adapter: Any) -> TaskWorkspace:
-    workspace = _task_workspace()
+    cwd = str(Path.cwd())
+    workspace = replace(
+        _task_workspace(),
+        repo_root=cwd,
+        original_cwd=cwd,
+        effective_cwd=cwd,
+        worktree_path=cwd,
+    )
     adapter.working_directory = workspace.effective_cwd
     return workspace
 
@@ -2993,6 +3001,37 @@ class TestOrchestratorRunner:
                 session_id="orch-project-anchor",
                 execution_id="exec-project-anchor",
             )
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_rejects_missing_cwd_before_publication(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        missing = tmp_path / "missing"
+        mock_adapter.working_directory = str(missing)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(missing),
+        )
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-missing-project",
+            session_id="orch-missing-project",
+        )
+
+        assert result.is_err
+        assert result.error.details["invalid"] == "project_identity"
+        assert not any(
+            call.args[0].type == "orchestrator.session.started"
+            for call in mock_event_store.append.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_prepare_session_with_unset_leader_runtime_cwd(

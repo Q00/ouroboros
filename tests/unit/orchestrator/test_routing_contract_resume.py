@@ -159,6 +159,8 @@ def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing surv
 
 
 def _workspace(*, durable_id: str, worktree_path: Path, repo_root: Path) -> TaskWorkspace:
+    (repo_root / "packages" / "app").mkdir(parents=True, exist_ok=True)
+    (worktree_path / "packages" / "app").mkdir(parents=True, exist_ok=True)
     return TaskWorkspace(
         durable_id=durable_id,
         repo_root=str(repo_root),
@@ -1694,9 +1696,13 @@ def test_explicit_constructor_model_change_requires_a_new_session(
 
 
 def test_cross_workspace_resume_is_rejected_before_dispatch(tmp_path: Path) -> None:
-    original = _runner(cwd=str(tmp_path / "project-a"))
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    original = _runner(cwd=str(project_a))
     persisted = original._build_execution_contract(seed=_seed())
-    resumed = _runner(cwd=str(tmp_path / "project-b"))
+    resumed = _runner(cwd=str(project_b))
 
     with pytest.raises(OrchestratorError, match="different project workspace"):
         resumed._restore_execution_contract(
@@ -2442,6 +2448,29 @@ def test_project_anchor_rejects_current_project_change(tmp_path: Path) -> None:
     resumed = _runner(cwd=str(second_root))
 
     with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        resumed._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_deleted_current_workspace(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    _init_git_repo(repo_root)
+    original = _runner(cwd=str(repo_root))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    repo_root.rename(tmp_path / "moved-repo")
+    resumed = _runner(cwd=str(repo_root))
+
+    with pytest.raises(OrchestratorError, match="Cannot resolve project identity"):
         resumed._restore_execution_contract(
             {
                 EXECUTION_CONTRACT_PROGRESS_KEY: persisted,

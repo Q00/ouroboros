@@ -31,7 +31,7 @@ class ProjectIdentityUnavailableError(ProjectIdentityError):
     """Raised when the installed Git boundary cannot answer deterministically."""
 
 
-def _canonical_directory(value: str | Path) -> Path:
+def _canonical_directory(value: str | Path, *, require_exists: bool = False) -> Path:
     if not isinstance(value, (str, Path)):
         raise ProjectIdentityError("project identity requires a non-empty path")
     raw_value = str(value)
@@ -39,7 +39,7 @@ def _canonical_directory(value: str | Path) -> Path:
         raise ProjectIdentityError("project identity path exceeds its bound")
     try:
         resolved = Path(value).expanduser().resolve(strict=False)
-        if resolved.exists() and not resolved.is_dir():
+        if not resolved.is_dir() and (require_exists or resolved.exists()):
             raise ProjectIdentityError("project identity path must be a directory")
     except ProjectIdentityError:
         raise
@@ -219,7 +219,7 @@ def _git_path(output: bytes) -> Path:
     if not record or b"\x00" in record:
         raise ProjectIdentityUnavailableError("Git path output is not representable")
     try:
-        return _canonical_directory(record.decode("utf-8", errors="strict"))
+        return _canonical_directory(record.decode("utf-8", errors="strict"), require_exists=True)
     except (UnicodeError, ProjectIdentityError) as exc:
         raise ProjectIdentityUnavailableError("Git path output is not representable") from exc
 
@@ -293,7 +293,7 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         )
     except (UnicodeError, ProjectIdentityError) as exc:
         raise ProjectIdentityUnavailableError("Git worktree output is not representable") from exc
-    if not worktrees:
+    if not worktrees or not worktrees[0].is_dir():
         raise ProjectIdentityUnavailableError("Git worktree output is not representable")
     if common_bare == b"true\n":
         active_is_common = start == common_dir or common_dir in start.parents
@@ -393,12 +393,13 @@ def resolve_project_identity(
     their durable :class:`TaskWorkspace`; this prevents the generated worktree
     path from splitting one source project into a new project on every run.
     """
-    effective = _canonical_directory(effective_cwd)
+    effective = _canonical_directory(effective_cwd, require_exists=True)
     _run_git(Path(Path(__file__).anchor), "--version")
     if source_root is not None:
-        checkout_root = _canonical_directory(source_root)
+        checkout_root = _canonical_directory(source_root, require_exists=True)
         workspace = _canonical_directory(
-            source_root if source_workspace is None else source_workspace
+            source_root if source_workspace is None else source_workspace,
+            require_exists=True,
         )
         workspace_path = _relative_workspace_path(workspace, checkout_root)
         project_root, _ = _project_and_checkout_roots(checkout_root)

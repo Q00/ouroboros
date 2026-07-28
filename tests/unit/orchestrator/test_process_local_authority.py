@@ -149,6 +149,21 @@ def _bind_task_workspace(runner: OrchestratorRunner, workspace: TaskWorkspace) -
     runner._adapter.working_directory = workspace.effective_cwd
 
 
+def _existing_task_workspace(tmp_path: Path, durable_id: str) -> TaskWorkspace:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    return TaskWorkspace(
+        durable_id=durable_id,
+        repo_root=str(repo),
+        repo_name="repo",
+        original_cwd=str(repo),
+        effective_cwd=str(repo),
+        worktree_path=str(repo),
+        branch=f"test/{durable_id}",
+        lock_path=f"/tmp/{durable_id}.lock",
+    )
+
+
 async def _prepare(
     runner: OrchestratorRunner,
     *,
@@ -2688,16 +2703,7 @@ async def test_prepare_collision_preserves_existing_owner_workspace_lock(tmp_pat
     await event_store.initialize()
     original_runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
     colliding_runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="live-owner-collision",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/live-owner-collision",
-        lock_path="/tmp/live-owner-collision.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "live-owner-collision")
     _bind_task_workspace(original_runner, workspace)
     _bind_task_workspace(colliding_runner, workspace)
     session_id = "session-live-owner-collision"
@@ -2743,16 +2749,7 @@ async def test_exact_identity_prepare_collision_preserves_original_generation(tm
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'exact-owner-collision.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="exact-owner-collision",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/exact-owner-collision",
-        lock_path="/tmp/exact-owner-collision.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "exact-owner-collision")
     _bind_task_workspace(runner, workspace)
     session_id = "session-exact-owner-collision"
     execution_id = "exec-exact-owner-collision"
@@ -2792,16 +2789,7 @@ async def test_workspace_lock_releases_after_last_runner_session_owner(tmp_path)
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-users.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="workspace-users",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/workspace-users",
-        lock_path="/tmp/workspace-users.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "workspace-users")
     _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
@@ -2860,16 +2848,7 @@ async def test_inflight_preparation_reserves_workspace_before_registration(tmp_p
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-prepare-race.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="workspace-prepare-race",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/workspace-prepare-race",
-        lock_path="/tmp/workspace-prepare-race.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "workspace-prepare-race")
     _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
@@ -2938,16 +2917,7 @@ async def test_resume_handoff_reserves_workspace_before_reclaim(tmp_path) -> Non
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'workspace-resume-race.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="workspace-resume-race",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/workspace-resume-race",
-        lock_path="/tmp/workspace-resume-race.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "workspace-resume-race")
     _bind_task_workspace(runner, workspace)
     first = await runner.prepare_session(
         _seed(),
@@ -3014,16 +2984,7 @@ async def test_direct_cancel_of_already_terminal_owner_releases_workspace(tmp_pa
     event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'terminal-cancel-workspace.db'}")
     await event_store.initialize()
     runner = OrchestratorRunner(_CountingRuntime(), event_store, MagicMock())
-    workspace = TaskWorkspace(
-        durable_id="terminal-cancel-workspace",
-        repo_root="/tmp/repo",
-        repo_name="repo",
-        original_cwd="/tmp/repo",
-        effective_cwd="/tmp/repo",
-        worktree_path="/tmp/repo",
-        branch="test/terminal-cancel-workspace",
-        lock_path="/tmp/terminal-cancel-workspace.lock",
-    )
+    workspace = _existing_task_workspace(tmp_path, "terminal-cancel-workspace")
     _bind_task_workspace(runner, workspace)
     execution_id = "exec-terminal-cancel-workspace"
     session_id = "session-terminal-cancel-workspace"
