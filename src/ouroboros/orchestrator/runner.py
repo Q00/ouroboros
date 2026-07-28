@@ -3193,9 +3193,26 @@ class OrchestratorRunner:
     def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
         """Return one cwd shared by publication, handles, and provider effects."""
         provider_cwd = self._provider_cwd()
-        selected_cwd = self._task_cwd
-        if selected_cwd is None and self._task_workspace is not None:
-            selected_cwd = resolve_worker_cwd(self._task_workspace.effective_cwd)
+        workspace_cwd = (
+            resolve_worker_cwd(self._task_workspace.effective_cwd)
+            if self._task_workspace is not None
+            else None
+        )
+        if (
+            self._task_cwd is not None
+            and workspace_cwd is not None
+            and self._task_cwd != workspace_cwd
+        ):
+            raise OrchestratorError(
+                message="Explicit task cwd does not match the managed workspace",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": self._task_cwd,
+                    "workspace_cwd": workspace_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        selected_cwd = self._task_cwd or workspace_cwd
         handle_cwd = (
             resolve_worker_cwd(runtime_handle.cwd)
             if runtime_handle is not None and runtime_handle.cwd

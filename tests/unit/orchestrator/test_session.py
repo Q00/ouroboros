@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.project_identity import ProjectIdentity
+from ouroboros.core.project_identity import ProjectIdentity, ProjectIdentityError
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.session import (
     SessionRepository,
@@ -209,9 +210,12 @@ class TestSessionRepository:
         self,
         repository: SessionRepository,
         mock_event_store: AsyncMock,
+        tmp_path: Path,
     ) -> None:
+        project_root = tmp_path / "project-map"
+        project_root.mkdir()
         identity = ProjectIdentity.from_root(
-            "/tmp/project-map",
+            project_root,
             workspace_path="packages/app",
         )
         execution_contract = {"frugality_proof": identity.to_workspace_data()}
@@ -240,13 +244,18 @@ class TestSessionRepository:
         repository: SessionRepository,
         mock_event_store: AsyncMock,
         publication: str,
+        tmp_path: Path,
     ) -> None:
+        project_root = tmp_path / "project-map"
+        other_project_root = tmp_path / "other-project-map"
+        project_root.mkdir()
+        other_project_root.mkdir()
         identity = ProjectIdentity.from_root(
-            "/tmp/project-map",
+            project_root,
             workspace_path="packages/app",
         )
         other = ProjectIdentity.from_root(
-            "/tmp/other-project-map",
+            other_project_root,
             workspace_path="packages/app",
         )
         project_identity = (
@@ -273,6 +282,25 @@ class TestSessionRepository:
                 seed_id="seed_456",
                 execution_contract=execution_contract,
                 project_identity=project_identity,
+            )
+
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_missing_project_root_before_publication(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        identity = ProjectIdentity.from_root(tmp_path / "missing")
+
+        with pytest.raises(ProjectIdentityError, match="directory"):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract={"frugality_proof": identity.to_workspace_data()},
+                project_identity=identity,
             )
 
         mock_event_store.append.assert_not_awaited()

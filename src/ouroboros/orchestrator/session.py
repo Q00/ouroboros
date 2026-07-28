@@ -88,6 +88,12 @@ def _validate_project_identity_publication(
         raise ValueError("project identity and execution contract must be published together")
     if project_identity is not None and nested_identity != project_identity.to_workspace_data():
         raise ValueError("project identity conflicts with execution contract")
+    if project_identity is not None:
+        ProjectIdentity.from_root(
+            project_identity.project_root,
+            workspace_path=project_identity.workspace_path,
+            require_exists=True,
+        )
 
 
 _STABLE_RUNTIME_RESUME_BACKENDS: dict[str, str] = {

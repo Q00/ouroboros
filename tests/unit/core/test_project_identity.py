@@ -94,12 +94,17 @@ def test_symlinked_workspace_canonicalizes_before_identity(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("target_exists", [False, True], ids=["broken", "live"])
+@pytest.mark.parametrize("parent_kind", ["ordinary", "bare"])
 def test_malformed_child_git_entry_stops_parent_discovery(
     tmp_path: Path,
     target_exists: bool,
+    parent_kind: str,
 ) -> None:
     parent = tmp_path / "parent"
-    _init_repo(parent)
+    if parent_kind == "bare":
+        _git("init", "-q", "--bare", str(parent))
+    else:
+        _init_repo(parent)
     child = parent / "nested" / "child"
     workspace = child / "packages" / "app"
     workspace.mkdir(parents=True)
@@ -110,6 +115,29 @@ def test_malformed_child_git_entry_stops_parent_discovery(
 
     with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
         resolve_project_identity(workspace)
+
+
+def test_nested_ordinary_checkout_beats_enclosing_bare_repository(tmp_path: Path) -> None:
+    parent = tmp_path / "parent.git"
+    child = parent / "nested" / "child"
+    workspace = child / "packages" / "app"
+    _git("init", "-q", "--bare", str(parent))
+    _init_repo(child)
+    workspace.mkdir(parents=True)
+
+    identity = resolve_project_identity(workspace)
+
+    assert identity.project_root == str(child.resolve())
+    assert identity.workspace_path == "packages/app"
+
+
+def test_explicit_git_marker_wins_tie_with_bare_shape(tmp_path: Path) -> None:
+    repository = tmp_path / "repository.git"
+    _git("init", "-q", "--bare", str(repository))
+    (repository / ".git").write_text("invalid\n", encoding="utf-8")
+
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(repository)
 
 
 def test_standard_linked_and_managed_worktrees_share_primary_identity(tmp_path: Path) -> None:

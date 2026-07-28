@@ -111,9 +111,10 @@ class ProjectIdentity:
         project_root: str | Path,
         *,
         workspace_path: str = ".",
+        require_exists: bool = False,
     ) -> ProjectIdentity:
         """Construct a validated identity from an explicit source root."""
-        canonical_root = str(_canonical_directory(project_root))
+        canonical_root = str(_canonical_directory(project_root, require_exists=require_exists))
         return cls(
             project_id=project_id_for_root(canonical_root),
             project_root=canonical_root,
@@ -136,8 +137,8 @@ class ProjectIdentity:
         }
 
 
-def _nearest_git_checkout_root(start: Path) -> Path | None:
-    """Return the nearest checkout marker without interpreting Git metadata."""
+def _nearest_repository_boundary(start: Path) -> tuple[Path | None, Path | None]:
+    """Return the nearest checkout marker or bare shape, without parsing either."""
     for candidate in (start, *start.parents):
         marker = candidate / ".git"
         try:
@@ -146,34 +147,23 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
             # silently inheriting an ancestor repository.
             marker.lstat()
         except FileNotFoundError:
-            continue
+            pass
         except OSError:
-            return candidate
-        return candidate
-    return None
-
-
-def _nearest_bare_repository_candidate(start: Path) -> Path | None:
-    """Return the nearest bare filesystem shape for Git to validate.
-
-    This does not interpret Git records.  It only avoids treating a valid
-    markerless bare repository as a generic local directory before Git gets to
-    own the actual topology decision.
-    """
-    for candidate in (start, *start.parents):
+            return candidate, None
+        else:
+            return candidate, None
         try:
-            head = (candidate / "HEAD").stat().st_mode
-            objects = (candidate / "objects").stat().st_mode
-            refs = (candidate / "refs").stat().st_mode
+            (candidate / "HEAD").stat()
+            (candidate / "objects").stat()
+            (candidate / "refs").stat()
         except FileNotFoundError:
             continue
         except OSError as exc:
             raise ProjectIdentityUnavailableError(
                 "bare repository discovery is temporarily unavailable"
             ) from exc
-        if stat.S_ISREG(head) and stat.S_ISDIR(objects) and stat.S_ISDIR(refs):
-            return candidate
-    return None
+        return None, candidate
+    return None, None
 
 
 def _git_environment() -> dict[str, str]:
@@ -354,8 +344,7 @@ def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
 
 def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
     """Resolve Git-owned topology, conservatively falling back to one checkout."""
-    checkout_root = _nearest_git_checkout_root(start)
-    bare_candidate = _nearest_bare_repository_candidate(start)
+    checkout_root, bare_candidate = _nearest_repository_boundary(start)
     if checkout_root is None and bare_candidate is None:
         return start, start
     # Bind markerless bare validation to the exact candidate.  Git discovery

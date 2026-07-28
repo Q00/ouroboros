@@ -3029,6 +3029,49 @@ class TestOrchestratorRunner:
         )
 
     @pytest.mark.asyncio
+    async def test_prepare_session_rejects_task_and_managed_cwd_mismatch(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "source"
+        managed = tmp_path / "managed"
+        selected = tmp_path / "selected"
+        for directory in (source, managed, selected):
+            directory.mkdir()
+        workspace = TaskWorkspace(
+            durable_id="cwd-mismatch",
+            repo_root=str(source),
+            repo_name="source",
+            original_cwd=str(source),
+            effective_cwd=str(managed),
+            worktree_path=str(managed),
+            branch="ooo/cwd-mismatch",
+            lock_path=str(tmp_path / ".locks" / "cwd-mismatch.json"),
+        )
+        mock_adapter.working_directory = str(selected)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_cwd=str(selected),
+            task_workspace=workspace,
+        )
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-cwd-mismatch",
+            session_id="orch-cwd-mismatch",
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_prepare_session_with_unset_leader_runtime_cwd(
         self,
         mock_event_store: AsyncMock,
