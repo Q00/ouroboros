@@ -526,6 +526,39 @@ class TestResetLogging:
         assert "reset.debug.must.stay.silent" not in captured.out
         assert "reset.debug.must.stay.silent" not in captured.err
 
+    def test_reset_keeps_emitted_levels_off_stdout(self, capsys: Any) -> None:
+        """Whatever survives the level filter must still avoid stdout.
+
+        Filtering debug is only half the contract. structlog's default
+        ``PrintLoggerFactory`` writes to stdout, so an INFO record emitted
+        after a reset still lands in command output — the same
+        contamination as the debug case, one level up.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        structlog.get_logger("reset.probe").info("reset.info.belongs.on.stderr")
+
+        captured = capsys.readouterr()
+        assert "reset.info.belongs.on.stderr" not in captured.out
+        assert "reset.info.belongs.on.stderr" in captured.err
+
+    def test_reset_preserves_a_quieter_configured_level(self, capsys: Any) -> None:
+        """Resetting an ERROR-level process must not restore it to INFO.
+
+        Assuming the ``LoggingConfig`` default on reset is a volume
+        regression in its own right for any process configured quieter
+        than INFO.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="ERROR"))
+        reset_logging()
+
+        structlog.get_logger("reset.quiet.probe").info("reset.info.must.stay.silent")
+
+        captured = capsys.readouterr()
+        assert "reset.info.must.stay.silent" not in captured.out
+        assert "reset.info.must.stay.silent" not in captured.err
+
 
 class TestIsConfigured:
     """Test is_configured function."""

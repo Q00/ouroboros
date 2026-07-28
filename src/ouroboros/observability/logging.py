@@ -45,6 +45,7 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -608,29 +609,38 @@ def is_configured() -> bool:
 def reset_logging() -> None:
     """Reset logging configuration state.
 
-    This is primarily for testing purposes. It resets the module state
-    but does not reconfigure the loggers.
+    This is primarily for testing purposes. It clears the Ouroboros module
+    state and installs a neutral global structlog configuration in place of
+    the application one.
 
-    A reset must never leave the process *louder* than a configured one.
-    ``structlog.reset_defaults()`` restores the library defaults, which
-    emit every level — including debug — through a ``PrintLogger`` bound
-    to stdout, while a configured Ouroboros logger filters at
-    ``LoggingConfig.log_level`` and writes to stderr so stdout stays
-    reserved for command output.
+    Neutral, not absent. ``structlog.reset_defaults()`` on its own restores
+    the *library* defaults, which emit every level — down to debug —
+    through a ``PrintLogger`` bound to stdout. A configured Ouroboros
+    logger filters at ``LoggingConfig.log_level`` and prints to stderr (see
+    ``_FileWritingPrintLogger._log``), so stdout stays reserved for command
+    output. Dropping to library defaults therefore makes the process both
+    louder and misdirected.
 
     That gap is not self-healing. Most modules bind their logger once at
     import time via a bare ``structlog.get_logger``, which never routes
     through :func:`get_logger` and so never triggers the lazy
     reconfiguration that clearing ``_configured`` sets up. Once those
-    proxies exist, a reset silently turns every ``log.debug`` in the
-    process into stdout output, which contaminates any CLI result parsed
-    by a caller or asserted on by a later test.
+    proxies exist, a reset silently redirects the process's logging to
+    stdout, which contaminates any CLI result parsed by a caller or
+    asserted on by a later test.
 
-    So restore the default filter alongside the reset. ``_configured``
-    stays false and ``_current_config`` stays ``None``, so the next
-    :func:`get_logger` still performs a full reconfiguration.
+    So carry both halves of the contract across the reset: keep the
+    outgoing configuration's level, and keep writing to stderr. Preserving
+    the level rather than assuming the ``LoggingConfig`` default matters
+    when the outgoing configuration was quieter — resetting an
+    ``ERROR``-level process to ``INFO`` would be its own volume
+    regression. ``_configured`` stays false and ``_current_config`` stays
+    ``None``, so the next :func:`get_logger` still performs a full
+    reconfiguration.
     """
     global _configured, _current_config
+    # Read before clearing: the reset must not be louder than what it replaces.
+    outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
     _configured = False
     _current_config = None
     _close_root_handlers()
@@ -639,7 +649,6 @@ def reset_logging() -> None:
     # Reset structlog configuration
     structlog.reset_defaults()
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(
-            _get_log_level(LoggingConfig().log_level)
-        )
+        wrapper_class=structlog.make_filtering_bound_logger(outgoing_level),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
