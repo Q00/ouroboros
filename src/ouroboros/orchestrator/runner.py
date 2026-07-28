@@ -3335,6 +3335,16 @@ class OrchestratorRunner:
                 project_root=raw_start_identity["project_root"],
                 workspace_path=raw_start_identity["workspace_path"],
             )
+        except ProjectIdentityUnavailableError as exc:
+            raise OrchestratorError(
+                message="Cannot resolve project identity",
+                details={
+                    "invalid": "project_identity",
+                    "cause": str(exc),
+                    "resume_blocked": "project_identity_unavailable",
+                    "retryable": True,
+                },
+            ) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise OrchestratorError(
                 message="Cannot resume with an invalid project identity anchor",

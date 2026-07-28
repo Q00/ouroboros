@@ -1917,10 +1917,28 @@ async def test_resume_invalid_workspace_returns_domain_error_and_releases_claim(
 
 
 @pytest.mark.asyncio
-async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
+@pytest.mark.parametrize(
+    ("case", "patch_target", "failure"),
+    [
+        (
+            "git-unavailable",
+            "ouroboros.core.project_identity.subprocess.run",
+            FileNotFoundError("git"),
+        ),
+        (
+            "filesystem-unavailable",
+            "ouroboros.core.project_identity.Path.stat",
+            OSError("mount"),
+        ),
+    ],
+)
+async def test_resume_identity_unavailable_stays_paused_and_releases_claim_for_retry(
     tmp_path: Path,
+    case: str,
+    patch_target: str,
+    failure: OSError,
 ) -> None:
-    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'git-unavailable.db'}")
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'{case}.db'}")
     await event_store.initialize()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1929,8 +1947,8 @@ async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
     runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
     prepared = await runner.prepare_session(
         _seed(),
-        execution_id="exec-git-unavailable",
-        session_id="session-git-unavailable",
+        execution_id=f"exec-{case}",
+        session_id=f"session-{case}",
     )
     assert prepared.is_ok
     tracker = prepared.value
@@ -1939,14 +1957,28 @@ async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
     assert paused.is_ok and paused.value is True
 
     try:
-        with patch(
-            "ouroboros.core.project_identity.subprocess.run",
-            side_effect=FileNotFoundError("git"),
-        ):
+        if case == "filesystem-unavailable":
+            original_stat = Path.stat
+
+            def selective_stat(
+                path: Path,
+                *,
+                follow_symlinks: bool = True,
+            ) -> os.stat_result:
+                if path == workspace:
+                    raise failure
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            unavailable = patch(patch_target, new=selective_stat)
+        else:
+            unavailable = patch(patch_target, side_effect=failure)
+        with unavailable:
             result = await runner.resume_session(tracker.session_id, _seed())
 
         assert result.is_err
-        assert result.error.details["resume_blocked"] == "project_identity_unavailable"
+        assert result.error.details.get("resume_blocked") == "project_identity_unavailable", (
+            result.error
+        )
         assert result.error.details["retryable"] is True
         assert runtime.execute_calls == 0
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)

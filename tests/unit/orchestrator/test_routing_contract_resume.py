@@ -2113,6 +2113,25 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
     assert changed is False
     assert resumed._project_identity() == direct
 
+    (common_git / "HEAD").write_text("not-a-ref-or-object-id\n", encoding="utf-8")
+    for invalid in (
+        _runner(cwd=str(common_git)),
+        _runner(task_workspace=task_workspace),
+    ):
+        with pytest.raises(OrchestratorError) as exc_info:
+            invalid._project_identity()
+        assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(cwd=str(common_git))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+            },
+            seed=_seed(),
+        )
+    assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
 
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"

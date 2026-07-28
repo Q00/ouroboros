@@ -39,11 +39,25 @@ def _canonical_directory(value: str | Path, *, require_exists: bool = False) -> 
         raise ProjectIdentityError("project identity path exceeds its bound")
     try:
         resolved = Path(value).expanduser().resolve(strict=False)
-        if not resolved.is_dir() and (require_exists or resolved.exists()):
-            raise ProjectIdentityError("project identity path must be a directory")
+        try:
+            mode = resolved.stat().st_mode
+        except FileNotFoundError:
+            if require_exists:
+                raise ProjectIdentityError("project identity path must be a directory") from None
+        except OSError as exc:
+            raise ProjectIdentityUnavailableError(
+                "project identity filesystem is temporarily unavailable"
+            ) from exc
+        else:
+            if not stat.S_ISDIR(mode):
+                raise ProjectIdentityError("project identity path must be a directory")
     except ProjectIdentityError:
         raise
-    except (OSError, RuntimeError, ValueError) as exc:
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError(
+            "project identity filesystem is temporarily unavailable"
+        ) from exc
+    except (RuntimeError, ValueError) as exc:
         raise ProjectIdentityError("project identity path cannot be canonicalized") from exc
     if len(str(resolved)) > _MAX_PATH_LENGTH:
         raise ProjectIdentityError("project identity path exceeds its bound")
@@ -256,9 +270,16 @@ def _git_head_is_valid(git_dir: Path) -> bool:
         return True
 
 
-def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | None:
+def _git_project_root(
+    start: Path,
+    checkout_root: Path | None = None,
+    *,
+    git_dir: Path | None = None,
+) -> Path | None:
     """Ask Git for the primary worktree (or bare common directory)."""
-    git_dir_argument = _git_dir_argument(checkout_root)
+    git_dir_argument = (
+        (f"--git-dir={git_dir}",) if git_dir is not None else _git_dir_argument(checkout_root)
+    )
     common_output = _run_git(
         start,
         *git_dir_argument,
@@ -337,15 +358,14 @@ def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
     bare_candidate = _nearest_bare_repository_candidate(start)
     if checkout_root is None and bare_candidate is None:
         return start, start
-    # A markerless bare repository may live inside an ordinary checkout. Ask
-    # Git about the active directory before adopting an ancestor marker.
-    if bare_candidate is not None and _active_repository_is_bare(start, None):
-        active_git_dir = _git_path(
-            _run_git(start, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
-        )
-        if active_git_dir == start or active_git_dir in start.parents:
-            bare_root = _git_project_root(start)
-            return (bare_root, bare_root) if bare_root is not None else (start, start)
+    # Bind markerless bare validation to the exact candidate.  Git discovery
+    # from ``start`` may otherwise skip malformed child metadata and inherit an
+    # enclosing checkout.
+    if bare_candidate is not None:
+        bare_root = _git_project_root(bare_candidate, git_dir=bare_candidate)
+        if bare_root is None:
+            raise ProjectIdentityUnavailableError("Git rejected bare repository topology")
+        return bare_root, bare_root
     project_root = _git_project_root(start, checkout_root)
     if project_root is None:
         fallback = checkout_root or start

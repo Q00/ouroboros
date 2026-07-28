@@ -417,10 +417,15 @@ def test_nested_markerless_bare_repository_beats_enclosing_checkout(tmp_path: Pa
 
 
 def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
     source = tmp_path / "source"
-    common_git = tmp_path / "common.git"
+    common_git = outer / "vendor" / "common.git"
     linked = tmp_path / "linked"
+    generated = tmp_path / "generated"
+    _init_repo(outer)
     _init_repo(source)
+    common_git.parent.mkdir()
+    generated.mkdir()
     _git("clone", "-q", "--bare", str(source), str(common_git))
     _git(
         f"--git-dir={common_git}",
@@ -434,9 +439,16 @@ def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None
     )
     (common_git / "HEAD").write_text("not-a-ref-or-object-id\n", encoding="utf-8")
 
-    for checkout in (common_git, linked):
-        with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
-            resolve_project_identity(checkout)
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(common_git)
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(linked)
+    with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
+        resolve_project_identity(
+            generated,
+            source_root=common_git,
+            source_workspace=common_git,
+        )
 
 
 def test_bare_repository_named_dot_git_is_not_its_parent(tmp_path: Path) -> None:
@@ -680,6 +692,14 @@ def test_existing_file_cannot_become_a_project_root(tmp_path: Path) -> None:
 def test_missing_directory_cannot_become_a_fresh_project_root(tmp_path: Path) -> None:
     with pytest.raises(ProjectIdentityError, match="directory"):
         resolve_project_identity(tmp_path / "missing")
+
+
+def test_filesystem_oserror_is_retryable_identity_unavailability(tmp_path: Path) -> None:
+    with (
+        patch("ouroboros.core.project_identity.Path.resolve", side_effect=OSError("mount")),
+        pytest.raises(ProjectIdentityUnavailableError, match="temporarily unavailable"),
+    ):
+        resolve_project_identity(tmp_path)
 
 
 @pytest.mark.parametrize("raw_path", ["x" * 4097, "bad\x00path"])
