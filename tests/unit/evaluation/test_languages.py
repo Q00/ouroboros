@@ -198,6 +198,25 @@ class TestBuildMechanicalConfigFromToml:
         # TOML parse failed → fall back to empty defaults, not crash.
         assert config.lint_command is None
 
+    def test_non_utf8_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Invalid UTF-8 raises UnicodeDecodeError, not TOMLDecodeError."""
+        ouroboros_dir = tmp_path / ".ouroboros"
+        ouroboros_dir.mkdir(exist_ok=True)
+        (ouroboros_dir / "mechanical.toml").write_bytes(b'lint = "\xff"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
+    def test_pathologically_nested_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Deeply nested documents exhaust tomllib's recursive parser.
+
+        RecursionError shares no base class with TOMLDecodeError or
+        UnicodeDecodeError, so enumerating decode errors alone does not hold the
+        "never raises" contract.
+        """
+        self._write_toml(tmp_path, "a = " + "[" * 2000 + "]" * 2000)
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
     def test_unreadable_toml_is_ignored(self, tmp_path: Path) -> None:
         """Existing but unopenable toml falls back to defaults instead of raising.
 

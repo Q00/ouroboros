@@ -151,7 +151,13 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
         # here. Fall back to built-in defaults so the docstring's contract holds.
         log.warning("mechanical.toml_read_error", path=str(config_path), error=str(e))
         return None
-    except tomllib.TOMLDecodeError as e:
+    except Exception as e:
+        # "Never raises" is the contract, and this file is optional operator-authored
+        # input, so anything that stops it becoming a dict must degrade to defaults
+        # rather than abort mechanical-config resolution. Narrowing this to the known
+        # exception types has repeatedly missed one: tomllib raises TOMLDecodeError for
+        # bad syntax, UnicodeDecodeError for non-UTF-8 bytes, and RecursionError for
+        # pathologically nested documents — and only the first two share a base class.
         log.warning("mechanical.toml_parse_error", path=str(config_path), error=str(e))
         return None
 
