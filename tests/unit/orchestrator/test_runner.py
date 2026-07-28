@@ -125,10 +125,26 @@ def _init_git_repo(root: Path) -> None:
     )
 
 
-def _runtime_owned_task_workspace(adapter: Any) -> TaskWorkspace:
-    workspace = _task_workspace()
-    Path(workspace.repo_root).mkdir(parents=True, exist_ok=True)
-    Path(workspace.effective_cwd).mkdir(parents=True, exist_ok=True)
+def _runtime_owned_task_workspace(adapter: Any, root: Path) -> TaskWorkspace:
+    repo_root = root / "repo"
+    worktree_path = root / "worktree"
+    _init_git_repo(repo_root)
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "ooo/orch_test", str(worktree_path), "HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    workspace = TaskWorkspace(
+        durable_id="orch_test",
+        repo_root=str(repo_root),
+        repo_name="repo",
+        original_cwd=str(repo_root),
+        effective_cwd=str(worktree_path),
+        worktree_path=str(worktree_path),
+        branch="ooo/orch_test",
+        lock_path=str(root / ".locks" / "repo" / "orch_test.json"),
+    )
     adapter.working_directory = workspace.effective_cwd
     return workspace
 
@@ -2942,6 +2958,7 @@ class TestOrchestratorRunner:
                 llm_backend=runner._adapter.llm_backend,
                 execution_contract=runner._execution_contract,
                 project_identity=resolve_project_identity(runner._adapter.working_directory),
+                project_workspace=runner._effective_cwd(),
             )
         finally:
             runner._retire_process_local_authority(
@@ -3112,6 +3129,50 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prepare_session_rejects_stale_managed_checkout_before_publication(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "source"
+        source_cwd = source / "packages" / "app"
+        stale_worktree = tmp_path / "managed" / "stale"
+        execution_cwd = stale_worktree / "packages" / "app"
+        _init_git_repo(source)
+        source_cwd.mkdir(parents=True)
+        execution_cwd.mkdir(parents=True)
+        workspace = TaskWorkspace(
+            durable_id="stale-checkout",
+            repo_root=str(source),
+            repo_name="source",
+            original_cwd=str(source_cwd),
+            effective_cwd=str(execution_cwd),
+            worktree_path=str(stale_worktree),
+            branch="ooo/stale-checkout",
+            lock_path=str(tmp_path / ".locks" / "stale-checkout.json"),
+        )
+        mock_adapter.working_directory = str(execution_cwd)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=workspace,
+        )
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-stale-checkout",
+            session_id="orch-stale-checkout",
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "project_identity_mismatch"
         mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4418,16 +4479,18 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Session creation errors should not leak an acquired workspace lock."""
         from ouroboros.core.errors import PersistenceError
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
             fat_harness_mode=False,
         )
 
@@ -4442,7 +4505,7 @@ class TestOrchestratorRunner:
             result = await runner.execute_seed(sample_seed)
 
         assert result.is_err
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
 
     @pytest.mark.asyncio
     async def test_execute_seed_start_event_failure_cleans_up_workspace_lock(
@@ -4451,15 +4514,17 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """A terminal-write failure releases effects but preserves the live lease."""
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
             fat_harness_mode=False,
         )
         _allow_mocked_precreated_durable_state(runner)
@@ -4495,7 +4560,7 @@ class TestOrchestratorRunner:
             tracker.session_id,
             release_liveness_lease=False,
         )
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
             execution_id="exec_setup",
@@ -4509,15 +4574,17 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Merged-tool setup failures should release the workspace lock and unregister."""
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
             fat_harness_mode=False,
         )
         _allow_mocked_precreated_durable_state(runner)
@@ -4541,7 +4608,7 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_tools", tracker.session_id)
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
 
     @pytest.mark.asyncio
     async def test_resume_session_already_completed(
@@ -4573,15 +4640,17 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Terminal resume attempts should not leak the acquired workspace lock."""
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
             fat_harness_mode=False,
         )
         completed_tracker = SessionTracker.create("exec", "seed").with_status(
@@ -4599,7 +4668,7 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_123", sample_seed)
 
         assert result.is_err
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
 
     @pytest.mark.asyncio
     async def test_resume_is_blocked_before_ungated_direct_execution(
@@ -4608,16 +4677,18 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Resume must not bypass typed evidence acceptance."""
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
             fat_harness_mode=True,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
@@ -4661,6 +4732,7 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Resume must fail closed until it can restore per-AC investment authority."""
         from ouroboros.core.types import Result
@@ -4680,11 +4752,12 @@ class TestOrchestratorRunner:
                 )
             }
         )
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.PAUSED
@@ -4729,15 +4802,17 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Resume setup failures should release the workspace lock and unregister."""
         from ouroboros.core.types import Result
 
+        task_workspace = _runtime_owned_task_workspace(mock_adapter, tmp_path)
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            task_workspace=_runtime_owned_task_workspace(mock_adapter),
+            task_workspace=task_workspace,
             fat_harness_mode=False,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
@@ -4764,7 +4839,7 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         unregister_mock.assert_called_once_with("exec_resume", "sess_resume_tool_setup")
-        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+        release_lock_mock.assert_called_once_with(task_workspace.lock_path)
 
     @pytest.mark.asyncio
     async def test_resume_session_not_found(
@@ -6321,6 +6396,21 @@ class TestOrchestratorRunner:
         linked_workspace = linked / "packages" / "app"
         linked_workspace.mkdir(parents=True)
         generated = tmp_path / "managed" / "legacy-public"
+        subprocess.run(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "ooo/legacy-public",
+                str(generated),
+                "HEAD",
+            ],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+        )
         generated_workspace = generated / "packages" / "app"
         generated_workspace.mkdir(parents=True)
         task_workspace = TaskWorkspace(

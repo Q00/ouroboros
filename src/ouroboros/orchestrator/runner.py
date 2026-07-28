@@ -3270,11 +3270,23 @@ class OrchestratorRunner:
                     "resume_blocked": "runtime_cwd_mismatch",
                 },
             )
-        return resolve_project_identity(
+        source_identity = resolve_project_identity(
             workspace.effective_cwd,
             source_root=workspace.repo_root,
             source_workspace=workspace.original_cwd,
         )
+        execution_identity = resolve_project_identity(workspace.effective_cwd)
+        if execution_identity != source_identity:
+            raise OrchestratorError(
+                message="Managed worktree does not belong to its source project",
+                details={
+                    "invalid": "project_identity",
+                    "source_identity": source_identity.to_workspace_data(),
+                    "execution_identity": execution_identity.to_workspace_data(),
+                    "resume_blocked": "project_identity_mismatch",
+                },
+            )
+        return source_identity
 
     @classmethod
     def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
@@ -8623,6 +8635,7 @@ class OrchestratorRunner:
             "llm_backend": getattr(self._adapter, "llm_backend", None),
             "execution_contract": execution_contract,
             "project_identity": project_identity,
+            "project_workspace": self._effective_cwd(),
         }
         try:
             if (

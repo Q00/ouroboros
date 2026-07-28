@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import subprocess
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.project_identity import ProjectIdentity, ProjectIdentityError
+from ouroboros.core.project_identity import (
+    ProjectIdentity,
+    ProjectIdentityError,
+    resolve_project_identity,
+)
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.session import (
     SessionRepository,
@@ -213,11 +220,10 @@ class TestSessionRepository:
         tmp_path: Path,
     ) -> None:
         project_root = tmp_path / "project-map"
-        project_root.mkdir()
-        identity = ProjectIdentity.from_root(
-            project_root,
-            workspace_path="packages/app",
-        )
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        identity = resolve_project_identity(workspace)
         execution_contract = {"frugality_proof": identity.to_workspace_data()}
 
         result = await repository.create_session(
@@ -225,6 +231,7 @@ class TestSessionRepository:
             seed_id="seed_456",
             execution_contract=execution_contract,
             project_identity=identity,
+            project_workspace=str(workspace),
         )
 
         assert result.is_ok
@@ -237,7 +244,15 @@ class TestSessionRepository:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "publication",
-        ["top-only", "nested-only", "absent-with-contract", "partial", "conflict"],
+        [
+            "top-only",
+            "nested-only",
+            "absent-with-contract",
+            "partial",
+            "conflict",
+            "missing-workspace",
+            "workspace-only",
+        ],
     )
     async def test_create_session_rejects_non_atomic_project_identity(
         self,
@@ -250,6 +265,8 @@ class TestSessionRepository:
         other_project_root = tmp_path / "other-project-map"
         project_root.mkdir()
         other_project_root.mkdir()
+        (project_root / "packages" / "app").mkdir(parents=True)
+        (other_project_root / "packages" / "app").mkdir(parents=True)
         identity = ProjectIdentity.from_root(
             project_root,
             workspace_path="packages/app",
@@ -259,9 +276,11 @@ class TestSessionRepository:
             workspace_path="packages/app",
         )
         project_identity = (
-            None if publication in {"nested-only", "absent-with-contract"} else identity
+            None
+            if publication in {"nested-only", "absent-with-contract", "workspace-only"}
+            else identity
         )
-        if publication == "top-only":
+        if publication in {"top-only", "workspace-only"}:
             execution_contract = None
         elif publication == "absent-with-contract":
             execution_contract = {"frugality_proof": {}}
@@ -282,6 +301,12 @@ class TestSessionRepository:
                 seed_id="seed_456",
                 execution_contract=execution_contract,
                 project_identity=project_identity,
+                project_workspace=(
+                    str(project_root / "packages" / "app")
+                    if (project_identity is not None and publication != "missing-workspace")
+                    or publication == "workspace-only"
+                    else None
+                ),
             )
 
         mock_event_store.append.assert_not_awaited()
@@ -301,6 +326,7 @@ class TestSessionRepository:
                 seed_id="seed_456",
                 execution_contract={"frugality_proof": identity.to_workspace_data()},
                 project_identity=identity,
+                project_workspace=str(tmp_path / "missing"),
             )
 
         mock_event_store.append.assert_not_awaited()
@@ -326,9 +352,77 @@ class TestSessionRepository:
                 seed_id="seed_456",
                 execution_contract={"frugality_proof": identity.to_workspace_data()},
                 project_identity=identity,
+                project_workspace=str(project_root),
             )
 
         mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("replacement", ["missing", "file"])
+    async def test_create_session_rejects_workspace_changed_before_publication(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+        replacement: str,
+    ) -> None:
+        project_root = tmp_path / "project"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        identity = resolve_project_identity(workspace)
+        workspace.rmdir()
+        if replacement == "file":
+            workspace.write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(ProjectIdentityError, match="directory"):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract={"frugality_proof": identity.to_workspace_data()},
+                project_identity=identity,
+                project_workspace=str(workspace),
+            )
+
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_revalidation_keeps_event_loop_responsive(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        identity = resolve_project_identity(workspace)
+        release_resolver = threading.Event()
+        resolver_threads: list[int] = []
+        event_loop_thread = threading.get_ident()
+
+        def delayed_resolver(value: str) -> ProjectIdentity:
+            assert value == str(workspace)
+            resolver_threads.append(threading.get_ident())
+            if not release_resolver.wait(timeout=1):
+                raise AssertionError("project identity resolution blocked the event loop")
+            return identity
+
+        asyncio.get_running_loop().call_later(0.01, release_resolver.set)
+        with patch(
+            "ouroboros.orchestrator.session.resolve_project_identity",
+            side_effect=delayed_resolver,
+        ):
+            result = await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract={"frugality_proof": identity.to_workspace_data()},
+                project_identity=identity,
+                project_workspace=str(workspace),
+            )
+
+        assert result.is_ok
+        assert resolver_threads and resolver_threads[0] != event_loop_thread
+        mock_event_store.append.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_create_session_with_custom_id(

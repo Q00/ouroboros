@@ -159,7 +159,19 @@ def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing surv
 
 
 def _workspace(*, durable_id: str, worktree_path: Path, repo_root: Path) -> TaskWorkspace:
+    if not (repo_root / ".git").exists():
+        _init_git_repo(repo_root)
     (repo_root / "packages" / "app").mkdir(parents=True, exist_ok=True)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        f"ooo/{durable_id}",
+        str(worktree_path),
+        "HEAD",
+        cwd=repo_root,
+    )
     (worktree_path / "packages" / "app").mkdir(parents=True, exist_ok=True)
     return TaskWorkspace(
         durable_id=durable_id,
@@ -2000,7 +2012,6 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
 
     direct = _runner(cwd=str(linked_workspace))._project_identity()
     managed = _runner(
@@ -2027,7 +2038,6 @@ def test_newline_git_topology_survives_direct_managed_and_resume_paths(tmp_path:
     linked_workspace = linked / "packages" / "app"
     primary_workspace.mkdir(parents=True)
     linked_workspace.mkdir(parents=True)
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-newline",
         worktree_path=generated,
@@ -2067,7 +2077,6 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
     _init_git_repo(outer)
     _init_git_repo(source)
     common_git.parent.mkdir()
-    generated.mkdir(parents=True)
     _git("clone", "-q", "--bare", str(source), str(common_git))
     _git(
         f"--git-dir={common_git}",
@@ -2077,6 +2086,16 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
         "-b",
         "linked",
         str(linked),
+        "HEAD",
+    )
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/run-1",
+        str(generated),
         "HEAD",
     )
     task_workspace = TaskWorkspace(
@@ -2139,6 +2158,17 @@ def test_managed_relative_scope_mismatch_is_rejected_on_resume(tmp_path: Path) -
     source_cwd = source / "packages" / "expected"
     expected_cwd = worktree / "packages" / "expected"
     wrong_cwd = worktree / "packages" / "wrong"
+    _init_git_repo(source)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/scope-resume",
+        str(worktree),
+        "HEAD",
+        cwd=source,
+    )
     for directory in (source_cwd, expected_cwd, wrong_cwd):
         directory.mkdir(parents=True)
     workspace = TaskWorkspace(
@@ -2172,6 +2202,37 @@ def test_managed_relative_scope_mismatch_is_rejected_on_resume(tmp_path: Path) -
     assert exc_info.value.details["resume_blocked"] == "runtime_cwd_mismatch"
 
 
+def test_stale_managed_checkout_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    workspace = _workspace(
+        durable_id="stale-resume",
+        worktree_path=worktree,
+        repo_root=source,
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+
+    worktree.rename(tmp_path / "detached-worktree")
+    (worktree / "packages" / "app").mkdir(parents=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=workspace)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "project_identity_mismatch"
+
+
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"
     common_git.parent.mkdir()
@@ -2200,7 +2261,6 @@ def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-1",
         worktree_path=generated,
@@ -2250,7 +2310,6 @@ def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-1",
         worktree_path=generated,
@@ -2318,7 +2377,6 @@ def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path)
     _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
     (linked / "packages" / "app").mkdir(parents=True)
     generated = tmp_path / "managed" / "legacy-run"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="legacy-run",
         worktree_path=generated,
