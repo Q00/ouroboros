@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import tempfile
@@ -21,6 +22,11 @@ _MAX_PATH_LENGTH = 4096
 _MAX_GIT_OUTPUT_LENGTH = 1_048_576
 _GIT_TIMEOUT_SECONDS = 5.0
 _GIT_NEUTRAL_HOME = str(Path(Path(__file__).anchor) / ".ouroboros-git-neutral-home")
+_MINIMUM_GIT_VERSION = (2, 36, 0)
+_MINIMUM_GIT_VERSION_TEXT = ".".join(str(part) for part in _MINIMUM_GIT_VERSION)
+_GIT_VERSION_PATTERN = re.compile(
+    rb"git version ([0-9]{1,9})\.([0-9]{1,9})(?:\.([0-9]{1,9}))?(?:[. ][^\r\n]*)?\n"
+)
 
 
 class ProjectIdentityError(ValueError):
@@ -29,6 +35,10 @@ class ProjectIdentityError(ValueError):
 
 class ProjectIdentityUnavailableError(ProjectIdentityError):
     """Raised when the installed Git boundary cannot answer deterministically."""
+
+
+class ProjectIdentityGitVersionError(ProjectIdentityError):
+    """Raised when installed Git cannot implement the identity grammar."""
 
 
 class ManagedProjectScopeError(ProjectIdentityError):
@@ -159,6 +169,24 @@ class ProjectIdentity:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveDirectoryEvidence:
+    """One canonical directory generation observed by the resolver."""
+
+    path: Path
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedProjectIdentity:
+    """Identity plus the checkout and live-directory evidence that proved it."""
+
+    identity: ProjectIdentity
+    checkout_root: Path
+    directory_evidence: tuple[_LiveDirectoryEvidence, ...]
+
+
 def _nearest_repository_boundary(start: Path) -> tuple[Path | None, Path | None]:
     """Return the nearest checkout marker or bare shape, without parsing either."""
     for candidate in (start, *start.parents):
@@ -204,8 +232,8 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _run_git(start: Path, *arguments: str) -> bytes:
-    """Run one bounded, non-interactive Git query and return complete stdout.
+def _run_git_command(*arguments: str) -> bytes:
+    """Run one bounded, non-interactive Git command and return complete stdout.
 
     A nonzero exit is unavailable because Git does not expose a portable
     exit-code distinction between malformed topology and transient repository
@@ -214,7 +242,7 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     try:
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run(
-                ["git", "-C", str(start), *arguments],
+                ["git", *arguments],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=output,
@@ -235,6 +263,29 @@ def _run_git(start: Path, *arguments: str) -> bytes:
         raise
     except (OSError, subprocess.SubprocessError) as exc:
         raise ProjectIdentityUnavailableError("Git query is temporarily unavailable") from exc
+
+
+def _run_git(start: Path, *arguments: str) -> bytes:
+    """Run one Git query scoped to an explicit canonical working directory."""
+    return _run_git_command("-C", str(start), *arguments)
+
+
+def _require_supported_git() -> None:
+    """Reject Git versions that lack the unambiguous topology query grammar."""
+    output = _run_git_command("--version")
+    match = _GIT_VERSION_PATTERN.fullmatch(output)
+    if match is None:
+        raise ProjectIdentityGitVersionError(
+            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
+        )
+    major, minor, patch = match.groups()
+    version = (int(major), int(minor), int(patch or b"0"))
+    if version < _MINIMUM_GIT_VERSION:
+        found = ".".join(str(part) for part in version)
+        raise ProjectIdentityGitVersionError(
+            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
+            f"found {found}"
+        )
 
 
 def _git_path(output: bytes) -> Path:
@@ -412,6 +463,51 @@ def _relative_workspace_path(workspace: Path, checkout_root: Path) -> str:
     return _normalize_workspace_path(relative.as_posix() or ".")
 
 
+def _capture_live_directory(directory: Path) -> _LiveDirectoryEvidence:
+    """Capture the filesystem generation behind one canonical directory path."""
+    canonical = _canonical_directory(directory, require_exists=True)
+    try:
+        status = canonical.stat()
+    except FileNotFoundError:
+        raise ProjectIdentityError("project identity path must be a directory") from None
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError(
+            "project identity filesystem is temporarily unavailable"
+        ) from exc
+    return _LiveDirectoryEvidence(
+        path=canonical,
+        device=status.st_dev,
+        inode=status.st_ino,
+    )
+
+
+def _resolve_canonical_project_identity(effective: Path) -> _ResolvedProjectIdentity:
+    """Resolve one already-canonical cwd and retain its topology evidence."""
+    project_root, checkout_root = _project_and_checkout_roots(effective)
+    workspace_path = _relative_workspace_path(effective, checkout_root)
+    identity = ProjectIdentity.from_root(
+        project_root,
+        workspace_path=workspace_path,
+        require_exists=True,
+    )
+    return _ResolvedProjectIdentity(
+        identity=identity,
+        checkout_root=checkout_root,
+        directory_evidence=tuple(
+            _capture_live_directory(directory)
+            for directory in dict.fromkeys((effective, project_root, checkout_root))
+        ),
+    )
+
+
+def _revalidate_live_directories(*expected_population: _LiveDirectoryEvidence) -> None:
+    """Require every topology input and owner to remain the same live directory."""
+    for expected in dict.fromkeys(expected_population):
+        current = _capture_live_directory(expected.path)
+        if current != expected:
+            raise ProjectIdentityError("project identity path changed during resolution")
+
+
 def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
     """Resolve one deterministic Project Map V1 identity.
 
@@ -424,17 +520,40 @@ def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
     this direct resolver cannot attribute a caller-supplied source checkout.
     """
     effective = _canonical_directory(effective_cwd, require_exists=True)
-    _run_git(Path(Path(__file__).anchor), "--version")
-    source, checkout_root = _project_and_checkout_roots(effective)
-    workspace_path = _relative_workspace_path(effective, checkout_root)
-    return ProjectIdentity.from_root(source, workspace_path=workspace_path)
+    effective_evidence = _capture_live_directory(effective)
+    _require_supported_git()
+    resolved = _resolve_canonical_project_identity(effective)
+    _revalidate_live_directories(effective_evidence, *resolved.directory_evidence)
+    return resolved.identity
 
 
-def _source_project_identity(source_root: Path, source_workspace: Path) -> ProjectIdentity:
-    """Resolve the source half of an already-canonical managed pair."""
-    workspace_path = _relative_workspace_path(source_workspace, source_root)
-    project_root, _ = _project_and_checkout_roots(source_root)
-    return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
+def _source_project_identity(
+    source_root: Path,
+    source_workspace: Path,
+) -> _ResolvedProjectIdentity:
+    """Resolve a managed source only from its Git-proven checkout root."""
+    project_root, checkout_root = _project_and_checkout_roots(source_root)
+    if source_root != checkout_root:
+        raise ManagedProjectScopeError(str(source_workspace), str(source_root))
+    try:
+        workspace_path = _relative_workspace_path(source_workspace, checkout_root)
+    except ProjectIdentityError as exc:
+        raise ManagedProjectScopeError(str(source_workspace), str(source_root)) from exc
+    identity = ProjectIdentity.from_root(
+        project_root,
+        workspace_path=workspace_path,
+        require_exists=True,
+    )
+    return _ResolvedProjectIdentity(
+        identity=identity,
+        checkout_root=checkout_root,
+        directory_evidence=tuple(
+            _capture_live_directory(directory)
+            for directory in dict.fromkeys(
+                (source_root, source_workspace, project_root, checkout_root)
+            )
+        ),
+    )
 
 
 def resolve_managed_project_identity(
@@ -452,12 +571,27 @@ def resolve_managed_project_identity(
         execution_workspace,
         require_exists=True,
     )
-    try:
-        source_scope = _relative_workspace_path(
-            canonical_source_workspace,
-            canonical_source_root,
+    input_evidence = tuple(
+        _capture_live_directory(directory)
+        for directory in dict.fromkeys(
+            (
+                canonical_source_root,
+                canonical_source_workspace,
+                canonical_worktree_root,
+                canonical_execution_workspace,
+            )
         )
-        execution_scope = _relative_workspace_path(
+    )
+    _require_supported_git()
+    source = _source_project_identity(
+        canonical_source_root,
+        canonical_source_workspace,
+    )
+    execution = _resolve_canonical_project_identity(canonical_execution_workspace)
+    # This declared scope comparison preserves the public error taxonomy only.
+    # Acceptance below still requires Git-proven checkout and resolved scope.
+    try:
+        declared_execution_scope = _relative_workspace_path(
             canonical_execution_workspace,
             canonical_worktree_root,
         )
@@ -466,20 +600,30 @@ def resolve_managed_project_identity(
             str(canonical_source_workspace),
             str(canonical_execution_workspace),
         ) from exc
-    if source_scope != execution_scope:
+    if source.identity.workspace_path != declared_execution_scope:
         raise ManagedProjectScopeError(
             str(canonical_source_workspace),
             str(canonical_execution_workspace),
         )
-
-    source_identity = _source_project_identity(
-        canonical_source_root,
-        canonical_source_workspace,
+    if (
+        execution.identity.project_id != source.identity.project_id
+        or execution.identity.project_root != source.identity.project_root
+    ):
+        raise ManagedProjectOwnershipError(source.identity, execution.identity)
+    if (
+        execution.checkout_root != canonical_worktree_root
+        or execution.identity.workspace_path != declared_execution_scope
+    ):
+        raise ManagedProjectScopeError(
+            str(canonical_source_workspace),
+            str(canonical_execution_workspace),
+        )
+    _revalidate_live_directories(
+        *input_evidence,
+        *source.directory_evidence,
+        *execution.directory_evidence,
     )
-    execution_identity = resolve_project_identity(canonical_execution_workspace)
-    if execution_identity != source_identity:
-        raise ManagedProjectOwnershipError(source_identity, execution_identity)
-    return source_identity
+    return source.identity
 
 
 __all__ = [
@@ -488,6 +632,7 @@ __all__ = [
     "ManagedProjectScopeError",
     "ProjectIdentity",
     "ProjectIdentityError",
+    "ProjectIdentityGitVersionError",
     "ProjectIdentityUnavailableError",
     "project_id_for_root",
     "resolve_managed_project_identity",

@@ -56,6 +56,11 @@ binary with argv rather than a shell and asks it for:
 - the configured top level via `rev-parse --path-format=absolute
   --show-toplevel`.
 
+This grammar requires Git 2.36.0 or newer. Every public resolver validates the
+bounded `git --version` result before any topology query. An older or
+unrepresentable version raises a typed, non-retryable configuration error;
+spawn failures and timeouts remain retryable unavailability.
+
 The process environment removes caller-supplied `GIT_*` overrides and gives Git
 a fixed neutral `HOME`, so home-relative local includes cannot change identity
 between start and resume. The central untrusted-project `.env` boundary rejects
@@ -73,7 +78,11 @@ identity unavailability, never evidence for a fallback identity.
 Fresh resolver inputs and every Git-reported ownership path must also still be
 an actual directory at resolution time. Historical anchors may describe a path
 that no longer exists, but a missing path can never be published as a new
-identity.
+identity. Immediately before returning, each public resolver revalidates the
+complete input, checkout-root, and project-root directory population recorded
+by topology resolution, including each canonical path's filesystem device and
+inode generation. Deletion, same-path replacement, or symlink rebinding during
+a Git query therefore cannot become a fresh durable anchor.
 Primary-top-level discovery is likewise bound to the already validated common
 directory, so a markerless reported path cannot fall through to an unrelated
 ancestor checkout. Acceptance of that argument is not ownership proof: the
@@ -128,12 +137,16 @@ Ouroboros `TaskWorkspace` already persists both generated checkout paths and
 the durable source paths. Project identity uses `repo_root` plus the
 source-relative `original_cwd`, never the generated `worktree_path`. Two task
 worktrees for the same source/workspace therefore join one project. A source
-workspace outside its declared root fails before session publication. The
-generated `effective_cwd` is independently resolved as a direct checkout and
-must produce the same canonical project root and workspace scope. A restored
-ordinary directory, foreign checkout, or moved worktree therefore cannot reuse
-persisted `TaskWorkspace` metadata to claim the source identity on a fresh run
-or resume.
+workspace outside its declared root fails before session publication. Both the
+declared source root and generated worktree root must exactly equal the
+checkout roots proven by Git; workspace scopes are then derived from those
+proven roots rather than from caller-selected nested directories. The generated
+`effective_cwd` is independently resolved as a direct checkout and must produce
+the same canonical project root and workspace scope. A restored ordinary
+directory, foreign checkout, moved worktree, or nested root that collapses a
+real subdirectory to `.` therefore cannot reuse persisted `TaskWorkspace`
+metadata to claim the source identity on a fresh run or resume. All source and
+execution directories are revalidated together after both topology queries.
 Omission of `source_workspace` intentionally selects the source root, while an
 explicit empty or otherwise malformed workspace value fails validation instead
 of silently widening scope to `workspace_path="."`.

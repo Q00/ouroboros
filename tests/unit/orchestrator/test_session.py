@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
@@ -240,6 +241,43 @@ class TestSessionRepository:
             key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
         } == identity.to_event_data()
         assert event.data["execution_contract"] == execution_contract
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_workspace_deleted_after_topology_resolution(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project-map"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        identity = resolve_project_identity(workspace)
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
+        original_resolver = project_identity_module._resolve_canonical_project_identity
+
+        def resolve_then_delete(effective: Path):
+            resolved = original_resolver(effective)
+            workspace.rmdir()
+            return resolved
+
+        with (
+            patch(
+                "ouroboros.core.project_identity._resolve_canonical_project_identity",
+                side_effect=resolve_then_delete,
+            ),
+            pytest.raises(ProjectIdentityError, match="directory"),
+        ):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract=execution_contract,
+                project_identity=identity,
+                project_workspace=str(workspace),
+            )
+
+        mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

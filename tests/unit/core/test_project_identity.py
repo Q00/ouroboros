@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
@@ -14,10 +15,13 @@ from ouroboros.core.project_identity import (
     ManagedProjectScopeError,
     ProjectIdentity,
     ProjectIdentityError,
+    ProjectIdentityGitVersionError,
     ProjectIdentityUnavailableError,
     _git_environment,
     _git_path,
     _git_project_root,
+    _require_supported_git,
+    _resolve_canonical_project_identity,
     _run_git,
     project_id_for_root,
     resolve_managed_project_identity,
@@ -645,6 +649,51 @@ def test_git_operational_failure_cannot_become_a_fallback_identity(
         resolve_project_identity(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"git version 2.35.9\n",
+        b"git version unknown\n",
+        b"git version 9999999999.36.0\n",
+    ],
+    ids=["too-old", "unrepresentable", "unbounded-component"],
+)
+def test_unsupported_git_is_a_non_retryable_configuration_error(
+    output: bytes,
+) -> None:
+    with (
+        patch("ouroboros.core.project_identity._run_git_command", return_value=output),
+        pytest.raises(ProjectIdentityGitVersionError, match="2.36.0") as exc_info,
+    ):
+        _require_supported_git()
+
+    assert not isinstance(exc_info.value, ProjectIdentityUnavailableError)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"git version 2.36.0\n",
+        b"git version 2.36.0.windows.1\n",
+        b"git version 2.39.5 (Apple Git-154)\n",
+        b"git version 3.0.0\n",
+    ],
+)
+def test_supported_git_version_grammar_is_explicit(output: bytes) -> None:
+    with patch("ouroboros.core.project_identity._run_git_command", return_value=output):
+        _require_supported_git()
+
+
+def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:
+    with patch(
+        "ouroboros.core.project_identity._run_git_command",
+        return_value=b"git version 2.36.0\n",
+    ) as run_git_command:
+        _require_supported_git()
+
+    run_git_command.assert_called_once_with("--version")
+
+
 def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
@@ -739,6 +788,50 @@ def test_non_git_directory_is_a_local_first_project(tmp_path: Path) -> None:
     assert resolve_project_identity(project) == ProjectIdentity.from_root(project)
 
 
+def test_direct_resolution_revalidates_live_evidence_after_topology(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def resolve_then_delete(effective: Path):
+        resolved = _resolve_canonical_project_identity(effective)
+        workspace.rmdir()
+        return resolved
+
+    with (
+        patch(
+            "ouroboros.core.project_identity._resolve_canonical_project_identity",
+            side_effect=resolve_then_delete,
+        ),
+        pytest.raises(ProjectIdentityError, match="directory"),
+    ):
+        resolve_project_identity(workspace)
+
+
+def test_direct_resolution_rejects_same_path_directory_replacement(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    displaced = tmp_path / "displaced"
+    workspace.mkdir()
+
+    def resolve_then_replace(effective: Path):
+        resolved = _resolve_canonical_project_identity(effective)
+        workspace.rename(displaced)
+        workspace.mkdir()
+        return resolved
+
+    with (
+        patch(
+            "ouroboros.core.project_identity._resolve_canonical_project_identity",
+            side_effect=resolve_then_replace,
+        ),
+        pytest.raises(ProjectIdentityError, match="changed"),
+    ):
+        resolve_project_identity(workspace)
+
+
 def test_existing_file_cannot_become_a_project_root(tmp_path: Path) -> None:
     file_path = tmp_path / "not-a-project"
     file_path.write_text("data", encoding="utf-8")
@@ -805,6 +898,70 @@ def test_managed_workspace_uses_durable_source_paths(tmp_path: Path) -> None:
 
     assert identity.project_root == str(source.resolve())
     assert identity.workspace_path == "packages/app"
+
+
+def test_managed_nested_source_root_cannot_collapse_proven_scope(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    generated = tmp_path / "generated"
+    _init_repo(source)
+    _add_linked(source, generated, branch="generated")
+    nested_source = source / "packages" / "app"
+    nested_source.mkdir(parents=True)
+
+    with pytest.raises(ManagedProjectScopeError, match="scopes do not match"):
+        resolve_managed_project_identity(
+            generated,
+            source_root=nested_source,
+            source_workspace=nested_source,
+            worktree_root=generated,
+        )
+
+
+@pytest.mark.parametrize(
+    "removed",
+    ["source_root", "source_workspace", "worktree_root", "execution_workspace"],
+)
+def test_managed_resolution_revalidates_complete_live_population(
+    tmp_path: Path,
+    removed: str,
+) -> None:
+    source = tmp_path / "source"
+    generated = tmp_path / "generated"
+    _init_repo(source)
+    _add_linked(source, generated, branch="generated")
+    source_workspace = source / "packages" / "app"
+    execution_workspace = generated / "packages" / "app"
+    source_workspace.mkdir(parents=True)
+    execution_workspace.mkdir(parents=True)
+    targets = {
+        "source_root": source,
+        "source_workspace": source_workspace,
+        "worktree_root": generated,
+        "execution_workspace": execution_workspace,
+    }
+
+    def resolve_then_delete(effective: Path):
+        resolved = _resolve_canonical_project_identity(effective)
+        target = targets[removed]
+        if target.exists():
+            shutil.rmtree(target)
+        return resolved
+
+    with (
+        patch(
+            "ouroboros.core.project_identity._resolve_canonical_project_identity",
+            side_effect=resolve_then_delete,
+        ),
+        pytest.raises(ProjectIdentityError, match="directory"),
+    ):
+        resolve_managed_project_identity(
+            execution_workspace,
+            source_root=source,
+            source_workspace=source_workspace,
+            worktree_root=generated,
+        )
 
 
 def test_managed_workspace_outside_source_root_fails_closed(tmp_path: Path) -> None:
