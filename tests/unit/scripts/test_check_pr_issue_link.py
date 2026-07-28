@@ -10,6 +10,11 @@ language, so the renderer is the authority.
 
 The fixtures below are the HTML GitHub actually returned for each Markdown
 input, captured via `POST /markdown` with `mode=gfm` and `context=Q00/ouroboros`.
+
+The script reports *candidates*: GitHub existence-checks the shorthand it
+autolinks itself, but an author-supplied destination is rendered verbatim, so
+`[x](/owner/repo/issues/0)` produces an anchor for an issue that does not
+exist. Resolving numbers against the repository is the workflow's job.
 """
 
 from __future__ import annotations
@@ -180,6 +185,58 @@ def test_rendered_file_input_matches_literal_input(tmp_path: Path) -> None:
 def test_numbers_are_emitted_one_per_line_for_the_shell_loop() -> None:
     rendered = '<a href="/Q00/ouroboros/issues/12">a</a><a href="/Q00/ouroboros/issues/7">b</a>'
     assert run(rendered).stdout == "7\n12\n"
+
+
+# ── author-supplied destinations ─────────────────────────────────────
+
+
+def test_explicit_link_to_a_nonexistent_issue_is_still_a_candidate() -> None:
+    """GitHub renders author-written destinations verbatim, so it cannot vouch
+    for them. The number is reported and the workflow resolves it."""
+    assert issues('<p><a href="/Q00/ouroboros/issues/0">nothing</a></p>') == [0]
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        pytest.param('<a href="/Q00/ouroboros/issues/1777"></a>', id="empty"),
+        pytest.param('<a href="/Q00/ouroboros/issues/1777">   </a>', id="whitespace-only"),
+        pytest.param('<a href="/Q00/ouroboros/issues/1777">\n\t\n</a>', id="newlines-and-tabs"),
+    ],
+)
+def test_anchor_without_visible_text_is_not_a_trail(rendered: str) -> None:
+    """`[](.../issues/1777)` renders an anchor a reader can neither see nor click."""
+    assert run(rendered).returncode == 1
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        pytest.param('<a href="/Q00/ouroboros/issues/1777"><img src="x.png"></a>', id="image-only"),
+        pytest.param(
+            '<a href="/Q00/ouroboros/issues/1777"><code>#1777</code></a>', id="nested-element"
+        ),
+    ],
+)
+def test_non_text_anchor_content_still_counts_as_visible(rendered: str) -> None:
+    assert issues(rendered) == [1777]
+
+
+# ── URL normalization ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        pytest.param("https://github.com/q00/OUROBOROS/issues/1777", id="different-case"),
+        pytest.param("https://www.github.com/Q00/ouroboros/issues/1777", id="www-subdomain"),
+        pytest.param("/Q00/ouroboros/issues/1777/", id="trailing-slash"),
+        pytest.param("  /Q00/ouroboros/issues/1777  ", id="surrounding-whitespace"),
+    ],
+)
+def test_equivalent_urls_resolve(href: str) -> None:
+    """GitHub treats these as the same page; a false red here blocks a valid PR."""
+    assert issues(f'<a href="{href}">x</a>') == [1777]
 
 
 def test_malformed_html_does_not_crash() -> None:

@@ -19,7 +19,7 @@ name: PR Hygiene
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 permissions:
@@ -75,20 +75,39 @@ jobs:
               ;;
           esac
 
+          # --- shared: one retry, then fail open ------------------------------
+          # Both lookups below go through this. A GitHub API outage is not the
+          # contributor's problem, and a hygiene gate must not hold a merge
+          # hostage to infrastructure -- but it also must not fail open
+          # silently, so every fallback announces itself.
+          api_retry() {
+            "$@" && return 0
+            echo "::warning::GitHub API call failed; retrying once."
+            sleep 5
+            "$@" && return 0
+            return 1
+          }
+
           # --- signal 1: GitHub's own closing link ----------------------------
           # Covers both `Closes #123` in the body and issues linked manually
           # through the Development sidebar, which no body scan can see.
-          closing=$(gh api graphql \
-            -f query='
-              query($owner:String!, $repo:String!, $pr:Int!) {
-                repository(owner: $owner, name: $repo) {
-                  pullRequest(number: $pr) {
-                    closingIssuesReferences(first: 10) { totalCount }
-                  }
+          closing_query='
+            query($owner:String!, $repo:String!, $pr:Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  closingIssuesReferences(first: 10) { totalCount }
                 }
-              }' \
-            -F owner="${OWNER}" -F repo="${REPO}" -F pr="${PR_NUMBER}" \
-            --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount')
+              }
+            }'
+          # `closing=$(gh ...)` under `set -e` would abort the whole step on a
+          # transient failure, skipping the fail-open path below, so the
+          # assignment and the error check are kept separate.
+          if ! closing=$(api_retry gh api graphql -f query="${closing_query}" \
+                -F owner="${OWNER}" -F repo="${REPO}" -F pr="${PR_NUMBER}" \
+                --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount'); then
+            echo "::warning::Could not read closing issue references; skipping the issue-link check."
+            exit 0
+          fi
 
           if [ "${closing}" -gt 0 ]; then
             echo "OK: ${closing} closing issue reference(s)."
@@ -111,22 +130,46 @@ jobs:
           # a typo all stop counting.
           printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
 
-          if ! jq -n --rawfile text "${RUNNER_TEMP}/pr-body.md" \
-                --arg context "${OWNER}/${REPO}" \
-                '{text: $text, mode: "gfm", context: $context}' \
-              | gh api -X POST /markdown --input - > "${RUNNER_TEMP}/rendered.html"; then
-            # A GitHub API outage is not the contributor's problem. Fail open
-            # and say so, rather than blocking a merge on infrastructure.
-            echo "::warning::Could not render the PR body (GitHub API error); skipping the issue-link check."
+          if ! api_retry sh -c 'jq -n --rawfile text "$1" --arg context "$2" \
+                "{text: \$text, mode: \"gfm\", context: \$context}" \
+                | gh api -X POST /markdown --input - > "$3"' _ \
+                "${RUNNER_TEMP}/pr-body.md" "${OWNER}/${REPO}" "${RUNNER_TEMP}/rendered.html"; then
+            echo "::warning::Could not render the PR body; skipping the issue-link check."
             exit 0
           fi
 
-          if python3 scripts/check-pr-issue-link.py \
-              --rendered-file "${RUNNER_TEMP}/rendered.html" \
-              --owner "${OWNER}" --repo "${REPO}"; then
+          candidates=$(python3 scripts/check-pr-issue-link.py \
+            --rendered-file "${RUNNER_TEMP}/rendered.html" \
+            --owner "${OWNER}" --repo "${REPO}" || true)
+
+          # The renderer settles *visibility*, and it existence-checks the
+          # shorthand it autolinks itself -- but an author-supplied destination
+          # is rendered verbatim, so `[x](/owner/repo/issues/0)` yields an
+          # anchor for an issue that does not exist. Resolve each candidate.
+          # Capped so a link-heavy body cannot fan out into API calls.
+          checked=0
+          for number in ${candidates}; do
+            if [ "${checked}" -ge 10 ]; then
+              echo "::warning::More than 10 linked issues; stopped resolving after 10."
+              break
+            fi
+            checked=$((checked + 1))
+
+            if ! payload=$(gh api "repos/${OWNER}/${REPO}/issues/${number}" 2>/dev/null); then
+              echo "  #${number}: linked, but no such issue in this repository"
+              continue
+            fi
+            # The REST issues endpoint also serves pull requests; only a pull
+            # request carries a `pull_request` object.
+            if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
+              echo "  #${number}: resolves to a pull request, not an issue"
+              continue
+            fi
+
+            echo "OK: the rendered body links to issue #${number}."
             echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
             exit 0
-          fi
+          done
 
           # --- fail ------------------------------------------------------------
           echo "::error::No issue link found. Do one of the following:"

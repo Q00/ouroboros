@@ -54,29 +54,65 @@ import sys
 
 
 class _IssueLinkCollector(HTMLParser):
-    """Collect issue numbers from ``<a href>`` targets in rendered HTML."""
+    """Collect issue numbers from ``<a href>`` targets in rendered HTML.
+
+    An anchor counts only when it carries visible text. GitHub renders
+    ``[](.../issues/1777)`` as an empty anchor, which links nothing a reader
+    can see or click, so it is not a trail.
+    """
 
     def __init__(self, owner: str, repo: str) -> None:
         super().__init__(convert_charrefs=True)
         # Anchored and repo-scoped on purpose: a link into another repository
-        # is not local traceability, and `/pull/N` is not an issue.
+        # is not local traceability, and `/pull/N` is not an issue. Owner and
+        # repository are compared case-insensitively and a trailing slash is
+        # tolerated, because GitHub treats those URLs as the same page.
         self._pattern = re.compile(
-            rf"^(?:https?://github\.com)?/{re.escape(owner)}/{re.escape(repo)}/issues/(\d+)(?:[#?].*)?$"
+            rf"^(?:https?://(?:www\.)?github\.com)?"
+            rf"/{re.escape(owner)}/{re.escape(repo)}/issues/(\d+)/?(?:[#?].*)?$",
+            re.IGNORECASE,
         )
         self.issue_numbers: set[int] = set()
+        self._open_issue_numbers: list[int | None] = []
+        self._text_seen: list[bool] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a":
+            # A nested element -- an `<img>` badge, say -- is visible content.
+            if self._text_seen:
+                self._text_seen[-1] = True
             return
+        number: int | None = None
         for name, value in attrs:
             if name == "href" and value:
-                match = self._pattern.match(value)
+                match = self._pattern.match(value.strip())
                 if match:
-                    self.issue_numbers.add(int(match.group(1)))
+                    number = int(match.group(1))
+        self._open_issue_numbers.append(number)
+        self._text_seen.append(False)
+
+    def handle_data(self, data: str) -> None:
+        if self._text_seen and data.strip():
+            self._text_seen[-1] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or not self._open_issue_numbers:
+            return
+        number = self._open_issue_numbers.pop()
+        visible = self._text_seen.pop()
+        if number is not None and visible:
+            self.issue_numbers.add(number)
 
 
 def find_linked_issues(rendered_html: str, *, owner: str, repo: str) -> list[int]:
-    """Return the repository issues the rendered body links to, ascending."""
+    """Return the repository issue numbers the rendered body links to, ascending.
+
+    These are *candidates*. GitHub existence- and type-checks the shorthand it
+    autolinks itself, but an author-supplied destination is rendered verbatim:
+    ``[x](/owner/repo/issues/0)`` produces an anchor for an issue that does not
+    exist. The workflow resolves each number against the repository before
+    accepting it.
+    """
     collector = _IssueLinkCollector(owner, repo)
     collector.feed(rendered_html)
     collector.close()
