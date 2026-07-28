@@ -52,6 +52,20 @@ from pathlib import Path
 import re
 import sys
 
+# Elements that render something by themselves. A `<span></span>` does not.
+_SELF_RENDERING_TAGS = frozenset({"img", "picture", "svg", "video"})
+
+# Characters that occupy no visual space, so a label made only of them is not
+# a trail a reader can see or click.
+_INVISIBLE = "".join(("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u180e"))
+_INVISIBLE_TABLE = str.maketrans("", "", _INVISIBLE)
+
+
+def _has_visible_glyph(text: str) -> bool:
+    """Return whether `text` shows anything once whitespace and zero-width
+    characters are removed."""
+    return bool(text.translate(_INVISIBLE_TABLE).strip())
+
 
 class _IssueLinkCollector(HTMLParser):
     """Collect issue numbers from ``<a href>`` targets in rendered HTML.
@@ -67,9 +81,13 @@ class _IssueLinkCollector(HTMLParser):
         # is not local traceability, and `/pull/N` is not an issue. Owner and
         # repository are compared case-insensitively and a trailing slash is
         # tolerated, because GitHub treats those URLs as the same page.
+        # The digit count is bounded. An author-supplied destination can hold
+        # arbitrarily many digits, and `int()` raises `ValueError` past
+        # CPython's integer-string limit -- a crash in a gate is a red check
+        # for a valid PR. No repository has a nine-digit issue number.
         self._pattern = re.compile(
             rf"^(?:https?://(?:www\.)?github\.com)?"
-            rf"/{re.escape(owner)}/{re.escape(repo)}/issues/(\d+)/?(?:[#?].*)?$",
+            rf"/{re.escape(owner)}/{re.escape(repo)}/issues/(\d{{1,9}})/?(?:[#?].*)?$",
             re.IGNORECASE,
         )
         self.issue_numbers: set[int] = set()
@@ -78,8 +96,10 @@ class _IssueLinkCollector(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a":
-            # A nested element -- an `<img>` badge, say -- is visible content.
-            if self._text_seen:
+            # Only an image renders on its own. An empty wrapper such as
+            # `<span></span>` shows nothing, and anything with real content --
+            # `<code>#1777</code>` -- is caught by `handle_data` instead.
+            if self._text_seen and tag in _SELF_RENDERING_TAGS:
                 self._text_seen[-1] = True
             return
         number: int | None = None
@@ -92,7 +112,7 @@ class _IssueLinkCollector(HTMLParser):
         self._text_seen.append(False)
 
     def handle_data(self, data: str) -> None:
-        if self._text_seen and data.strip():
+        if self._text_seen and _has_visible_glyph(data):
             self._text_seen[-1] = True
 
     def handle_endtag(self, tag: str) -> None:

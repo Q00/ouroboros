@@ -239,6 +239,43 @@ def test_equivalent_urls_resolve(href: str) -> None:
     assert issues(f'<a href="{href}">x</a>') == [1777]
 
 
+# ── invisible labels and unbounded digits ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        pytest.param('<a href="/Q00/ouroboros/issues/1777"><span></span></a>', id="empty-wrapper"),
+        pytest.param(
+            '<a href="/Q00/ouroboros/issues/1777"><span><b></b></span></a>', id="nested-empty"
+        ),
+        pytest.param('<a href="/Q00/ouroboros/issues/1777">\u200b\u200c</a>', id="zero-width-only"),
+        pytest.param('<a href="/Q00/ouroboros/issues/1777">\u00ad</a>', id="soft-hyphen-only"),
+        pytest.param('<a href="/Q00/ouroboros/issues/1777">\ufeff</a>', id="bom-only"),
+    ],
+)
+def test_invisible_labels_are_not_a_trail(rendered: str) -> None:
+    """An anchor a reader can neither see nor click is not traceability."""
+    assert run(rendered).returncode == 1
+
+
+def test_wrapper_with_real_text_is_visible() -> None:
+    assert issues('<a href="/Q00/ouroboros/issues/1777"><span>see</span></a>') == [1777]
+
+
+@pytest.mark.parametrize(
+    ("digits", "expected"),
+    [
+        pytest.param("999999999", [999999999], id="nine-digits-accepted"),
+        pytest.param("1234567890", [], id="ten-digits-ignored"),
+        pytest.param("9" * 4301, [], id="beyond-int-conversion-limit"),
+    ],
+)
+def test_issue_numbers_are_bounded(digits: str, expected: list[int]) -> None:
+    """`int()` raises past CPython's digit limit; a crash here reds a valid PR."""
+    assert issues(f'<a href="/Q00/ouroboros/issues/{digits}">x</a>') == expected
+
+
 def test_malformed_html_does_not_crash() -> None:
     """`html.parser` is lenient by design; the gate must not fail on noise."""
     assert run("<p><a href=<<>> unclosed").returncode == 1

@@ -80,9 +80,13 @@ jobs:
           # contributor's problem, and a hygiene gate must not hold a merge
           # hostage to infrastructure -- but it also must not fail open
           # silently, so every fallback announces itself.
+          # Diagnostics go to stderr. `closing=$(api_retry ...)` captures
+          # stdout, so a warning printed there would be concatenated with the
+          # count and turn a successful retry into `integer expression
+          # expected` -- silently discarding a valid closing link.
           api_retry() {
             "$@" && return 0
-            echo "::warning::GitHub API call failed; retrying once."
+            echo "::warning::GitHub API call failed; retrying once." >&2
             sleep 5
             "$@" && return 0
             return 1
@@ -146,30 +150,57 @@ jobs:
           # shorthand it autolinks itself -- but an author-supplied destination
           # is rendered verbatim, so `[x](/owner/repo/issues/0)` yields an
           # anchor for an issue that does not exist. Resolve each candidate.
-          # Capped so a link-heavy body cannot fan out into API calls.
+          resolve_issue() {
+            # 0 = a real issue, 1 = definitively not, 2 = could not tell.
+            if payload=$(gh api "repos/${OWNER}/${REPO}/issues/$1" 2>"${RUNNER_TEMP}/api-err"); then
+              # The REST issues endpoint also serves pull requests; only a
+              # pull request carries a `pull_request` object.
+              if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
+                echo "  #$1: resolves to a pull request, not an issue"
+                return 1
+              fi
+              return 0
+            fi
+            if grep -qi "HTTP 404" "${RUNNER_TEMP}/api-err"; then
+              echo "  #$1: linked, but no such issue in this repository"
+              return 1
+            fi
+            # Rate limiting, 5xx, DNS. Treating these as "no such issue" would
+            # turn a GitHub outage into a red check on a correctly linked PR.
+            echo "::warning::Could not resolve #$1: $(tr -d '\n' < "${RUNNER_TEMP}/api-err")" >&2
+            return 2
+          }
+
+          # Bounded so a link-heavy body cannot fan out into API calls. Hitting
+          # the cap is *undecidable*, not a failure: the eleventh candidate may
+          # be the valid one, and candidates arrive in numeric order rather
+          # than by likelihood.
+          RESOLVE_CAP=20
           checked=0
+          undecided=0
           for number in ${candidates}; do
-            if [ "${checked}" -ge 10 ]; then
-              echo "::warning::More than 10 linked issues; stopped resolving after 10."
+            if [ "${checked}" -ge "${RESOLVE_CAP}" ]; then
+              echo "::warning::More than ${RESOLVE_CAP} linked issues; stopped resolving. Treating the result as undetermined rather than as a missing link."
+              undecided=1
               break
             fi
             checked=$((checked + 1))
 
-            if ! payload=$(gh api "repos/${OWNER}/${REPO}/issues/${number}" 2>/dev/null); then
-              echo "  #${number}: linked, but no such issue in this repository"
-              continue
-            fi
-            # The REST issues endpoint also serves pull requests; only a pull
-            # request carries a `pull_request` object.
-            if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
-              echo "  #${number}: resolves to a pull request, not an issue"
-              continue
-            fi
-
-            echo "OK: the rendered body links to issue #${number}."
-            echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
-            exit 0
+            resolve_issue "${number}"
+            case $? in
+              0)
+                echo "OK: the rendered body links to issue #${number}."
+                echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
+                exit 0
+                ;;
+              2) undecided=1 ;;
+            esac
           done
+
+          if [ "${undecided}" -eq 1 ]; then
+            echo "::warning::Could not determine whether a linked issue exists; skipping the issue-link check."
+            exit 0
+          fi
 
           # --- fail ------------------------------------------------------------
           echo "::error::No issue link found. Do one of the following:"
