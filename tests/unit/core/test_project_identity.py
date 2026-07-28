@@ -10,6 +10,8 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from ouroboros.core.project_identity import (
+    ManagedProjectOwnershipError,
+    ManagedProjectScopeError,
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
@@ -18,6 +20,7 @@ from ouroboros.core.project_identity import (
     _git_project_root,
     _run_git,
     project_id_for_root,
+    resolve_managed_project_identity,
     resolve_project_identity,
 )
 
@@ -143,21 +146,24 @@ def test_explicit_git_marker_wins_tie_with_bare_shape(tmp_path: Path) -> None:
 def test_standard_linked_and_managed_worktrees_share_primary_identity(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"
-    generated = tmp_path / "generated" / "packages" / "app"
+    generated = tmp_path / "generated"
     _init_repo(primary)
     _add_linked(primary, linked)
+    _add_linked(primary, generated, branch="generated")
     primary_workspace = primary / "packages" / "app"
     linked_workspace = linked / "packages" / "app"
+    generated_workspace = generated / "packages" / "app"
     primary_workspace.mkdir(parents=True)
     linked_workspace.mkdir(parents=True)
-    generated.mkdir(parents=True)
+    generated_workspace.mkdir(parents=True)
 
     direct = resolve_project_identity(primary_workspace)
     linked_direct = resolve_project_identity(linked_workspace)
-    managed = resolve_project_identity(
-        generated,
+    managed = resolve_managed_project_identity(
+        generated_workspace,
         source_root=linked,
         source_workspace=linked_workspace,
+        worktree_root=generated,
     )
 
     assert direct == linked_direct == managed
@@ -170,21 +176,24 @@ def test_newline_bearing_git_paths_preserve_direct_linked_and_managed_identity(
 ) -> None:
     primary = tmp_path / "primary\nrepo"
     linked = tmp_path / "linked\nrepo"
-    generated = tmp_path / "generated" / "packages" / "app"
+    generated = tmp_path / "generated\nrepo"
     _init_repo(primary)
     _add_linked(primary, linked)
+    _add_linked(primary, generated, branch="generated")
     primary_workspace = primary / "packages" / "app"
     linked_workspace = linked / "packages" / "app"
+    generated_workspace = generated / "packages" / "app"
     primary_workspace.mkdir(parents=True)
     linked_workspace.mkdir(parents=True)
-    generated.mkdir(parents=True)
+    generated_workspace.mkdir(parents=True)
 
     direct = resolve_project_identity(primary_workspace)
     linked_direct = resolve_project_identity(linked_workspace)
-    managed = resolve_project_identity(
-        generated,
+    managed = resolve_managed_project_identity(
+        generated_workspace,
         source_root=linked,
         source_workspace=linked_workspace,
+        worktree_root=generated,
     )
 
     assert direct == linked_direct == managed
@@ -261,8 +270,9 @@ def test_unowned_git_marker_cannot_adopt_another_repository(
     unowned = (owner if nested_under_owner else tmp_path) / "unowned"
     unowned_workspace = unowned / "packages" / "app"
     generated = tmp_path / "generated"
+    generated_workspace = generated / "packages" / "app"
     unowned_workspace.mkdir(parents=True)
-    generated.mkdir()
+    generated_workspace.mkdir(parents=True)
     marker = unowned / ".git"
     if marker_kind == "gitfile":
         marker.write_text(f"gitdir: {owner_git_dir}\n", encoding="utf-8")
@@ -270,13 +280,14 @@ def test_unowned_git_marker_cannot_adopt_another_repository(
         marker.symlink_to(owner_git_dir, target_is_directory=True)
 
     direct = resolve_project_identity(unowned_workspace)
-    managed = resolve_project_identity(
-        generated,
-        source_root=unowned,
-        source_workspace=unowned_workspace,
-    )
+    with pytest.raises(ManagedProjectOwnershipError):
+        resolve_managed_project_identity(
+            generated_workspace,
+            source_root=unowned,
+            source_workspace=unowned_workspace,
+            worktree_root=generated,
+        )
 
-    assert direct == managed
     assert direct.project_root == str(unowned.resolve())
     assert direct.workspace_path == "packages/app"
     assert direct.project_id != project_id_for_root(owner)
@@ -294,10 +305,11 @@ def test_markerless_bare_candidate_cannot_redirect_common_directory(tmp_path: Pa
     with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
         resolve_project_identity(redirected)
     with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
-        resolve_project_identity(
+        resolve_managed_project_identity(
             generated,
             source_root=redirected,
             source_workspace=redirected,
+            worktree_root=generated,
         )
 
 
@@ -305,7 +317,6 @@ def test_git_owns_bom_tab_and_value_continuation_grammar(tmp_path: Path) -> None
     holder = tmp_path / "holder"
     owner = tmp_path / "primary owner"
     linked = tmp_path / "linked"
-    generated = tmp_path / "generated" / "packages" / "app"
     _init_repo(holder)
     _add_linked(holder, linked)
     owner.mkdir()
@@ -324,16 +335,16 @@ def test_git_owns_bom_tab_and_value_continuation_grammar(tmp_path: Path) -> None
     holder_workspace.mkdir(parents=True)
     owner_workspace.mkdir(parents=True)
     linked_workspace.mkdir(parents=True)
-    generated.mkdir(parents=True)
 
     identities = (
         resolve_project_identity(holder_workspace),
         resolve_project_identity(owner_workspace),
         resolve_project_identity(linked_workspace),
-        resolve_project_identity(
-            generated,
+        resolve_managed_project_identity(
+            holder_workspace,
             source_root=linked,
             source_workspace=linked_workspace,
+            worktree_root=holder,
         ),
     )
 
@@ -435,11 +446,9 @@ def test_nested_markerless_bare_repository_beats_enclosing_checkout(tmp_path: Pa
     source = tmp_path / "source"
     common_git = outer / "vendor" / "source.git"
     linked = tmp_path / "linked"
-    generated = tmp_path / "generated"
     _init_repo(outer)
     _init_repo(source)
     common_git.parent.mkdir()
-    generated.mkdir()
     _git("clone", "-q", "--bare", str(source), str(common_git))
     _git(
         f"--git-dir={common_git}",
@@ -454,10 +463,11 @@ def test_nested_markerless_bare_repository_beats_enclosing_checkout(tmp_path: Pa
 
     direct = resolve_project_identity(common_git)
     linked_direct = resolve_project_identity(linked)
-    managed = resolve_project_identity(
-        generated,
+    managed = resolve_managed_project_identity(
+        linked,
         source_root=common_git,
         source_workspace=common_git,
+        worktree_root=linked,
     )
 
     assert direct == linked_direct == managed
@@ -470,11 +480,9 @@ def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None
     source = tmp_path / "source"
     common_git = outer / "vendor" / "common.git"
     linked = tmp_path / "linked"
-    generated = tmp_path / "generated"
     _init_repo(outer)
     _init_repo(source)
     common_git.parent.mkdir()
-    generated.mkdir()
     _git("clone", "-q", "--bare", str(source), str(common_git))
     _git(
         f"--git-dir={common_git}",
@@ -493,10 +501,11 @@ def test_malformed_bare_head_cannot_join_linked_worktree(tmp_path: Path) -> None
     with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
         resolve_project_identity(linked)
     with pytest.raises(ProjectIdentityUnavailableError, match="topology"):
-        resolve_project_identity(
-            generated,
+        resolve_managed_project_identity(
+            linked,
             source_root=common_git,
             source_workspace=common_git,
+            worktree_root=linked,
         )
 
 
@@ -757,17 +766,41 @@ def test_unrepresentable_paths_fail_before_git(raw_path: str) -> None:
         resolve_project_identity(raw_path)
 
 
+def test_direct_resolver_cannot_accept_caller_supplied_source_attribution(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    unrelated_execution = tmp_path / "unrelated"
+    source.mkdir()
+    unrelated_execution.mkdir()
+
+    with pytest.raises(TypeError, match="source_root"):
+        resolve_project_identity(  # type: ignore[call-arg]
+            unrelated_execution,
+            source_root=source,
+            source_workspace=source,
+        )
+
+    identity = resolve_project_identity(unrelated_execution)
+    assert identity.project_root == str(unrelated_execution.resolve())
+    assert identity.project_id != project_id_for_root(source)
+
+
 def test_managed_workspace_uses_durable_source_paths(tmp_path: Path) -> None:
     source = tmp_path / "source"
+    generated = tmp_path / "generated"
+    _init_repo(source)
+    _add_linked(source, generated, branch="generated")
     source_workspace = source / "packages" / "app"
+    generated_workspace = generated / "packages" / "app"
     source_workspace.mkdir(parents=True)
-    generated = tmp_path / "generated" / "packages" / "app"
-    generated.mkdir(parents=True)
+    generated_workspace.mkdir(parents=True)
 
-    identity = resolve_project_identity(
-        generated,
+    identity = resolve_managed_project_identity(
+        generated_workspace,
         source_root=source,
         source_workspace=source_workspace,
+        worktree_root=generated,
     )
 
     assert identity.project_root == str(source.resolve())
@@ -782,11 +815,12 @@ def test_managed_workspace_outside_source_root_fails_closed(tmp_path: Path) -> N
     generated.mkdir()
     outside.mkdir()
 
-    with pytest.raises(ProjectIdentityError, match="outside"):
-        resolve_project_identity(
+    with pytest.raises(ManagedProjectScopeError, match="scopes do not match"):
+        resolve_managed_project_identity(
             generated,
             source_root=source,
             source_workspace=outside,
+            worktree_root=generated,
         )
 
 
