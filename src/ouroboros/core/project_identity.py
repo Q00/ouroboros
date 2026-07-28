@@ -211,17 +211,17 @@ def _run_git(start: Path, *arguments: str) -> bytes:
         raise ProjectIdentityUnavailableError("Git query is temporarily unavailable") from exc
 
 
-def _git_path(output: bytes | None) -> Path | None:
-    """Decode one newline-terminated Git path without trimming valid spaces."""
-    if output is None or not output.endswith(b"\n"):
-        return None
+def _git_path(output: bytes) -> Path:
+    """Decode one Git-owned path, removing only its final record terminator."""
+    if not output.endswith(b"\n"):
+        raise ProjectIdentityUnavailableError("Git path output is not representable")
     record = output[:-1]
-    if not record or b"\n" in record or b"\r" in record or b"\x00" in record:
-        return None
+    if not record or b"\x00" in record:
+        raise ProjectIdentityUnavailableError("Git path output is not representable")
     try:
         return _canonical_directory(record.decode("utf-8", errors="strict"))
-    except (UnicodeError, ProjectIdentityError):
-        return None
+    except (UnicodeError, ProjectIdentityError) as exc:
+        raise ProjectIdentityUnavailableError("Git path output is not representable") from exc
 
 
 def _git_dir_argument(checkout_root: Path | None) -> tuple[str, ...]:
@@ -267,8 +267,6 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--git-common-dir",
     )
     common_dir = _git_path(common_output)
-    if common_dir is None:
-        return None
     common_bare = _run_git(
         common_dir,
         f"--git-dir={common_dir}",
@@ -276,7 +274,7 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--is-bare-repository",
     )
     if common_bare not in {b"true\n", b"false\n"}:
-        return None
+        raise ProjectIdentityUnavailableError("Git bare-state output is not representable")
 
     output = _run_git(
         start,
@@ -293,10 +291,10 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
             for record in output.split(b"\x00")
             if record.startswith(prefix)
         )
-    except (UnicodeError, ProjectIdentityError):
-        return None
+    except (UnicodeError, ProjectIdentityError) as exc:
+        raise ProjectIdentityUnavailableError("Git worktree output is not representable") from exc
     if not worktrees:
-        return None
+        raise ProjectIdentityUnavailableError("Git worktree output is not representable")
     if common_bare == b"true\n":
         active_is_common = start == common_dir or common_dir in start.parents
         owned = checkout_root is None or checkout_root in worktrees or active_is_common
@@ -313,8 +311,6 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
         "--show-toplevel",
     )
     project_root = _git_path(top_level)
-    if project_root is None:
-        return None
     # Git accepting an explicit --git-dir does not prove that the active
     # checkout owns it.  Membership must come from Git's worktree population or
     # from Git's own configured top-level decision (an explicit core.worktree).
@@ -330,6 +326,8 @@ def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
         "rev-parse",
         "--is-bare-repository",
     )
+    if output not in {b"true\n", b"false\n"}:
+        raise ProjectIdentityUnavailableError("Git bare-state output is not representable")
     return output == b"true\n"
 
 
@@ -345,9 +343,7 @@ def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
         active_git_dir = _git_path(
             _run_git(start, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
         )
-        if active_git_dir is not None and (
-            active_git_dir == start or active_git_dir in start.parents
-        ):
+        if active_git_dir == start or active_git_dir in start.parents:
             bare_root = _git_project_root(start)
             return (bare_root, bare_root) if bare_root is not None else (start, start)
     project_root = _git_project_root(start, checkout_root)
@@ -368,10 +364,8 @@ def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
         "--path-format=absolute",
         "--show-toplevel",
     )
-    if top_level is None:
-        return start, start
     decoded_top_level = _git_path(top_level)
-    return (project_root, decoded_top_level) if decoded_top_level is not None else (start, start)
+    return project_root, decoded_top_level
 
 
 def _relative_workspace_path(workspace: Path, checkout_root: Path) -> str:

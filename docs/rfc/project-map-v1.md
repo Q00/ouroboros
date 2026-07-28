@@ -65,6 +65,11 @@ and set a five-second timeout. Only complete UTF-8 paths from successful
 commands with at most 1 MiB of stdout are accepted. When a checkout marker is
 present, it is passed back to Git explicitly as `--git-dir`; a malformed nested
 marker therefore cannot be skipped in favor of a parent repository.
+Each scalar path query returns one Git-owned value; the resolver removes only
+Git's final LF terminator, so a legal POSIX newline inside a checkout path is
+preserved rather than mistaken for a second record. An undecodable, truncated,
+NUL-bearing, or otherwise unrepresentable successful response is transient
+identity unavailability, never evidence for a fallback identity.
 Primary-top-level discovery is likewise bound to the already validated common
 directory, so a markerless reported path cannot fall through to an unrelated
 ancestor checkout. Acceptance of that argument is not ownership proof: the
@@ -148,7 +153,8 @@ path, resolving relative inputs against construction-time process cwd. If an
 omitted provider cwd is unavailable, the boundary preserves `None`; an explicit
 task path does not silently replace it because the provider would still execute
 with its retained value. Preparation instead requires task, runtime-handle, and
-provider cwd owners to agree before publication. Persistent Claude transport
+provider cwd owners to agree before publication, and it cannot infer provider
+ownership from the runner's later process cwd. Persistent Claude transport
 and runtime objects share the same normalized value for both spawn and resume.
 The resulting concrete workspace is therefore available before a runner-owned
 session publishes its mandatory identity and remains the path passed to
