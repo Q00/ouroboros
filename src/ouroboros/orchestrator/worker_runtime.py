@@ -35,6 +35,7 @@ from ouroboros.orchestrator.adapter import (
     SubagentOrchestration,
     TaskResult,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.subagent_label import derive_session_label
 
@@ -235,6 +236,15 @@ class LeaderDrivenWorkerRuntime:
         and resume. Each transport applies only controls it can enforce and must
         advertise that truth through its runtime capabilities.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         # A handle carrying ``fork_session`` is the HOST session delegated by the
         # parent (its native_session_id is the human's LIVE conversation). It is a
         # fork SOURCE, never a resume target: resuming it would append worker turns

@@ -28,11 +28,13 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
@@ -106,7 +108,7 @@ class KiroAgentAdapter:
         *,
         cli_path: str | Path | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         permission_mode: str | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -302,6 +304,15 @@ class KiroAgentAdapter:
         backend would silently drop a runtime behavior that Claude and Codex
         both preserve.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend_name,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         current_handle = resume_handle
         intercepted_messages = await self._interceptor.maybe_dispatch(prompt, current_handle)
         if intercepted_messages is not None:

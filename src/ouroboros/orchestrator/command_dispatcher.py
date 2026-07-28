@@ -14,6 +14,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     SkillDispatchHandler,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.router.types import Resolved
 
@@ -176,6 +177,14 @@ class CodexCommandDispatcher:
         current_handle: RuntimeHandle | None = None,
     ) -> tuple[AgentMessage, ...] | None:
         """Dispatch an intercepted command to its backing Ouroboros MCP tool."""
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=current_handle,
+        )
+        if cwd_failure is not None:
+            return (cwd_failure,)
+
         tool_arguments = self._build_tool_arguments(intercept, current_handle)
         try:
             result = await self._get_server().call_tool(

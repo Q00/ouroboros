@@ -10,9 +10,12 @@ import pytest
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPTimeoutError, MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import ResolvedWorkerCwd, RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
-from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
+from ouroboros.orchestrator.command_dispatcher import (
+    CodexCommandDispatcher,
+    create_codex_command_dispatcher,
+)
 from ouroboros.router.types import Resolved
 
 
@@ -52,6 +55,28 @@ class TestCodexCommandDispatcher:
             mcp_args=mcp_args,
             first_argument=first_argument,
         )
+
+    @pytest.mark.asyncio
+    async def test_unresolved_cwd_blocks_server_creation(self, tmp_path: Path) -> None:
+        dispatcher = CodexCommandDispatcher(cwd=ResolvedWorkerCwd(None))
+        intercept = self._make_intercept(
+            tmp_path,
+            "run",
+            mcp_tool="ouroboros_execute_seed",
+            mcp_args={"seed_path": "seed.yaml"},
+            prompt="ooo run seed.yaml",
+            first_argument="seed.yaml",
+        )
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            side_effect=AssertionError("server must not be created without a resolved cwd"),
+        ):
+            messages = await dispatcher.dispatch(intercept)
+
+        assert messages is not None
+        assert len(messages) == 1
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
 
     @pytest.mark.asyncio
     async def test_dispatches_ooo_run_before_codex_exec(self, tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ from ouroboros.orchestrator.adapter import (
     AgentMessage,
     RuntimeHandle,
     SkillDispatchHandler,
+    worker_cwd_failure_message,
 )
 from ouroboros.router import (
     InvalidInputReason,
@@ -73,7 +74,7 @@ class SkillInterceptor:
     def __init__(
         self,
         *,
-        cwd: str | Path,
+        cwd: str | Path | None,
         runtime_backend: str,
         runtime_handle_backend: str,
         permission_mode: str | None,
@@ -83,7 +84,7 @@ class SkillInterceptor:
         skill_dispatcher: SkillDispatchHandler | None = None,
         invalid_skill_log_formatter: InvalidSkillLogFormatter | None = None,
     ) -> None:
-        self._cwd = str(Path(cwd).expanduser())
+        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else None
         self._runtime_backend = runtime_backend
         self._runtime_handle_backend = runtime_handle_backend
         self._permission_mode = permission_mode
@@ -102,6 +103,15 @@ class SkillInterceptor:
         current_handle: RuntimeHandle | None,
     ) -> tuple[AgentMessage, ...] | None:
         """Attempt deterministic skill dispatch before invoking the runtime CLI."""
+        if self._cwd is None:
+            cwd_failure = worker_cwd_failure_message(
+                self._cwd,
+                runtime_backend=self._runtime_backend,
+                resume_handle=current_handle,
+            )
+            assert cwd_failure is not None
+            return (cwd_failure,)
+
         dispatch_result = resolve_skill_dispatch(
             ResolveRequest(
                 prompt=prompt,

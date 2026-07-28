@@ -14,6 +14,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import (
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeHandle,
     SubagentOrchestration,
     is_leader_driven_worker,
@@ -105,6 +106,49 @@ class TestCapabilities:
 
 
 class TestSpawn:
+    @pytest.mark.parametrize(
+        "resume_handle",
+        [None, RuntimeHandle(backend="codex_mcp", native_session_id="s1")],
+        ids=["spawn", "resume"],
+    )
+    @pytest.mark.asyncio
+    async def test_unresolved_cwd_blocks_transport_before_spawn_or_resume(
+        self,
+        resume_handle: RuntimeHandle | None,
+    ) -> None:
+        transport = _FakeTransport(
+            spawn_turn=WorkerTurn(text="unexpected", session_id="s1"),
+            resume_turn=WorkerTurn(text="unexpected", session_id="s1"),
+        )
+        runtime = LeaderDrivenWorkerRuntime(
+            transport=transport,
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+            cwd=ResolvedWorkerCwd(None),
+        )
+
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                "must not run",
+                resume_handle=resume_handle,
+            )
+        ]
+
+        assert len(messages) == 1
+        assert messages[0].is_error
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert transport.spawn_calls == []
+        assert transport.resume_calls == []
+
+        result = await runtime.execute_task_to_result(
+            "must not run",
+            resume_handle=resume_handle,
+        )
+        assert result.is_err
+        assert transport.spawn_calls == []
+        assert transport.resume_calls == []
+
     @pytest.mark.asyncio
     async def test_relative_cwd_is_stable_across_spawn_and_resume(
         self,

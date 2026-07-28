@@ -23,7 +23,11 @@ from typing import Any
 
 from ouroboros.config import get_cli_path
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import CLAUDE_REASONING_EFFORT_LEVELS, ParamSupport
+from ouroboros.orchestrator.adapter import (
+    CLAUDE_REASONING_EFFORT_LEVELS,
+    WORKER_CWD_UNAVAILABLE_MESSAGE,
+    ParamSupport,
+)
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
     ResolvedWorkerCwd,
@@ -187,10 +191,16 @@ class ClaudeWorkerTransport:
         )
 
     async def _run(self, command: list[str], prompt: str, cwd: str | None) -> WorkerTurn:
+        if cwd is None:
+            return WorkerTurn(
+                text="",
+                is_error=True,
+                error=WORKER_CWD_UNAVAILABLE_MESSAGE,
+            )
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=cwd or os.getcwd(),
+                cwd=cwd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -273,7 +273,7 @@ def create_agent_runtime(
     permission_mode: str | None = None,
     model: str | None = None,
     cli_path: str | Path | None = None,
-    cwd: str | Path | None = None,
+    cwd: str | Path | ResolvedWorkerCwd | None = None,
     llm_backend: str | None = None,
     startup_output_timeout_seconds: float | None = None,
     stdout_idle_timeout_seconds: float | None = None,

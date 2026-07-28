@@ -62,6 +62,54 @@ class TestResolveAgentRuntimeBackend:
 class TestCreateAgentRuntime:
     """Tests for runtime construction."""
 
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "claude",
+            "codex",
+            "codex_mcp",
+            "claude_mcp",
+            "copilot",
+            "gemini",
+            "zcode",
+            "hermes",
+            "kiro",
+            "opencode",
+            "goose",
+            "pi",
+            "gjc",
+            "antigravity",
+            "grok",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_every_runtime_fails_closed_before_effects_when_cwd_is_unresolved(
+        self,
+        backend: str,
+    ) -> None:
+        cwd_calls: list[int] = []
+
+        def moving_process_cwd() -> str:
+            cwd_calls.append(len(cwd_calls))
+            if len(cwd_calls) == 1:
+                raise FileNotFoundError("launch cwd unavailable")
+            return "/tmp/unselected-later-cwd"
+
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=moving_process_cwd,
+        ):
+            runtime = create_agent_runtime(
+                backend=backend,
+                cli_path="/tmp/runtime-cli",
+            )
+            messages = [message async for message in runtime.execute_task("must not run")]
+
+        assert len(messages) == 1
+        assert messages[0].is_error
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert cwd_calls == [0]
+
     def test_omitted_cwd_absence_is_shared_without_reinterpretation(self) -> None:
         cwd_results: list[OSError | str] = [
             FileNotFoundError("launch cwd unavailable"),
