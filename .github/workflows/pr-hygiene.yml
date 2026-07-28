@@ -186,8 +186,13 @@ jobs:
             fi
             checked=$((checked + 1))
 
-            resolve_issue "${number}"
-            case $? in
+            # `|| status=$?` is load-bearing. A bare call under `set -e`
+            # terminates the step on status 1 or 2, so one invalid candidate
+            # ahead of a valid one would reject the PR and an outage would
+            # exit red instead of following the fail-open path below.
+            status=0
+            resolve_issue "${number}" || status=$?
+            case "${status}" in
               0)
                 echo "OK: the rendered body links to issue #${number}."
                 echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."

@@ -51,20 +51,22 @@ from html.parser import HTMLParser
 from pathlib import Path
 import re
 import sys
+import unicodedata
 
 # Elements that render something by themselves. A `<span></span>` does not.
 _SELF_RENDERING_TAGS = frozenset({"img", "picture", "svg", "video"})
 
-# Characters that occupy no visual space, so a label made only of them is not
-# a trail a reader can see or click.
-_INVISIBLE = "".join(("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u180e"))
-_INVISIBLE_TABLE = str.maketrans("", "", _INVISIBLE)
+# A character is visible when it occupies space on screen. Rather than deny a
+# finite list -- which missed U+2061 FUNCTION APPLICATION, among others --
+# classify by Unicode general category: control (Cc), format (Cf), surrogate
+# (Cs), private use (Co), unassigned (Cn), and the separators (Zs/Zl/Zp) all
+# render nothing. Everything else, including emoji (So) and CJK (Lo), does.
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zs", "Zl", "Zp"})
 
 
 def _has_visible_glyph(text: str) -> bool:
-    """Return whether `text` shows anything once whitespace and zero-width
-    characters are removed."""
-    return bool(text.translate(_INVISIBLE_TABLE).strip())
+    """Return whether `text` renders anything a reader can see."""
+    return any(unicodedata.category(ch) not in _INVISIBLE_CATEGORIES for ch in text)
 
 
 class _IssueLinkCollector(HTMLParser):

@@ -29,7 +29,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-hygiene.yml"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
+pytestmark = pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="bash and jq are required; the workflow uses both",
+)
 
 
 def _step_script() -> str:
@@ -127,7 +130,10 @@ if api_retry fake 2>/dev/null; then echo "unexpected-success"; else echo "failed
 class TestResolveIssue:
     """`resolve_issue` returns 0 = issue, 1 = definitively not, 2 = undecidable."""
 
-    HEADER = 'set -uo pipefail\nRUNNER_TEMP=.\nOWNER=Q00\nREPO=ouroboros\nPATH="$PWD/bin:$PATH"\n'
+    # Matches the workflow's own `set -euo pipefail`. Omitting `-e` here is
+    # what let the bare-call bug reach review: under `-e`, a non-zero
+    # `resolve_issue` terminates the step before its status is inspected.
+    HEADER = 'set -euo pipefail\nRUNNER_TEMP=.\nOWNER=Q00\nREPO=ouroboros\nPATH="$PWD/bin:$PATH"\n'
 
     @staticmethod
     def _stub_gh(tmp_path: Path, *, stdout: str = "", stderr: str = "", code: int = 0) -> None:
@@ -143,8 +149,9 @@ class TestResolveIssue:
     def _run(self, tmp_path: Path) -> subprocess.CompletedProcess[str]:
         script = f"""{self.HEADER}
 {_extract_function("resolve_issue")}
-resolve_issue 1777
-echo "status=$?"
+status=0
+resolve_issue 1777 || status=$?
+echo "status=${{status}}"
 """
         return run_bash(script, tmp_path)
 
@@ -178,3 +185,63 @@ echo "status=$?"
         result = self._run(tmp_path)
         assert "status=2" in result.stdout
         assert "no such issue" not in result.stdout
+
+
+class TestResolutionLoopUnderSetE:
+    """The loop must survive a non-zero `resolve_issue` under `set -e`.
+
+    A bare call terminates the step, so one invalid candidate ahead of a valid
+    one rejects the PR, and an outage exits red instead of failing open. The
+    earlier helper tests ran without `-e` and missed exactly this.
+    """
+
+    @staticmethod
+    def _loop(tmp_path: Path, statuses: dict[str, int]) -> subprocess.CompletedProcess[str]:
+        """Run the workflow's resolution loop with `resolve_issue` stubbed."""
+        script = _step_script()
+        # Anchored on the fail-open branch's own text so the match cannot stop
+        # at an inner `fi` and yield an unbalanced fragment.
+        match = re.search(
+            r"^\s*RESOLVE_CAP=.*?Could not determine.*?^\s*fi$",
+            script,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert match, "resolution loop not found in the workflow step"
+        loop = "\n".join(
+            line[10:] if line.startswith(" " * 10) else line for line in match.group(0).splitlines()
+        )
+        cases = "\n".join(f"    {number}) return {code} ;;" for number, code in statuses.items())
+        stub = f"""set -euo pipefail
+candidates="{" ".join(statuses)}"
+resolve_issue() {{
+  case "$1" in
+{cases}
+    *) return 1 ;;
+  esac
+}}
+{loop}
+echo "fell-through"
+"""
+        return run_bash(stub, tmp_path)
+
+    def test_invalid_candidate_before_a_valid_one_does_not_reject(self, tmp_path: Path) -> None:
+        result = self._loop(tmp_path, {"1": 1, "1777": 0})
+        assert result.returncode == 0, result.stderr
+        assert "links to issue #1777" in result.stdout
+        assert "fell-through" not in result.stdout
+
+    def test_all_invalid_falls_through_to_the_failure_path(self, tmp_path: Path) -> None:
+        result = self._loop(tmp_path, {"1": 1, "2": 1})
+        assert result.returncode == 0, result.stderr
+        assert "fell-through" in result.stdout
+
+    def test_an_outage_fails_open_instead_of_exiting_red(self, tmp_path: Path) -> None:
+        result = self._loop(tmp_path, {"1": 2})
+        assert result.returncode == 0, result.stderr
+        assert "Could not determine" in result.stdout
+        assert "fell-through" not in result.stdout
+
+    def test_a_valid_candidate_wins_over_an_earlier_outage(self, tmp_path: Path) -> None:
+        result = self._loop(tmp_path, {"1": 2, "1777": 0})
+        assert result.returncode == 0, result.stderr
+        assert "links to issue #1777" in result.stdout
