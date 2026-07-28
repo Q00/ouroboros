@@ -32,8 +32,13 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ouroboros.core.errors import PersistenceError
-from ouroboros.core.project_identity import ProjectIdentity, resolve_project_identity
+from ouroboros.core.project_identity import (
+    ProjectIdentity,
+    resolve_managed_project_identity,
+    resolve_project_identity,
+)
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 from ouroboros.observability.logging import get_logger
 
@@ -71,6 +76,7 @@ async def _validate_project_identity_publication(
     execution_contract: Mapping[str, Any] | None,
     project_identity: ProjectIdentity | None,
     project_workspace: str | None,
+    project_task_workspace: TaskWorkspace | None,
 ) -> None:
     """Require the immutable top-level and nested project scopes to agree."""
     raw_proof = (
@@ -90,13 +96,26 @@ async def _validate_project_identity_publication(
         raise ValueError("project identity and execution contract must be published together")
     if (project_identity is None) != (project_workspace is None):
         raise ValueError("project identity and actual workspace must be published together")
+    if project_task_workspace is not None and project_identity is None:
+        raise ValueError("managed project workspace requires a project identity")
     if project_identity is not None and nested_identity != project_identity.to_workspace_data():
         raise ValueError("project identity conflicts with execution contract")
     if project_identity is not None and project_workspace is not None:
-        revalidated_identity = await asyncio.to_thread(
-            resolve_project_identity,
-            project_workspace,
-        )
+        if project_task_workspace is None:
+            revalidated_identity = await asyncio.to_thread(
+                resolve_project_identity,
+                project_workspace,
+            )
+        else:
+            if project_workspace != project_task_workspace.effective_cwd:
+                raise ValueError("managed execution workspace changed before publication")
+            revalidated_identity = await asyncio.to_thread(
+                resolve_managed_project_identity,
+                project_task_workspace.effective_cwd,
+                source_root=project_task_workspace.repo_root,
+                source_workspace=project_task_workspace.original_cwd,
+                worktree_root=project_task_workspace.worktree_path,
+            )
         if revalidated_identity != project_identity:
             raise ValueError("project workspace identity changed before publication")
 
@@ -715,6 +734,7 @@ class SessionRepository:
         acceptance_root_indices: Iterable[int] | None = None,
         project_identity: ProjectIdentity | None = None,
         project_workspace: str | None = None,
+        project_task_workspace: TaskWorkspace | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -737,6 +757,8 @@ class SessionRepository:
                 is additive metadata only and grants no execution authority.
             project_workspace: Actual runner cwd re-resolved immediately before
                 immutable publication. It is validation input, not event data.
+            project_task_workspace: Frozen managed source/execution paths to
+                revalidate together at the immutable publication boundary.
 
         Returns:
             Result containing new SessionTracker.
@@ -750,6 +772,7 @@ class SessionRepository:
             execution_contract_snapshot,
             project_identity,
             project_workspace,
+            project_task_workspace,
         )
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 

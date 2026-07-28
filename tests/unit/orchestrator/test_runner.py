@@ -149,6 +149,51 @@ def _runtime_owned_task_workspace(adapter: Any, root: Path) -> TaskWorkspace:
     return workspace
 
 
+def _bare_linked_task_workspace(adapter: Any, root: Path) -> TaskWorkspace:
+    seed = root / "seed"
+    common_git = root / "common.git"
+    source = root / "source"
+    worktree = root / "worktree"
+    _init_git_repo(seed)
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(seed), str(common_git)],
+        check=True,
+        capture_output=True,
+    )
+    for branch, checkout in (("source", source), ("execution", worktree)):
+        subprocess.run(
+            [
+                "git",
+                f"--git-dir={common_git}",
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                str(checkout),
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    source_cwd = source / "packages" / "app"
+    execution_cwd = worktree / "packages" / "app"
+    source_cwd.mkdir(parents=True)
+    execution_cwd.mkdir(parents=True)
+    workspace = TaskWorkspace(
+        durable_id="bare-linked",
+        repo_root=str(source),
+        repo_name="source",
+        original_cwd=str(source_cwd),
+        effective_cwd=str(execution_cwd),
+        worktree_path=str(worktree),
+        branch="execution",
+        lock_path=str(root / ".locks" / "bare-linked.json"),
+    )
+    adapter.working_directory = workspace.effective_cwd
+    return workspace
+
+
 def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
     """Treat a unit-test tracker as the durable snapshot for mocked stores."""
 
@@ -3174,6 +3219,67 @@ class TestOrchestratorRunner:
         assert result.is_err
         assert result.error.details["resume_blocked"] == "project_identity_mismatch"
         mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "source_mutation",
+        ["delete", "replace", "ownership-mismatch"],
+    )
+    @pytest.mark.asyncio
+    async def test_prepare_session_revalidates_complete_managed_identity_at_publication(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+        source_mutation: str,
+    ) -> None:
+        workspace = _bare_linked_task_workspace(mock_adapter, tmp_path)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=workspace,
+        )
+        create_session = runner._session_repo.create_session
+
+        async def mutate_source_then_create(**kwargs: Any):
+            source = Path(workspace.repo_root)
+            source_cwd = Path(workspace.original_cwd)
+            if source_mutation == "delete":
+                source_cwd.rmdir()
+            elif source_mutation == "replace":
+                source_cwd.rmdir()
+                source_cwd.write_text("not a directory", encoding="utf-8")
+            else:
+                source.rename(tmp_path / "detached-source")
+                _init_git_repo(source)
+                (source / "packages" / "app").mkdir(parents=True)
+            assert resolve_project_identity(workspace.effective_cwd) == kwargs["project_identity"]
+            assert kwargs["project_task_workspace"] is workspace
+            return await create_session(**kwargs)
+
+        with patch.object(
+            runner._session_repo,
+            "create_session",
+            new=mutate_source_then_create,
+        ):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id=f"exec-managed-race-{source_mutation}",
+                session_id=f"orch-managed-race-{source_mutation}",
+            )
+
+        assert result.is_err
+        assert "Failed to create session" in result.error.message
+        assert not any(
+            call.args[0].type == "orchestrator.session.started"
+            for call in mock_event_store.append.await_args_list
+        )
+        assert (
+            f"orch-managed-race-{source_mutation}",
+            f"exec-managed-race-{source_mutation}",
+        ) not in runner._process_local_authorities
 
     @pytest.mark.asyncio
     async def test_prepare_session_with_unset_leader_runtime_cwd(

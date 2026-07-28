@@ -31,6 +31,28 @@ class ProjectIdentityUnavailableError(ProjectIdentityError):
     """Raised when the installed Git boundary cannot answer deterministically."""
 
 
+class ManagedProjectScopeError(ProjectIdentityError):
+    """Raised when source and execution workspaces select different relative scopes."""
+
+    def __init__(self, source_workspace: str, execution_workspace: str) -> None:
+        super().__init__("managed source and execution workspace scopes do not match")
+        self.source_workspace = source_workspace
+        self.execution_workspace = execution_workspace
+
+
+class ManagedProjectOwnershipError(ProjectIdentityError):
+    """Raised when a generated checkout does not belong to its durable source."""
+
+    def __init__(
+        self,
+        source_identity: ProjectIdentity,
+        execution_identity: ProjectIdentity,
+    ) -> None:
+        super().__init__("managed worktree does not belong to its source project")
+        self.source_identity = source_identity
+        self.execution_identity = execution_identity
+
+
 def _canonical_directory(value: str | Path, *, require_exists: bool = False) -> Path:
     if not isinstance(value, (str, Path)):
         raise ProjectIdentityError("project identity requires a non-empty path")
@@ -424,11 +446,60 @@ def resolve_project_identity(
     return ProjectIdentity.from_root(source, workspace_path=workspace_path)
 
 
+def resolve_managed_project_identity(
+    execution_workspace: str | Path,
+    *,
+    source_root: str | Path,
+    source_workspace: str | Path,
+    worktree_root: str | Path,
+) -> ProjectIdentity:
+    """Revalidate one managed source/execution pair as a single identity."""
+    canonical_source_root = _canonical_directory(source_root, require_exists=True)
+    canonical_source_workspace = _canonical_directory(source_workspace, require_exists=True)
+    canonical_worktree_root = _canonical_directory(worktree_root, require_exists=True)
+    canonical_execution_workspace = _canonical_directory(
+        execution_workspace,
+        require_exists=True,
+    )
+    try:
+        source_scope = _relative_workspace_path(
+            canonical_source_workspace,
+            canonical_source_root,
+        )
+        execution_scope = _relative_workspace_path(
+            canonical_execution_workspace,
+            canonical_worktree_root,
+        )
+    except ProjectIdentityError as exc:
+        raise ManagedProjectScopeError(
+            str(canonical_source_workspace),
+            str(canonical_execution_workspace),
+        ) from exc
+    if source_scope != execution_scope:
+        raise ManagedProjectScopeError(
+            str(canonical_source_workspace),
+            str(canonical_execution_workspace),
+        )
+
+    source_identity = resolve_project_identity(
+        canonical_execution_workspace,
+        source_root=canonical_source_root,
+        source_workspace=canonical_source_workspace,
+    )
+    execution_identity = resolve_project_identity(canonical_execution_workspace)
+    if execution_identity != source_identity:
+        raise ManagedProjectOwnershipError(source_identity, execution_identity)
+    return source_identity
+
+
 __all__ = [
     "PROJECT_ID_PREFIX",
+    "ManagedProjectOwnershipError",
+    "ManagedProjectScopeError",
     "ProjectIdentity",
     "ProjectIdentityError",
     "ProjectIdentityUnavailableError",
     "project_id_for_root",
+    "resolve_managed_project_identity",
     "resolve_project_identity",
 ]

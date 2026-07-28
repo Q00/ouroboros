@@ -54,9 +54,12 @@ from ouroboros.core.execution_preferences import (
     resolve_execution_preferences,
 )
 from ouroboros.core.project_identity import (
+    ManagedProjectOwnershipError,
+    ManagedProjectScopeError,
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
+    resolve_managed_project_identity,
     resolve_project_identity,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
@@ -3249,44 +3252,33 @@ class OrchestratorRunner:
     @classmethod
     def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
         """Resolve a managed worktree against its durable source checkout."""
-        source_root = resolve_worker_cwd(workspace.repo_root)
-        source_cwd = resolve_worker_cwd(workspace.original_cwd)
-        worktree_root = resolve_worker_cwd(workspace.worktree_path)
-        execution_cwd = resolve_worker_cwd(workspace.effective_cwd)
         try:
-            source_scope = Path(source_cwd).relative_to(source_root) if source_root else None
-            execution_scope = (
-                Path(execution_cwd).relative_to(worktree_root) if worktree_root else None
+            return resolve_managed_project_identity(
+                workspace.effective_cwd,
+                source_root=workspace.repo_root,
+                source_workspace=workspace.original_cwd,
+                worktree_root=workspace.worktree_path,
             )
-        except (TypeError, ValueError):
-            source_scope = execution_scope = None
-        if source_scope is None or source_scope != execution_scope:
+        except ManagedProjectScopeError as exc:
             raise OrchestratorError(
                 message="Managed source and execution workspace scopes do not match",
                 details={
                     "invalid": "runtime_cwd",
-                    "source_cwd": source_cwd,
-                    "execution_cwd": execution_cwd,
+                    "source_cwd": exc.source_workspace,
+                    "execution_cwd": exc.execution_workspace,
                     "resume_blocked": "runtime_cwd_mismatch",
                 },
-            )
-        source_identity = resolve_project_identity(
-            workspace.effective_cwd,
-            source_root=workspace.repo_root,
-            source_workspace=workspace.original_cwd,
-        )
-        execution_identity = resolve_project_identity(workspace.effective_cwd)
-        if execution_identity != source_identity:
+            ) from exc
+        except ManagedProjectOwnershipError as exc:
             raise OrchestratorError(
                 message="Managed worktree does not belong to its source project",
                 details={
                     "invalid": "project_identity",
-                    "source_identity": source_identity.to_workspace_data(),
-                    "execution_identity": execution_identity.to_workspace_data(),
+                    "source_identity": exc.source_identity.to_workspace_data(),
+                    "execution_identity": exc.execution_identity.to_workspace_data(),
                     "resume_blocked": "project_identity_mismatch",
                 },
-            )
-        return source_identity
+            ) from exc
 
     @classmethod
     def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
@@ -8592,6 +8584,8 @@ class OrchestratorRunner:
                 "project_identity": project_identity,
                 "project_workspace": self._effective_cwd(),
             }
+            if self._task_workspace is not None:
+                create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:
                 if (
                     "acceptance_root_indices"
