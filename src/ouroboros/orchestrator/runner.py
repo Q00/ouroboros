@@ -3305,6 +3305,17 @@ class OrchestratorRunner:
             "workspace_path": workspace_path,
         }
 
+    @staticmethod
+    def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
+        """Normalize resolver failures at the orchestration lifecycle boundary."""
+        details: dict[str, Any] = {"invalid": "project_identity", "cause": str(exc)}
+        if isinstance(exc, ProjectIdentityUnavailableError):
+            details.update(
+                resume_blocked="project_identity_unavailable",
+                retryable=True,
+            )
+        return OrchestratorError(message="Cannot resolve project identity", details=details)
+
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
         try:
@@ -3315,21 +3326,8 @@ class OrchestratorRunner:
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():
                 return None
             return resolve_project_identity(effective_cwd)
-        except ProjectIdentityUnavailableError as exc:
-            raise OrchestratorError(
-                message="Cannot resolve project identity",
-                details={
-                    "invalid": "project_identity",
-                    "cause": str(exc),
-                    "resume_blocked": "project_identity_unavailable",
-                    "retryable": True,
-                },
-            ) from exc
         except ProjectIdentityError as exc:
-            raise OrchestratorError(
-                message="Cannot resolve project identity",
-                details={"invalid": "project_identity", "cause": str(exc)},
-            ) from exc
+            raise self._project_identity_error(exc) from exc
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
@@ -3386,15 +3384,7 @@ class OrchestratorRunner:
                 workspace_path=raw_start_identity["workspace_path"],
             )
         except ProjectIdentityUnavailableError as exc:
-            raise OrchestratorError(
-                message="Cannot resolve project identity",
-                details={
-                    "invalid": "project_identity",
-                    "cause": str(exc),
-                    "resume_blocked": "project_identity_unavailable",
-                    "retryable": True,
-                },
-            ) from exc
+            raise OrchestratorRunner._project_identity_error(exc) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise OrchestratorError(
                 message="Cannot resume with an invalid project identity anchor",
@@ -6509,10 +6499,14 @@ class OrchestratorRunner:
             # carry that representation forward; recomputing under the current
             # resolver would make the following resume disagree with the
             # immutable, still-unanchored start event.
-            replacement_project_identity = ProjectIdentity.from_root(
-                persisted_workspace["project_root"],
-                workspace_path=persisted_workspace["workspace_path"],
-            )
+            try:
+                replacement_project_identity = ProjectIdentity.from_root(
+                    persisted_workspace["project_root"],
+                    workspace_path=persisted_workspace["workspace_path"],
+                    require_exists=True,
+                )
+            except ProjectIdentityError as exc:
+                raise self._project_identity_error(exc) from exc
         active_resume_workspace = self._resume_workspace_identity()
         normalized_persisted_resume_workspace = (
             dict(persisted_resume_workspace)

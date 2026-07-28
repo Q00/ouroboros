@@ -56,7 +56,12 @@ from ouroboros.orchestrator.runner import (
     is_cancellation_requested,
     request_cancellation,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import (
+    SESSION_START_IDENTITY_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+    SessionTracker,
+)
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 from ouroboros.persistence.uow import UnitOfWork
@@ -1908,6 +1913,84 @@ async def test_resume_invalid_workspace_returns_domain_error_and_releases_claim(
         )
         assert generation is None
         assert already_claimed is False
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_kind", ("file", "missing"))
+async def test_pre_anchor_resume_invalid_workspace_cleans_claim_before_retry(
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    """Historical identity failures stay inside the public resume lifecycle."""
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'pre-anchor-{replacement_kind}.db'}"
+    )
+    await event_store.initialize()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = _CountingRuntime()
+    runtime.working_directory = str(workspace)
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-pre-anchor-{replacement_kind}",
+        session_id=f"session-pre-anchor-{replacement_kind}",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    paused = await runner._session_repo.mark_paused(tracker.session_id, reason="test pause")
+    assert paused.is_ok and paused.value is True
+    historical = await runner._session_repo.reconstruct_session(tracker.session_id)
+    assert historical.is_ok
+    historical_progress = deepcopy(historical.value.progress)
+    start_identity = dict(historical_progress[SESSION_START_IDENTITY_PROGRESS_KEY])
+    for key in ("project_id", "project_root", "workspace_path"):
+        start_identity.pop(key)
+    historical_progress[SESSION_START_IDENTITY_PROGRESS_KEY] = start_identity
+    historical_tracker = replace(historical.value, progress=historical_progress)
+    reconstruct_session = runner._session_repo.reconstruct_session
+    first_reconstruction = True
+
+    async def reconstruct_historical_then_durable(session_id: str):
+        nonlocal first_reconstruction
+        if first_reconstruction:
+            first_reconstruction = False
+            return Result.ok(historical_tracker)
+        return await reconstruct_session(session_id)
+
+    workspace.rmdir()
+    if replacement_kind == "file":
+        workspace.write_text("not a directory", encoding="utf-8")
+
+    try:
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            side_effect=reconstruct_historical_then_durable,
+        ):
+            first = await runner.resume_session(tracker.session_id, _seed())
+            second = await runner.resume_session(tracker.session_id, _seed())
+
+        assert first.is_err
+        assert first.error.message == "Cannot resolve project identity"
+        assert second.is_err
+        assert second.error.details.get("resume_blocked") != "process_local_execution_in_progress"
+        assert runtime.execute_calls == 0
+        durable = await reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
     finally:
         runner._retire_process_local_authority(
             session_id=tracker.session_id,
