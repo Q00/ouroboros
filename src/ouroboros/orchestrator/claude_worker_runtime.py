@@ -326,7 +326,7 @@ class ClaudeWorkerTransport:
 def build_claude_worker_runtime(
     *,
     cli_path: str | None = None,
-    cwd: str | os.PathLike[str] | None = None,
+    cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None = None,
     permission_mode: str | None = None,
     model: str | None = None,
     llm_backend: str | None = None,

@@ -62,6 +62,32 @@ class TestResolveAgentRuntimeBackend:
 class TestCreateAgentRuntime:
     """Tests for runtime construction."""
 
+    def test_omitted_cwd_absence_is_shared_without_reinterpretation(self) -> None:
+        cwd_results: list[OSError | str] = [
+            FileNotFoundError("launch cwd unavailable"),
+            "/tmp/dispatcher-late",
+            "/tmp/runtime-later",
+        ]
+
+        def moving_process_cwd() -> str:
+            result = cwd_results.pop(0)
+            if isinstance(result, OSError):
+                raise result
+            return result
+
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=moving_process_cwd,
+        ):
+            runtime = create_agent_runtime(
+                backend="codex",
+                cli_path="/tmp/codex",
+            )
+
+        assert runtime.working_directory is None
+        assert runtime._skill_dispatcher.__self__._cwd is None
+        assert cwd_results == ["/tmp/dispatcher-late", "/tmp/runtime-later"]
+
     def test_explicit_cwd_resolution_failure_never_uses_process_cwd(self) -> None:
         with (
             patch(
@@ -112,7 +138,9 @@ class TestCreateAgentRuntime:
         assert runtime._cli_path == "/tmp/codex"
         assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._skill_dispatcher is mock_dispatcher
-        assert mock_create_dispatcher.call_args.kwargs["cwd"] == _EXPECTED_CANONICAL_PROJECT_CWD
+        assert (
+            mock_create_dispatcher.call_args.kwargs["cwd"].value == _EXPECTED_CANONICAL_PROJECT_CWD
+        )
         assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "codex"
 
     def test_relative_cwd_is_shared_with_runtime_and_dispatcher(
@@ -139,7 +167,7 @@ class TestCreateAgentRuntime:
         monkeypatch.chdir(later)
 
         assert runtime.working_directory == str(workspace)
-        assert create_dispatcher.call_args.kwargs["cwd"] == str(workspace)
+        assert create_dispatcher.call_args.kwargs["cwd"].value == str(workspace)
 
     def test_create_codex_runtime_propagates_runtime_profile(self) -> None:
         """``get_runtime_profile()`` must reach CodexCliRuntime via the factory.

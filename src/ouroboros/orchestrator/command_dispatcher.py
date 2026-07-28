@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
+    ResolvedWorkerCwd,
     RuntimeHandle,
     SkillDispatchHandler,
     resolve_worker_cwd,
@@ -31,7 +32,7 @@ class CodexCommandDispatcher:
     def __init__(
         self,
         *,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         runtime_backend: str = "codex",
         llm_backend: str | None = None,
     ) -> None:
@@ -228,7 +229,7 @@ class CodexCommandDispatcher:
 
 def create_codex_command_dispatcher(
     *,
-    cwd: str | Path | None = None,
+    cwd: str | Path | ResolvedWorkerCwd | None = None,
     runtime_backend: str = "codex",
     llm_backend: str | None = None,
 ) -> SkillDispatchHandler:

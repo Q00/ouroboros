@@ -44,6 +44,7 @@ from ouroboros.orchestrator.codex_session_index import (
 )
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
+    ResolvedWorkerCwd,
     WorkerTurn,
 )
 
@@ -280,7 +281,7 @@ class CodexMcpWorkerTransport:
 def build_codex_mcp_worker_runtime(
     *,
     cli_path: str | None = None,
-    cwd: str | os.PathLike[str] | None = None,
+    cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None = None,
     permission_mode: str | None = None,
     model: str | None = None,
     llm_backend: str | None = None,

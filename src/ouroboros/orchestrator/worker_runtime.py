@@ -29,6 +29,7 @@ from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SubagentOrchestration,
@@ -118,13 +119,6 @@ class LeaderDrivenWorkerTransport(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedWorkerCwd:
-    """Single cwd-resolution result shared by a runtime and its transport."""
-
-    value: str | None
-
-
 class LeaderDrivenWorkerRuntime:
     """``AgentRuntime`` that drives any provider's worker session via a transport.
 
@@ -150,7 +144,7 @@ class LeaderDrivenWorkerRuntime:
         self._transport = transport
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
-        self._cwd = cwd.value if isinstance(cwd, ResolvedWorkerCwd) else resolve_worker_cwd(cwd)
+        self._cwd = resolve_worker_cwd(cwd)
         self._permission_mode = permission_mode
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support

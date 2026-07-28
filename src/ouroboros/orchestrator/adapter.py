@@ -1086,8 +1086,19 @@ TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
 )
 
 
-def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
+@dataclass(frozen=True, slots=True)
+class ResolvedWorkerCwd:
+    """One cwd-resolution result that downstream consumers must not reinterpret."""
+
+    value: str | None
+
+
+def resolve_worker_cwd(
+    cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None,
+) -> str | None:
     """Resolve one stable cwd; only an unavailable omitted cwd remains absent."""
+    if isinstance(cwd, ResolvedWorkerCwd):
+        return cwd.value
     if cwd is not None:
         return str(Path(cwd).expanduser().resolve(strict=False))
     try:
@@ -1132,7 +1143,7 @@ class ClaudeAgentAdapter:
         api_key: str | None = None,
         permission_mode: str = "acceptEdits",
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         cli_path: str | Path | None = None,
     ) -> None:
         """Initialize Claude Agent adapter.

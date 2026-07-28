@@ -171,12 +171,15 @@ leader-driven runtimes, and runner/executor `task_cwd` overrides to one absolute
 path, resolving relative inputs against construction-time process cwd. If an
 omitted provider cwd is unavailable, the boundary preserves `None`. Resolution
 failure for an explicit cwd instead propagates and cannot silently select the
-process cwd. An explicit task path does not replace an absent provider owner
-because the provider would still execute with its retained value. Preparation
-instead requires task, runtime-handle, and provider cwd owners to agree before
-publication, and it cannot infer provider ownership from the runner's later
-process cwd. Persistent Claude transport and runtime objects share the same
-normalized value for both spawn and resume.
+process cwd. The one resolution result, including resolved absence, is wrapped
+and shared with every factory runtime and command dispatcher so downstream
+constructors cannot reinterpret `None` independently. An explicit task path
+does not replace an absent provider owner because the provider would still
+execute with its retained value. Preparation instead requires task,
+runtime-handle, and provider cwd owners to agree before publication, and it
+cannot infer provider ownership from the runner's later process cwd. Persistent
+Claude transport and runtime objects share the same normalized value for both
+spawn and resume.
 The resulting concrete workspace is therefore available before a runner-owned
 session publishes its mandatory identity and remains the path passed to
 provider subprocesses.
