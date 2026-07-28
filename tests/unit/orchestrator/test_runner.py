@@ -3032,7 +3032,7 @@ class TestOrchestratorRunner:
                 execution_id="exec-leader-cwd",
             )
 
-    def test_optional_runtime_cwd_is_captured_at_runner_construction(
+    def test_optional_runtime_cwd_is_not_inferred_from_runner_launch(
         self,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
@@ -3050,8 +3050,45 @@ class TestOrchestratorRunner:
 
         monkeypatch.chdir(later_cwd)
 
-        assert runner._effective_cwd() == str(launch_cwd)
-        assert runner._project_identity() == resolve_project_identity(launch_cwd)
+        assert runner._effective_cwd() is None
+        assert runner._project_identity() is None
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_unowned_provider_cwd_before_process_drift(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        later_cwd = tmp_path / "later"
+        launch_cwd.mkdir()
+        later_cwd.mkdir()
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=FileNotFoundError,
+        ):
+            runtime = CodexCliRuntime(cli_path="/usr/bin/true")
+        monkeypatch.chdir(launch_cwd)
+        runner = OrchestratorRunner(runtime, mock_event_store, mock_console)
+        monkeypatch.chdir(later_cwd)
+
+        assert runtime.working_directory is None
+        provider_entry = MagicMock()
+        with patch.object(runtime, "execute_task", provider_entry):
+            result = await runner.execute_seed(
+                sample_seed,
+                execution_id="exec-unowned-provider-cwd",
+                session_id="orch-unowned-provider-cwd",
+                parallel=False,
+            )
+
+        assert result.is_err
+        assert "project identity" in result.error.message.lower()
+        provider_entry.assert_not_called()
+        mock_event_store.append.assert_not_awaited()
 
     def test_relative_task_cwd_is_frozen_before_process_cwd_changes(
         self,

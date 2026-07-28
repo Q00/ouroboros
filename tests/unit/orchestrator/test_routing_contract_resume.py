@@ -2011,6 +2011,47 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
     assert direct.workspace_path == "packages/app"
 
 
+def test_newline_git_topology_survives_direct_managed_and_resume_paths(tmp_path: Path) -> None:
+    primary = tmp_path / "primary\nrepo"
+    linked = tmp_path / "linked\nrepo"
+    generated = tmp_path / "managed" / "run-1"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked-newline", str(linked), "HEAD", cwd=primary)
+    primary_workspace = primary / "packages" / "app"
+    linked_workspace = linked / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    linked_workspace.mkdir(parents=True)
+    (generated / "packages" / "app").mkdir(parents=True)
+    task_workspace = _workspace(
+        durable_id="run-newline",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+
+    direct = _runner(cwd=str(primary_workspace))._project_identity()
+    linked_direct = _runner(cwd=str(linked_workspace))._project_identity()
+    managed = _runner(task_workspace=task_workspace)._project_identity()
+
+    assert direct == linked_direct == managed
+    assert direct is not None
+    persisted = _runner(cwd=str(linked_workspace))._build_execution_contract(
+        seed=_seed(),
+        project_identity=direct,
+    )
+    resumed = _runner(cwd=str(linked_workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == direct
+
+
 def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path: Path) -> None:
     outer = tmp_path / "outer"
     source = tmp_path / "source"

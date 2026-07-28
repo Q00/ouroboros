@@ -137,6 +137,33 @@ def test_standard_linked_and_managed_worktrees_share_primary_identity(tmp_path: 
     assert direct.workspace_path == "packages/app"
 
 
+def test_newline_bearing_git_paths_preserve_direct_linked_and_managed_identity(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary\nrepo"
+    linked = tmp_path / "linked\nrepo"
+    generated = tmp_path / "generated" / "packages" / "app"
+    _init_repo(primary)
+    _add_linked(primary, linked)
+    primary_workspace = primary / "packages" / "app"
+    linked_workspace = linked / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    linked_workspace.mkdir(parents=True)
+    generated.mkdir(parents=True)
+
+    direct = resolve_project_identity(primary_workspace)
+    linked_direct = resolve_project_identity(linked_workspace)
+    managed = resolve_project_identity(
+        generated,
+        source_root=linked,
+        source_workspace=linked_workspace,
+    )
+
+    assert direct == linked_direct == managed
+    assert direct.project_root == str(primary.resolve())
+    assert direct.workspace_path == "packages/app"
+
+
 def test_unowned_separate_git_directory_fails_closed(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     common_git = tmp_path / "metadata.git"
@@ -585,12 +612,15 @@ def test_linked_identity_does_not_drift_when_git_disappears_from_path(
     assert resolve_project_identity(linked) == stable
 
 
-def test_git_path_preserves_spaces_and_rejects_extra_records(tmp_path: Path) -> None:
-    root = tmp_path / "project "
+def test_git_path_removes_only_the_final_terminator(tmp_path: Path) -> None:
+    root = tmp_path / "project \nwith-newline"
     root.mkdir()
 
     assert _git_path(f"{root}\n".encode()) == root.resolve()
-    assert _git_path(f"{root}\nextra\n".encode()) is None
+    with pytest.raises(ProjectIdentityUnavailableError, match="representable"):
+        _git_path(str(root).encode())
+    with pytest.raises(ProjectIdentityUnavailableError, match="representable"):
+        _git_path(f"{root}\x00\n".encode())
 
 
 def test_git_environment_disables_global_and_system_config(

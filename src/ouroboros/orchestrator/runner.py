@@ -940,16 +940,12 @@ class OrchestratorRunner:
                 bounded signals to exact active AC attempts.
         """
         self._adapter = adapter
-        try:
-            self._launch_cwd: str | None = os.getcwd()
-        except OSError:
-            self._launch_cwd = None
         adapter_cwd = adapter.working_directory
         self._adapter_launch_cwd = adapter_cwd
         self._resolved_adapter_launch_cwd = (
             resolve_worker_cwd(adapter_cwd)
             if isinstance(adapter_cwd, str) and adapter_cwd
-            else self._launch_cwd
+            else None
         )
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
@@ -3226,7 +3222,7 @@ class OrchestratorRunner:
                     "resume_blocked": "runtime_cwd_mismatch",
                 },
             )
-        return required_cwd or provider_cwd or self._launch_cwd
+        return required_cwd or provider_cwd
 
     @staticmethod
     def _canonical_path(value: str) -> str:
