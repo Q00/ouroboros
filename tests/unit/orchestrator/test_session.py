@@ -425,6 +425,65 @@ class TestSessionRepository:
         mock_event_store.append.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_create_session_persists_contract_snapshot_from_before_revalidation(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "project"
+        other_workspace = tmp_path / "other-project"
+        workspace.mkdir()
+        other_workspace.mkdir()
+        identity = resolve_project_identity(workspace)
+        other_identity = resolve_project_identity(other_workspace)
+        route = {"model": "cheap"}
+        execution_contract = {
+            "frugality_proof": identity.to_workspace_data(),
+            "route": route,
+        }
+        resolver_started = threading.Event()
+        release_resolver = threading.Event()
+
+        def delayed_resolver(value: str) -> ProjectIdentity:
+            assert value == str(workspace)
+            resolver_started.set()
+            if not release_resolver.wait(timeout=1):
+                raise AssertionError("test did not release project identity resolution")
+            return identity
+
+        with patch(
+            "ouroboros.orchestrator.session.resolve_project_identity",
+            side_effect=delayed_resolver,
+        ):
+            creation = asyncio.create_task(
+                repository.create_session(
+                    execution_id="exec_123",
+                    seed_id="seed_456",
+                    execution_contract=execution_contract,
+                    project_identity=identity,
+                    project_workspace=str(workspace),
+                )
+            )
+            try:
+                assert await asyncio.to_thread(resolver_started.wait, 1)
+                execution_contract["frugality_proof"] = other_identity.to_workspace_data()
+                route["model"] = "expensive"
+            finally:
+                release_resolver.set()
+            result = await creation
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert {
+            key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
+        } == identity.to_event_data()
+        assert event.data["execution_contract"] == {
+            "frugality_proof": identity.to_workspace_data(),
+            "route": {"model": "cheap"},
+        }
+
+    @pytest.mark.asyncio
     async def test_create_session_with_custom_id(
         self,
         repository: SessionRepository,

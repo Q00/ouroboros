@@ -1087,9 +1087,11 @@ TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
 
 
 def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
-    """Resolve one stable worker cwd, preserving absence when cwd is unavailable."""
+    """Resolve one stable cwd; only an unavailable omitted cwd remains absent."""
+    if cwd is not None:
+        return str(Path(cwd).expanduser().resolve(strict=False))
     try:
-        return str(Path(cwd).expanduser().resolve(strict=False)) if cwd is not None else os.getcwd()
+        return os.getcwd()
     except OSError:
         return None
 

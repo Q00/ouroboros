@@ -62,6 +62,26 @@ class TestResolveAgentRuntimeBackend:
 class TestCreateAgentRuntime:
     """Tests for runtime construction."""
 
+    def test_explicit_cwd_resolution_failure_never_uses_process_cwd(self) -> None:
+        with (
+            patch(
+                "ouroboros.orchestrator.adapter.Path.resolve",
+                side_effect=FileNotFoundError("requested workspace unavailable"),
+            ),
+            patch(
+                "ouroboros.orchestrator.adapter.os.getcwd",
+                return_value="/fallback/process-cwd",
+            ) as getcwd,
+        ):
+            with pytest.raises(FileNotFoundError, match="requested workspace unavailable"):
+                create_agent_runtime(
+                    backend="codex",
+                    cli_path="/tmp/codex",
+                    cwd="/requested/workspace",
+                )
+
+        getcwd.assert_not_called()
+
     def test_create_claude_runtime(self) -> None:
         """Creates the Claude adapter for the claude backend."""
         runtime = create_agent_runtime(backend="claude", permission_mode="acceptEdits")

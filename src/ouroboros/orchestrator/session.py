@@ -741,8 +741,13 @@ class SessionRepository:
         Returns:
             Result containing new SessionTracker.
         """
+        execution_contract_snapshot = (
+            sanitize_event_data_for_persistence(dict(execution_contract))
+            if execution_contract is not None
+            else None
+        )
         await _validate_project_identity_publication(
-            execution_contract,
+            execution_contract_snapshot,
             project_identity,
             project_workspace,
         )
@@ -765,10 +770,8 @@ class SessionRepository:
             event_data["llm_backend"] = llm_backend
         if project_identity is not None:
             event_data.update(project_identity.to_event_data())
-        if execution_contract is not None:
-            event_data["execution_contract"] = sanitize_event_data_for_persistence(
-                dict(execution_contract)
-            )
+        if execution_contract_snapshot is not None:
+            event_data["execution_contract"] = execution_contract_snapshot
 
         event = BaseEvent(
             type="orchestrator.session.started",

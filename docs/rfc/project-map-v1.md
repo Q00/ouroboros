@@ -153,11 +153,14 @@ absence fails session creation, so it cannot be confused with a historical
 start event that predates these fields. `SessionRepository.create_session`
 also rejects identity-free execution contracts, top-level-only, nested-only,
 partial, or conflicting identity payloads before appending the immutable start
-event. It also re-resolves the runner's concrete workspace through the same
-Git-backed resolver at the persistence choke point and compares the complete
-identity. A workspace deleted, replaced by a file, moved to another checkout,
-or rebound through a symlink after contract construction cannot be published.
-This subprocess-backed final resolution runs in a worker thread, so bounded Git
+event. Before the asynchronous publication check, the repository detaches one
+sanitized contract snapshot; both validation and event persistence consume that
+same snapshot, so caller mutation cannot split the top-level and nested anchors.
+It then re-resolves the runner's concrete workspace through the same Git-backed
+resolver at the persistence choke point and compares the complete identity. A
+workspace deleted, replaced by a file, moved to another checkout, or rebound
+through a symlink after contract construction cannot be published. This
+subprocess-backed final resolution runs in a worker thread, so bounded Git
 timeouts cannot block cancellation, heartbeats, or unrelated session work on
 the orchestrator event loop.
 Contract-free utility sessions remain valid; historical events are read without
@@ -166,12 +169,14 @@ being recreated through this API.
 The shared provider-neutral worker cwd boundary normalizes direct runtimes,
 leader-driven runtimes, and runner/executor `task_cwd` overrides to one absolute
 path, resolving relative inputs against construction-time process cwd. If an
-omitted provider cwd is unavailable, the boundary preserves `None`; an explicit
-task path does not silently replace it because the provider would still execute
-with its retained value. Preparation instead requires task, runtime-handle, and
-provider cwd owners to agree before publication, and it cannot infer provider
-ownership from the runner's later process cwd. Persistent Claude transport
-and runtime objects share the same normalized value for both spawn and resume.
+omitted provider cwd is unavailable, the boundary preserves `None`. Resolution
+failure for an explicit cwd instead propagates and cannot silently select the
+process cwd. An explicit task path does not replace an absent provider owner
+because the provider would still execute with its retained value. Preparation
+instead requires task, runtime-handle, and provider cwd owners to agree before
+publication, and it cannot infer provider ownership from the runner's later
+process cwd. Persistent Claude transport and runtime objects share the same
+normalized value for both spawn and resume.
 The resulting concrete workspace is therefore available before a runner-owned
 session publishes its mandatory identity and remains the path passed to
 provider subprocesses.
