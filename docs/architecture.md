@@ -281,7 +281,8 @@ independently-verifiable units.
 
 **Recursive Decomposition:**
 
-Each AC defaults to **atomic** execution. It is split into
+Each AC defaults to **atomic** execution. Preflight splitting is retired: a split
+may be proposed only after an evidence-backed `TOO_BIG` bounce. It is accepted as
 `MIN_SUB_ACS`–`MAX_SUB_ACS` (2–5) sub-ACs only when it genuinely spans multiple
 units along the profile's axis — splitting is conservative because each sub-AC
 costs a full agent session. Sub-ACs recurse within a bounded depth.

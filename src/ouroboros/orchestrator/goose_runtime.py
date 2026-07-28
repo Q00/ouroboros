@@ -26,6 +26,7 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
 )
@@ -73,7 +74,7 @@ class GooseCliRuntime(CodexCliRuntime):
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: Any | None = None,
         llm_backend: str | None = None,

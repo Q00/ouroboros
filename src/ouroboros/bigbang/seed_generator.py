@@ -38,6 +38,7 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -418,6 +419,172 @@ def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[
             )
         )
     return tuple(conditions)
+
+
+def _parse_ontology_fields(raw_value: object, *, strict: bool = False) -> tuple[OntologyField, ...]:
+    """Parse ONTOLOGY_FIELDS from JSON object arrays or the legacy pipe list.
+
+    Mirrors the evaluation-principle and exit-condition parsers (#1729): the
+    extraction format requests a single-line JSON array of ``{"name", "type",
+    "description"}`` objects (the model field spelling ``field_type`` is
+    accepted too, and an optional boolean ``required`` is honored) so colons
+    and pipes inside the data survive. Strict mode raises on anything else so
+    the retry path reformats; lenient mode keeps the historical
+    ``name:type:description`` split where the description absorbs any further
+    colons, skips malformed entries, and never raises.
+    """
+    field_label = "ONTOLOGY_FIELDS"
+
+    def _build(entry: object) -> OntologyField | None:
+        if isinstance(entry, OntologyField):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            required = entry.get("required", True)
+            if not isinstance(required, bool):
+                raise ValueError(
+                    f"{field_label} entry field 'required' must be a boolean; got {required!r}."
+                )
+            return OntologyField(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                field_type=_require_object_string(
+                    entry, "type", field_label=field_label, aliases=("field_type",)
+                ),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                required=required,
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[OntologyField, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    fields: list[OntologyField] = []
+    for field_str in text.split("|"):
+        field_str = field_str.strip()
+        if not field_str:
+            continue
+        parts = field_str.split(":")
+        if len(parts) < 3:
+            continue
+        name = parts[0].strip()
+        field_type = parts[1].strip()
+        description = ":".join(parts[2:]).strip()
+        if not name or not field_type or not description:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        fields.append(OntologyField(name=name, field_type=field_type, description=description))
+    return tuple(fields)
+
+
+def _parse_context_references(
+    raw_value: object, *, strict: bool = False
+) -> tuple[ContextReference, ...]:
+    """Parse CONTEXT_REFERENCES from JSON object arrays or the legacy pipe list.
+
+    Mirrors the other #1729 object-array parsers: the extraction format
+    requests a single-line JSON array of ``{"path", "role", "summary"}``
+    objects — ``summary`` is optional and defaults to empty — so colons in
+    paths (e.g. Windows drives) and colons/pipes in summaries survive as
+    data. Strict mode raises on anything else so the retry path reformats;
+    lenient mode keeps the historical ``path:role:summary`` split where the
+    summary absorbs further colons, skips malformed entries, and never
+    raises.
+    """
+    field_label = "CONTEXT_REFERENCES"
+
+    def _build(entry: object) -> ContextReference | None:
+        if isinstance(entry, ContextReference):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            summary = entry.get("summary", "")
+            if not isinstance(summary, str):
+                raise ValueError(
+                    f"{field_label} entry field 'summary' must be a string; got {summary!r}."
+                )
+            return ContextReference(
+                path=_require_object_string(entry, "path", field_label=field_label),
+                role=_require_object_string(entry, "role", field_label=field_label),
+                summary=summary.strip(),
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[ContextReference, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    references: list[ContextReference] = []
+    for ref_str in text.split("|"):
+        ref_str = ref_str.strip()
+        if not ref_str:
+            continue
+        parts = ref_str.split(":")
+        if len(parts) < 2:
+            continue
+        path = parts[0].strip()
+        role = parts[1].strip()
+        if not path or not role:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        references.append(
+            ContextReference(
+                path=path,
+                role=role,
+                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
+            )
+        )
+    return tuple(references)
 
 
 def _parse_acceptance_criteria_contracts(
@@ -946,7 +1113,7 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
@@ -964,7 +1131,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             return "PROJECT_TYPE: greenfield"
         return (
             "PROJECT_TYPE: brownfield\n"
-            "CONTEXT_REFERENCES: <path>:<role primary|reference>:<summary> | ...\n"
+            'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
             'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
             'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
             "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
@@ -1053,7 +1220,7 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
 EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
 EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
@@ -1181,6 +1348,14 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             requirements["exit_conditions"] = _parse_exit_conditions(
                 requirements["exit_conditions"], strict=True
             )
+        if "ontology_fields" in requirements:
+            requirements["ontology_fields"] = _parse_ontology_fields(
+                requirements["ontology_fields"], strict=True
+            )
+        if "context_references" in requirements:
+            requirements["context_references"] = _parse_context_references(
+                requirements["context_references"], strict=True
+            )
 
         return requirements
 
@@ -1206,22 +1381,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                 requirements["acceptance_criteria"]
             )
 
-        # Parse ontology fields
-        ontology_fields: list[OntologyField] = []
-        if "ontology_fields" in requirements and requirements["ontology_fields"]:
-            for field_str in requirements["ontology_fields"].split("|"):
-                field_str = field_str.strip()
-                if not field_str:
-                    continue
-                parts = field_str.split(":")
-                if len(parts) >= 3:
-                    ontology_fields.append(
-                        OntologyField(
-                            name=parts[0].strip(),
-                            field_type=parts[1].strip(),
-                            description=":".join(parts[2:]).strip(),
-                        )
-                    )
+        # Parse ontology fields (JSON object arrays preferred; legacy
+        # colon/pipe lists supported for stored requirements)
+        ontology_fields = _parse_ontology_fields(requirements.get("ontology_fields"))
 
         # Build ontology schema
         ontology_schema = OntologySchema(
@@ -1241,22 +1403,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         brownfield_context = BrownfieldContext()
         project_type = requirements.get("project_type", "greenfield").strip().lower()
         if project_type == "brownfield":
-            # Parse context references: path:role:summary | ...
-            context_refs: list[ContextReference] = []
-            if "context_references" in requirements and requirements["context_references"]:
-                for ref_str in requirements["context_references"].split("|"):
-                    ref_str = ref_str.strip()
-                    if not ref_str:
-                        continue
-                    parts = ref_str.split(":")
-                    if len(parts) >= 2:
-                        context_refs.append(
-                            ContextReference(
-                                path=parts[0].strip(),
-                                role=parts[1].strip() if len(parts) > 1 else "reference",
-                                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
-                            )
-                        )
+            # Parse context references (JSON object arrays preferred; legacy
+            # colon/pipe lists supported for stored requirements)
+            context_refs = _parse_context_references(requirements.get("context_references"))
 
             # Parse existing patterns (lenient: stored data has no retry path)
             existing_patterns = _parse_string_array_values(
@@ -1325,7 +1474,14 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                 sort_keys=False,
             )
 
-            file_path.write_text(content, encoding="utf-8")
+            if not write_owner_only(file_path, content):
+                # Reported like every other artifact writer: the file exists
+                # but the directory flush was unconfirmed.
+                log.warning(
+                    "seed.save_durability_uncertain",
+                    seed_id=seed.metadata.seed_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "seed.saved",
@@ -1433,7 +1589,12 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        file_path.write_text(content, encoding="utf-8")
+        if not write_owner_only(file_path, content):
+            log.warning(
+                "seed.save_durability_uncertain",
+                seed_id=seed.metadata.seed_id,
+                file_path=str(file_path),
+            )
 
         log.info(
             "seed.saved.sync",

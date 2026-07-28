@@ -28,11 +28,13 @@ from ouroboros.orchestrator.adapter import (
     AgentMessage,
     AgentRuntime,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.providers.codex_cli_stream import (
@@ -184,7 +186,7 @@ class HermesCliRuntime(AgentRuntime):
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -407,6 +409,15 @@ class HermesCliRuntime(AgentRuntime):
         multi-turn orchestrator flows resume the prior session instead
         of starting a fresh one.
         """
+
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
 
         # Resolve the effective resume handle. Prefer the backend-neutral
         # handle; fall back to the legacy session id for callers that have

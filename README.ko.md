@@ -140,11 +140,11 @@ Claude Code 세션 안에서 `ooo setup` 실행.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # 기본
-pip install ouroboros-ai[claude]        # + Claude Code 의존성
-pip install ouroboros-ai[litellm]       # + LiteLLM 멀티 프로바이더; Python 3.12-3.13
-pip install ouroboros-ai[mcp]           # + MCP 서버/클라이언트 지원
-pip install ouroboros-ai[tui]           # + Textual 터미널 UI
-pip install ouroboros-ai[all]           # 전부; Python 3.12-3.13
+pip install 'ouroboros-ai[claude]'        # + Claude Code 의존성
+pip install 'ouroboros-ai[litellm]'       # + LiteLLM 멀티 프로바이더; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'           # + MCP 서버/클라이언트 지원
+pip install 'ouroboros-ai[tui]'           # + Textual 터미널 UI
+pip install 'ouroboros-ai[all]'           # 전부; Python 3.12-3.13
 ouroboros setup                         # 런타임 설정
 ```
 

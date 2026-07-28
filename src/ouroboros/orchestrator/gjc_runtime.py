@@ -21,11 +21,13 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import (
@@ -79,7 +81,7 @@ class GjcRuntime:
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -390,6 +392,15 @@ class GjcRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         current_handle = None
         if resume_handle is not None or resume_session_id is not None:
             log.info(f"{self._log_namespace}.resume_ignored_non_resumable")

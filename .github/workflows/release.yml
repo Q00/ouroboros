@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -25,7 +25,7 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.14"
 
@@ -34,13 +34,49 @@ jobs:
           uv sync --dev
           uv pip check
 
+      - name: Validate release metadata
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          if [[ "$VERSION" == *.dev* ]]; then
+            echo "Development versions cannot be published from release tags: $VERSION" >&2
+            exit 1
+          fi
+          python scripts/sync-plugin-version.py --require-canonical --version "$VERSION"
+
       - name: Build package
         run: |
           uv build
 
       - name: Check package
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           uv publish --dry-run dist/*
+          VERSION="${REF_NAME#v}"
+          PACKAGE_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit(f"expected exactly one METADATA file, found {len(metadata_files)}")
+              metadata = archive.read(metadata_files[0]).decode("utf-8")
+          versions = [line.removeprefix("Version: ") for line in metadata.splitlines() if line.startswith("Version: ")]
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one package version, found {len(versions)}")
+          print(versions[0])
+          PY
+          )"
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "Package version $PACKAGE_VERSION does not match release tag $VERSION" >&2
+            exit 1
+          fi
 
       - name: Detect pre-release
         id: prerelease
@@ -57,7 +93,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: dist/*
           draft: false
@@ -68,6 +104,7 @@ jobs:
 
   build-tui:
     name: Build TUI (${{ matrix.target }})
+    needs: release
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -83,7 +120,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -126,7 +163,7 @@ jobs:
           merge-multiple: true
 
       - name: Attach binaries to release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: ouroboros-tui-*
         env:
@@ -140,7 +177,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -150,7 +187,7 @@ jobs:
           version: "latest"
 
       - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.14"
 
@@ -162,6 +199,34 @@ jobs:
       - name: Build package
         run: |
           uv build
+
+      - name: Validate built package version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          PACKAGE_VERSION="$(python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit(f"expected exactly one METADATA file, found {len(metadata_files)}")
+              metadata = archive.read(metadata_files[0]).decode("utf-8")
+          versions = [line.removeprefix("Version: ") for line in metadata.splitlines() if line.startswith("Version: ")]
+          if len(versions) != 1:
+              raise SystemExit(f"expected exactly one package version, found {len(versions)}")
+          print(versions[0])
+          PY
+          )"
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "Package version $PACKAGE_VERSION does not match release tag $VERSION" >&2
+            exit 1
+          fi
 
       - name: Publish to PyPI
         env:

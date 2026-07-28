@@ -33,7 +33,6 @@ from ouroboros.codex_permissions import (
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
-from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -43,6 +42,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import RuntimeStreamMixin, collect_stream_lines
+from ouroboros.providers.llm_response import truncate_llm_response_if_oversized
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
@@ -766,16 +766,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
     @staticmethod
     def _truncate_if_oversized(content: str, model: str) -> str:
         """Validate and truncate oversized LLM responses."""
-        is_valid, _ = InputValidator.validate_llm_response(content)
-        if not is_valid:
-            log.warning(
-                "llm.response.truncated",
-                model=model,
-                original_length=len(content),
-                max_length=MAX_LLM_RESPONSE_LENGTH,
-            )
-            return content[:MAX_LLM_RESPONSE_LENGTH]
-        return content
+        return truncate_llm_response_if_oversized(content, model=model)
 
     def _is_retryable_error(self, message: str) -> bool:
         """Check whether an error looks transient."""

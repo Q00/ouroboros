@@ -62,6 +62,100 @@ class TestResolveAgentRuntimeBackend:
 class TestCreateAgentRuntime:
     """Tests for runtime construction."""
 
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "claude",
+            "codex",
+            "codex_mcp",
+            "claude_mcp",
+            "copilot",
+            "gemini",
+            "zcode",
+            "hermes",
+            "kiro",
+            "opencode",
+            "goose",
+            "pi",
+            "gjc",
+            "antigravity",
+            "grok",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_every_runtime_fails_closed_before_effects_when_cwd_is_unresolved(
+        self,
+        backend: str,
+    ) -> None:
+        cwd_calls: list[int] = []
+
+        def moving_process_cwd() -> str:
+            cwd_calls.append(len(cwd_calls))
+            if len(cwd_calls) == 1:
+                raise FileNotFoundError("launch cwd unavailable")
+            return "/tmp/unselected-later-cwd"
+
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=moving_process_cwd,
+        ):
+            runtime = create_agent_runtime(
+                backend=backend,
+                cli_path="/tmp/runtime-cli",
+            )
+            messages = [message async for message in runtime.execute_task("must not run")]
+
+        assert len(messages) == 1
+        assert messages[0].is_error
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert cwd_calls == [0]
+
+    def test_omitted_cwd_absence_is_shared_without_reinterpretation(self) -> None:
+        cwd_results: list[OSError | str] = [
+            FileNotFoundError("launch cwd unavailable"),
+            "/tmp/dispatcher-late",
+            "/tmp/runtime-later",
+        ]
+
+        def moving_process_cwd() -> str:
+            result = cwd_results.pop(0)
+            if isinstance(result, OSError):
+                raise result
+            return result
+
+        with patch(
+            "ouroboros.orchestrator.adapter.os.getcwd",
+            side_effect=moving_process_cwd,
+        ):
+            runtime = create_agent_runtime(
+                backend="codex",
+                cli_path="/tmp/codex",
+            )
+
+        assert runtime.working_directory is None
+        assert runtime._skill_dispatcher.__self__._cwd is None
+        assert cwd_results == ["/tmp/dispatcher-late", "/tmp/runtime-later"]
+
+    def test_explicit_cwd_resolution_failure_never_uses_process_cwd(self) -> None:
+        with (
+            patch(
+                "ouroboros.orchestrator.adapter.Path.resolve",
+                side_effect=FileNotFoundError("requested workspace unavailable"),
+            ),
+            patch(
+                "ouroboros.orchestrator.adapter.os.getcwd",
+                return_value="/fallback/process-cwd",
+            ) as getcwd,
+        ):
+            with pytest.raises(FileNotFoundError, match="requested workspace unavailable"):
+                create_agent_runtime(
+                    backend="codex",
+                    cli_path="/tmp/codex",
+                    cwd="/requested/workspace",
+                )
+
+        getcwd.assert_not_called()
+
     def test_create_claude_runtime(self) -> None:
         """Creates the Claude adapter for the claude backend."""
         runtime = create_agent_runtime(backend="claude", permission_mode="acceptEdits")
@@ -92,8 +186,36 @@ class TestCreateAgentRuntime:
         assert runtime._cli_path == "/tmp/codex"
         assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._skill_dispatcher is mock_dispatcher
-        assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
+        assert (
+            mock_create_dispatcher.call_args.kwargs["cwd"].value == _EXPECTED_CANONICAL_PROJECT_CWD
+        )
         assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "codex"
+
+    def test_relative_cwd_is_shared_with_runtime_and_dispatcher(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch = tmp_path / "launch"
+        workspace = launch / "workspace"
+        later = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later.mkdir()
+        monkeypatch.chdir(launch)
+
+        with patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=object(),
+        ) as create_dispatcher:
+            runtime = create_agent_runtime(
+                backend="codex",
+                cli_path="/tmp/codex",
+                cwd="workspace",
+            )
+        monkeypatch.chdir(later)
+
+        assert runtime.working_directory == str(workspace)
+        assert create_dispatcher.call_args.kwargs["cwd"].value == str(workspace)
 
     def test_create_codex_runtime_propagates_runtime_profile(self) -> None:
         """``get_runtime_profile()`` must reach CodexCliRuntime via the factory.

@@ -307,8 +307,14 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
-        assert config.decomposition_mode == "preflight"
+        assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is True
+
+    def test_execution_config_migrates_legacy_preflight_to_bounce_only(self) -> None:
+        """Stored preflight settings cannot re-enable pre-execution splitting."""
+        config = ExecutionConfig(decomposition_mode="preflight")  # type: ignore[arg-type]
+
+        assert config.decomposition_mode == "bounce_only"
 
     def test_execution_config_rejects_invalid_decomposition_mode(self) -> None:
         """ExecutionConfig only accepts known decomposition modes."""

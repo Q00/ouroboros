@@ -1086,10 +1086,69 @@ TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
 )
 
 
-def resolve_worker_cwd(cwd: str | os.PathLike[str] | None) -> str | None:
-    """Resolve one stable worker cwd, preserving absence when cwd is unavailable."""
+@dataclass(frozen=True, slots=True)
+class ResolvedWorkerCwd:
+    """One cwd-resolution result that downstream consumers must not reinterpret."""
+
+    value: str | None
+
+    def __post_init__(self) -> None:
+        if self.value is None:
+            return
+        if not isinstance(self.value, str) or not self.value:
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+        path = Path(self.value).expanduser()
+        if not path.is_absolute():
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+        try:
+            canonical = str(path.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("resolved worker cwd must be a canonical absolute path") from exc
+        if canonical != self.value:
+            raise ValueError("resolved worker cwd must be a canonical absolute path")
+
+
+WORKER_CWD_UNAVAILABLE_MESSAGE = (
+    "Worker working directory was unavailable when the runtime was created; "
+    "refusing to execute without a stable resolved cwd."
+)
+
+
+def worker_cwd_failure_message(
+    cwd: str | None,
+    *,
+    runtime_backend: str,
+    resume_handle: RuntimeHandle | None = None,
+) -> AgentMessage | None:
+    """Return the shared fail-closed result when construction resolved no cwd."""
+    if cwd is not None:
+        return None
+    log.error(
+        "orchestrator.adapter.worker_cwd_unavailable",
+        runtime_backend=runtime_backend,
+    )
+    return AgentMessage(
+        type="result",
+        content=WORKER_CWD_UNAVAILABLE_MESSAGE,
+        data={
+            "subtype": "error",
+            "error_type": "WorkerCwdUnavailable",
+            "runtime_backend": runtime_backend,
+        },
+        resume_handle=resume_handle,
+    )
+
+
+def resolve_worker_cwd(
+    cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None,
+) -> str | None:
+    """Resolve one stable cwd; only an unavailable omitted cwd remains absent."""
+    if isinstance(cwd, ResolvedWorkerCwd):
+        return cwd.value
+    if cwd is not None:
+        return str(Path(cwd).expanduser().resolve(strict=False))
     try:
-        return str(Path(cwd).expanduser().resolve(strict=False)) if cwd is not None else os.getcwd()
+        return os.getcwd()
     except OSError:
         return None
 
@@ -1130,7 +1189,7 @@ class ClaudeAgentAdapter:
         api_key: str | None = None,
         permission_mode: str = "acceptEdits",
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         cli_path: str | Path | None = None,
     ) -> None:
         """Initialize Claude Agent adapter.
@@ -1495,6 +1554,15 @@ class ClaudeAgentAdapter:
         Raises:
             ProviderError: If SDK initialization fails.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         # ``None`` means the caller did not choose a tool policy and receives
         # the normal execution defaults.  An explicit empty list is different:
         # Synapse ``inform`` uses it to create a read-only, no-tools reply turn.
@@ -2039,11 +2107,13 @@ __all__ = [
     "DEFAULT_TOOLS",
     "FULL_CAPABILITIES",
     "ParamSupport",
+    "ResolvedWorkerCwd",
     "RuntimeCapabilities",
     "RuntimeHandle",
     "SkillDispatchHandler",
     "SubagentOrchestration",
     "TaskResult",
+    "WORKER_CWD_UNAVAILABLE_MESSAGE",
     "is_host_bridge_dispatch",
     "is_leader_driven_worker",
     "subagent_orchestration_for_backend",
@@ -2051,4 +2121,5 @@ __all__ = [
     "runtime_handle_capability_graph",
     "runtime_handle_control_plane",
     "resolve_worker_cwd",
+    "worker_cwd_failure_message",
 ]

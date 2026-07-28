@@ -33,18 +33,21 @@ from ouroboros.codex_permissions import (
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.session_signal import SessionSignalCapabilities
+from ouroboros.core.text import truncate_with_ellipsis
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     SubagentOrchestration,
     TaskResult,
     resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
@@ -246,7 +249,7 @@ class CodexCliRuntime:
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -850,9 +853,7 @@ class CodexCliRuntime:
 
     def _truncate_log_value(self, value: str | None, *, limit: int) -> str | None:
         """Trim long string values before including them in warning logs."""
-        if value is None or len(value) <= limit:
-            return value
-        return f"{value[: limit - 3]}..."
+        return truncate_with_ellipsis(value, limit=limit)
 
     def _preview_dispatch_value(self, value: Any, *, limit: int = 160) -> Any:
         """Build a bounded preview of resolved MCP arguments for diagnostics."""
@@ -2798,6 +2799,15 @@ class CodexCliRuntime:
         model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Codex CLI and stream normalized messages."""
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         async for msg in self._execute_task_impl(
             prompt=prompt,
             tools=tools,

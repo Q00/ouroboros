@@ -15,8 +15,6 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 import structlog
 
 from ouroboros.config import get_goose_cli_path
@@ -26,6 +24,9 @@ from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.providers.response_format import (
+    validate_response_format_payload,
+)
 
 log = structlog.get_logger()
 
@@ -173,29 +174,7 @@ class GooseCliLLMAdapter(CodexCliLLMAdapter):
         response_format: dict[str, object],
     ) -> str | None:
         """Validate extracted JSON against the requested response_format."""
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            return f"invalid JSON: {exc}"
-
-        fmt_type = response_format.get("type")
-        if fmt_type == "json_object":
-            if not isinstance(parsed, dict):
-                return "expected a JSON object"
-            return None
-
-        if fmt_type == "json_schema":
-            schema = response_format.get("json_schema")
-            if not isinstance(schema, dict):
-                return "json_schema response_format is missing a schema object"
-            schema_payload = (
-                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
-            )
-            try:
-                Draft202012Validator(schema_payload).validate(parsed)
-            except JsonSchemaValidationError as exc:
-                return exc.message
-        return None
+        return validate_response_format_payload(payload, response_format)
 
     def _update_last_content(self, last_content: str, event_content: str) -> str:
         """Accumulate Goose stream chunks for completion fallback."""

@@ -234,13 +234,30 @@ def _normalized_evidence_text(text: str) -> str:
 
 
 def _normalize_command(command: str) -> str:
-    """Normalize Bash commands for stable audit output."""
+    """Collapse a Bash command's whitespace for stable audit output.
+
+    Case is preserved. That is worth stating because the neighbouring
+    :func:`_normalized_evidence_text` does fold case, so the two are easy to
+    confuse when skimming this module.
+    """
     return " ".join(command.split())
 
 
 def _normalize_exact_command(command: str) -> str:
-    """Normalize command whitespace while preserving case-sensitive exactness."""
-    return " ".join(command.split())
+    """Alias of :func:`_normalize_command` for command-proof call sites.
+
+    Introduced by ``69bc1ad7a`` ("Preserve exact command case and tool-result
+    boundaries") so that evidence sites asserting a command actually ran read
+    as explicitly case-sensitive: *"Exact command proof must be case-sensitive
+    and tied to the Bash command's own runtime output chunk."*
+
+    The two names stay because that call-site vocabulary is deliberate, but
+    they delegate to one implementation. Previously each carried its own copy
+    of the body under a contract that they must never diverge, with nothing
+    enforcing it — and a whitespace fix applied to only one would have made the
+    proof path and the audit path disagree about what "the same command" means.
+    """
+    return _normalize_command(command)
 
 
 def _truncate_text(text: str, limit: int = _MAX_LEAF_RESULT_CHARS) -> str:

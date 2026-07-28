@@ -31,6 +31,28 @@ class ProjectIdentityUnavailableError(ProjectIdentityError):
     """Raised when the installed Git boundary cannot answer deterministically."""
 
 
+class ManagedProjectScopeError(ProjectIdentityError):
+    """Raised when source and execution workspaces select different relative scopes."""
+
+    def __init__(self, source_workspace: str, execution_workspace: str) -> None:
+        super().__init__("managed source and execution workspace scopes do not match")
+        self.source_workspace = source_workspace
+        self.execution_workspace = execution_workspace
+
+
+class ManagedProjectOwnershipError(ProjectIdentityError):
+    """Raised when a generated checkout does not belong to its durable source."""
+
+    def __init__(
+        self,
+        source_identity: ProjectIdentity,
+        execution_identity: ProjectIdentity,
+    ) -> None:
+        super().__init__("managed worktree does not belong to its source project")
+        self.source_identity = source_identity
+        self.execution_identity = execution_identity
+
+
 def _canonical_directory(value: str | Path, *, require_exists: bool = False) -> Path:
     if not isinstance(value, (str, Path)):
         raise ProjectIdentityError("project identity requires a non-empty path")
@@ -39,11 +61,25 @@ def _canonical_directory(value: str | Path, *, require_exists: bool = False) -> 
         raise ProjectIdentityError("project identity path exceeds its bound")
     try:
         resolved = Path(value).expanduser().resolve(strict=False)
-        if not resolved.is_dir() and (require_exists or resolved.exists()):
-            raise ProjectIdentityError("project identity path must be a directory")
+        try:
+            mode = resolved.stat().st_mode
+        except FileNotFoundError:
+            if require_exists:
+                raise ProjectIdentityError("project identity path must be a directory") from None
+        except OSError as exc:
+            raise ProjectIdentityUnavailableError(
+                "project identity filesystem is temporarily unavailable"
+            ) from exc
+        else:
+            if not stat.S_ISDIR(mode):
+                raise ProjectIdentityError("project identity path must be a directory")
     except ProjectIdentityError:
         raise
-    except (OSError, RuntimeError, ValueError) as exc:
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError(
+            "project identity filesystem is temporarily unavailable"
+        ) from exc
+    except (RuntimeError, ValueError) as exc:
         raise ProjectIdentityError("project identity path cannot be canonicalized") from exc
     if len(str(resolved)) > _MAX_PATH_LENGTH:
         raise ProjectIdentityError("project identity path exceeds its bound")
@@ -97,9 +133,10 @@ class ProjectIdentity:
         project_root: str | Path,
         *,
         workspace_path: str = ".",
+        require_exists: bool = False,
     ) -> ProjectIdentity:
         """Construct a validated identity from an explicit source root."""
-        canonical_root = str(_canonical_directory(project_root))
+        canonical_root = str(_canonical_directory(project_root, require_exists=require_exists))
         return cls(
             project_id=project_id_for_root(canonical_root),
             project_root=canonical_root,
@@ -122,8 +159,8 @@ class ProjectIdentity:
         }
 
 
-def _nearest_git_checkout_root(start: Path) -> Path | None:
-    """Return the nearest checkout marker without interpreting Git metadata."""
+def _nearest_repository_boundary(start: Path) -> tuple[Path | None, Path | None]:
+    """Return the nearest checkout marker or bare shape, without parsing either."""
     for candidate in (start, *start.parents):
         marker = candidate / ".git"
         try:
@@ -132,34 +169,23 @@ def _nearest_git_checkout_root(start: Path) -> Path | None:
             # silently inheriting an ancestor repository.
             marker.lstat()
         except FileNotFoundError:
-            continue
+            pass
         except OSError:
-            return candidate
-        return candidate
-    return None
-
-
-def _nearest_bare_repository_candidate(start: Path) -> Path | None:
-    """Return the nearest bare filesystem shape for Git to validate.
-
-    This does not interpret Git records.  It only avoids treating a valid
-    markerless bare repository as a generic local directory before Git gets to
-    own the actual topology decision.
-    """
-    for candidate in (start, *start.parents):
+            return candidate, None
+        else:
+            return candidate, None
         try:
-            head = (candidate / "HEAD").stat().st_mode
-            objects = (candidate / "objects").stat().st_mode
-            refs = (candidate / "refs").stat().st_mode
+            (candidate / "HEAD").stat()
+            (candidate / "objects").stat()
+            (candidate / "refs").stat()
         except FileNotFoundError:
             continue
         except OSError as exc:
             raise ProjectIdentityUnavailableError(
                 "bare repository discovery is temporarily unavailable"
             ) from exc
-        if stat.S_ISREG(head) and stat.S_ISDIR(objects) and stat.S_ISDIR(refs):
-            return candidate
-    return None
+        return None, candidate
+    return None, None
 
 
 def _git_environment() -> dict[str, str]:
@@ -256,9 +282,16 @@ def _git_head_is_valid(git_dir: Path) -> bool:
         return True
 
 
-def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | None:
+def _git_project_root(
+    start: Path,
+    checkout_root: Path | None = None,
+    *,
+    git_dir: Path | None = None,
+) -> Path | None:
     """Ask Git for the primary worktree (or bare common directory)."""
-    git_dir_argument = _git_dir_argument(checkout_root)
+    git_dir_argument = (
+        (f"--git-dir={git_dir}",) if git_dir is not None else _git_dir_argument(checkout_root)
+    )
     common_output = _run_git(
         start,
         *git_dir_argument,
@@ -296,8 +329,13 @@ def _git_project_root(start: Path, checkout_root: Path | None = None) -> Path | 
     if not worktrees or not worktrees[0].is_dir():
         raise ProjectIdentityUnavailableError("Git worktree output is not representable")
     if common_bare == b"true\n":
-        active_is_common = start == common_dir or common_dir in start.parents
-        owned = checkout_root is None or checkout_root in worktrees or active_is_common
+        # A marker proves only registered membership; markerless discovery
+        # proves only exact common-directory ownership. Ancestry is not evidence.
+        owned = (
+            checkout_root in worktrees
+            if checkout_root is not None
+            else git_dir is not None and start == git_dir == common_dir
+        )
         return common_dir if owned and _git_head_is_valid(common_dir) else None
 
     main_worktree = worktrees[0]
@@ -333,19 +371,17 @@ def _active_repository_is_bare(start: Path, checkout_root: Path | None) -> bool:
 
 def _project_and_checkout_roots(start: Path) -> tuple[Path, Path]:
     """Resolve Git-owned topology, conservatively falling back to one checkout."""
-    checkout_root = _nearest_git_checkout_root(start)
-    bare_candidate = _nearest_bare_repository_candidate(start)
+    checkout_root, bare_candidate = _nearest_repository_boundary(start)
     if checkout_root is None and bare_candidate is None:
         return start, start
-    # A markerless bare repository may live inside an ordinary checkout. Ask
-    # Git about the active directory before adopting an ancestor marker.
-    if bare_candidate is not None and _active_repository_is_bare(start, None):
-        active_git_dir = _git_path(
-            _run_git(start, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
-        )
-        if active_git_dir == start or active_git_dir in start.parents:
-            bare_root = _git_project_root(start)
-            return (bare_root, bare_root) if bare_root is not None else (start, start)
+    # Bind markerless bare validation to the exact candidate.  Git discovery
+    # from ``start`` may otherwise skip malformed child metadata and inherit an
+    # enclosing checkout.
+    if bare_candidate is not None:
+        bare_root = _git_project_root(bare_candidate, git_dir=bare_candidate)
+        if bare_root is None:
+            raise ProjectIdentityUnavailableError("Git rejected bare repository topology")
+        return bare_root, bare_root
     project_root = _git_project_root(start, checkout_root)
     if project_root is None:
         fallback = checkout_root or start
@@ -376,12 +412,7 @@ def _relative_workspace_path(workspace: Path, checkout_root: Path) -> str:
     return _normalize_workspace_path(relative.as_posix() or ".")
 
 
-def resolve_project_identity(
-    effective_cwd: str | Path,
-    *,
-    source_root: str | Path | None = None,
-    source_workspace: str | Path | None = None,
-) -> ProjectIdentity:
+def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
     """Resolve one deterministic Project Map V1 identity.
 
     Direct callers are anchored to the nearest Git checkout and, for linked
@@ -389,32 +420,76 @@ def resolve_project_identity(
     valid local-first projects and use their canonical cwd as both project and
     workspace root.
 
-    Managed task worktrees pass ``source_root`` and ``source_workspace`` from
-    their durable :class:`TaskWorkspace`; this prevents the generated worktree
-    path from splitting one source project into a new project on every run.
+    Managed task worktrees must use :func:`resolve_managed_project_identity`;
+    this direct resolver cannot attribute a caller-supplied source checkout.
     """
     effective = _canonical_directory(effective_cwd, require_exists=True)
     _run_git(Path(Path(__file__).anchor), "--version")
-    if source_root is not None:
-        checkout_root = _canonical_directory(source_root, require_exists=True)
-        workspace = _canonical_directory(
-            source_root if source_workspace is None else source_workspace,
-            require_exists=True,
-        )
-        workspace_path = _relative_workspace_path(workspace, checkout_root)
-        project_root, _ = _project_and_checkout_roots(checkout_root)
-        return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
-
     source, checkout_root = _project_and_checkout_roots(effective)
     workspace_path = _relative_workspace_path(effective, checkout_root)
     return ProjectIdentity.from_root(source, workspace_path=workspace_path)
 
 
+def _source_project_identity(source_root: Path, source_workspace: Path) -> ProjectIdentity:
+    """Resolve the source half of an already-canonical managed pair."""
+    workspace_path = _relative_workspace_path(source_workspace, source_root)
+    project_root, _ = _project_and_checkout_roots(source_root)
+    return ProjectIdentity.from_root(project_root, workspace_path=workspace_path)
+
+
+def resolve_managed_project_identity(
+    execution_workspace: str | Path,
+    *,
+    source_root: str | Path,
+    source_workspace: str | Path,
+    worktree_root: str | Path,
+) -> ProjectIdentity:
+    """Revalidate one managed source/execution pair as a single identity."""
+    canonical_source_root = _canonical_directory(source_root, require_exists=True)
+    canonical_source_workspace = _canonical_directory(source_workspace, require_exists=True)
+    canonical_worktree_root = _canonical_directory(worktree_root, require_exists=True)
+    canonical_execution_workspace = _canonical_directory(
+        execution_workspace,
+        require_exists=True,
+    )
+    try:
+        source_scope = _relative_workspace_path(
+            canonical_source_workspace,
+            canonical_source_root,
+        )
+        execution_scope = _relative_workspace_path(
+            canonical_execution_workspace,
+            canonical_worktree_root,
+        )
+    except ProjectIdentityError as exc:
+        raise ManagedProjectScopeError(
+            str(canonical_source_workspace),
+            str(canonical_execution_workspace),
+        ) from exc
+    if source_scope != execution_scope:
+        raise ManagedProjectScopeError(
+            str(canonical_source_workspace),
+            str(canonical_execution_workspace),
+        )
+
+    source_identity = _source_project_identity(
+        canonical_source_root,
+        canonical_source_workspace,
+    )
+    execution_identity = resolve_project_identity(canonical_execution_workspace)
+    if execution_identity != source_identity:
+        raise ManagedProjectOwnershipError(source_identity, execution_identity)
+    return source_identity
+
+
 __all__ = [
     "PROJECT_ID_PREFIX",
+    "ManagedProjectOwnershipError",
+    "ManagedProjectScopeError",
     "ProjectIdentity",
     "ProjectIdentityError",
     "ProjectIdentityUnavailableError",
     "project_id_for_root",
+    "resolve_managed_project_identity",
     "resolve_project_identity",
 ]

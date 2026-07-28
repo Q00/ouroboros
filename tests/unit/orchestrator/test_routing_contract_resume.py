@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
-from ouroboros.core.project_identity import project_id_for_root
+from ouroboros.core.project_identity import ProjectIdentity, project_id_for_root
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -159,7 +159,19 @@ def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing surv
 
 
 def _workspace(*, durable_id: str, worktree_path: Path, repo_root: Path) -> TaskWorkspace:
+    if not (repo_root / ".git").exists():
+        _init_git_repo(repo_root)
     (repo_root / "packages" / "app").mkdir(parents=True, exist_ok=True)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        f"ooo/{durable_id}",
+        str(worktree_path),
+        "HEAD",
+        cwd=repo_root,
+    )
     (worktree_path / "packages" / "app").mkdir(parents=True, exist_ok=True)
     return TaskWorkspace(
         durable_id=durable_id,
@@ -776,6 +788,34 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
     )
 
     with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_current_execution_semantics_migrates_retired_preflight_authority_once() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    migrated = resumed._execution_contract
+    assert migrated["execution_semantics"]["decomposition_mode"] == "bounce_only"
+    assert migrated["frugality_proof"]["execution_semantics_fingerprint"] == (
+        OrchestratorRunner._execution_semantics_fingerprint(migrated["execution_semantics"])
+    )
+    assert resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: migrated}) is False
+
+
+def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+
+    with pytest.raises(OrchestratorError, match="invalid legacy preflight contract"):
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
@@ -1972,7 +2012,6 @@ def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
 
     direct = _runner(cwd=str(linked_workspace))._project_identity()
     managed = _runner(
@@ -1999,7 +2038,6 @@ def test_newline_git_topology_survives_direct_managed_and_resume_paths(tmp_path:
     linked_workspace = linked / "packages" / "app"
     primary_workspace.mkdir(parents=True)
     linked_workspace.mkdir(parents=True)
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-newline",
         worktree_path=generated,
@@ -2039,7 +2077,6 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
     _init_git_repo(outer)
     _init_git_repo(source)
     common_git.parent.mkdir()
-    generated.mkdir(parents=True)
     _git("clone", "-q", "--bare", str(source), str(common_git))
     _git(
         f"--git-dir={common_git}",
@@ -2049,6 +2086,16 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
         "-b",
         "linked",
         str(linked),
+        "HEAD",
+    )
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/run-1",
+        str(generated),
         "HEAD",
     )
     task_workspace = TaskWorkspace(
@@ -2085,6 +2132,106 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
     assert changed is False
     assert resumed._project_identity() == direct
 
+    (common_git / "HEAD").write_text("not-a-ref-or-object-id\n", encoding="utf-8")
+    for invalid in (
+        _runner(cwd=str(common_git)),
+        _runner(task_workspace=task_workspace),
+    ):
+        with pytest.raises(OrchestratorError) as exc_info:
+            invalid._project_identity()
+        assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(cwd=str(common_git))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+            },
+            seed=_seed(),
+        )
+    assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
+
+def test_managed_relative_scope_mismatch_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    source_cwd = source / "packages" / "expected"
+    expected_cwd = worktree / "packages" / "expected"
+    wrong_cwd = worktree / "packages" / "wrong"
+    _init_git_repo(source)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/scope-resume",
+        str(worktree),
+        "HEAD",
+        cwd=source,
+    )
+    for directory in (source_cwd, expected_cwd, wrong_cwd):
+        directory.mkdir(parents=True)
+    workspace = TaskWorkspace(
+        durable_id="scope-resume",
+        repo_root=str(source),
+        repo_name="source",
+        original_cwd=str(source_cwd),
+        effective_cwd=str(expected_cwd),
+        worktree_path=str(worktree),
+        branch="ooo/scope-resume",
+        lock_path=str(tmp_path / ".locks" / "scope-resume.json"),
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    inconsistent = replace(workspace, effective_cwd=str(wrong_cwd))
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=inconsistent)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "runtime_cwd_mismatch"
+
+
+def test_stale_managed_checkout_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    workspace = _workspace(
+        durable_id="stale-resume",
+        worktree_path=worktree,
+        repo_root=source,
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+
+    worktree.rename(tmp_path / "detached-worktree")
+    (worktree / "packages" / "app").mkdir(parents=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=workspace)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "project_identity_mismatch"
+
 
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"
@@ -2114,7 +2261,6 @@ def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-1",
         worktree_path=generated,
@@ -2164,7 +2310,6 @@ def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path)
     linked_workspace = linked / "packages" / "app"
     linked_workspace.mkdir(parents=True)
     generated = tmp_path / "managed" / "run-1"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="run-1",
         worktree_path=generated,
@@ -2225,6 +2370,32 @@ def test_unowned_gitfile_cannot_resume_as_its_target_repository(tmp_path: Path) 
         )
 
 
+def test_unregistered_child_cannot_resume_with_enclosing_bare_anchor(tmp_path: Path) -> None:
+    owner = tmp_path / "owner.git"
+    unowned = owner / "unregistered"
+    workspace = unowned / "packages" / "app"
+    _git("init", "-q", "--bare", str(owner))
+    workspace.mkdir(parents=True)
+    (unowned / ".git").write_text(f"gitdir: {owner}\n", encoding="utf-8")
+    claimed = ProjectIdentity.from_root(
+        owner,
+        workspace_path="unregistered/packages/app",
+    )
+    persisted = _runner(cwd=str(workspace))._build_execution_contract(
+        seed=_seed(),
+        project_identity=claimed,
+    )
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        _runner(cwd=str(workspace))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: claimed.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
 def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"
@@ -2232,7 +2403,6 @@ def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path)
     _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
     (linked / "packages" / "app").mkdir(parents=True)
     generated = tmp_path / "managed" / "legacy-run"
-    (generated / "packages" / "app").mkdir(parents=True)
     task_workspace = _workspace(
         durable_id="legacy-run",
         worktree_path=generated,

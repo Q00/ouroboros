@@ -1,6 +1,6 @@
 # RFC — Atomicity & decomposition reliability (re-grounded on the live executor)
 
-> Status: **Draft**
+> Status: **Implemented on the live path**
 > Relates to [discussion #1385](https://github.com/Q00/ouroboros/discussions/1385)
 > (atomicity & AC-decomposition reliability). Sibling mechanism:
 > [spend estimator](https://github.com/Q00/ouroboros/pull/1404) (#1384) — both pre-execution judgments,
@@ -10,10 +10,11 @@
 
 ## Summary
 
-Before fanning out, Ouroboros decides *is this unit atomic (execute it) or not
-(decompose it first)?* — the gate in front of fan-out, where a wrong call is
-asymmetric (under-decompose → rework; over-decompose → wasted motion) and compounds
-recursively. The owner's verification of #1385 produced a finding that
+Ouroboros first attempts each unit atomically. Only an evidence-backed `TOO_BIG`
+bounce may propose a split, and only a Verified-MECE decision may fan out children.
+That recovery gate has asymmetric errors (under-decompose → rework;
+over-decompose → wasted motion) that compound recursively. The owner's verification
+of #1385 produced a finding that
 **re-grounds the entire effort**:
 
 > The module the original analysis dissected — `execution/atomicity.py` +
@@ -26,6 +27,49 @@ recursively. The owner's verification of #1385 produced a finding that
 So this RFC does two things: **delete the dead modules** (repairing fabricated
 fields in code nothing calls is motion, not progress), and **re-aim the
 decomposition discipline at `parallel_executor.py`'s actual split path**.
+
+The live default is now `bounce_only`. Stored `preflight` configuration and an
+exact, fingerprint-valid current-format execution contract are migrated once to
+that mode, so new production runs cannot perform a decomposition provider effect
+before an evidence-backed `TOO_BIG` bounce. The historical `PREFLIGHT` enum
+remains readable only for durable-record compatibility; both live runner and
+executor constructors reject a direct `preflight` override, and the
+decomposition provider entry itself refuses any call that is not bound to a
+`TOO_BIG` bounce.
+
+The bounce trace is a typed projection, not a redacted transcript: it contains
+only server-derived counts, booleans, and validated failure/retry enums. Classifier
+and semantic-attestation replies likewise contain only closed enums/booleans;
+their prose and claimed evidence cannot enter durable events or authorize child
+dispatch. The only generated prose that survives is the independently attested
+child contract required to execute and replay the split.
+
+Both `bounce_classified` and `decision_finalized` are required persistence
+boundaries, not best-effort telemetry. Failure to append the bounce prevents the
+decomposition provider call; failure to append the finalized decision prevents
+child dispatch. Before any resumed effect, the executor chronologically replays
+and validates the bounded bounce-event population, then strictly replays the
+exact finalized-event population. A pending durable `TOO_BIG` phase resumes at
+the decomposer/attestation boundary without repeating the atomic parent or
+classifier. Every finalized `BOUNCE` decision must consume an earlier matching
+`TOO_BIG` event for the same node and evidence; a final event without that
+trigger fails closed. Checkpoints and composite completion/pause projections may
+then confirm—but never create, replace, or contradict—the event-owned canonical
+decision.
+Malformed, truncated, unknown-field, duplicated, or conflicting durable
+decisions fail closed. A historical non-split `PREFLIGHT` record may transition
+once to a new `BOUNCE` record; a finalized live bounce decision is immutable. A
+forced-atomic/escalated compromise therefore cannot continue without its
+required event.
+
+A trustworthy live `BOUNCE` split is valid only with `cause=TOO_BIG`. The
+classifier always starts a fresh tool-free runtime session, so an inherited
+conversation cannot supplement the closed server-derived trace.
+
+When Routing D is active, its bounded loop offers each failed atomic result to
+this gate before selecting a successor route. A trustworthy `TOO_BIG` split
+transfers the root to the durable composite completion/pause owner; all other
+failures remain atomic and continue through the finite route set.
 
 ## Context
 
@@ -142,5 +186,6 @@ re-grounding is that lesson applied.
    split/verdict fields carry **real** inputs (no hardcoded stand-ins).
 4. Evaluation bounces are classified (too-big / bad-spec / environment) and only
    *too-big* drives a decomposition, seeded from the bounce trace.
-5. With no LLM available, the fallback reports "uncertain → decompose conservatively"
-   rather than a confident keyword verdict.
+5. With no LLM available, the fallback records `UNKNOWN` and leaves the failed
+   unit untrusted for escalation or human handoff. It never invents children or
+   emits a confident keyword verdict; verified fan-out has no heuristic fallback.

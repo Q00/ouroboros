@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import stat
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -61,6 +62,10 @@ def _make_engine_stub(
         deferred_items=list(deferred or []),
         decide_later_items=list(decide_later or []),
     )
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
 
 
 def _make_state(
@@ -298,6 +303,71 @@ class TestPrdMetaFileLocation:
         assert nested_dir.exists()
         meta = _load_pm_meta("sess-nested", data_dir=nested_dir)
         assert meta is not None
+
+    def test_save_meta_is_owner_only_and_preserves_supplied_directory_mode(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Caller-supplied pm_meta directories keep their mode; meta files do not."""
+        previous_umask = os.umask(0o022)
+        try:
+            data_dir = tmp_path / "shared-data"
+            data_dir.mkdir(mode=0o755)
+            os.chmod(data_dir, 0o755)
+
+            _save_pm_meta("sess-owner", _make_engine_stub(), data_dir=data_dir)
+        finally:
+            os.umask(previous_umask)
+
+        assert _mode(data_dir) == 0o755
+        assert _mode(_meta_path("sess-owner", data_dir)) == 0o600
+
+    def test_save_meta_write_failure_propagates_without_leftover_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PM meta persistence keeps the owner-only writer's failure contract."""
+        import ouroboros.mcp.tools.pm_handler as pmh
+
+        def _fail_write(*_args: object, **_kwargs: object) -> bool:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pmh, "write_owner_only", _fail_write)
+
+        with pytest.raises(OSError, match="disk full"):
+            _save_pm_meta("sess-fail", _make_engine_stub(), data_dir=tmp_path)
+
+        assert not _meta_path("sess-fail", tmp_path).exists()
+
+    def test_save_meta_logs_unconfirmed_durability(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The helper returns None, so an unconfirmed durable write is logged."""
+        import ouroboros.mcp.tools.pm_handler as pmh
+
+        warnings: list[tuple[str, dict[str, object]]] = []
+
+        monkeypatch.setattr(pmh, "write_owner_only", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(
+            pmh.log,
+            "warning",
+            lambda event, **kwargs: warnings.append((event, kwargs)),
+        )
+
+        _save_pm_meta("sess-uncertain", _make_engine_stub(), data_dir=tmp_path)
+
+        assert warnings == [
+            (
+                "pm_handler.meta_save_durability_unconfirmed",
+                {
+                    "session_id": "sess-uncertain",
+                    "path": str(_meta_path("sess-uncertain", tmp_path)),
+                },
+            )
+        ]
 
     def test_meta_file_has_expected_fields(self, tmp_path: Path) -> None:
         """pm_meta JSON contains all required fields."""

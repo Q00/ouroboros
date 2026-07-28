@@ -16,11 +16,13 @@ from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ClaudeAgentAdapter,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
     _clone_runtime_handle_data,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
@@ -29,6 +31,31 @@ from ouroboros.orchestrator.rate_limit import RateLimitSnapshot, SharedRateLimit
 from ouroboros.router import Resolved
 
 _EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
+
+
+class TestResolvedWorkerCwd:
+    def test_rejects_relative_value_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="canonical absolute path"):
+            ResolvedWorkerCwd("workspace")
+
+    def test_rejects_noncanonical_absolute_value(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="canonical absolute path"):
+            ResolvedWorkerCwd(str(tmp_path / "nested" / ".."))
+
+    def test_rejects_symlink_alias(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(workspace, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="canonical absolute path"):
+            ResolvedWorkerCwd(str(alias))
+
+    def test_preserves_canonical_absolute_value(self, tmp_path: Path) -> None:
+        canonical = str(tmp_path.resolve())
+        resolved = ResolvedWorkerCwd(canonical)
+
+        assert resolve_worker_cwd(resolved) == canonical
 
 
 # Helper function to create mock SDK messages with correct class names

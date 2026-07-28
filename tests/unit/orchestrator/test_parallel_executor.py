@@ -32,7 +32,15 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
-from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
+from ouroboros.orchestrator.decomposition_policy import (
+    BounceCause,
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
@@ -66,6 +74,29 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
+
+
+def _trusted_preflight_split(
+    node_id: str,
+    *descriptions: str,
+) -> DecompositionDecisionRecord:
+    """Build a verified historical preflight decision for replay-only tests."""
+    return DecompositionDecisionRecord(
+        node_id=node_id,
+        source=DecompositionSource.PREFLIGHT,
+        disposition=DecompositionDisposition.SPLIT,
+        children=tuple(
+            DecompositionChild(
+                description=description,
+                coverage_claims=(f"scope-{index}",),
+                verification_hint=f"verify scope {index}",
+            )
+            for index, description in enumerate(descriptions)
+        ),
+        structural_status=StructuralCheckStatus.PASSED,
+        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+        trustworthy=True,
+    )
 
 
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
@@ -9156,6 +9187,8 @@ class TestParallelACExecutor:
                 seed_goal="Ship OpenCode support",
                 tools=["Read", "Edit"],
                 system_prompt="system",
+                source=DecompositionSource.BOUNCE,
+                cause=BounceCause.TOO_BIG,
             )
 
         assert result.disposition is DecompositionDisposition.UNKNOWN
@@ -9173,9 +9206,15 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Extract parser", "Wire parser"], None, None]
+        root = ExecutionNodeIdentity.root(execution_context_id="exec_decompose", ac_index=1)
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             return ACExecutionResult(
@@ -9222,7 +9261,7 @@ class TestParallelACExecutor:
             (100, "Extract parser", 1),
             (101, "Wire parser", 1),
         ]
-        assert executor._try_decompose_ac.await_count == 3
+        executor._try_decompose_ac.assert_not_awaited()
         assert execute_atomic_ac.await_count == 2
 
     @pytest.mark.asyncio
@@ -9235,9 +9274,15 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Extract parser", "Wire parser"], None, None]
+        root = ExecutionNodeIdentity.root(execution_context_id="exec_sub_ac_runtime", ac_index=1)
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             return ACExecutionResult(
@@ -9491,9 +9536,17 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Retry leaf", "Stable leaf"], None, None]
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_atomic_retry_scope", ac_index=1
         )
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Retry leaf",
+                "Stable leaf",
+            )
+        )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
@@ -9535,7 +9588,7 @@ class TestParallelACExecutor:
         assert result.success is True
         assert result.is_decomposed is True
         assert [sub_result.retry_attempt for sub_result in result.sub_results] == [1, 0]
-        assert executor._try_decompose_ac.await_count == 3
+        executor._try_decompose_ac.assert_not_awaited()
         assert [
             (
                 int(call.kwargs["ac_index"]),
@@ -12753,20 +12806,12 @@ async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> Non
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate and test sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify Goose final result handling",
-        tools=[],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate and test sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect",
-        "Sub-AC 2: test",
-    ]
-    assert result.trustworthy is False
+    assert response == '["Sub-AC 1: inspect", "Sub-AC 2: test"]'
 
 
 @pytest.mark.asyncio
@@ -12800,21 +12845,16 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate, test, and document sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify Goose sub-AC support",
-        tools=[],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate, test, and document sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect the implementation",
-        "Sub-AC 2: write a focused regression test",
-        "Sub-AC 3: document the result",
-    ]
-    assert result.trustworthy is False
+    assert response == (
+        '["Sub-AC 1: inspect the implementation", '
+        '"Sub-AC 2: write a focused regression test", '
+        '"Sub-AC 3: document the result"]'
+    )
 
 
 @pytest.mark.asyncio
@@ -12852,20 +12892,12 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate and test sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify decomposition tool handling",
-        tools=["Read"],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate and test sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect",
-        "Sub-AC 2: test",
-    ]
-    assert result.trustworthy is False
+    assert response == '["Sub-AC 1: inspect", "Sub-AC 2: test"]'
     assert runtime.dispatched_tools == []
     console.print.assert_called_once()
     notice = console.print.call_args.args[0]

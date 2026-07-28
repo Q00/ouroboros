@@ -54,9 +54,12 @@ from ouroboros.core.execution_preferences import (
     resolve_execution_preferences,
 )
 from ouroboros.core.project_identity import (
+    ManagedProjectOwnershipError,
+    ManagedProjectScopeError,
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
+    resolve_managed_project_identity,
     resolve_project_identity,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
@@ -878,7 +881,7 @@ class OrchestratorRunner:
         mcp_tool_prefix: str = "",
         debug: bool = False,
         enable_decomposition: bool = True,
-        decomposition_mode: Literal["preflight", "bounce_only", "off"] | None = None,
+        decomposition_mode: Literal["bounce_only", "off"] | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         inherited_tools: list[str] | None = None,
         task_cwd: str | None = None,
@@ -908,6 +911,8 @@ class OrchestratorRunner:
             decomposition_mode: Optional decomposition mode override. When omitted,
                 the runner uses ``execution.decomposition_mode`` from config.
                 ``enable_decomposition=False`` forces the effective mode to ``off``.
+                Legacy config files are migrated while loading; direct preflight
+                overrides are rejected instead of authorizing a provider effect.
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions that should fork a session.
             inherited_tools: Optional effective tool set inherited from a
@@ -1046,14 +1051,16 @@ class OrchestratorRunner:
         self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
         self._context_pack_enabled = get_context_pack_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
-        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
-            "off"
-            if not enable_decomposition
-            else (
-                _execution_config.decomposition_mode
-                if decomposition_mode is None
-                else decomposition_mode
-            )
+        configured_decomposition_mode = (
+            _execution_config.decomposition_mode
+            if decomposition_mode is None
+            else decomposition_mode
+        )
+        if configured_decomposition_mode not in {"bounce_only", "off"}:
+            msg = f"Unsupported decomposition_mode: {configured_decomposition_mode!r}"
+            raise ValueError(msg)
+        self._decomposition_mode: Literal["bounce_only", "off"] = (
+            "off" if not enable_decomposition else configured_decomposition_mode
         )
         if not _model_routing_disabled:
             from ouroboros.orchestrator.model_routing import build_model_router
@@ -3189,9 +3196,26 @@ class OrchestratorRunner:
     def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
         """Return one cwd shared by publication, handles, and provider effects."""
         provider_cwd = self._provider_cwd()
-        selected_cwd = self._task_cwd
-        if selected_cwd is None and self._task_workspace is not None:
-            selected_cwd = resolve_worker_cwd(self._task_workspace.effective_cwd)
+        workspace_cwd = (
+            resolve_worker_cwd(self._task_workspace.effective_cwd)
+            if self._task_workspace is not None
+            else None
+        )
+        if (
+            self._task_cwd is not None
+            and workspace_cwd is not None
+            and self._task_cwd != workspace_cwd
+        ):
+            raise OrchestratorError(
+                message="Explicit task cwd does not match the managed workspace",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": self._task_cwd,
+                    "workspace_cwd": workspace_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        selected_cwd = self._task_cwd or workspace_cwd
         handle_cwd = (
             resolve_worker_cwd(runtime_handle.cwd)
             if runtime_handle is not None and runtime_handle.cwd
@@ -3228,11 +3252,33 @@ class OrchestratorRunner:
     @classmethod
     def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
         """Resolve a managed worktree against its durable source checkout."""
-        return resolve_project_identity(
-            workspace.effective_cwd,
-            source_root=workspace.repo_root,
-            source_workspace=workspace.original_cwd,
-        )
+        try:
+            return resolve_managed_project_identity(
+                workspace.effective_cwd,
+                source_root=workspace.repo_root,
+                source_workspace=workspace.original_cwd,
+                worktree_root=workspace.worktree_path,
+            )
+        except ManagedProjectScopeError as exc:
+            raise OrchestratorError(
+                message="Managed source and execution workspace scopes do not match",
+                details={
+                    "invalid": "runtime_cwd",
+                    "source_cwd": exc.source_workspace,
+                    "execution_cwd": exc.execution_workspace,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            ) from exc
+        except ManagedProjectOwnershipError as exc:
+            raise OrchestratorError(
+                message="Managed worktree does not belong to its source project",
+                details={
+                    "invalid": "project_identity",
+                    "source_identity": exc.source_identity.to_workspace_data(),
+                    "execution_identity": exc.execution_identity.to_workspace_data(),
+                    "resume_blocked": "project_identity_mismatch",
+                },
+            ) from exc
 
     @classmethod
     def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
@@ -3251,6 +3297,17 @@ class OrchestratorRunner:
             "workspace_path": workspace_path,
         }
 
+    @staticmethod
+    def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
+        """Normalize resolver failures at the orchestration lifecycle boundary."""
+        details: dict[str, Any] = {"invalid": "project_identity", "cause": str(exc)}
+        if isinstance(exc, ProjectIdentityUnavailableError):
+            details.update(
+                resume_blocked="project_identity_unavailable",
+                retryable=True,
+            )
+        return OrchestratorError(message="Cannot resolve project identity", details=details)
+
     def _project_identity(self) -> ProjectIdentity | None:
         """Return the single canonical identity shared by event and contract."""
         try:
@@ -3261,21 +3318,8 @@ class OrchestratorRunner:
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():
                 return None
             return resolve_project_identity(effective_cwd)
-        except ProjectIdentityUnavailableError as exc:
-            raise OrchestratorError(
-                message="Cannot resolve project identity",
-                details={
-                    "invalid": "project_identity",
-                    "cause": str(exc),
-                    "resume_blocked": "project_identity_unavailable",
-                    "retryable": True,
-                },
-            ) from exc
         except ProjectIdentityError as exc:
-            raise OrchestratorError(
-                message="Cannot resolve project identity",
-                details={"invalid": "project_identity", "cause": str(exc)},
-            ) from exc
+            raise self._project_identity_error(exc) from exc
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
@@ -3331,6 +3375,8 @@ class OrchestratorRunner:
                 project_root=raw_start_identity["project_root"],
                 workspace_path=raw_start_identity["workspace_path"],
             )
+        except ProjectIdentityUnavailableError as exc:
+            raise OrchestratorRunner._project_identity_error(exc) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise OrchestratorError(
                 message="Cannot resume with an invalid project identity anchor",
@@ -3960,7 +4006,7 @@ class OrchestratorRunner:
             and 1 <= effective_workers <= max_workers
             and effective_workers == expected_effective_workers
             and isinstance(mode, str)
-            and mode in {"preflight", "bounce_only", "off"}
+            and mode in {"bounce_only", "off"}
             and (value.get("enable_decomposition") is True or mode == "off")
             and isinstance(backend, str)
             and bool(backend)
@@ -3969,6 +4015,25 @@ class OrchestratorRunner:
             and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
             and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
         )
+
+    @staticmethod
+    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
+        """Recognize only the retired current-schema preflight snapshot.
+
+        The migration changes one authority bit (``preflight`` to
+        ``bounce_only``); every other effect-bearing field must already satisfy
+        the exact current schema.  This helper never feeds a live constructor.
+        """
+
+        if (
+            not isinstance(value, Mapping)
+            or value.get("decomposition_mode") != "preflight"
+            or value.get("enable_decomposition") is not True
+        ):
+            return False
+        migrated = dict(value)
+        migrated["decomposition_mode"] = "bounce_only"
+        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
 
     def _execution_semantics_snapshot(
         self,
@@ -6184,6 +6249,33 @@ class OrchestratorRunner:
                 },
             )
 
+        migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
+            raw_execution_semantics
+        )
+        if migrate_preflight_contract:
+            persisted_legacy_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_legacy_fingerprint, str
+            ) or persisted_legacy_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid legacy preflight contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_semantics = migrated_contract["execution_semantics"]
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_semantics, dict)
+            assert isinstance(migrated_proof, dict)
+            migrated_semantics["decomposition_mode"] = "bounce_only"
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_semantics
+
         # Version 2 predates effort/Route B fields; version 3 predates the
         # independent requested-tier field; version 4 predates the complete
         # executor-semantics snapshot. Only those exact shapes migrate.
@@ -6399,10 +6491,14 @@ class OrchestratorRunner:
             # carry that representation forward; recomputing under the current
             # resolver would make the following resume disagree with the
             # immutable, still-unanchored start event.
-            replacement_project_identity = ProjectIdentity.from_root(
-                persisted_workspace["project_root"],
-                workspace_path=persisted_workspace["workspace_path"],
-            )
+            try:
+                replacement_project_identity = ProjectIdentity.from_root(
+                    persisted_workspace["project_root"],
+                    workspace_path=persisted_workspace["workspace_path"],
+                    require_exists=True,
+                )
+            except ProjectIdentityError as exc:
+                raise self._project_identity_error(exc) from exc
         active_resume_workspace = self._resume_workspace_identity()
         normalized_persisted_resume_workspace = (
             dict(persisted_resume_workspace)
@@ -6686,6 +6782,9 @@ class OrchestratorRunner:
             if authority_generation is None:
                 replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
             self._execution_contract = replacement
+            return True
+        if migrate_preflight_contract:
+            self._execution_contract = dict(raw_contract)
             return True
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
@@ -8474,6 +8573,31 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
+            create_session_kwargs: dict[str, Any] = {
+                "execution_id": exec_id,
+                "seed_id": seed.metadata.seed_id,
+                "session_id": resolved_session_id,
+                "seed_goal": seed.goal,
+                "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                "llm_backend": getattr(self._adapter, "llm_backend", None),
+                "execution_contract": execution_contract,
+                "project_identity": project_identity,
+                "project_workspace": self._effective_cwd(),
+            }
+            if self._task_workspace is not None:
+                create_session_kwargs["project_task_workspace"] = self._task_workspace
+            try:
+                if (
+                    "acceptance_root_indices"
+                    in inspect.signature(self._session_repo.create_session).parameters
+                ):
+                    create_session_kwargs["acceptance_root_indices"] = range(
+                        len(seed.acceptance_criteria)
+                    )
+            except (TypeError, ValueError):
+                # Legacy/mock repositories may not expose an inspectable signature;
+                # the durable SessionRepository path always does.
+                pass
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather
@@ -8512,29 +8636,6 @@ class OrchestratorRunner:
             raise
         self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
-
-        create_session_kwargs: dict[str, Any] = {
-            "execution_id": exec_id,
-            "seed_id": seed.metadata.seed_id,
-            "session_id": resolved_session_id,
-            "seed_goal": seed.goal,
-            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-            "llm_backend": getattr(self._adapter, "llm_backend", None),
-            "execution_contract": execution_contract,
-            "project_identity": project_identity,
-        }
-        try:
-            if (
-                "acceptance_root_indices"
-                in inspect.signature(self._session_repo.create_session).parameters
-            ):
-                create_session_kwargs["acceptance_root_indices"] = range(
-                    len(seed.acceptance_criteria)
-                )
-        except (TypeError, ValueError):
-            # Legacy/mock repositories may not expose an inspectable signature;
-            # the durable SessionRepository path always does.
-            pass
         try:
             session_result = await self._session_repo.create_session(**create_session_kwargs)
         except asyncio.CancelledError:
@@ -8905,13 +9006,20 @@ class OrchestratorRunner:
             return Result.err(durable_status_error)
 
         try:
-            authenticated_contract = self._authenticate_process_local_prepared_contract(
+            caller_contract = self._authenticate_process_local_prepared_contract(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 generation=authority_generation,
                 execution_contract=raw_contract,
             )
-            if authenticated_contract is None:
+            durable_progress = deepcopy(dict(durable_tracker.progress))
+            durable_contract = self._authenticate_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=durable_progress.get(EXECUTION_CONTRACT_PROGRESS_KEY),
+            )
+            if caller_contract is None or durable_contract is None:
                 raise OrchestratorError(
                     message=(
                         "Caller-supplied execution contract does not match the "
@@ -8923,9 +9031,10 @@ class OrchestratorRunner:
                         "resume_blocked": "prepared_execution_contract_mismatch",
                     },
                 )
+            durable_progress[EXECUTION_CONTRACT_PROGRESS_KEY] = durable_contract
             contract_changed, validated_contract = await asyncio.to_thread(
                 self._restore_execution_contract_snapshot,
-                {EXECUTION_CONTRACT_PROGRESS_KEY: authenticated_contract},
+                durable_progress,
                 seed=seed,
                 authority_generation=authority_generation,
                 require_bound_execution_inputs=False,

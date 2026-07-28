@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import tempfile
 from typing import IO
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -131,7 +130,7 @@ class TestPMSeedSaveJSON:
         saved_path.write_text("original\n", encoding="utf-8")
 
         with (
-            patch("tempfile.mkstemp", wraps=tempfile.mkstemp) as mock_mkstemp,
+            patch("os.open", wraps=os.open) as mock_open,
             patch("os.fsync") as mock_fsync,
             patch("os.replace", side_effect=OSError("boom")),
         ):
@@ -139,8 +138,9 @@ class TestPMSeedSaveJSON:
                 engine.save_pm_seed(seed, output_dir=seeds_dir)
 
         assert saved_path.read_text(encoding="utf-8") == "original\n"
-        assert mock_mkstemp.call_count == 1
-        assert mock_mkstemp.call_args.kwargs["dir"] == str(seeds_dir)
+        temp_creations = [call for call in mock_open.call_args_list if call.args[1] & os.O_EXCL]
+        assert len(temp_creations) == 1
+        assert Path(temp_creations[0].args[0]).parent == seeds_dir
         mock_fsync.assert_called_once()
         assert {path.name for path in seeds_dir.iterdir()} == {saved_path.name}
 
@@ -150,16 +150,17 @@ class TestPMSeedSaveJSON:
         seeds_dir = tmp_path / "seeds"
         created_fds: list[int] = []
         created_paths: list[Path] = []
-        real_mkstemp = tempfile.mkstemp
+        real_open = os.open
 
-        def _recording_mkstemp(*args, **kwargs):
-            fd, name = real_mkstemp(*args, **kwargs)
-            created_fds.append(fd)
-            created_paths.append(Path(name))
-            return fd, name
+        def _recording_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_EXCL:
+                created_fds.append(fd)
+                created_paths.append(Path(path))
+            return fd
 
         with (
-            patch("tempfile.mkstemp", side_effect=_recording_mkstemp),
+            patch("os.open", side_effect=_recording_open),
             patch("os.fdopen", side_effect=RuntimeError("fdopen failed")),
             pytest.raises(RuntimeError, match="fdopen failed"),
         ):
@@ -190,7 +191,13 @@ class TestPMSeedSaveJSON:
         assert saved_path.read_text(encoding="utf-8") == "original\n"
         assert {path.name for path in seeds_dir.iterdir()} == {saved_path.name}
 
-    def test_preserves_existing_file_mode(self, tmp_path: Path) -> None:
+    def test_narrows_an_existing_readable_file_mode(self, tmp_path: Path) -> None:
+        """A PM Seed left readable by an older version is narrowed, not kept.
+
+        The mode is deliberately NOT preserved: the Seed carries whatever the
+        PM confirmed during the interview, and preserving the previous mode
+        would keep an older version's group-readable file readable forever.
+        """
         engine = _make_engine(tmp_path)
         seed = _make_seed()
         seeds_dir = tmp_path / "seeds"
@@ -198,12 +205,11 @@ class TestPMSeedSaveJSON:
         saved_path = seeds_dir / f"{seed.pm_id}.json"
         saved_path.write_text("original\n", encoding="utf-8")
         saved_path.chmod(0o640)
-        expected_mode = stat.S_IMODE(saved_path.stat().st_mode)
 
         result = engine.save_pm_seed(seed, output_dir=seeds_dir)
 
         assert result == saved_path
-        assert stat.S_IMODE(saved_path.stat().st_mode) == expected_mode
+        assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
 
     @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
     def test_fsyncs_file_and_parent_directory(self, tmp_path: Path) -> None:

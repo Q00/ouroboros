@@ -34,7 +34,6 @@ Functions:
     get_zcode_cli_path: Get zcode CLI path from env var or config
 """
 
-import ast
 from collections.abc import Callable
 import math
 import os
@@ -43,6 +42,7 @@ import shutil
 import stat
 from typing import Any
 
+from dotenv import dotenv_values
 from pydantic import ValidationError as PydanticValidationError
 import yaml
 
@@ -143,22 +143,21 @@ _RUNTIME_CONTROL_ENV_KEYS = {
 }
 
 
-def _parse_env_value(raw_value: str) -> str:
-    candidate = raw_value.strip()
-    if not candidate:
-        return ""
+def _is_assignable_env_key(key: str) -> bool:
+    """Return whether `key` can be written to ``os.environ`` at all.
 
-    if candidate[0] in {'"', "'"} and candidate[-1:] == candidate[0]:
-        try:
-            parsed = ast.literal_eval(candidate)
-        except (SyntaxError, ValueError):
-            return candidate[1:-1]
-        return str(parsed)
+    python-dotenv's grammar is wider than the environment's. A quoted
+    left-hand side such as ``'BROKEN=KEY'=value`` parses to the key
+    ``BROKEN=KEY``, and CPython rejects any name containing ``=`` or NUL with
+    ``ValueError: illegal environment variable name``.
 
-    comment_index = candidate.find(" #")
-    if comment_index != -1:
-        candidate = candidate[:comment_index]
-    return candidate.rstrip()
+    This module runs ``_load_env_file`` at import, so an unhandled rejection
+    there would stop every Ouroboros command from starting -- a denial of
+    service reachable from a cloned repository's ``.env``. Skipping the entry
+    keeps startup alive and matches the previous parser, which also refused
+    keys containing whitespace.
+    """
+    return bool(key) and not any(ch == "=" or ch == "\0" or ch.isspace() for ch in key)
 
 
 def _is_placeholder_api_key(value: str) -> bool:
@@ -337,21 +336,52 @@ def _is_untrusted_env_denied_key(key: str) -> bool:
 
 
 def _load_env_file(path: Path, *, trusted: bool = False) -> None:
+    """Apply a ``.env`` file to ``os.environ`` under this module's trust policy.
+
+    Grammar is delegated to ``python-dotenv``, which owns it. The previous
+    hand-rolled parser routed quoted values through :func:`ast.literal_eval`,
+    applying *Python* string syntax to a POSIX-shaped file: `X='C:\\new\\table'`
+    came back ten characters long with a newline and a tab in it, because single
+    quotes are literal everywhere except in Python. Escapes, comments, quoting,
+    and `export ` are now the library's problem.
+
+    Every policy decision stays here:
+
+    * the untrusted-source key denylist (RCE guard) is applied per key;
+    * template placeholder keys are skipped;
+    * an already-set real environment value is never overridden.
+
+    ``interpolate=False`` is deliberate. python-dotenv expands ``${VAR}`` from
+    the environment by default; leaving that on would both change today's
+    behaviour (``$HOME`` is currently literal) and hand an untrusted
+    project-directory ``.env`` a way to read the real process environment into
+    a value it controls.
+    """
     if not path.is_file():
         return
 
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
+    try:
+        entries = dotenv_values(path, interpolate=False, encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # An unreadable or non-UTF-8 .env is not fatal; the process
+        # environment still wins. `UnicodeDecodeError` is a `ValueError`, not
+        # an `OSError`, so it needs naming: a single invalid byte
+        # (`BROKEN=\xFF`) in a cloned repository would otherwise abort import.
+        return
+    except Exception:  # noqa: BLE001 - startup must survive any parser failure
+        # This module runs `_load_env_file` at import, so a malformed `.env`
+        # must degrade to "no variables loaded", never to an unstartable
+        # process. Enumerating the parser's failure modes has already missed
+        # two -- an illegal key name and a decoding error -- so the invariant
+        # is enforced here rather than predicted.
+        return
+
+    for key, parsed_value in entries.items():
+        # A bare `KEY` line with no `=` yields None, matching the old skip.
+        if not key or parsed_value is None:
             continue
 
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        if not key or any(ch.isspace() for ch in key):
+        if not _is_assignable_env_key(key):
             continue
 
         if not trusted and _is_untrusted_env_denied_key(key):
@@ -359,13 +389,19 @@ def _load_env_file(path: Path, *, trusted: bool = False) -> None:
             # binary Ouroboros executes (remote code execution guard).
             continue
 
-        parsed_value = _parse_env_value(raw_value)
         if not parsed_value or _is_placeholder_api_key(parsed_value):
             continue
 
         current_value = os.environ.get(key)
         if current_value is None or _is_placeholder_api_key(current_value):
-            os.environ[key] = parsed_value
+            try:
+                os.environ[key] = parsed_value
+            except ValueError:
+                # Defence in depth. `_is_assignable_env_key` already rejects
+                # everything CPython refuses, but this module is imported at
+                # startup: a future parser change must degrade to skipping one
+                # entry, never to an unstartable process.
+                continue
 
 
 # The project-directory .env travels with whatever repository the user

@@ -77,7 +77,7 @@ class TestBrownfieldParsingRoundTrip:
             "ONTOLOGY_NAME: Svc\n"
             "ONTOLOGY_DESCRIPTION: A service\n"
             "PROJECT_TYPE: brownfield\n"
-            "CONTEXT_REFERENCES: /repo/api:primary:API layer\n"
+            'CONTEXT_REFERENCES: [{"path": "/repo/api", "role": "primary", "summary": "API layer"}]\n'
             'EXISTING_PATTERNS: ["repository pattern", "dependency injection"]\n'
             'EXISTING_DEPENDENCIES: ["fastapi", "sqlalchemy"]'
         )
@@ -98,7 +98,7 @@ class TestBrownfieldListExtractionContract:
         "ONTOLOGY_NAME: Svc\n"
         "ONTOLOGY_DESCRIPTION: A service\n"
         "PROJECT_TYPE: brownfield\n"
-        "CONTEXT_REFERENCES: /repo/api:primary:API layer\n"
+        'CONTEXT_REFERENCES: [{"path": "/repo/api", "role": "primary", "summary": "API layer"}]\n'
     )
 
     def test_strict_rejects_pipe_list_existing_patterns(self) -> None:

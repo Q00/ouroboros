@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from types import MappingProxyType
 
 import pytest
 
@@ -121,6 +122,41 @@ class TestEnumsAndSerialization:
         record["trustworthy"] = "true"
         assert DecompositionDecisionRecord.from_dict(record) is None
 
+    def test_unknown_durable_decision_field_fails_closed(self) -> None:
+        record = DecompositionDecisionRecord(
+            node_id="n1",
+            source=DecompositionSource.BOUNCE,
+            disposition=DecompositionDisposition.UNKNOWN,
+        ).to_dict()
+        record["acceptance_authority"] = "trusted"
+
+        assert DecompositionDecisionRecord.from_dict(record) is None
+
+    def test_durable_decision_requires_canonical_json_containers(self) -> None:
+        record = DecompositionDecisionRecord(
+            node_id="n1",
+            source=DecompositionSource.BOUNCE,
+            disposition=DecompositionDisposition.UNKNOWN,
+        ).to_dict()
+
+        assert DecompositionDecisionRecord.from_dict(MappingProxyType(record)) is None
+        record["reasons"] = ()
+        assert DecompositionDecisionRecord.from_dict(record) is None
+
+    @pytest.mark.parametrize("mutation", ["oversized_reason", "normalized_node_id"])
+    def test_non_canonical_durable_decision_fails_closed(self, mutation: str) -> None:
+        record = DecompositionDecisionRecord(
+            node_id="n1",
+            source=DecompositionSource.BOUNCE,
+            disposition=DecompositionDisposition.UNKNOWN,
+        ).to_dict()
+        if mutation == "oversized_reason":
+            record["reasons"] = ["r" * 241]
+        else:
+            record["node_id"] = " n1 "
+
+        assert DecompositionDecisionRecord.from_dict(record) is None
+
     def test_records_are_frozen(self) -> None:
         record = DecompositionDecisionRecord(
             node_id="n1",
@@ -132,8 +168,33 @@ class TestEnumsAndSerialization:
 
 
 class TestTrustInvariant:
+    def test_trustworthy_bounce_split_requires_too_big_cause_on_construct_and_parse(self) -> None:
+        with pytest.raises(ValueError, match="TOO_BIG"):
+            DecompositionDecisionRecord(
+                node_id="n1",
+                source=DecompositionSource.BOUNCE,
+                disposition=DecompositionDisposition.SPLIT,
+                cause=BounceCause.ENVIRONMENT,
+                children=_children(),
+                structural_status=StructuralCheckStatus.PASSED,
+                semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                trustworthy=True,
+            )
+
+        payload = DecompositionDecisionRecord(
+            node_id="n1",
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.SPLIT,
+            children=_children(),
+            structural_status=StructuralCheckStatus.PASSED,
+            semantic_status=SemanticAttestationStatus.ESTABLISHED,
+            trustworthy=True,
+        ).to_dict()
+        payload.update(source="bounce", cause="ENVIRONMENT")
+        assert DecompositionDecisionRecord.from_dict(payload) is None
+
     def test_trust_requires_split_statuses_children_and_low_repair_count(self) -> None:
-        with pytest.raises(ValueError, match="trustworthy split"):
+        with pytest.raises(ValueError, match="repair_count"):
             DecompositionDecisionRecord(
                 node_id="n1",
                 source=DecompositionSource.PREFLIGHT,
@@ -143,6 +204,24 @@ class TestTrustInvariant:
                 semantic_status=SemanticAttestationStatus.ESTABLISHED,
                 repair_count=2,
                 trustworthy=True,
+            )
+
+    @pytest.mark.parametrize("repair_count", [-1, 2, 10_000])
+    def test_every_decision_bounds_repair_count(self, repair_count: int) -> None:
+        with pytest.raises(ValueError, match="repair_count"):
+            DecompositionDecisionRecord(
+                node_id="n1",
+                source=DecompositionSource.BOUNCE,
+                disposition=DecompositionDisposition.ESCALATED,
+                repair_count=repair_count,
+            )
+
+    def test_durable_decision_bounds_node_identity(self) -> None:
+        with pytest.raises(ValueError, match="node_id"):
+            DecompositionDecisionRecord(
+                node_id="n" * 513,
+                source=DecompositionSource.BOUNCE,
+                disposition=DecompositionDisposition.UNKNOWN,
             )
 
     def test_trusted_split_accepts_repair_count_one(self) -> None:
@@ -218,6 +297,29 @@ class TestProposalValidation:
         assert decision.structural_status is StructuralCheckStatus.PASSED
         assert decision.semantic_status is SemanticAttestationStatus.NOT_RUN
         assert decision.trustworthy is False
+
+    def test_proposal_requires_canonical_json_containers(self) -> None:
+        payload = _proposal_payload()
+
+        assert parse_decomposition_proposal(MappingProxyType(payload)) is None
+        payload["children"] = tuple(payload["children"])  # type: ignore[arg-type]
+        assert parse_decomposition_proposal(payload) is None
+
+    @pytest.mark.parametrize("mutation", ["uncovered_parent", "empty_verification"])
+    def test_proposal_value_object_cannot_bypass_structural_requirements(
+        self, mutation: str
+    ) -> None:
+        payload = _proposal_payload()
+        if mutation == "uncovered_parent":
+            payload["covers_parent"] = False
+        else:
+            children = payload["children"]
+            assert isinstance(children, list)
+            child = children[0]
+            assert isinstance(child, dict)
+            child["verification_hint"] = ""
+
+        assert DecompositionProposal.from_dict(payload) is None
 
     def test_rejects_duplicate_normalized_children(self) -> None:
         payload = _proposal_payload()
@@ -304,6 +406,20 @@ class TestProposalValidation:
         first = children[0]
         assert isinstance(first, dict)
         first["description"] = "x" * 501
+        assert parse_decomposition_proposal(payload) is None
+
+    @pytest.mark.parametrize("target", ["proposal", "child"])
+    def test_rejects_unknown_proposal_semantics(self, target: str) -> None:
+        payload = _proposal_payload()
+        if target == "proposal":
+            payload["mece_verified"] = True
+        else:
+            children = payload["children"]
+            assert isinstance(children, list)
+            first = children[0]
+            assert isinstance(first, dict)
+            first["exclusive"] = True
+
         assert parse_decomposition_proposal(payload) is None
 
 

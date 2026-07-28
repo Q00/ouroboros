@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle, SkillDispatchHandler
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    ResolvedWorkerCwd,
+    RuntimeHandle,
+    SkillDispatchHandler,
+    resolve_worker_cwd,
+    worker_cwd_failure_message,
+)
 from ouroboros.router.types import Resolved
 
 log = get_logger(__name__)
@@ -27,11 +33,11 @@ class CodexCommandDispatcher:
     def __init__(
         self,
         *,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         runtime_backend: str = "codex",
         llm_backend: str | None = None,
     ) -> None:
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
         self._server: MCPServerAdapter | None = None
@@ -171,6 +177,14 @@ class CodexCommandDispatcher:
         current_handle: RuntimeHandle | None = None,
     ) -> tuple[AgentMessage, ...] | None:
         """Dispatch an intercepted command to its backing Ouroboros MCP tool."""
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=current_handle,
+        )
+        if cwd_failure is not None:
+            return (cwd_failure,)
+
         tool_arguments = self._build_tool_arguments(intercept, current_handle)
         try:
             result = await self._get_server().call_tool(
@@ -224,7 +238,7 @@ class CodexCommandDispatcher:
 
 def create_codex_command_dispatcher(
     *,
-    cwd: str | Path | None = None,
+    cwd: str | Path | ResolvedWorkerCwd | None = None,
     runtime_backend: str = "codex",
     llm_backend: str | None = None,
 ) -> SkillDispatchHandler:

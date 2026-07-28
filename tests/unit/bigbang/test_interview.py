@@ -1024,6 +1024,24 @@ class TestInterviewEngineListInterviews:
                 assert interview["rounds"] == 3
 
     @pytest.mark.asyncio
+    async def test_list_interviews_without_llm_adapter(self, tmp_path: Path) -> None:
+        """list_interviews works without an llm_adapter (read-only command).
+
+        Regression test for #1746: `ouroboros interview list` should not
+        require the optional LiteLLM dependency because listing only reads
+        persisted JSON state and never calls the LLM.
+        """
+        engine = InterviewEngine(state_dir=tmp_path)
+
+        state = InterviewState(interview_id="solo", initial_context="ctx")
+        await engine.save_state(state)
+
+        interviews = await engine.list_interviews()
+
+        assert len(interviews) == 1
+        assert interviews[0]["interview_id"] == "solo"
+
+    @pytest.mark.asyncio
     async def test_list_interviews_sorted_by_updated(self, tmp_path: Path) -> None:
         """list_interviews sorts by updated_at descending."""
         mock_adapter = MagicMock()

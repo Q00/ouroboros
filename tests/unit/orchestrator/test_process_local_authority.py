@@ -17,6 +17,7 @@ import yaml
 
 from ouroboros.cli.commands.cancel import _cancel_session
 from ouroboros.core.errors import PersistenceError
+from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -56,7 +57,12 @@ from ouroboros.orchestrator.runner import (
     is_cancellation_requested,
     request_cancellation,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import (
+    SESSION_START_IDENTITY_PROGRESS_KEY,
+    SessionRepository,
+    SessionStatus,
+    SessionTracker,
+)
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
 from ouroboros.persistence.uow import UnitOfWork
@@ -323,6 +329,127 @@ async def test_precreated_session_rejects_durable_nested_input_with_stale_finger
         runner._retire_process_local_authority(
             session_id=prepared.value.session_id,
             execution_id=prepared.value.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("anchor_mutation", ["partial", "malformed", "conflicting"])
+async def test_precreated_session_rejects_reconstructed_durable_project_anchor_before_effects(
+    tmp_path: Path,
+    anchor_mutation: str,
+) -> None:
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'prepared-anchor-{anchor_mutation}.db'}"
+    )
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-prepared-anchor-{anchor_mutation}",
+        session_id=f"session-prepared-anchor-{anchor_mutation}",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    reconstruct = runner._reconstruct_precreated_durable_tracker
+    conflicting_root = tmp_path / "conflicting-project"
+    conflicting_root.mkdir()
+
+    async def reconstruct_with_corrupt_anchor(receipt: SessionTracker):
+        durable = await reconstruct(receipt)
+        assert durable.is_ok
+        progress = deepcopy(dict(durable.value.progress))
+        raw_anchor = progress[SESSION_START_IDENTITY_PROGRESS_KEY]
+        assert isinstance(raw_anchor, dict)
+        anchor = dict(raw_anchor)
+        if anchor_mutation == "partial":
+            anchor.pop("project_id")
+        elif anchor_mutation == "malformed":
+            anchor["project_root"] = 42
+        else:
+            anchor.update(ProjectIdentity.from_root(conflicting_root).to_event_data())
+        progress[SESSION_START_IDENTITY_PROGRESS_KEY] = anchor
+        return Result.ok(durable.value.with_progress(progress))
+
+    try:
+        with patch.object(
+            runner,
+            "_reconstruct_precreated_durable_tracker",
+            side_effect=reconstruct_with_corrupt_anchor,
+        ):
+            result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert result.is_err
+        assert "project identity" in result.error.message
+        assert runtime.execute_calls == 0
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+async def test_precreated_session_rejects_reconstructed_durable_contract_mismatch(
+    tmp_path: Path,
+) -> None:
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'prepared-durable-contract.db'}")
+    await event_store.initialize()
+    runtime = _SuccessfulRuntime()
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id="exec-prepared-durable-contract",
+        session_id="session-prepared-durable-contract",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    reconstruct = runner._reconstruct_precreated_durable_tracker
+
+    async def reconstruct_with_corrupt_contract(receipt: SessionTracker):
+        durable = await reconstruct(receipt)
+        assert durable.is_ok
+        progress = deepcopy(dict(durable.value.progress))
+        durable_contract = deepcopy(progress[EXECUTION_CONTRACT_PROGRESS_KEY])
+        durable_contract["execution_inputs"]["context_pack_fragment"] += "\nchanged"
+        progress[EXECUTION_CONTRACT_PROGRESS_KEY] = durable_contract
+        return Result.ok(durable.value.with_progress(progress))
+
+    try:
+        with patch.object(
+            runner,
+            "_reconstruct_precreated_durable_tracker",
+            side_effect=reconstruct_with_corrupt_contract,
+        ):
+            result = await runner.execute_precreated_session(_seed(), tracker, parallel=False)
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "prepared_execution_contract_mismatch"
+        assert runtime.execute_calls == 0
+        durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
         )
         await event_store.close()
 
@@ -1917,10 +2044,15 @@ async def test_resume_invalid_workspace_returns_domain_error_and_releases_claim(
 
 
 @pytest.mark.asyncio
-async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
+@pytest.mark.parametrize("replacement_kind", ("file", "missing"))
+async def test_pre_anchor_resume_invalid_workspace_cleans_claim_before_retry(
     tmp_path: Path,
+    replacement_kind: str,
 ) -> None:
-    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'git-unavailable.db'}")
+    """Historical identity failures stay inside the public resume lifecycle."""
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{tmp_path / f'pre-anchor-{replacement_kind}.db'}"
+    )
     await event_store.initialize()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1929,8 +2061,99 @@ async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
     runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
     prepared = await runner.prepare_session(
         _seed(),
-        execution_id="exec-git-unavailable",
-        session_id="session-git-unavailable",
+        execution_id=f"exec-pre-anchor-{replacement_kind}",
+        session_id=f"session-pre-anchor-{replacement_kind}",
+    )
+    assert prepared.is_ok
+    tracker = prepared.value
+    contract = tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY]
+    paused = await runner._session_repo.mark_paused(tracker.session_id, reason="test pause")
+    assert paused.is_ok and paused.value is True
+    historical = await runner._session_repo.reconstruct_session(tracker.session_id)
+    assert historical.is_ok
+    historical_progress = deepcopy(historical.value.progress)
+    start_identity = dict(historical_progress[SESSION_START_IDENTITY_PROGRESS_KEY])
+    for key in ("project_id", "project_root", "workspace_path"):
+        start_identity.pop(key)
+    historical_progress[SESSION_START_IDENTITY_PROGRESS_KEY] = start_identity
+    historical_tracker = replace(historical.value, progress=historical_progress)
+    reconstruct_session = runner._session_repo.reconstruct_session
+    first_reconstruction = True
+
+    async def reconstruct_historical_then_durable(session_id: str):
+        nonlocal first_reconstruction
+        if first_reconstruction:
+            first_reconstruction = False
+            return Result.ok(historical_tracker)
+        return await reconstruct_session(session_id)
+
+    workspace.rmdir()
+    if replacement_kind == "file":
+        workspace.write_text("not a directory", encoding="utf-8")
+
+    try:
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            side_effect=reconstruct_historical_then_durable,
+        ):
+            first = await runner.resume_session(tracker.session_id, _seed())
+            second = await runner.resume_session(tracker.session_id, _seed())
+
+        assert first.is_err
+        assert first.error.message == "Cannot resolve project identity"
+        assert second.is_err
+        assert second.error.details.get("resume_blocked") != "process_local_execution_in_progress"
+        assert runtime.execute_calls == 0
+        durable = await reconstruct_session(tracker.session_id)
+        assert durable.is_ok and durable.value.status is SessionStatus.FAILED
+        assert not runner._has_live_process_local_authority(
+            tracker.session_id,
+            tracker.execution_id,
+            contract,
+        )
+        assert not heartbeat.is_holder_alive(tracker.session_id)
+    finally:
+        runner._retire_process_local_authority(
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        await event_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "patch_target", "failure"),
+    [
+        (
+            "git-unavailable",
+            "ouroboros.core.project_identity.subprocess.run",
+            FileNotFoundError("git"),
+        ),
+        (
+            "filesystem-unavailable",
+            "ouroboros.core.project_identity.Path.stat",
+            OSError("mount"),
+        ),
+    ],
+)
+async def test_resume_identity_unavailable_stays_paused_and_releases_claim_for_retry(
+    tmp_path: Path,
+    case: str,
+    patch_target: str,
+    failure: OSError,
+) -> None:
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'{case}.db'}")
+    await event_store.initialize()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = _CountingRuntime()
+    runtime.working_directory = str(workspace)
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+    prepared = await runner.prepare_session(
+        _seed(),
+        execution_id=f"exec-{case}",
+        session_id=f"session-{case}",
     )
     assert prepared.is_ok
     tracker = prepared.value
@@ -1939,14 +2162,28 @@ async def test_resume_git_unavailable_stays_paused_and_releases_claim_for_retry(
     assert paused.is_ok and paused.value is True
 
     try:
-        with patch(
-            "ouroboros.core.project_identity.subprocess.run",
-            side_effect=FileNotFoundError("git"),
-        ):
+        if case == "filesystem-unavailable":
+            original_stat = Path.stat
+
+            def selective_stat(
+                path: Path,
+                *,
+                follow_symlinks: bool = True,
+            ) -> os.stat_result:
+                if path == workspace:
+                    raise failure
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            unavailable = patch(patch_target, new=selective_stat)
+        else:
+            unavailable = patch(patch_target, side_effect=failure)
+        with unavailable:
             result = await runner.resume_session(tracker.session_id, _seed())
 
         assert result.is_err
-        assert result.error.details["resume_blocked"] == "project_identity_unavailable"
+        assert result.error.details.get("resume_blocked") == "project_identity_unavailable", (
+            result.error
+        )
         assert result.error.details["retryable"] is True
         assert runtime.execute_calls == 0
         durable = await SessionRepository(event_store).reconstruct_session(tracker.session_id)
@@ -5560,6 +5797,46 @@ async def test_prepare_rolls_back_when_heartbeat_acquire_fails() -> None:
     assert result.error.message == "Cannot establish process-local execution liveness lease"
     assert (session_id, execution_id) not in runner._process_local_authorities
     assert not heartbeat.is_holder_alive(session_id)
+
+
+@pytest.mark.asyncio
+async def test_prepare_cwd_drift_before_registration_releases_every_owner(tmp_path: Path) -> None:
+    """Final publication validation precedes every process-local ownership claim."""
+    runner = _runner()
+    workspace = _existing_task_workspace(tmp_path, "prepare-cwd-drift")
+    _bind_task_workspace(runner, workspace)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    session_id = "session-prepare-cwd-drift"
+    execution_id = "exec-prepare-cwd-drift"
+    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
+    build_contract = runner._build_new_session_contract
+
+    def build_then_drift(**kwargs: object):
+        contract = build_contract(**kwargs)
+        runner._adapter.working_directory = str(replacement)
+        return contract
+
+    with (
+        patch.object(runner, "_build_new_session_contract", side_effect=build_then_drift),
+        patch.object(runner._session_repo, "create_session", AsyncMock()) as create_session,
+        patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+    ):
+        result = await runner.prepare_session(
+            _seed(),
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
+    assert result.is_err
+    assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+    create_session.assert_not_awaited()
+    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+    assert (session_id, execution_id) not in runner._process_local_authorities
+    assert not heartbeat.is_holder_alive(session_id)
+    assert not runner._task_workspace_reservations
+    assert not runner._task_workspace_users
+    release_lock_mock.assert_called_once_with(workspace.lock_path)
 
 
 @pytest.mark.asyncio

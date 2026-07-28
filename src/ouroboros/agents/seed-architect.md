@@ -50,7 +50,7 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 The data structure/domain model for this work:
 - **ONTOLOGY_NAME**: A name for the domain model
 - **ONTOLOGY_DESCRIPTION**: What the ontology represents
-- **ONTOLOGY_FIELDS**: Key fields in format: name:type:description (pipe-separated)
+- **ONTOLOGY_FIELDS**: Key fields as a single-line JSON array of objects with "name", "type" (string, number, boolean, array, object), and "description"
 
 Field types should be one of: string, number, boolean, array, object
 
@@ -65,7 +65,7 @@ Format: single-line JSON array of objects with "name", "description", and "crite
 ### 7. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
-- **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
+- **CONTEXT_REFERENCES**: single-line JSON array of objects with "path", "role" (primary or reference), and optional "summary"
 - **EXISTING_PATTERNS**: Key patterns that must be followed (single-line JSON array of strings)
 - **EXISTING_DEPENDENCIES**: Key dependencies to reuse (single-line JSON array of strings)
 
@@ -81,11 +81,11 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
 EVALUATION_PRINCIPLES: [{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}, ...]
 EXIT_CONDITIONS: [{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}, ...]
 PROJECT_TYPE: greenfield|brownfield
-CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
+CONTEXT_REFERENCES: [{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}, ...]
 EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]
 EXISTING_DEPENDENCIES: ["<dep 1>", "<dep 2>", ...]
 ```

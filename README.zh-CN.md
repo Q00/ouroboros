@@ -83,11 +83,11 @@ claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@o
 **pip / uv / pipx**：
 ```bash
 pip install ouroboros-ai                # 基础
-pip install ouroboros-ai[claude]        # + Claude Code 依赖
-pip install ouroboros-ai[litellm]       # + LiteLLM 多 provider；Python 3.12-3.13
-pip install ouroboros-ai[mcp]           # + MCP server / client 支持
-pip install ouroboros-ai[tui]           # + Textual 终端 UI
-pip install ouroboros-ai[all]           # 全部 (claude + litellm + mcp + tui + dashboard)；Python 3.12-3.13
+pip install 'ouroboros-ai[claude]'        # + Claude Code 依赖
+pip install 'ouroboros-ai[litellm]'       # + LiteLLM 多 provider；Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'           # + MCP server / client 支持
+pip install 'ouroboros-ai[tui]'           # + Textual 终端 UI
+pip install 'ouroboros-ai[all]'           # 全部 (claude + litellm + mcp + tui + dashboard)；Python 3.12-3.13
 ouroboros setup                         # 配置运行时
 ```
 

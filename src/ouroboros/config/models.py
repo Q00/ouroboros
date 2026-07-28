@@ -222,9 +222,9 @@ class ExecutionConfig(BaseModel, frozen=True):
             alt-harness redispatch may fan out to multiple runtimes in parallel,
             first-passing-verification wins (PR-X N-version tournament, opt-in).
         decomposition_mode: Controls where AC decomposition is allowed:
-            ``preflight`` uses the configured preflight decomposition path,
-            ``bounce_only`` only decomposes after an atomic AC bounces, and
-            ``off`` disables decomposition.
+            ``bounce_only`` only decomposes after an evidence-backed too-big
+            bounce, and ``off`` disables decomposition. Legacy ``preflight``
+            configuration is migrated to ``bounce_only`` at load time.
         context_pack: Whether to append a deterministic repo context pack
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
@@ -240,9 +240,15 @@ class ExecutionConfig(BaseModel, frozen=True):
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = True
     n_version_tournament: bool = False
-    decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight"
+    decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+
+    @field_validator("decomposition_mode", mode="before")
+    @classmethod
+    def _migrate_legacy_decomposition_mode(cls, value: object) -> object:
+        """Retire pre-execution splitting without breaking stored config files."""
+        return "bounce_only" if value == "preflight" else value
 
     @field_validator("project_guidance")
     @classmethod

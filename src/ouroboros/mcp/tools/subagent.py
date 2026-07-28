@@ -49,6 +49,7 @@ from ouroboros.backends.capabilities import (
     SubagentDispatchMode,
     resolve_subagent_dispatch,
 )
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -2717,11 +2718,22 @@ class FanoutRegistry:
             synthesizer_input=synthesizer_input,
         )
         try:
-            self._dir.mkdir(parents=True, exist_ok=True)
-            self._path(resolved_id).write_text(
+            # A fan-out record carries the producer's ``synthesizer_input``
+            # verbatim — the code-investigation request, the persona panel
+            # entries — so it is the same artifact class as the transcript it
+            # was derived from and takes the same writer. Registration stays
+            # best-effort: an unconfirmed durability flush is logged like every
+            # other migrated writer, and the caller still gets its id.
+            secure_directory(self._dir)
+            if not write_owner_only(
+                self._path(resolved_id),
                 json.dumps(record.to_dict(), ensure_ascii=False),
-                encoding="utf-8",
-            )
+            ):
+                log.warning(
+                    "fanout.registry.durability_unconfirmed",
+                    fanout_id=resolved_id,
+                    kind=kind,
+                )
         except OSError as exc:
             log.warning(
                 "fanout.registry.persist_failed",

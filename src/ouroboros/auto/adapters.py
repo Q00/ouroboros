@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import structlog
 import yaml
 
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
@@ -35,6 +37,8 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.resilience.lateral import ThinkingPersona
+
+log = structlog.get_logger(__name__)
 
 _SAFE_SEED_ID_FILENAME_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -1108,16 +1112,32 @@ def load_seed(path: str | Path) -> Seed:
 
 
 def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
-    """Persist an auto-generated Seed in the standard seed directory."""
+    """Persist an auto-generated Seed in the standard seed directory.
+
+    An auto-generated Seed carries the same requirement content as one written
+    by the interview path — including answers confirmed from a data lookup —
+    so it takes the same owner-only primitive. Reached through Auto
+    rather than through ``ouroboros.bigbang``, this writer was the one Seed
+    path still landing at the umask default, typically ``0644``.
+
+    The directory keeps its own permissions: ``seeds_dir`` may be a shared
+    project directory the caller chose, and narrowing it is not this package's
+    to do.
+    """
     directory = seeds_dir or (Path.home() / ".ouroboros" / "seeds")
     directory.mkdir(parents=True, exist_ok=True)
     seed_id = _safe_seed_id_for_filename(seed.metadata.seed_id)
     path = directory / f"{seed_id}{_SEED_FILENAME_SUFFIX}"
     _require_path_inside_directory(path, directory)
-    path.write_text(
+    if not write_owner_only(
+        path,
         yaml.dump(seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    ):
+        # Reported like every other migrated artifact writer: the
+        # file exists but the directory flush was unconfirmed, so a crash may
+        # still lose it — the caller's success return stays, the risk is
+        # visible in the log.
+        log.warning("auto.seed_save_durability_uncertain", path=str(path))
     return str(path)
 
 

@@ -123,6 +123,10 @@ from ouroboros.orchestrator.decomposition_params import (
     params_from_profile,
 )
 from ouroboros.orchestrator.decomposition_policy import (
+    MAX_EVIDENCE_REF_CHARS,
+    MAX_EVIDENCE_REF_COUNT,
+    MAX_REASON_CHARS,
+    MAX_TRACE_SUMMARY_CHARS,
     BounceCause,
     DecompositionDecisionRecord,
     DecompositionDisposition,
@@ -376,6 +380,7 @@ from ouroboros.orchestrator.synapse import (
     render_inform_signal_prompt,
 )
 from ouroboros.orchestrator.verifier import (
+    RetryAdmission,
     Verifier,
     VerifierContractError,
     VerifierVerdict,
@@ -410,6 +415,99 @@ def _composite_completion_event_sentinel(root_ac_count: int) -> int:
     # their query sentinel from that producer population instead of imposing a
     # smaller execution-wide constant on otherwise valid Seeds.
     return root_ac_count + 1
+
+
+def _decomposition_decision_event_sentinel(root_ac_count: int) -> int:
+    """Return the max-plus-one durable decision population for one Seed.
+
+    A historical PREFLIGHT atomic decision may transition once to the live
+    BOUNCE decision after migration. No other finalized decision can change.
+    """
+
+    if type(root_ac_count) is not int or root_ac_count < 0:
+        raise ValueError("decomposition decision root population is invalid")
+    node_population = root_ac_count * (MAX_DECOMPOSITION_REPLAY_NODES + 1)
+    return node_population * 2 + 1
+
+
+_DECOMPOSITION_DECISION_RECORD_KEYS = frozenset(
+    {
+        "schema_version",
+        "node_id",
+        "source",
+        "disposition",
+        "cause",
+        "reasons",
+        "evidence_refs",
+        "children",
+        "structural_status",
+        "semantic_status",
+        "repair_count",
+        "trustworthy",
+        "compromise_reason",
+    }
+)
+_DECOMPOSITION_DECISION_EVENT_KEYS = frozenset(
+    {
+        "identity_model",
+        "schema_version",
+        "node_id",
+        "parent_node_id",
+        "legacy_node_id",
+        "legacy_parent_node_id",
+        "legacy_node_aliases",
+        "legacy_parent_node_aliases",
+        "root_ac_index",
+        "root_ac_number",
+        "path",
+        "display_path",
+        "depth",
+        "ordinal",
+        "node_kind",
+        "execution_id",
+        "session_id",
+        "mode",
+        "child_count",
+        "source",
+        "disposition",
+        "cause",
+        "reasons",
+        "evidence_refs",
+        "children",
+        "structural_status",
+        "semantic_status",
+        "repair_count",
+        "trustworthy",
+        "compromise_reason",
+    }
+)
+_BOUNCE_CLASSIFIED_EVENT_KEYS = frozenset(
+    {
+        "identity_model",
+        "schema_version",
+        "node_id",
+        "parent_node_id",
+        "legacy_node_id",
+        "legacy_parent_node_id",
+        "legacy_node_aliases",
+        "legacy_parent_node_aliases",
+        "root_ac_index",
+        "root_ac_number",
+        "path",
+        "display_path",
+        "depth",
+        "ordinal",
+        "node_kind",
+        "execution_id",
+        "session_id",
+        "cause",
+        "rationale",
+        "failure_class",
+        "retry_admission",
+        "evidence_refs",
+        "trace_summary",
+    }
+)
 
 
 _PARALLEL_ROUTE_PAUSE_KEYS = frozenset(
@@ -505,6 +603,14 @@ _PARALLEL_COMPOSITE_PAUSE_LEAF_KEYS = frozenset(
         "capsule_fingerprint",
     }
 )
+_DECOMPOSITION_ATTESTATION_KEYS = frozenset(
+    {
+        "coverage_established",
+        "non_overlap_established",
+        "simpler_units_established",
+    }
+)
+_BOUNCE_CLASSIFICATION_KEYS = frozenset({"cause", "has_remaining_scope"})
 _PARALLEL_ROUTE_JUDGMENT_KEYS = frozenset(
     {
         "execution_id",
@@ -539,6 +645,19 @@ class _PartialCompositeResumeState:
     paused_runtime_scope_id: str | None
     paused_dispatch_id: str | None
     paused_capsule_fingerprint: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _DurableBounceReplayState:
+    """Validated TOO_BIG phase persisted before decomposition provider effects."""
+
+    cause: BounceCause
+    rationale: str
+    failure_class: str | None
+    retry_admission: str | None
+    evidence_refs: tuple[str, ...]
+    trace_summary: str
+    event_key: tuple[datetime, str] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1721,12 +1840,24 @@ def _structured_literal(value: str) -> str | None:
 
 
 # Decomposition constants
-# Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
+# A bounce at max_decomposition_depth escalates and records the unsplit compromise.
 MIN_SUB_ACS = MIN_DECOMPOSITION_CHILDREN
 MAX_SUB_ACS = MAX_DECOMPOSITION_CHILDREN
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
 _VERIFY_OUTPUT_TAIL_CHARS = 2000  # How much verify-command output to attach
+_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+_WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -2757,7 +2888,7 @@ class ParallelACExecutor:
         event_store: EventStore,
         console: Console | None = None,
         enable_decomposition: bool = True,
-        decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight",
+        decomposition_mode: Literal["bounce_only", "off"] = "bounce_only",
         max_concurrent: int = 3,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
@@ -2790,8 +2921,10 @@ class ParallelACExecutor:
             event_store: Event store for progress tracking.
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
-            decomposition_mode: Whether decomposition runs before execution,
-                only after a classified bounce, or not at all.
+            decomposition_mode: Whether decomposition runs only after a
+                classified bounce or not at all. Historical ``preflight``
+                records remain readable, but no live constructor can authorize
+                a new pre-execution decomposition effect.
             max_concurrent: Maximum number of concurrent AC executions.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
@@ -2846,10 +2979,10 @@ class ParallelACExecutor:
         )
         self._event_store = event_store
         self._console = console or Console()
-        if decomposition_mode not in {"preflight", "bounce_only", "off"}:
+        if decomposition_mode not in {"bounce_only", "off"}:
             msg = f"Unsupported decomposition_mode: {decomposition_mode!r}"
             raise ValueError(msg)
-        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
+        self._decomposition_mode: Literal["bounce_only", "off"] = (
             "off" if not enable_decomposition else decomposition_mode
         )
         self._enable_decomposition = self._decomposition_mode != "off"
@@ -2946,6 +3079,8 @@ class ParallelACExecutor:
         )
         self._checkpoint_store = checkpoint_store
         self._decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
+        self._event_owned_decomposition_decisions: dict[str, DecompositionDecisionRecord] = {}
+        self._pending_bounce_decompositions: dict[str, _DurableBounceReplayState] = {}
         self._partial_composite_resumes: dict[str, _PartialCompositeResumeState] = {}
         self._parallel_route_resumes: dict[int, _ParallelRouteResumeState] = {}
         self._execution_counters_lock = asyncio.Lock()
@@ -3943,6 +4078,20 @@ class ParallelACExecutor:
         resume_from_level = 0
         recoverable_route_pause = False
 
+        # Restore the durable bounce phase before its consuming finalized event.
+        # Both precede checkpoints, route projections, and every provider entry.
+        if self._decomposition_mode == "bounce_only":
+            await self._restore_bounce_classifications(
+                seed=seed,
+                execution_id=execution_id,
+                session_id=session_id,
+            )
+        await self._restore_finalized_decomposition_decisions(
+            seed=seed,
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
         # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
             try:
@@ -4021,14 +4170,10 @@ class ParallelACExecutor:
                         saved_contexts = cp.state.get("level_contexts", [])
                         if saved_contexts:
                             level_contexts = deserialize_level_contexts(saved_contexts)
-                        raw_decisions = cp.state.get("decomposition_decisions", {})
-                        if isinstance(raw_decisions, Mapping):
-                            for raw_node_id, raw_record in raw_decisions.items():
-                                if not isinstance(raw_node_id, str):
-                                    continue
-                                restored = DecompositionDecisionRecord.from_dict(raw_record)
-                                if restored is not None and restored.node_id == raw_node_id:
-                                    self._decomposition_decisions[raw_node_id] = restored
+                        self._restore_checkpoint_decomposition_decisions(
+                            checkpoint_state.get("decomposition_decisions", {}),
+                            root_ac_count=total_acs,
+                        )
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
@@ -4122,6 +4267,11 @@ class ParallelACExecutor:
                             session_id=session_id,
                             execution_id=execution_id,
                         )
+            except RuntimeError:
+                # A matching checkpoint is durable execution authority.  Once
+                # recognized, malformed state must stop before provider entry;
+                # treating it as a cache miss would redispatch completed work.
+                raise
             except Exception as e:
                 log.warning(
                     "parallel_executor.recovery.failed",
@@ -5039,33 +5189,56 @@ class ParallelACExecutor:
         return False
 
     @staticmethod
-    def _workspace_content_digest(cwd: str) -> str | None:
-        """Hash the observable workspace tree for coordinator mutation checks.
+    def _workspace_content_digest(
+        cwd: str,
+        *,
+        expected_artifacts: tuple[str, ...] = (),
+    ) -> str | None:
+        """Hash acceptance-relevant workspace state for mutation checks.
 
-        The digest intentionally excludes runtime/cache directories that are
-        not part of the task workspace contract.  Read failures return
-        ``None`` so the caller fails closed instead of trusting pre-coordinator
-        evidence it could not compare.
+        Runtime/cache paths are excluded unless they overlap an explicitly
+        declared expected artifact. Bytecode suffix exclusions apply only to
+        regular files: same-named directories and symlinks remain observable.
+        Read failures return ``None`` so the caller fails closed instead of
+        trusting evidence it could not compare.
         """
-        ignored_directories = {
-            ".git",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            ".venv",
-            "node_modules",
-        }
         try:
             root = Path(cwd).expanduser().resolve(strict=False)
             if not root.is_dir():
                 return hashlib.sha256(
                     f"missing-workspace\0{root}".encode("utf-8", "surrogateescape")
                 ).hexdigest()
+
+            declared_paths: set[Path] = set()
+            for artifact in expected_artifacts:
+                # Keep both the lexical path and its resolved in-workspace target.
+                # The former binds symlink artifacts themselves; the latter keeps
+                # an artifact reached through an in-workspace symlink observable.
+                candidate = Path(os.path.abspath(root / artifact))
+                for declared in (candidate, candidate.resolve(strict=False)):
+                    if declared.is_relative_to(root):
+                        declared_paths.add(declared.relative_to(root))
+
+            def is_declared_contract_path(relative: Path) -> bool:
+                return any(
+                    relative == declared
+                    or relative in declared.parents
+                    or declared in relative.parents
+                    for declared in declared_paths
+                )
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
-                if any(part in ignored_directories for part in relative.parts):
+                declared_contract_path = is_declared_contract_path(relative)
+                if (
+                    any(
+                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
+                        for part in relative.parts
+                    )
+                    and not declared_contract_path
+                ):
                     continue
                 try:
                     stat = path.lstat()
@@ -5084,6 +5257,11 @@ class ParallelACExecutor:
                         digest.update(b"\0")
                         digest.update(str(stat.st_mode).encode("ascii"))
                     elif path.is_file():
+                        if (
+                            path.suffix in _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES
+                            and not declared_contract_path
+                        ):
+                            continue
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
                         digest.update(b"\0")
@@ -5226,7 +5404,10 @@ class ParallelACExecutor:
                         passed=True,
                         reason=None,
                         output_tail="",
-                        workspace_digest=self._workspace_content_digest(cwd),
+                        workspace_digest=self._workspace_content_digest(
+                            cwd,
+                            expected_artifacts=spec.expected_artifacts,
+                        ),
                     ),
                 )
             )
@@ -5277,7 +5458,6 @@ class ParallelACExecutor:
             return results
 
         cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
-        final_digest = self._workspace_content_digest(cwd)
         settled: list[ACExecutionResult] = []
         individual_failures: dict[int, tuple[str, _VerifyGateOutcome | None]] = {}
 
@@ -5319,6 +5499,10 @@ class ParallelACExecutor:
                 continue
 
             missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
+            final_digest = self._workspace_content_digest(
+                cwd,
+                expected_artifacts=spec.expected_artifacts,
+            )
             if final_digest is None:
                 individual_failures[result.ac_index] = (
                     "Final workspace digest unavailable for acceptance evidence.",
@@ -5503,7 +5687,7 @@ class ParallelACExecutor:
         execution_id: str,
         session_id: str,
     ) -> DecompositionDecisionRecord:
-        """Cache and emit a finalized node decision once per distinct value."""
+        """Persist event-owned authority, then publish its runtime projection."""
         if decision.node_id != node_identity.node_id:
             decision = DecompositionDecisionRecord(
                 node_id=node_identity.node_id,
@@ -5512,17 +5696,346 @@ class ParallelACExecutor:
                 cause=decision.cause,
                 reasons=("decomposition_decision_identity_mismatch",),
             )
-        previous = self._decomposition_decisions.get(node_identity.node_id)
-        self._decomposition_decisions[node_identity.node_id] = decision
-        if previous != decision:
-            await self._event_emitter.emit_decomposition_decision_finalized(
-                execution_id=execution_id,
-                session_id=session_id,
-                mode=self._decomposition_mode,
-                node_identity=node_identity,
-                decision=decision,
+        previous = self._event_owned_decomposition_decisions.get(node_identity.node_id)
+        cached = self._decomposition_decisions.get(node_identity.node_id)
+        if cached is not None and cached != previous:
+            raise RuntimeError("decomposition cache lacks matching finalized-event authority")
+        if (
+            previous is not None
+            and previous != decision
+            and not self._is_valid_decision_transition(
+                previous,
+                decision,
             )
+        ):
+            raise RuntimeError("a finalized decomposition decision cannot change")
+        if previous == decision:
+            self._decomposition_decisions[node_identity.node_id] = decision
+            return decision
+        self._require_pending_bounce_for_finalized_decision(decision)
+        await self._event_emitter.emit_decomposition_decision_finalized(
+            execution_id=execution_id,
+            session_id=session_id,
+            mode=self._decomposition_mode,
+            node_identity=node_identity,
+            decision=decision,
+        )
+        if decision.source is DecompositionSource.BOUNCE:
+            self._pending_bounce_decompositions.pop(decision.node_id)
+        self._event_owned_decomposition_decisions[node_identity.node_id] = decision
+        self._decomposition_decisions[node_identity.node_id] = decision
         return decision
+
+    @staticmethod
+    def _is_valid_decision_transition(
+        previous: DecompositionDecisionRecord,
+        current: DecompositionDecisionRecord,
+    ) -> bool:
+        """Admit only the one historical-to-live migration transition."""
+
+        return bool(
+            previous.node_id == current.node_id
+            and previous.source is DecompositionSource.PREFLIGHT
+            and previous.disposition is not DecompositionDisposition.SPLIT
+            and current.source is DecompositionSource.BOUNCE
+        )
+
+    def _require_pending_bounce_for_finalized_decision(
+        self,
+        decision: DecompositionDecisionRecord,
+        *,
+        finalized_event_key: tuple[datetime, str] | None = None,
+    ) -> None:
+        """Bind every BOUNCE decision to its earlier durable TOO_BIG trigger."""
+
+        if decision.source is not DecompositionSource.BOUNCE:
+            return
+        pending = self._pending_bounce_decompositions.get(decision.node_id)
+        if (
+            decision.cause is not BounceCause.TOO_BIG
+            or pending is None
+            or pending.cause is not BounceCause.TOO_BIG
+            or decision.evidence_refs != pending.evidence_refs
+            or (
+                finalized_event_key is not None
+                and pending.event_key is not None
+                and pending.event_key >= finalized_event_key
+            )
+        ):
+            raise RuntimeError("BOUNCE decision lacks matching prior TOO_BIG authority")
+
+    def _publish_event_owned_decomposition_decision(
+        self,
+        decision: DecompositionDecisionRecord,
+    ) -> None:
+        """Publish authority restored from a canonical finalized event."""
+
+        previous = self._event_owned_decomposition_decisions.get(decision.node_id)
+        cached = self._decomposition_decisions.get(decision.node_id)
+        if previous is not None and previous != decision:
+            raise RuntimeError("durable decomposition decisions conflict")
+        if cached is not None and cached != decision:
+            raise RuntimeError("decomposition cache conflicts with finalized-event authority")
+        self._event_owned_decomposition_decisions[decision.node_id] = decision
+        self._decomposition_decisions[decision.node_id] = decision
+
+    def _confirm_replayed_decomposition_decision(
+        self,
+        decision: DecompositionDecisionRecord,
+    ) -> None:
+        """Confirm a cache projection without allowing it to mint authority."""
+
+        authority = self._event_owned_decomposition_decisions.get(decision.node_id)
+        if authority is None:
+            raise RuntimeError("decomposition cache lacks finalized-event authority")
+        if authority != decision:
+            raise RuntimeError("decomposition cache conflicts with finalized-event authority")
+        self._decomposition_decisions[decision.node_id] = authority
+
+    async def _restore_bounce_classifications(
+        self,
+        *,
+        seed: Seed,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Restore canonical durable TOO_BIG phases before any resumed effect."""
+
+        async for event in replay_execution_events_chronologically(
+            self._event_store,
+            execution_id=execution_id,
+            event_type="execution.decomposition.bounce_classified",
+            page_size=_PARALLEL_PAUSE_REPLAY_PAGE_SIZE,
+        ):
+            if event.type != "execution.decomposition.bounce_classified":
+                continue
+            data = event.data
+            if not _mapping_has_exact_keys(data, _BOUNCE_CLASSIFIED_EVENT_KEYS):
+                raise RuntimeError("bounce classification replay has an invalid event envelope")
+            if data.get("session_id") != session_id:
+                continue
+            raw_path = data.get("path")
+            root_ac_index = data.get("root_ac_index")
+            if (
+                data.get("execution_id") != execution_id
+                or data.get("identity_model") != "execution_node_v1"
+                or type(root_ac_index) is not int
+                or not 0 <= root_ac_index < len(seed.acceptance_criteria)
+                or type(raw_path) is not list
+                or not raw_path
+                or len(raw_path) > self._max_decomposition_depth + 1
+                or any(type(ordinal) is not int or ordinal < 0 for ordinal in raw_path)
+                or raw_path[0] != root_ac_index
+                or any(ordinal >= MAX_DECOMPOSITION_CHILDREN for ordinal in raw_path[1:])
+            ):
+                raise RuntimeError("bounce classification replay has invalid execution identity")
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id or session_id,
+                ac_index=root_ac_index,
+            )
+            for ordinal in raw_path[1:]:
+                node_identity = node_identity.child(ordinal)
+            try:
+                cause = BounceCause(data.get("cause"))
+                raw_evidence_refs = data.get("evidence_refs")
+                if type(raw_evidence_refs) is not list:
+                    raise ValueError
+                trace = DecompositionTraceSummary(
+                    summary=data.get("trace_summary"),
+                    evidence_refs=tuple(raw_evidence_refs),
+                )
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    "bounce classification replay has malformed bounded evidence"
+                ) from None
+            rationale = data.get("rationale")
+            failure_class = data.get("failure_class")
+            retry_admission = data.get("retry_admission")
+            if (
+                type(rationale) is not str
+                or not rationale
+                or rationale != redact_and_truncate_text(rationale, max_chars=MAX_REASON_CHARS)
+                or trace.summary != data.get("trace_summary")
+                or list(trace.evidence_refs) != raw_evidence_refs
+                or len(trace.evidence_refs) > MAX_EVIDENCE_REF_COUNT
+                or any(len(ref) > MAX_EVIDENCE_REF_CHARS for ref in trace.evidence_refs)
+                or len(trace.summary) > MAX_TRACE_SUMMARY_CHARS
+                or (
+                    failure_class is not None
+                    and (type(failure_class) is not str or len(failure_class) > MAX_REASON_CHARS)
+                )
+                or (
+                    retry_admission is not None
+                    and (
+                        type(retry_admission) is not str or len(retry_admission) > MAX_REASON_CHARS
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "bounce classification replay has non-canonical bounded evidence"
+                )
+            expected_payload = {
+                **node_identity.to_event_metadata(),
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "cause": cause.value,
+                "rationale": rationale,
+                "failure_class": failure_class,
+                "retry_admission": retry_admission,
+                "evidence_refs": list(trace.evidence_refs),
+                "trace_summary": trace.summary,
+            }
+            if data != expected_payload:
+                raise RuntimeError("bounce classification replay is not canonical")
+            if cause is not BounceCause.TOO_BIG:
+                continue
+            if node_identity.node_id in self._pending_bounce_decompositions:
+                raise RuntimeError(
+                    "bounce classification replay duplicated a pending TOO_BIG phase"
+                )
+            self._pending_bounce_decompositions[node_identity.node_id] = _DurableBounceReplayState(
+                cause=cause,
+                rationale=rationale,
+                failure_class=failure_class,
+                retry_admission=retry_admission,
+                evidence_refs=trace.evidence_refs,
+                trace_summary=trace.summary,
+                event_key=(event.timestamp, event.id),
+            )
+
+    async def _restore_finalized_decomposition_decisions(
+        self,
+        *,
+        seed: Seed,
+        execution_id: str,
+        session_id: str,
+    ) -> None:
+        """Replay the mandatory decision event before any resumed effect.
+
+        Checkpoints and composite projections are caches of this authority, not
+        substitutes for it.  Historical PREFLIGHT decisions remain consumable,
+        while the live constructor still exposes no preflight producer path.
+        """
+
+        event_limit = _decomposition_decision_event_sentinel(len(seed.acceptance_criteria))
+        raw_events = await self._event_store.query_execution_related_events(
+            execution_id,
+            event_type="execution.decomposition.decision_finalized",
+            limit=event_limit,
+        )
+        try:
+            events = list(raw_events)
+        except TypeError as exc:
+            raise RuntimeError(
+                "decomposition decision replay returned a non-iterable page"
+            ) from exc
+        if len(events) >= event_limit:
+            raise RuntimeError("decomposition decision replay exceeds the admitted node population")
+        seen: dict[str, DecompositionDecisionRecord] = {}
+        for event in sorted(events, key=lambda item: (item.timestamp, item.id)):
+            if event.type != "execution.decomposition.decision_finalized":
+                continue
+            data = event.data
+            if not _mapping_has_exact_keys(data, _DECOMPOSITION_DECISION_EVENT_KEYS):
+                raise RuntimeError("decomposition decision replay has an invalid event envelope")
+            if data.get("session_id") != session_id:
+                continue
+            raw_path = data.get("path")
+            root_ac_index = data.get("root_ac_index")
+            if (
+                data.get("execution_id") != execution_id
+                or data.get("identity_model") != "execution_node_v1"
+                or type(root_ac_index) is not int
+                or not 0 <= root_ac_index < len(seed.acceptance_criteria)
+                or type(raw_path) is not list
+                or not raw_path
+                or len(raw_path) > self._max_decomposition_depth + 1
+                or any(type(ordinal) is not int or ordinal < 0 for ordinal in raw_path)
+                or raw_path[0] != root_ac_index
+                or any(ordinal >= MAX_DECOMPOSITION_CHILDREN for ordinal in raw_path[1:])
+            ):
+                raise RuntimeError("decomposition decision replay has invalid execution identity")
+            node_identity = ExecutionNodeIdentity.root(
+                execution_context_id=execution_id or session_id,
+                ac_index=root_ac_index,
+            )
+            for ordinal in raw_path[1:]:
+                node_identity = node_identity.child(ordinal)
+            raw_decision = {key: data[key] for key in _DECOMPOSITION_DECISION_RECORD_KEYS}
+            decision = DecompositionDecisionRecord.from_dict(raw_decision)
+            mode = data.get("mode")
+            expected_source = (
+                DecompositionSource.PREFLIGHT
+                if mode == "preflight"
+                else DecompositionSource.BOUNCE
+                if mode == "bounce_only"
+                else None
+            )
+            if (
+                decision is None
+                or decision.node_id != node_identity.node_id
+                or decision.source is not expected_source
+                or data.get("child_count") != len(decision.children)
+                or (
+                    decision.disposition is DecompositionDisposition.SPLIT
+                    and node_identity.depth >= self._max_decomposition_depth
+                )
+            ):
+                raise RuntimeError("decomposition decision replay has invalid decision authority")
+            expected_payload = {
+                **node_identity.to_event_metadata(),
+                **decision.to_dict(),
+                "execution_id": execution_id,
+                "session_id": session_id,
+                "mode": mode,
+                "child_count": len(decision.children),
+            }
+            if data != expected_payload:
+                raise RuntimeError("decomposition decision replay is not canonical")
+            previous = seen.get(decision.node_id)
+            if previous is not None:
+                if not self._is_valid_decision_transition(previous, decision):
+                    raise RuntimeError("decomposition decision replay has an invalid transition")
+            self._require_pending_bounce_for_finalized_decision(
+                decision,
+                finalized_event_key=(event.timestamp, event.id),
+            )
+            if decision.source is DecompositionSource.BOUNCE:
+                self._pending_bounce_decompositions.pop(decision.node_id)
+            if previous is not None:
+                self._event_owned_decomposition_decisions[decision.node_id] = decision
+                self._decomposition_decisions[decision.node_id] = decision
+            else:
+                self._publish_event_owned_decomposition_decision(decision)
+            seen[decision.node_id] = decision
+
+    def _restore_checkpoint_decomposition_decisions(
+        self,
+        raw_decisions: object,
+        *,
+        root_ac_count: int,
+    ) -> None:
+        """Strictly merge the checkpoint cache into event-owned replay state."""
+
+        if type(raw_decisions) is not dict:
+            raise RuntimeError("checkpoint decomposition decisions are malformed")
+        max_population = root_ac_count * (MAX_DECOMPOSITION_REPLAY_NODES + 1)
+        if len(raw_decisions) > max_population:
+            raise RuntimeError("checkpoint decomposition decisions exceed their bound")
+        for raw_node_id, raw_record in raw_decisions.items():
+            if type(raw_node_id) is not str:
+                raise RuntimeError("checkpoint decomposition decision id is malformed")
+            restored = DecompositionDecisionRecord.from_dict(raw_record)
+            if (
+                restored is None
+                or restored.node_id != raw_node_id
+                or restored.to_dict() != raw_record
+            ):
+                raise RuntimeError("checkpoint decomposition decision is non-canonical")
+            try:
+                self._confirm_replayed_decomposition_decision(restored)
+            except RuntimeError as exc:
+                raise RuntimeError(f"checkpoint {exc}") from exc
 
     async def _execute_decomposition_children(
         self,
@@ -5730,55 +6243,62 @@ class ParallelACExecutor:
         result: ACExecutionResult,
         ac_spec: AcceptanceCriterionSpec | None,
     ) -> DecompositionTraceSummary:
-        """Project one failed attempt into bounded, secret-safe recovery evidence."""
+        """Project one failed attempt into typed counts and enums only."""
+        from ouroboros.orchestrator.failure_taxonomy import FailureClass
+
         verdict = result.atomic_verifier_verdict
-        tool_names = tuple(
-            dict.fromkeys(
-                message.tool_name
-                for message in result.messages
-                if isinstance(message.tool_name, str) and message.tool_name.strip()
-            )
-        )[:8]
-        evidence_fields = (
-            tuple(sorted(str(key) for key in result.typed_evidence.data))[:8]
-            if result.typed_evidence is not None
-            else ()
+        attempted_tool_count = sum(
+            1
+            for message in result.messages
+            if isinstance(message.tool_name, str) and bool(message.tool_name.strip())
         )
-        evidence_refs = tuple(verdict.evidence_used) if verdict is not None else ()
-        verified_artifacts: list[str] = []
-        remaining_artifacts: list[str] = []
+        evidence_field_count = (
+            len(result.typed_evidence.data)
+            if result.typed_evidence is not None and type(result.typed_evidence.data) is dict
+            else 0
+        )
+        verified_artifact_count = 0
+        remaining_artifact_count = 0
         if ac_spec is not None and ac_spec.expected_artifacts:
             cwd = Path(self._task_cwd or self._adapter.working_directory or os.getcwd())
             for artifact in ac_spec.expected_artifacts[:8]:
                 target = Path(artifact)
                 if not target.is_absolute():
                     target = cwd / target
-                (verified_artifacts if target.exists() else remaining_artifacts).append(artifact)
+                if target.exists():
+                    verified_artifact_count += 1
+                else:
+                    remaining_artifact_count += 1
 
-        failure_class = verdict.failure_class if verdict is not None else None
+        try:
+            failure_class = (
+                FailureClass(verdict.failure_class).value
+                if verdict is not None and verdict.failure_class is not None
+                else "UNKNOWN"
+            )
+        except ValueError:
+            failure_class = "UNKNOWN"
         retry_admission = (
             verdict.retry_admission.value
-            if verdict is not None and hasattr(verdict.retry_admission, "value")
-            else (str(verdict.retry_admission) if verdict is not None else None)
+            if verdict is not None and isinstance(verdict.retry_admission, RetryAdmission)
+            else "UNKNOWN"
         )
-        reasons = tuple(verdict.reasons) if verdict is not None else ()
         lines = [
-            "attempted_tools=" + (", ".join(tool_names) if tool_names else "none-recorded"),
-            "evidence_fields="
-            + (", ".join(evidence_fields) if evidence_fields else "none-recorded"),
-            "verified_artifacts="
-            + (", ".join(verified_artifacts) if verified_artifacts else "none-recorded"),
-            "remaining_artifacts="
-            + (", ".join(remaining_artifacts) if remaining_artifacts else "none-recorded"),
-            f"failure_class={failure_class or 'UNKNOWN'}",
-            f"retry_admission={retry_admission or 'UNKNOWN'}",
-            "verifier_reasons=" + ("; ".join(reasons) if reasons else "none-recorded"),
+            f"attempt_message_count={len(result.messages)}",
+            f"attempted_tool_count={attempted_tool_count}",
+            f"typed_evidence_present={result.typed_evidence is not None}",
+            f"evidence_field_count={evidence_field_count}",
+            f"verified_artifact_count={verified_artifact_count}",
+            f"remaining_artifact_count={remaining_artifact_count}",
+            f"failure_class={failure_class}",
+            f"retry_admission={retry_admission}",
+            f"verifier_reason_count={len(verdict.reasons) if verdict is not None else 0}",
             f"failure_detail_present={bool(result.error or result.final_message)}",
         ]
         if ac_spec is not None:
             lines.append(f"verify_command_present={bool(ac_spec.verify_command)}")
             lines.append(f"output_assertion_present={bool(ac_spec.output_assertion)}")
-        return summarize_decomposition_trace("\n".join(lines), evidence_refs=evidence_refs)
+        return summarize_decomposition_trace("\n".join(lines))
 
     async def _dispatch_decomposition_prompt(
         self,
@@ -5830,12 +6350,12 @@ class ParallelACExecutor:
         self,
         *,
         trace: DecompositionTraceSummary,
-    ) -> tuple[BounceCause, str, tuple[str, ...], bool]:
-        """Ask a bounded tool-free classifier only for ambiguous failure causes."""
+    ) -> tuple[BounceCause, bool]:
+        """Ask for typed cause metadata without admitting classifier prose."""
         prompt = (
             "Classify this failed execution attempt for recovery. Use only the bounded "
             "attempt evidence below. Do not infer complexity from task length or wording. "
-            "Return ONLY JSON with cause, reason, evidence_refs, and has_remaining_scope. "
+            "Return ONLY JSON with cause and has_remaining_scope. "
             "cause must be TOO_BIG, BAD_SPEC, ENVIRONMENT, MODEL, or UNKNOWN. TOO_BIG is "
             "allowed only when the trace shows attempted work and distinct parent scope "
             "still remaining.\n\n"
@@ -5847,41 +6367,28 @@ class ParallelACExecutor:
                 _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
                 prompt=prompt,
                 system_prompt="You are a conservative execution-recovery classifier.",
+                independent_session=True,
             )
             if len(response) > 10_000:
                 raise ValueError
             match = re.search(r"\{.*\}", response, re.DOTALL)
             payload = json.loads(match.group() if match is not None else response)
-            if not isinstance(payload, dict):
+            if not _mapping_has_exact_keys(payload, _BOUNCE_CLASSIFICATION_KEYS):
                 raise ValueError
-            cause = BounceCause(payload.get("cause", BounceCause.UNKNOWN.value))
-            reason = payload.get("reason", "")
-            refs = payload.get("evidence_refs", ())
-            remaining = payload.get("has_remaining_scope", False)
-            if not isinstance(reason, str):
-                reason = ""
-            if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
-                refs = []
+            assert isinstance(payload, Mapping)
+            cause = BounceCause(payload["cause"])
+            remaining = payload["has_remaining_scope"]
             if type(remaining) is not bool:
-                remaining = False
-            bounded_refs = DecompositionTraceSummary(
-                summary="",
-                evidence_refs=tuple(refs[:8]),
-            ).evidence_refs
-            return (
-                cause,
-                redact_and_truncate_text(reason, max_chars=240),
-                bounded_refs,
-                remaining,
-            )
+                raise ValueError
+            return cause, remaining
         except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
-            return BounceCause.UNKNOWN, "Bounce classifier returned no admissible cause.", (), False
+            return BounceCause.UNKNOWN, False
         except Exception as exc:
             log.warning(
                 "parallel_executor.bounce_classifier.error",
-                error=redact_and_truncate_text(str(exc), max_chars=240),
+                error_type=type(exc).__name__,
             )
-            return BounceCause.UNKNOWN, "Bounce classifier failed operationally.", (), False
+            return BounceCause.UNKNOWN, False
 
     async def _classify_bounce_result(
         self,
@@ -5913,19 +6420,13 @@ class ParallelACExecutor:
         if failure not in {None, FailureClass.SCOPE_CREEP, FailureClass.STALL}:
             return deterministic
 
-        (
-            proposed_cause,
-            reason,
-            proposed_refs,
-            has_remaining_scope,
-        ) = await self._request_bounce_classification(trace=trace)
-        refs = tuple(dict.fromkeys((*trace.evidence_refs, *proposed_refs)))
+        proposed_cause, has_remaining_scope = await self._request_bounce_classification(trace=trace)
         return classify_bounce(
             failure,
             admission,
             proposed_cause=proposed_cause,
-            proposed_reasons=(reason,),
-            evidence_refs=refs,
+            proposed_reasons=(),
+            evidence_refs=trace.evidence_refs,
             has_attempt_evidence=bool(
                 result.messages or result.typed_evidence or trace.evidence_refs
             ),
@@ -5955,9 +6456,15 @@ class ParallelACExecutor:
         investment_spec: InvestmentSpec | None = None,
     ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord | None]:
         """Run cause-matched bounce recovery before alternate-harness fallback."""
-        if self._decomposition_mode != "bounce_only" or result.success:
+        if (
+            self._decomposition_mode != "bounce_only"
+            or result.success
+            or _has_usage_limit_pause(result)
+        ):
             return None, None
-        previous = self._decomposition_decisions.get(node_identity.node_id)
+        previous = self._event_owned_decomposition_decisions.get(node_identity.node_id)
+        if self._decomposition_decisions.get(node_identity.node_id) != previous:
+            raise RuntimeError("decomposition cache lacks matching finalized-event authority")
         if previous is not None and previous.source is DecompositionSource.BOUNCE:
             return None, previous
 
@@ -5983,6 +6490,69 @@ class ParallelACExecutor:
         if not classification.allows_decomposition:
             return None, None
 
+        if node_identity.node_id in self._pending_bounce_decompositions:
+            raise RuntimeError("a node cannot own two pending TOO_BIG bounce phases")
+        pending = _DurableBounceReplayState(
+            cause=classification.cause,
+            rationale=classification.rationale,
+            failure_class=verdict.failure_class if verdict is not None else None,
+            retry_admission=retry_admission,
+            evidence_refs=classification.evidence_refs,
+            trace_summary=trace.summary,
+            event_key=None,
+        )
+        self._pending_bounce_decompositions[node_identity.node_id] = pending
+        return await self._continue_bounce_decomposition(
+            pending=pending,
+            ac_index=ac_index,
+            ac_content=ac_content,
+            session_id=session_id,
+            tools=tools,
+            tool_catalog=tool_catalog,
+            system_prompt=system_prompt,
+            seed_goal=seed_goal,
+            depth=depth,
+            execution_id=execution_id,
+            level_contexts=level_contexts,
+            retry_attempt=retry_attempt,
+            execution_counters=execution_counters,
+            node_identity=node_identity,
+            ac_spec=ac_spec,
+            start_time=start_time,
+            semantic_ac_key=semantic_ac_key,
+            investment_spec=investment_spec,
+        )
+
+    async def _continue_bounce_decomposition(
+        self,
+        *,
+        pending: _DurableBounceReplayState,
+        ac_index: int,
+        ac_content: str,
+        session_id: str,
+        tools: list[str],
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+        system_prompt: str,
+        seed_goal: str,
+        depth: int,
+        execution_id: str,
+        level_contexts: list[LevelContext] | None,
+        retry_attempt: int,
+        execution_counters: dict[str, int] | None,
+        node_identity: ExecutionNodeIdentity,
+        ac_spec: AcceptanceCriterionSpec | None,
+        start_time: datetime,
+        semantic_ac_key: str,
+        investment_spec: InvestmentSpec | None = None,
+    ) -> tuple[ACExecutionResult | None, DecompositionDecisionRecord]:
+        """Resume the post-classification phase without repeating the parent attempt."""
+
+        if (
+            pending.cause is not BounceCause.TOO_BIG
+            or self._pending_bounce_decompositions.get(node_identity.node_id) != pending
+        ):
+            raise RuntimeError("decomposition requires the node's durable TOO_BIG phase")
+
         if depth >= self._max_decomposition_depth:
             decision = await self._finalize_decomposition_decision(
                 decision=DecompositionDecisionRecord(
@@ -5990,8 +6560,8 @@ class ParallelACExecutor:
                     source=DecompositionSource.BOUNCE,
                     disposition=DecompositionDisposition.ESCALATED,
                     cause=BounceCause.TOO_BIG,
-                    reasons=("decomposition_depth_cap", classification.rationale),
-                    evidence_refs=classification.evidence_refs,
+                    reasons=("decomposition_depth_cap", pending.rationale),
+                    evidence_refs=pending.evidence_refs,
                     compromise_reason="depth_cap_forced_atomic",
                 ),
                 node_identity=node_identity,
@@ -6014,8 +6584,8 @@ class ParallelACExecutor:
             ac_spec=ac_spec,
             source=DecompositionSource.BOUNCE,
             cause=BounceCause.TOO_BIG,
-            trace_summary=trace.summary,
-            evidence_refs=classification.evidence_refs,
+            trace_summary=pending.trace_summary,
+            evidence_refs=pending.evidence_refs,
         )
         decision = self._coerce_decomposition_decision(
             decision,
@@ -6091,9 +6661,9 @@ class ParallelACExecutor:
         """Execute a single AC via the sole recursive AC execution entry point.
 
         Flow:
-        1. Ask Claude to analyze if AC needs decomposition
-        2. If decomposable → get Sub-ACs → execute in parallel
-        3. If atomic → execute directly
+        1. Execute the AC atomically.
+        2. Classify an evidence-backed failure.
+        3. Only a ``TOO_BIG`` bounce may enter verified decomposition.
 
         Args:
             ac_index: 0-based AC index.
@@ -6122,8 +6692,8 @@ class ParallelACExecutor:
                 This is separate from ``ac_spec`` so the parent's success contract
                 is not copied into child prompts.
             decomposition_trustworthy: Explicit deterministic trust for this unit's
-                decomposition. Defaults fail closed; current live decomposition has
-                no trusted producer.
+                decomposition. Defaults fail closed; only the verified-MECE producer
+                may authorize trusted-child routing.
 
         Returns:
             ACExecutionResult for this AC.
@@ -6150,7 +6720,47 @@ class ParallelACExecutor:
             depth=depth,
         )
 
-        node_decision = self._decomposition_decisions.get(node_identity.node_id)
+        cached_decision = self._decomposition_decisions.get(node_identity.node_id)
+        node_decision = self._event_owned_decomposition_decisions.get(node_identity.node_id)
+        if cached_decision != node_decision:
+            raise RuntimeError("decomposition cache lacks matching finalized-event authority")
+        pending_bounce = self._pending_bounce_decompositions.get(node_identity.node_id)
+        if pending_bounce is not None:
+            recovered, node_decision = await self._continue_bounce_decomposition(
+                pending=pending_bounce,
+                ac_index=ac_index,
+                ac_content=ac_content,
+                session_id=session_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                seed_goal=seed_goal,
+                depth=depth,
+                execution_id=execution_id,
+                level_contexts=level_contexts,
+                retry_attempt=retry_attempt,
+                execution_counters=execution_counters,
+                node_identity=node_identity,
+                ac_spec=ac_spec,
+                start_time=start_time,
+                semantic_ac_key=semantic_ac_key,
+                investment_spec=investment_spec,
+            )
+            if recovered is not None:
+                return recovered
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=False,
+                error="Durable TOO_BIG recovery completed without an admissible split.",
+                final_message="Durable TOO_BIG recovery completed without an admissible split.",
+                retry_attempt=retry_attempt,
+                outcome=ACExecutionOutcome.FAILED,
+                decomposition_decision=node_decision,
+                decomposition_depth_warning=(
+                    node_decision.compromise_reason == "depth_cap_forced_atomic"
+                ),
+            )
         durable_route_proves_atomic = (
             expected_route_candidate is not None or expected_resume_dispatch_id is not None
         ) and not is_sub_ac
@@ -6162,64 +6772,12 @@ class ParallelACExecutor:
                 raise RuntimeError(
                     "durable atomic route state contradicts the decomposition decision"
                 )
-            # The provider boundary already emitted a RouteCandidate only
-            # after this root passed decomposition as atomic.  Re-running the
-            # preflight provider on resume/successor dispatch would repeat an
-            # effect before replay authorization and could switch call sites.
-            node_decision = DecompositionDecisionRecord(
-                node_id=node_identity.node_id,
-                source=DecompositionSource.PREFLIGHT,
-                disposition=DecompositionDisposition.ATOMIC,
-                reasons=("durable_route_history_proves_atomic",),
-            )
-            self._decomposition_decisions[node_identity.node_id] = node_decision
-
-        # Compatibility mode keeps preflight ordering, but every result is now a
-        # persisted explicit decision and only a trusted SPLIT may lower children.
-        if (
-            not durable_route_proves_atomic
-            and self._decomposition_mode == "preflight"
-            and depth < self._max_decomposition_depth
-        ):
-            display_label = (
-                f"AC {node_identity.display_path}"
-                if node_identity.depth == 0
-                else f"Sub-AC {node_identity.display_path}"
-            )
-            self._console.print(f"  [dim]{display_label}: Analyzing complexity...[/dim]")
-            self._flush_console()
-            if node_decision is None:
-                raw_decision = await self._try_decompose_ac(
-                    ac_content=ac_content,
-                    ac_index=ac_index,
-                    seed_goal=seed_goal,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    node_identity=node_identity,
-                    session_id=session_id,
-                    execution_id=execution_context_id,
-                    retry_attempt=retry_attempt,
-                    depth=depth,
-                    ac_spec=ac_spec,
-                    source=DecompositionSource.PREFLIGHT,
-                )
-                node_decision = self._coerce_decomposition_decision(
-                    raw_decision,
-                    node_identity=node_identity,
-                    source=DecompositionSource.PREFLIGHT,
-                )
-                node_decision = await self._finalize_decomposition_decision(
-                    decision=node_decision,
-                    node_identity=node_identity,
-                    execution_id=execution_context_id,
-                    session_id=session_id,
-                )
 
         if (
             node_decision is not None
             and node_decision.disposition is DecompositionDisposition.SPLIT
             and len(node_decision.children) >= MIN_SUB_ACS
-            and (self._decomposition_mode == "preflight" or node_decision.trustworthy is True)
+            and node_decision.trustworthy is True
         ):
             if depth >= self._max_decomposition_depth:
                 raise RuntimeError("durable decomposition exceeds the replayable depth boundary")
@@ -6243,35 +6801,16 @@ class ParallelACExecutor:
                 investment_spec=investment_spec,
             )
 
-        if (
-            self._decomposition_mode == "preflight"
-            and depth >= self._max_decomposition_depth
-            and node_decision is None
-        ):
-            node_decision = await self._finalize_decomposition_decision(
-                decision=DecompositionDecisionRecord(
-                    node_id=node_identity.node_id,
-                    source=DecompositionSource.PREFLIGHT,
-                    disposition=DecompositionDisposition.ESCALATED,
-                    reasons=("decomposition_depth_cap",),
-                    compromise_reason="depth_cap_forced_atomic",
-                ),
-                node_identity=node_identity,
-                execution_id=execution_context_id,
-                session_id=session_id,
-            )
-
-        # Depth-limit canary: execution is forced atomic once the soft recursion
-        # safety net is reached, so downstream stages can detect decomposition pressure.
-        decomposition_depth_warning = (
-            self._decomposition_mode == "preflight" and depth >= self._max_decomposition_depth
-        )
+        decomposition_depth_warning = False
 
         def _finalize_node_result(result: ACExecutionResult) -> ACExecutionResult:
-            updates: dict[str, Any] = {"decomposition_decision": node_decision}
-            if decomposition_depth_warning:
-                updates["decomposition_depth_warning"] = True
-            return replace(result, **updates)
+            return replace(
+                result,
+                decomposition_decision=node_decision,
+                decomposition_depth_warning=(
+                    result.decomposition_depth_warning or decomposition_depth_warning
+                ),
+            )
 
         # Stall recovery belongs to atomic leaves only. Once this method decides
         # to execute atomically, it can retry the leaf without re-running the
@@ -6723,29 +7262,6 @@ class ParallelACExecutor:
         )
 
     @staticmethod
-    def _parse_legacy_decomposition(
-        response_text: str,
-        *,
-        min_sub_acs: int,
-        max_sub_acs: int,
-    ) -> list[str] | None:
-        """Parse a legacy string-array response without granting it trust."""
-        match = re.search(r"\[.*\]", response_text, re.DOTALL)
-        if match is None:
-            return None
-        try:
-            parsed = json.loads(match.group())
-        except json.JSONDecodeError:
-            return None
-        if (
-            isinstance(parsed, list)
-            and all(isinstance(item, str) and item.strip() for item in parsed)
-            and min_sub_acs <= len(parsed) <= max_sub_acs
-        ):
-            return [item.strip() for item in parsed]
-        return None
-
-    @staticmethod
     def _parse_structured_decomposition(
         response_text: str,
         *,
@@ -6786,7 +7302,7 @@ class ParallelACExecutor:
         trace_summary: str,
         system_prompt: str,
     ) -> tuple[bool, tuple[str, ...]]:
-        """Run one independent bounded semantic attestation for a proposed split."""
+        """Run one independent typed semantic attestation for a proposed split."""
         profile_clause = ""
         if self._execution_profile is not None:
             profile_clause = (
@@ -6798,8 +7314,8 @@ class ParallelACExecutor:
             "Independently attest this proposed decomposition. Do not modify files and do "
             "not accept the proposal merely because it declares coverage. Return ONLY JSON "
             "with boolean coverage_established, non_overlap_established, "
-            "simpler_units_established, and a reasons string array. All three booleans must "
-            "be true to establish the split.\n\n"
+            "and simpler_units_established. All three booleans must be true to establish "
+            "the split. Do not add explanatory fields.\n\n"
             f"{profile_clause}"
             f"Parent criterion:\n{parent_text}\n\n"
             f"Bounded attempt trace:\n{trace_summary or 'none'}\n\n"
@@ -6818,32 +7334,38 @@ class ParallelACExecutor:
                 raise ValueError
             match = re.search(r"\{.*\}", response, re.DOTALL)
             payload = json.loads(match.group() if match is not None else response)
-            if not isinstance(payload, dict):
+            if not _mapping_has_exact_keys(payload, _DECOMPOSITION_ATTESTATION_KEYS):
                 raise ValueError
+            assert isinstance(payload, Mapping)
             checks = (
                 payload.get("coverage_established"),
                 payload.get("non_overlap_established"),
                 payload.get("simpler_units_established"),
             )
-            reasons_raw = payload.get("reasons", ())
-            reasons = (
-                tuple(
-                    redact_and_truncate_text(item, max_chars=240)
-                    for item in reasons_raw[:7]
-                    if isinstance(item, str) and item.strip()
-                )
-                if isinstance(reasons_raw, list)
-                else ()
-            )
+            if any(type(value) is not bool for value in checks):
+                raise ValueError
             if all(value is True for value in checks):
-                return True, ("semantic_attestation_established", *reasons)
-            return False, ("semantic_attestation_not_established", *reasons)
+                return True, ("semantic_attestation_established",)
+            failed_checks = tuple(
+                reason
+                for value, reason in zip(
+                    checks,
+                    (
+                        "coverage_not_established",
+                        "non_overlap_not_established",
+                        "simpler_units_not_established",
+                    ),
+                    strict=True,
+                )
+                if value is False
+            )
+            return False, ("semantic_attestation_not_established", *failed_checks)
         except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
             return False, ("semantic_attestation_unparseable",)
         except Exception as exc:
             log.warning(
                 "parallel_executor.decomposition.attestation_error",
-                error=redact_and_truncate_text(str(exc), max_chars=240),
+                error_type=type(exc).__name__,
             )
             return False, ("semantic_attestation_runtime_error",)
 
@@ -6910,12 +7432,14 @@ class ParallelACExecutor:
         retry_attempt: int = 0,
         depth: int = 0,
         ac_spec: AcceptanceCriterionSpec | None = None,
-        source: DecompositionSource = DecompositionSource.PREFLIGHT,
+        source: DecompositionSource = DecompositionSource.BOUNCE,
         cause: BounceCause | None = None,
         trace_summary: str = "",
         evidence_refs: tuple[str, ...] = (),
     ) -> DecompositionDecisionRecord:
         """Decompose an AC and return a versioned, fail-closed decision."""
+        if source is not DecompositionSource.BOUNCE or cause is not BounceCause.TOO_BIG:
+            raise RuntimeError("live decomposition requires an evidence-backed TOO_BIG bounce")
         del tools, system_prompt, retry_attempt, ac_spec
         ac_label = (
             f"AC #{node_identity.display_path}"
@@ -7003,139 +7527,94 @@ Respond with either ATOMIC or the structured JSON object only.
                 return DecompositionDecisionRecord(
                     node_id=decision_identity.node_id,
                     source=source,
-                    disposition=(
-                        DecompositionDisposition.ATOMIC
-                        if source is DecompositionSource.PREFLIGHT
-                        else DecompositionDisposition.ESCALATED
-                    ),
+                    disposition=DecompositionDisposition.ESCALATED,
                     cause=cause,
                     reasons=("explicit_atomic",),
                     evidence_refs=evidence_refs,
-                    compromise_reason=(
-                        None
-                        if source is DecompositionSource.PREFLIGHT
-                        else "too_big_classifier_disagreed_with_decomposer"
-                    ),
+                    compromise_reason="too_big_classifier_disagreed_with_decomposer",
                 )
 
-            if "{" in response_text:
-                proposal, proposal_reasons = await self._verify_generic_decomposition(
-                    response_text=response_text,
-                    parent_text=ac_content,
-                    trace_summary=bounded_trace,
-                    system_prompt=decomposition_system_prompt,
-                    min_sub_acs=min_sub_acs,
-                    max_sub_acs=max_sub_acs,
-                )
-                if proposal is not None:
-                    return DecompositionDecisionRecord(
-                        node_id=decision_identity.node_id,
-                        source=source,
-                        disposition=DecompositionDisposition.SPLIT,
-                        cause=cause,
-                        reasons=proposal_reasons,
-                        evidence_refs=evidence_refs,
-                        children=proposal.children,
-                        structural_status=StructuralCheckStatus.PASSED,
-                        semantic_status=SemanticAttestationStatus.ESTABLISHED,
-                        trustworthy=True,
-                    )
-
-                repair_prompt = self._build_generic_decomposition_repair_prompt(
-                    parent_text=ac_content,
-                    trace_summary=bounded_trace,
-                    reasons=proposal_reasons,
-                    min_sub_acs=min_sub_acs,
-                    max_sub_acs=max_sub_acs,
-                )
-                repaired_text = await _invoke_execution_authority_entry(
-                    self,
-                    _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
-                    prompt=repair_prompt,
-                    system_prompt=decomposition_system_prompt,
-                )
-                repaired_proposal, repaired_reasons = await self._verify_generic_decomposition(
-                    response_text=repaired_text,
-                    parent_text=ac_content,
-                    trace_summary=bounded_trace,
-                    system_prompt=decomposition_system_prompt,
-                    min_sub_acs=min_sub_acs,
-                    max_sub_acs=max_sub_acs,
-                )
-                if repaired_proposal is not None:
-                    return DecompositionDecisionRecord(
-                        node_id=decision_identity.node_id,
-                        source=source,
-                        disposition=DecompositionDisposition.SPLIT,
-                        cause=cause,
-                        reasons=repaired_reasons,
-                        evidence_refs=evidence_refs,
-                        children=repaired_proposal.children,
-                        structural_status=StructuralCheckStatus.PASSED,
-                        semantic_status=SemanticAttestationStatus.ESTABLISHED,
-                        repair_count=1,
-                        trustworthy=True,
-                    )
-
-                final_reasons = repaired_reasons or proposal_reasons
-                semantic_failure = any(
-                    reason.startswith("semantic_attestation") for reason in final_reasons
-                )
-                return DecompositionDecisionRecord(
-                    node_id=decision_identity.node_id,
-                    source=source,
-                    disposition=DecompositionDisposition.ESCALATED,
-                    cause=cause,
-                    reasons=final_reasons,
-                    evidence_refs=evidence_refs,
-                    structural_status=(
-                        StructuralCheckStatus.PASSED
-                        if semantic_failure
-                        else StructuralCheckStatus.FAILED
-                    ),
-                    semantic_status=(
-                        SemanticAttestationStatus.NOT_ESTABLISHED
-                        if semantic_failure
-                        else SemanticAttestationStatus.NOT_RUN
-                    ),
-                    repair_count=1,
-                    compromise_reason="generic_decomposition_repair_failed",
-                )
-
-            sub_acs = self._parse_legacy_decomposition(
-                response_text,
+            proposal, proposal_reasons = await self._verify_generic_decomposition(
+                response_text=response_text,
+                parent_text=ac_content,
+                trace_summary=bounded_trace,
+                system_prompt=decomposition_system_prompt,
                 min_sub_acs=min_sub_acs,
                 max_sub_acs=max_sub_acs,
             )
-            if sub_acs is not None:
-                log.warning(
-                    "parallel_executor.decomposition.legacy_array_untrusted",
-                    ac_index=ac_index,
-                    sub_ac_count=len(sub_acs),
-                    **profile_metadata,
-                )
-                return legacy_unverified_split_decision(
+            if proposal is not None:
+                return DecompositionDecisionRecord(
                     node_id=decision_identity.node_id,
                     source=source,
-                    child_descriptions=sub_acs,
+                    disposition=DecompositionDisposition.SPLIT,
                     cause=cause,
-                    reasons=("legacy_array_without_attestation",),
+                    reasons=proposal_reasons,
                     evidence_refs=evidence_refs,
+                    children=proposal.children,
+                    structural_status=StructuralCheckStatus.PASSED,
+                    semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                    trustworthy=True,
                 )
 
-            log.warning(
-                "parallel_executor.decomposition.unparseable_unknown",
-                ac_index=ac_index,
-                response_preview=redact_and_truncate_text(response_text, max_chars=100),
-                **profile_metadata,
+            repair_prompt = self._build_generic_decomposition_repair_prompt(
+                parent_text=ac_content,
+                trace_summary=bounded_trace,
+                reasons=proposal_reasons,
+                min_sub_acs=min_sub_acs,
+                max_sub_acs=max_sub_acs,
+            )
+            repaired_text = await _invoke_execution_authority_entry(
+                self,
+                _FOUNDATION_A_ENTRY_DISPATCH_DECOMPOSITION_PROMPT,
+                prompt=repair_prompt,
+                system_prompt=decomposition_system_prompt,
+            )
+            repaired_proposal, repaired_reasons = await self._verify_generic_decomposition(
+                response_text=repaired_text,
+                parent_text=ac_content,
+                trace_summary=bounded_trace,
+                system_prompt=decomposition_system_prompt,
+                min_sub_acs=min_sub_acs,
+                max_sub_acs=max_sub_acs,
+            )
+            if repaired_proposal is not None:
+                return DecompositionDecisionRecord(
+                    node_id=decision_identity.node_id,
+                    source=source,
+                    disposition=DecompositionDisposition.SPLIT,
+                    cause=cause,
+                    reasons=repaired_reasons,
+                    evidence_refs=evidence_refs,
+                    children=repaired_proposal.children,
+                    structural_status=StructuralCheckStatus.PASSED,
+                    semantic_status=SemanticAttestationStatus.ESTABLISHED,
+                    repair_count=1,
+                    trustworthy=True,
+                )
+
+            final_reasons = repaired_reasons or proposal_reasons
+            semantic_failure = any(
+                reason.startswith("semantic_attestation") for reason in final_reasons
             )
             return DecompositionDecisionRecord(
                 node_id=decision_identity.node_id,
                 source=source,
-                disposition=DecompositionDisposition.UNKNOWN,
+                disposition=DecompositionDisposition.ESCALATED,
                 cause=cause,
-                reasons=("unparseable_decomposition_response",),
+                reasons=final_reasons,
                 evidence_refs=evidence_refs,
+                structural_status=(
+                    StructuralCheckStatus.PASSED
+                    if semantic_failure
+                    else StructuralCheckStatus.FAILED
+                ),
+                semantic_status=(
+                    SemanticAttestationStatus.NOT_ESTABLISHED
+                    if semantic_failure
+                    else SemanticAttestationStatus.NOT_RUN
+                ),
+                repair_count=1,
+                compromise_reason="generic_decomposition_repair_failed",
             )
         except TimeoutError:
             log.warning(
@@ -7156,7 +7635,7 @@ Respond with either ATOMIC or the structured JSON object only.
             log.warning(
                 "parallel_executor.decomposition.error",
                 ac_index=ac_index,
-                error=redact_and_truncate_text(str(exc), max_chars=240),
+                error_type=type(exc).__name__,
                 **profile_metadata,
             )
             return DecompositionDecisionRecord(
@@ -9231,6 +9710,12 @@ Respond with either ATOMIC or the structured JSON object only.
         """
         import contextlib
 
+        def workspace_digest() -> str | None:
+            return self._workspace_content_digest(
+                cwd,
+                expected_artifacts=spec.expected_artifacts,
+            )
+
         missing_artifacts = _missing_expected_artifacts(spec.expected_artifacts, cwd)
         if missing_artifacts:
             return _VerifyGateOutcome(
@@ -9238,7 +9723,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 reason="expected_artifacts missing: " + ", ".join(missing_artifacts),
                 output_tail="",
                 missing_artifacts=missing_artifacts,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
 
         command = spec.verify_command
@@ -9247,12 +9732,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=True,
                 reason=None,
                 output_tail="",
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
-        workspace_before = self._workspace_content_digest(cwd)
+        workspace_before = workspace_digest()
 
         def workspace_mutation_outcome(output_tail: str) -> _VerifyGateOutcome | None:
-            workspace_after = self._workspace_content_digest(cwd)
+            workspace_after = workspace_digest()
             if (
                 workspace_before is None
                 or workspace_after is None
@@ -9310,7 +9795,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=(f"verify_command timed out after {self._verify_command_timeout_seconds}s"),
                 output_tail="",
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
 
         combined = (stdout_bytes or b"").decode("utf-8", errors="replace")
@@ -9324,7 +9809,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 passed=False,
                 reason=f"verify_command exited with status {returncode}",
                 output_tail=tail,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
@@ -9333,13 +9818,13 @@ Respond with either ATOMIC or the structured JSON object only.
                     f"output_assertion {spec.output_assertion!r} not found in verify_command output"
                 ),
                 output_tail=tail,
-                workspace_digest=self._workspace_content_digest(cwd),
+                workspace_digest=workspace_digest(),
             )
         return _VerifyGateOutcome(
             passed=True,
             reason=None,
             output_tail=tail,
-            workspace_digest=self._workspace_content_digest(cwd),
+            workspace_digest=workspace_digest(),
         )
 
     async def _apply_verify_gate(
@@ -10753,6 +11238,71 @@ Respond with either ATOMIC or the structured JSON object only.
                 if not isinstance(value, ACExecutionResult):
                     self._parallel_route_resumes.pop(ac_idx, None)
                     continue
+                if (
+                    not value.is_decomposed
+                    and not value.success
+                    and not _has_usage_limit_pause(value)
+                    and value.outcome
+                    not in {ACExecutionOutcome.BLOCKED, ACExecutionOutcome.INVALID}
+                ):
+                    # A classified TOO_BIG result changes the root from an
+                    # atomic route episode into a verified composite.  Own that
+                    # transition here, before route escalation can skip the sole
+                    # live decomposition path.  Once finalized, the composite
+                    # branch below owns child replay and no top-level successor
+                    # route is admitted for this result.
+                    criterion = seed.acceptance_criteria[ac_idx]
+                    semantic_ac_key = (
+                        criterion.semantic_ac_key
+                        if isinstance(criterion, AcceptanceCriterionSpec)
+                        and criterion.semantic_ac_key is not None
+                        else derive_semantic_ac_key(criterion)
+                    )
+                    node_identity = ExecutionNodeIdentity.root(
+                        execution_context_id=execution_id or session_id,
+                        ac_index=ac_idx,
+                    )
+                    (
+                        bounce_result,
+                        bounce_decision,
+                    ) = await self._maybe_recover_with_bounce_decomposition(
+                        result=value,
+                        ac_index=ac_idx,
+                        ac_content=ac_text(criterion),
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed.goal,
+                        depth=0,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        execution_counters=execution_counters,
+                        node_identity=node_identity,
+                        ac_spec=(
+                            criterion if isinstance(criterion, AcceptanceCriterionSpec) else None
+                        ),
+                        start_time=datetime.now(UTC),
+                        semantic_ac_key=semantic_ac_key,
+                        investment_spec=(
+                            criterion.investment
+                            if isinstance(criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
+                    )
+                    if bounce_decision is not None:
+                        value = replace(
+                            value,
+                            decomposition_decision=bounce_decision,
+                            decomposition_depth_warning=(
+                                value.decomposition_depth_warning
+                                or bounce_decision.compromise_reason == "depth_cap_forced_atomic"
+                            ),
+                        )
+                    if bounce_result is not None:
+                        value = bounce_result
+                    results[positions[ac_idx]] = value
                 if value.is_decomposed:
                     if (
                         recoverable_pause_seen
@@ -10770,8 +11320,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         continue
                     # Routing D has no child/aggregate replay owner in this
-                    # slice.  Once preflight or bounce execution proves this
-                    # root is composite, finish its established legacy
+                    # slice. Once a verified bounce decision proves this root
+                    # is composite, finish its established legacy
                     # verify/retry policy rather than interpreting a missing
                     # top-level RouteCandidate as a bounded outcome.
                     legacy_result = await self._continue_decomposed_legacy_recovery(
@@ -11275,7 +11825,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 decomposition_decision=decision,
             )
             composite_results[root_ac_index] = restored
-            self._decomposition_decisions[decision.node_id] = decision
+            try:
+                self._confirm_replayed_decomposition_decision(decision)
+            except RuntimeError as exc:
+                raise RuntimeError(f"composite completion {exc}") from exc
         partial_states: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
         prior_frame_states: dict[tuple[int, str], _PartialCompositeResumeState] = {}
         prior_paths: dict[int, tuple[_PartialCompositeResumeState, ...]] = {}
@@ -11466,7 +12019,10 @@ Respond with either ATOMIC or the structured JSON object only.
                     raise RuntimeError("partial composite replay conflicts with completion")
                 continue
             for state in states:
-                self._decomposition_decisions[state.decision.node_id] = state.decision
+                try:
+                    self._confirm_replayed_decomposition_decision(state.decision)
+                except RuntimeError as exc:
+                    raise RuntimeError(f"partial composite {exc}") from exc
                 self._partial_composite_resumes[state.decision.node_id] = state
         grouped: dict[int, list[tuple[RouteObservation, object, bool, object]]] = {
             ac_idx: [] for ac_idx in root_ac_indices

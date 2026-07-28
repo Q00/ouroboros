@@ -426,7 +426,18 @@ def _codex_mcp_entry_from_toml(data: dict[str, object]) -> dict[str, object] | N
 
 
 def _is_source_tree_ouroboros_build() -> bool:
-    """Return whether this module is executing from an Ouroboros source tree."""
+    """Return whether this module is executing from an Ouroboros source tree.
+
+    The project name is read from the parsed document rather than matched as a
+    formatted substring. TOML does not guarantee the spelling ``name = "..."``,
+    so ``name="ouroboros-ai"``, single quotes, or extra whitespace all declare
+    the same project while failing a literal search; conversely the literal can
+    appear in a comment, a ``[tool.*]`` table, or a dependency pin without being
+    the project name. Both directions change which Codex MCP command block
+    setup writes (see ``_render_codex_mcp_section``).
+    """
+    import tomllib
+
     current_file = Path(__file__).resolve()
     for parent in current_file.parents:
         pyproject = parent / "pyproject.toml"
@@ -436,10 +447,15 @@ def _is_source_tree_ouroboros_build() -> bool:
         if not current_file.is_relative_to(source_package):
             continue
         try:
-            pyproject_text = pyproject.read_text(encoding="utf-8")
-        except OSError:
+            parsed = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            # Unreadable or malformed metadata keeps walking the parents, as
+            # before, instead of aborting setup.
             continue
-        if 'name = "ouroboros-ai"' in pyproject_text and source_package.is_dir():
+        project = parsed.get("project")
+        if not isinstance(project, dict):
+            continue
+        if project.get("name") == "ouroboros-ai" and source_package.is_dir():
             return True
     return False
 
