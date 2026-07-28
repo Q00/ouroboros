@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import subprocess
 from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
@@ -13,6 +14,7 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.core.project_identity import ProjectIdentity
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.events import create_session_started_event
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.project_map import (
@@ -37,6 +39,7 @@ async def event_store(tmp_path: Path):
 def project(tmp_path: Path) -> ProjectIdentity:
     root = tmp_path / "project\nroot "
     root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     return ProjectIdentity.from_root(root)
 
 
@@ -64,6 +67,8 @@ async def _create_current_session(
         project_root=project.project_root,
         workspace_path=workspace_path or project.workspace_path,
     )
+    actual_workspace = Path(scoped.project_root) / scoped.workspace_path
+    actual_workspace.mkdir(parents=True, exist_ok=True)
     sessions = SessionRepository(store)
     created = await sessions.create_session(
         execution_id,
@@ -74,6 +79,7 @@ async def _create_current_session(
         llm_backend="openai",
         execution_contract=_contract(scoped),
         project_identity=scoped,
+        project_workspace=str(actual_workspace),
     )
     assert created.is_ok
     if status is SessionStatus.COMPLETED:
@@ -163,6 +169,29 @@ async def test_nested_only_historical_start_is_labeled_execution_contract(
     assert record.run_count == 1
     assert record.runs[0].identity_source == "execution_contract"
     assert record.runs[0].project_root == project.project_root
+
+
+@pytest.mark.asyncio
+async def test_top_level_only_public_start_event_is_attributed(
+    event_store: EventStore,
+    project: ProjectIdentity,
+) -> None:
+    event = create_session_started_event(
+        session_id="top-level-session",
+        execution_id="top-level-execution",
+        seed_id="top-level-seed",
+        seed_goal="Project a public producer event",
+        project_identity=project,
+    )
+    assert "execution_contract" not in event.data
+    await event_store.append(event)
+
+    record = await ProjectMapBuilder(event_store).build(project)
+
+    assert record.run_count == 1
+    assert record.runs[0].session_id == "top-level-session"
+    assert record.runs[0].identity_source == "session_start"
+    assert record.runs[0].project_id == project.project_id
 
 
 @pytest.mark.asyncio
@@ -334,6 +363,32 @@ async def test_reconstruction_failure_never_returns_a_partial_record(
 
 
 @pytest.mark.asyncio
+async def test_related_lifecycle_read_failure_aborts_the_projection(
+    event_store: EventStore,
+    project: ProjectIdentity,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _create_current_session(
+        event_store,
+        project,
+        session_id="related-read-session",
+        execution_id="related-read-execution",
+        seed_id="related-read-seed",
+    )
+    query_related = AsyncMock(side_effect=PersistenceError("related history unavailable"))
+    monkeypatch.setattr(event_store, "query_session_related_events", query_related)
+
+    with pytest.raises(ProjectProjectionError, match="reconstruct"):
+        await ProjectMapBuilder(event_store).build(project)
+
+    query_related.assert_awaited_once_with(
+        session_id="related-read-session",
+        execution_id="related-read-execution",
+        limit=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_workspace_filter_counts_only_the_requested_complete_population(
     event_store: EventStore,
     project: ProjectIdentity,
@@ -367,6 +422,7 @@ async def test_unrelated_and_identity_free_sessions_are_not_attributed(
 ) -> None:
     other_root = tmp_path / "other"
     other_root.mkdir()
+    subprocess.run(["git", "init", "-q", str(other_root)], check=True)
     other = ProjectIdentity.from_root(other_root)
     await _create_current_session(
         event_store,

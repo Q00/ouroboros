@@ -244,7 +244,7 @@ def _identity_from_start(event: BaseEvent, project: ProjectIdentity) -> _Attribu
         ) from exc
 
     if top_identity is not None:
-        if nested_identity is None or top_identity != nested_identity:
+        if nested_identity is not None and top_identity != nested_identity:
             raise ProjectIdentityConflictError(
                 f"Session {event.aggregate_id} has conflicting project identity anchors"
             )
@@ -328,7 +328,10 @@ class ProjectMapBuilder:
     async def _run_summary(self, start: _AttributedStart) -> ProjectRunSummary:
         event = start.event
         try:
-            reconstructed = await self._sessions.reconstruct_session(event.aggregate_id)
+            reconstructed = await self._sessions.reconstruct_session(
+                event.aggregate_id,
+                strict_related_events=True,
+            )
         except Exception as exc:
             raise ProjectProjectionError(
                 f"Cannot reconstruct project session {event.aggregate_id}"

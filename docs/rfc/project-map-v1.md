@@ -194,7 +194,9 @@ Historical session starts without top-level identity remain readable. The
 projection slice may identify an older row from its nested execution contract
 and must label that source explicitly. If top-level and nested identities
 conflict, it must fail the complete project query rather than return a partial
-map.
+map. Complete top-level anchors from the public low-level event producer also
+remain readable when no execution contract exists; nested identity is compared
+only when it is present.
 
 ## Authority boundary
 
@@ -214,7 +216,9 @@ Project identity is an indexing and attribution contract only:
 `ProjectMapBuilder` ships these invariants without a second state model:
 
 1. `EventStore.get_all_sessions()` enumerates the complete lifecycle history;
-2. `SessionRepository.reconstruct_session()` remains the only owner of status;
+2. `SessionRepository.reconstruct_session()` remains the only owner of status,
+   while the projection opts into its strict related-event read so a storage
+   failure cannot publish a lifecycle result from incomplete history;
 3. frozen `ProjectRunSummary` and `ProjectRecord` values have deterministic
    ordering and JSON serialization;
 4. compatible nested-only historical anchors are labeled

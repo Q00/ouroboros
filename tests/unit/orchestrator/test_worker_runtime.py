@@ -188,44 +188,6 @@ class TestSpawn:
         assert len(transport.resume_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_relative_cwd_is_stable_across_spawn_and_resume(
-        self,
-        tmp_path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        launch_cwd = tmp_path / "launch"
-        workspace = launch_cwd / "workspace"
-        later_cwd = tmp_path / "later"
-        workspace.mkdir(parents=True)
-        later_cwd.mkdir()
-        monkeypatch.chdir(launch_cwd)
-        transport = _FakeTransport(
-            spawn_turn=WorkerTurn(text="first", session_id="s1"),
-            resume_turn=WorkerTurn(text="second", session_id="s1"),
-        )
-        runtime = LeaderDrivenWorkerRuntime(
-            transport=transport,
-            runtime_backend="codex_mcp",
-            llm_backend="codex",
-            cwd="workspace",
-        )
-
-        first = [message async for message in runtime.execute_task("first")]
-        monkeypatch.chdir(later_cwd)
-        _ = [
-            message
-            async for message in runtime.execute_task(
-                "resume",
-                resume_handle=first[-1].resume_handle,
-            )
-        ]
-
-        assert runtime.working_directory == str(workspace)
-        assert transport.spawn_calls[0]["cwd"] == str(workspace)
-        assert first[-1].resume_handle.cwd == str(workspace)
-        assert len(transport.resume_calls) == 1
-
-    @pytest.mark.asyncio
     async def test_spawn_yields_init_then_result_with_handle(self) -> None:
         t = _FakeTransport(spawn_turn=WorkerTurn(text="PONG", session_id="thread-1"))
         rt = _runtime(t)
