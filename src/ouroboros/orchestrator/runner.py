@@ -8587,6 +8587,29 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
             )
             self._execution_guidance_delivery_mode()
+            create_session_kwargs: dict[str, Any] = {
+                "execution_id": exec_id,
+                "seed_id": seed.metadata.seed_id,
+                "session_id": resolved_session_id,
+                "seed_goal": seed.goal,
+                "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                "llm_backend": getattr(self._adapter, "llm_backend", None),
+                "execution_contract": execution_contract,
+                "project_identity": project_identity,
+                "project_workspace": self._effective_cwd(),
+            }
+            try:
+                if (
+                    "acceptance_root_indices"
+                    in inspect.signature(self._session_repo.create_session).parameters
+                ):
+                    create_session_kwargs["acceptance_root_indices"] = range(
+                        len(seed.acceptance_criteria)
+                    )
+            except (TypeError, ValueError):
+                # Legacy/mock repositories may not expose an inspectable signature;
+                # the durable SessionRepository path always does.
+                pass
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather
@@ -8625,30 +8648,6 @@ class OrchestratorRunner:
             raise
         self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
-
-        create_session_kwargs: dict[str, Any] = {
-            "execution_id": exec_id,
-            "seed_id": seed.metadata.seed_id,
-            "session_id": resolved_session_id,
-            "seed_goal": seed.goal,
-            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-            "llm_backend": getattr(self._adapter, "llm_backend", None),
-            "execution_contract": execution_contract,
-            "project_identity": project_identity,
-            "project_workspace": self._effective_cwd(),
-        }
-        try:
-            if (
-                "acceptance_root_indices"
-                in inspect.signature(self._session_repo.create_session).parameters
-            ):
-                create_session_kwargs["acceptance_root_indices"] = range(
-                    len(seed.acceptance_criteria)
-                )
-        except (TypeError, ValueError):
-            # Legacy/mock repositories may not expose an inspectable signature;
-            # the durable SessionRepository path always does.
-            pass
         try:
             session_result = await self._session_repo.create_session(**create_session_kwargs)
         except asyncio.CancelledError:

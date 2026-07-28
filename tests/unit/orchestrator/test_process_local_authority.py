@@ -5595,6 +5595,46 @@ async def test_prepare_rolls_back_when_heartbeat_acquire_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_cwd_drift_before_registration_releases_every_owner(tmp_path: Path) -> None:
+    """Final publication validation precedes every process-local ownership claim."""
+    runner = _runner()
+    workspace = _existing_task_workspace(tmp_path, "prepare-cwd-drift")
+    _bind_task_workspace(runner, workspace)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    session_id = "session-prepare-cwd-drift"
+    execution_id = "exec-prepare-cwd-drift"
+    issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
+    build_contract = runner._build_new_session_contract
+
+    def build_then_drift(**kwargs: object):
+        contract = build_contract(**kwargs)
+        runner._adapter.working_directory = str(replacement)
+        return contract
+
+    with (
+        patch.object(runner, "_build_new_session_contract", side_effect=build_then_drift),
+        patch.object(runner._session_repo, "create_session", AsyncMock()) as create_session,
+        patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+    ):
+        result = await runner.prepare_session(
+            _seed(),
+            execution_id=execution_id,
+            session_id=session_id,
+        )
+
+    assert result.is_err
+    assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+    create_session.assert_not_awaited()
+    assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+    assert (session_id, execution_id) not in runner._process_local_authorities
+    assert not heartbeat.is_holder_alive(session_id)
+    assert not runner._task_workspace_reservations
+    assert not runner._task_workspace_users
+    release_lock_mock.assert_called_once_with(workspace.lock_path)
+
+
+@pytest.mark.asyncio
 async def test_prepare_cancellation_discards_issuance_and_releases_workspace() -> None:
     """Cancellation before durable publication cannot leak a live generation."""
     runner = _runner()
