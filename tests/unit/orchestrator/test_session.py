@@ -306,6 +306,31 @@ class TestSessionRepository:
         mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_create_session_rejects_project_root_symlink_swap(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project"
+        replacement = tmp_path / "replacement"
+        project_root.mkdir()
+        replacement.mkdir()
+        identity = ProjectIdentity.from_root(project_root)
+        project_root.rename(tmp_path / "original-project")
+        project_root.symlink_to(replacement, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="changed before publication"):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract={"frugality_proof": identity.to_workspace_data()},
+                project_identity=identity,
+            )
+
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_create_session_with_custom_id(
         self,
         repository: SessionRepository,

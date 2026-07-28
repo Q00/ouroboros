@@ -23,7 +23,7 @@ from ouroboros.config import (
     get_runtime_profile,
     get_zcode_cli_path,
 )
-from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
+from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter, resolve_worker_cwd
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
@@ -279,14 +279,15 @@ def create_agent_runtime(
         backend=resolved_backend
     )
     resolved_llm_backend = llm_backend or get_llm_backend()
+    resolved_cwd = resolve_worker_cwd(cwd)
     runtime_kwargs = None
     if resolved_backend != "claude":
         runtime_kwargs = {
             "permission_mode": resolved_permission_mode,
             "model": model,
-            "cwd": cwd,
+            "cwd": resolved_cwd,
             "skill_dispatcher": create_codex_command_dispatcher(
-                cwd=cwd,
+                cwd=resolved_cwd,
                 runtime_backend=resolved_backend,
                 llm_backend=resolved_llm_backend,
             ),
@@ -307,7 +308,7 @@ def create_agent_runtime(
             permission_mode=resolved_permission_mode,
             model=model,
             cli_path=cli_path,
-            cwd=cwd,
+            cwd=resolved_cwd,
             llm_backend=resolved_llm_backend,
             runtime_kwargs=runtime_kwargs,
             startup_output_timeout_seconds=startup_output_timeout_seconds,

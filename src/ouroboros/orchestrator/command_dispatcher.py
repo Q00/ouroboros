@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle, SkillDispatchHandler
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    RuntimeHandle,
+    SkillDispatchHandler,
+    resolve_worker_cwd,
+)
 from ouroboros.router.types import Resolved
 
 log = get_logger(__name__)
@@ -31,7 +35,7 @@ class CodexCommandDispatcher:
         runtime_backend: str = "codex",
         llm_backend: str | None = None,
     ) -> None:
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
         self._server: MCPServerAdapter | None = None

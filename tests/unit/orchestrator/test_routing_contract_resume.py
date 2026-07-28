@@ -2133,6 +2133,45 @@ def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path
     assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
 
 
+def test_managed_relative_scope_mismatch_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    source_cwd = source / "packages" / "expected"
+    expected_cwd = worktree / "packages" / "expected"
+    wrong_cwd = worktree / "packages" / "wrong"
+    for directory in (source_cwd, expected_cwd, wrong_cwd):
+        directory.mkdir(parents=True)
+    workspace = TaskWorkspace(
+        durable_id="scope-resume",
+        repo_root=str(source),
+        repo_name="source",
+        original_cwd=str(source_cwd),
+        effective_cwd=str(expected_cwd),
+        worktree_path=str(worktree),
+        branch="ooo/scope-resume",
+        lock_path=str(tmp_path / ".locks" / "scope-resume.json"),
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    inconsistent = replace(workspace, effective_cwd=str(wrong_cwd))
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=inconsistent)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "runtime_cwd_mismatch"
+
+
 def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
     common_git = tmp_path / "storage" / ".git"
     common_git.parent.mkdir()

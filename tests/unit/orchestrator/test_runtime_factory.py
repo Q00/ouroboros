@@ -92,8 +92,34 @@ class TestCreateAgentRuntime:
         assert runtime._cli_path == "/tmp/codex"
         assert runtime._cwd == _EXPECTED_CANONICAL_PROJECT_CWD
         assert runtime._skill_dispatcher is mock_dispatcher
-        assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
+        assert mock_create_dispatcher.call_args.kwargs["cwd"] == _EXPECTED_CANONICAL_PROJECT_CWD
         assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "codex"
+
+    def test_relative_cwd_is_shared_with_runtime_and_dispatcher(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch = tmp_path / "launch"
+        workspace = launch / "workspace"
+        later = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later.mkdir()
+        monkeypatch.chdir(launch)
+
+        with patch(
+            "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+            return_value=object(),
+        ) as create_dispatcher:
+            runtime = create_agent_runtime(
+                backend="codex",
+                cli_path="/tmp/codex",
+                cwd="workspace",
+            )
+        monkeypatch.chdir(later)
+
+        assert runtime.working_directory == str(workspace)
+        assert create_dispatcher.call_args.kwargs["cwd"] == str(workspace)
 
     def test_create_codex_runtime_propagates_runtime_profile(self) -> None:
         """``get_runtime_profile()`` must reach CodexCliRuntime via the factory.

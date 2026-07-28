@@ -336,6 +336,7 @@ class TestCodexCommandDispatcher:
         assert messages is not None
         assert messages[1].resume_handle is not None
         assert messages[1].resume_handle.backend == "opencode"
+        assert messages[1].resume_handle.cwd == str(tmp_path)
         assert (
             messages[1].resume_handle.metadata["ouroboros_interview_session_id"] == "interview-123"
         )

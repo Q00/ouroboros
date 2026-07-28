@@ -3249,6 +3249,27 @@ class OrchestratorRunner:
     @classmethod
     def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
         """Resolve a managed worktree against its durable source checkout."""
+        source_root = resolve_worker_cwd(workspace.repo_root)
+        source_cwd = resolve_worker_cwd(workspace.original_cwd)
+        worktree_root = resolve_worker_cwd(workspace.worktree_path)
+        execution_cwd = resolve_worker_cwd(workspace.effective_cwd)
+        try:
+            source_scope = Path(source_cwd).relative_to(source_root) if source_root else None
+            execution_scope = (
+                Path(execution_cwd).relative_to(worktree_root) if worktree_root else None
+            )
+        except (TypeError, ValueError):
+            source_scope = execution_scope = None
+        if source_scope is None or source_scope != execution_scope:
+            raise OrchestratorError(
+                message="Managed source and execution workspace scopes do not match",
+                details={
+                    "invalid": "runtime_cwd",
+                    "source_cwd": source_cwd,
+                    "execution_cwd": execution_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
         return resolve_project_identity(
             workspace.effective_cwd,
             source_root=workspace.repo_root,

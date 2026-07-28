@@ -3072,6 +3072,49 @@ class TestOrchestratorRunner:
         mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_prepare_session_rejects_managed_relative_scope_mismatch(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "source"
+        worktree = tmp_path / "worktree"
+        source_cwd = source / "packages" / "expected"
+        execution_cwd = worktree / "packages" / "wrong"
+        source_cwd.mkdir(parents=True)
+        execution_cwd.mkdir(parents=True)
+        workspace = TaskWorkspace(
+            durable_id="scope-mismatch",
+            repo_root=str(source),
+            repo_name="source",
+            original_cwd=str(source_cwd),
+            effective_cwd=str(execution_cwd),
+            worktree_path=str(worktree),
+            branch="ooo/scope-mismatch",
+            lock_path=str(tmp_path / ".locks" / "scope-mismatch.json"),
+        )
+        mock_adapter.working_directory = str(execution_cwd)
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=workspace,
+        )
+
+        result = await runner.prepare_session(
+            sample_seed,
+            execution_id="exec-scope-mismatch",
+            session_id="orch-scope-mismatch",
+        )
+
+        assert result.is_err
+        assert result.error.details["resume_blocked"] == "runtime_cwd_mismatch"
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_prepare_session_with_unset_leader_runtime_cwd(
         self,
         mock_event_store: AsyncMock,
