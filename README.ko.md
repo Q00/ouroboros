@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <summary><strong>Kiro CLI 빠른 시작</strong></summary>
 
 ```bash
-pip install 'ouroboros-ai[mcp,claude]'
+pip install 'ouroboros-ai[mcp]'
 ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
 ```
 
@@ -140,15 +140,17 @@ Claude Code 세션 안에서 `ooo setup` 실행.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # 기본
-pip install 'ouroboros-ai[claude]'        # + Claude Code 의존성
+pip install 'ouroboros-ai[claude]'        # + 독립 Claude SDK 프로필(MCP 1.x 기반)
 pip install 'ouroboros-ai[litellm]'       # + LiteLLM 멀티 프로바이더; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'           # + MCP 서버/클라이언트 지원
 pip install 'ouroboros-ai[tui]'           # + Textual 터미널 UI
-pip install 'ouroboros-ai[all]'           # 전부; Python 3.12-3.13
+pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI; MCP 2 제외
 ouroboros setup                         # 런타임 설정
 ```
 
 기본 및 비-LiteLLM 설치는 Python 3.12-3.14를 지원합니다. LiteLLM 포함 설치(`[litellm]`, `[all]`, source `--all-extras`)는 Python 3.12-3.13을 지원하며, 현재 예시는 Python 3.13을 권장합니다. 자세한 내용은 [Platform Support](./docs/platform-support.md#python-profile-matrix)를 참고하세요.
+
+`[mcp]`와 `[claude]`는 의도적으로 분리된 프로필입니다. MCP 2와 현재 Claude Agent SDK가 서로 다른 `mcp` 메이저 버전을 요구하기 때문입니다. MCP 호스트 등록은 별도 프로세스에서 `uvx --from 'ouroboros-ai[mcp]' ...`를 실행합니다. 이 서버 안에서는 독립 Claude SDK 프로필을 사용할 수 없으므로, MCP 실행에는 지원되는 CLI 기반 runtime과 LLM backend를 설정해야 합니다.
 
 호환성 참고: extras 전환 기간 동안 `ouroboros-ai[dashboard]`도 no-op alias로 계속 허용됩니다.
 

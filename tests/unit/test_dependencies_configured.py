@@ -141,6 +141,26 @@ def test_litellm_public_extra_excludes_unsupported_python():
     assert all("python_version < '3.14'" in dep for dep in optional_deps["litellm"])
 
 
+def test_mcp_and_claude_profiles_are_isolated():
+    """MCP 2 and the MCP 1.x-based Claude SDK never share an environment."""
+    root = Path(__file__).parent.parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+
+    optional_deps = pyproject["project"]["optional-dependencies"]
+    groups = pyproject["dependency-groups"]
+    conflicts = pyproject["tool"]["uv"]["conflicts"]
+
+    assert optional_deps["mcp"] == ["mcp==2.0.0"]
+    assert "mcp" not in optional_deps["all"][0]
+    assert groups["mcp-test"] == ["ouroboros-ai[mcp]"]
+    assert groups["claude-test"] == ["ouroboros-ai[claude]"]
+    assert not any("mcp" in dep or "claude" in dep for dep in groups["dev"])
+    assert [
+        {"extra": "claude"},
+        {"extra": "mcp"},
+    ] in conflicts
+
+
 def test_python_version_constraint():
     """Test that Python version is set to >=3.12."""
     root = Path(__file__).parent.parent.parent

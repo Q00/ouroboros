@@ -259,13 +259,13 @@ RUNTIME_COUNT=0
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
 # Keep this table boring and explicit: agents reading this installer should be
-# able to see why Claude/Hermes pull MCP dependencies while file-based runtimes
-# only need the base CLI.
+# able to see why Claude's SDK runtime and the modern MCP server are installed
+# in different environments. The Claude tool environment must not pull MCP 2.
 _runtime_to_extras() {
   # `tui` ships with every selection so the settings GUI
   # (`ouroboros config`) works out of the box (#1414).
   case "$1" in
-    claude)  EXTRAS="[mcp,claude,tui]"; RUNTIME="claude" ;;
+    claude)  EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
     codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
     opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
@@ -329,7 +329,7 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude Code plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 1 "Claude" "Claude SDK tool + isolated MCP server (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -386,7 +386,7 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Recommended: plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 1 "Claude" "Recommended: Claude SDK tool + isolated MCP server (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -499,23 +499,21 @@ if [ "$HAS_UV" = true ]; then
   # Map extras to explicit --with flags for uv.
   # NOTE: Pin specs MUST mirror [project.optional-dependencies] in
   # pyproject.toml. tests/unit/scripts/test_install_runtime_selection.py
-  # asserts the `[all]` set covers every declared extra so silent drift
-  # (e.g. forgetting `tui`) is caught in CI rather than discovered by a
-  # user with a half-installed `[all]` tree.
+  # asserts `[all]` covers every compatible extra while MCP stays in its
+  # isolated profile, so silent drift is caught in CI rather than discovered
+  # by a user with a conflicting tool environment.
   case "$EXTRAS" in
-    "[mcp,claude,tui]")
+    "[claude,tui]")
       UV_ARGS+=(
-        --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.123"
         --with "anthropic==0.117.0"
       )
       ;;
     "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==1.28.1")
+      UV_ARGS+=(--with "mcp==2.0.0")
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "mcp==1.28.1"
         --with "claude-agent-sdk==0.2.123"
         --with "anthropic==0.117.0"
         --with "litellm==1.91.0"
@@ -621,23 +619,15 @@ if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" =
   MCP_FILE="$HOME/.claude/mcp.json"
   mkdir -p "$HOME/.claude"
 
-  # MCP command matches the installer that actually ran in step 3
-  if [ "$INSTALL_METHOD" = "uv" ]; then
-    case "$EXTRAS" in
-      "[mcp,claude]" | "[mcp,claude,tui]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
-        ;;
-      "[all]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
-        ;;
-      *)
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
-        ;;
-    esac
-  elif [ "$INSTALL_METHOD" = "pipx" ]; then
-    OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"]}'
+# Always launch MCP from its own environment. claude-agent-sdk embeds MCP 1.x,
+# while the Ouroboros protocol server requires MCP 2.x.
+  if [ "$INSTALL_METHOD" = "uv" ] || command -v uvx &>/dev/null; then
+    OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
+  elif command -v pipx &>/dev/null; then
+    OUROBOROS_ENTRY='{"command":"pipx","args":["run","--spec","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
   else
-    OUROBOROS_ENTRY='{"command":"'"${PYTHON:-python3}"'","args":["-m","ouroboros","mcp","serve"]}'
+    OUROBOROS_ENTRY=""
+    _warn "MCP registration skipped: install uv/uvx or pipx to provide an isolated ouroboros-ai[mcp] environment."
   fi
 
   # Find a working Python: system python3, or uv-managed python
@@ -648,7 +638,7 @@ if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" =
     MCP_PYTHON="uv run python3"
   fi
 
-  if [ -n "$MCP_PYTHON" ]; then
+  if [ -n "$OUROBOROS_ENTRY" ] && [ -n "$MCP_PYTHON" ]; then
     if [ -f "$MCP_FILE" ]; then
       if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
 import json, os
@@ -680,7 +670,7 @@ with open(mcp_file, 'w') as f:
         _warn "MCP could not create; check $MCP_FILE manually."
       fi
     fi
-  else
+  elif [ -n "$OUROBOROS_ENTRY" ]; then
     _warn "MCP skipped: no python3 found. Add the entry manually to $MCP_FILE."
   fi
 fi

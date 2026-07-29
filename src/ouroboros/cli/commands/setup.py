@@ -92,9 +92,9 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
 def _ensure_claude_mcp_entry() -> None:
     """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
 
-    Creates the entry if missing (detecting install method), updates stale
-    uvx args (e.g. ouroboros-ai without [claude] extras), and removes the
-    legacy timeout key.  Skips the file write when nothing changed.
+    The Claude Agent SDK embeds MCP 1.x, so the modern MCP server must always
+    run in a separate package environment containing only the ``mcp`` extra.
+    Creates or repairs that isolated entry and removes the legacy timeout key.
     """
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
     mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,25 @@ def _ensure_claude_mcp_entry() -> None:
     mcp_data.setdefault("mcpServers", {})
 
     existing = mcp_data["mcpServers"].get("ouroboros")
-    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
+    if shutil.which("uvx"):
+        detected: dict[str, object] | None = {
+            "command": "uvx",
+            "args": _build_uvx_mcp_args("ouroboros-ai[mcp]"),
+        }
+    elif shutil.which("pipx"):
+        detected = {
+            "command": "pipx",
+            "args": [
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ],
+        }
+    else:
+        detected = None
     needs_write = False
 
     if existing is None:
@@ -129,7 +147,7 @@ def _ensure_claude_mcp_entry() -> None:
         # Update entry to match currently detected install method, but only
         # for known standard commands. Custom entries (docker, nix, etc.) are
         # left untouched so we don't break user-managed configurations.
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
+        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python"}
         if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
             if (
                 existing.get("command") != detected["command"]
@@ -1406,13 +1424,13 @@ def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
 
     Priority: ouroboros binary > uvx > python3 -m ouroboros.
     """
-    if (ouroboros_bin := shutil.which("ouroboros")) is not None:
-        return {"command": ouroboros_bin, "args": ["mcp", "serve"]}
     if shutil.which("uvx"):
         return {
             "command": "uvx",
-            "args": _build_uvx_mcp_args("ouroboros-ai[mcp,claude]"),
+            "args": _build_uvx_mcp_args("ouroboros-ai[mcp]"),
         }
+    if (ouroboros_bin := shutil.which("ouroboros")) is not None:
+        return {"command": ouroboros_bin, "args": ["mcp", "serve"]}
     # python3 -m fallback: only valid if ouroboros is importable
     import subprocess
 
@@ -2309,6 +2327,12 @@ def _setup_claude(claude_path: str) -> None:
 
     # Register/fix MCP server in ~/.claude/mcp.json
     _ensure_claude_mcp_entry()
+    print_warning(
+        "The MCP 2 server runs in an isolated ouroboros-ai[mcp] process. "
+        "That process cannot load the MCP 1.x-based Claude Agent SDK. "
+        "Claude-backed execution inside MCP requires a supported CLI-backed "
+        "runtime/LLM configuration; the standalone Claude SDK profile remains separate."
+    )
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
@@ -2475,7 +2499,7 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {"command": ["uvx", "--from", "ouroboros-ai[all]", "ouroboros", "mcp", "serve"]}
+        return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
     if shutil.which("ouroboros"):
         return {"command": ["ouroboros", "mcp", "serve"]}
     # Check if ouroboros is importable via python

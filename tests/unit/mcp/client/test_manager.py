@@ -59,6 +59,40 @@ class _HealthAdapter:
         return self.result
 
 
+class _DiscoveryAdapter:
+    """Controllable adapter for connection/discovery race tests."""
+
+    def __init__(self) -> None:
+        self.discovery_started = asyncio.Event()
+        self.release_discovery = asyncio.Event()
+        self.is_connected = False
+        self.disconnect_calls = 0
+        self.server_snapshot = None
+
+    async def connect(self, config):
+        self.is_connected = True
+        return Result.ok(
+            MCPServerInfo(
+                name=config.name,
+                version="1.0.0",
+                capabilities=MCPCapabilities(tools=True, resources=True),
+            )
+        )
+
+    async def list_tools(self):
+        self.discovery_started.set()
+        await self.release_discovery.wait()
+        return Result.ok((MCPToolDefinition(name="discovered", description=""),))
+
+    async def list_resources(self):
+        return Result.ok(())
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        self.is_connected = False
+        return Result.ok(None)
+
+
 class TestConnectionState:
     """Test ConnectionState enum."""
 
@@ -151,6 +185,85 @@ class TestMCPClientManager:
         state = manager.get_connection_state("test-server")
 
         assert state == ConnectionState.DISCONNECTED
+
+    async def test_discovery_does_not_hold_global_manager_lock(self) -> None:
+        """A slow server discovery does not block unrelated manager mutations."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="slow-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+
+        unrelated = MCPServerConfig(
+            name="unrelated",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        add_result = await asyncio.wait_for(manager.add_server(unrelated), timeout=0.1)
+        assert add_result.is_ok
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_ok
+
+    async def test_disconnect_supersedes_in_flight_discovery_snapshot(self) -> None:
+        """Late discovery cannot overwrite a newer disconnected generation."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="race-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+        connecting = manager.get_connection_snapshot(config.name)
+        assert connecting is not None
+        assert connecting.generation == 1
+
+        disconnect_result = await manager.disconnect(config.name)
+        assert disconnect_result.is_ok
+        disconnected = manager.get_connection_snapshot(config.name)
+        assert disconnected is not None
+        assert disconnected.generation == 2
+        assert disconnected.state == ConnectionState.DISCONNECTED
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_err
+        assert manager.get_connection_snapshot(config.name) is disconnected
+        assert adapter.disconnect_calls == 2
+
+    async def test_remove_and_readd_rejects_old_connection_snapshot(self) -> None:
+        """Late discovery from a removed adapter cannot resurrect or replace a server."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="reused-name",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+        assert (await manager.remove_server(config.name)).is_ok
+        assert (await manager.add_server(config)).is_ok
+        replacement = manager.get_connection_snapshot(config.name)
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_err
+        assert manager.get_connection_snapshot(config.name) is replacement
+        assert replacement is not None
+        assert replacement.adapter is not adapter
+        assert replacement.state == ConnectionState.DISCONNECTED
+        assert adapter.disconnect_calls == 2
 
     def test_find_tool_server_not_found(self) -> None:
         """find_tool_server returns None when tool not found."""

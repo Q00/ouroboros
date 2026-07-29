@@ -154,7 +154,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     ]
 
 
-def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
+def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "claude"},
@@ -165,10 +165,11 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.28.1 --with claude-agent-sdk==0.2.123 --with anthropic==0.117.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with claude-agent-sdk==0.2.123 --with anthropic==0.117.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
-    _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
+    _assert_calls_include_pyproject_pins(calls, "claude")
+    assert "--with mcp==" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     mcp_config = json.loads(
         (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
@@ -179,7 +180,7 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
             "--python",
             ">=3.12",
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",
@@ -618,7 +619,7 @@ def _read_pyproject_extras() -> dict[str, list[str]]:
 
 
 def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
-    """`[all]` under uv must install every extra that pyproject declares.
+    """`[all]` mirrors every compatible extra and intentionally omits MCP 2.
 
     Catches the contract drift flagged by ouroboros-agent on PR #654:
     install.sh's hand-maintained --with list silently dropped tui, so
@@ -634,7 +635,10 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
         if match:
             declared_in_all.update(name.strip() for name in match.group(1).split(","))
 
-    expected_extras = set(_EXTRA_TO_PACKAGES.keys())
+    # The compatibility [all] profile intentionally excludes MCP 2 because
+    # its Claude SDK dependency embeds MCP 1.x. The protocol server is a
+    # separate uvx ouroboros-ai[mcp] process.
+    expected_extras = set(_EXTRA_TO_PACKAGES.keys()) - {"mcp"}
 
     # Sanity: pyproject's `all` aggregates every extra we know about.
     assert declared_in_all == expected_extras, (
@@ -646,7 +650,12 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    expected_packages = {pkg for pkgs in _EXTRA_TO_PACKAGES.values() for pkg in pkgs}
+    expected_packages = {
+        pkg
+        for extra, pkgs in _EXTRA_TO_PACKAGES.items()
+        if extra in expected_extras
+        for pkg in pkgs
+    }
     missing = sorted(pkg for pkg in expected_packages if f"--with {pkg}" not in calls)
     assert not missing, (
         f"install.sh `[all]` is missing --with entries for: {missing}.\n"
@@ -656,8 +665,7 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
 
 
 def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
-    """`[all]` under uv must mirror pyproject's full version specifiers, not
-    just the package names.
+    """`[all]` mirrors full pins for its compatible extras, not just names.
 
     Bot follow-up on PR #660: the package-name check was insufficient — a
     silent change to a pin range (e.g. relaxing ``<1.0.0`` to ``<2.0.0`` in
@@ -669,4 +677,5 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    _assert_calls_include_pyproject_pins(calls, *_EXTRA_TO_PACKAGES)
+    _assert_calls_include_pyproject_pins(calls, *(set(_EXTRA_TO_PACKAGES) - {"mcp"}))
+    assert "--with mcp==" not in calls

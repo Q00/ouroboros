@@ -1189,10 +1189,10 @@ class TestClaudeSetup:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
         assert "timeout" not in claude_mcp["mcpServers"]["ouroboros"]
-        # Stale args (ouroboros-ai without [claude]) should be updated
+        # The MCP subprocess stays isolated from the Claude SDK profile.
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == [
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",
@@ -1203,26 +1203,27 @@ class TestClaudeSetup:
     @pytest.mark.parametrize(
         "which_side_effect, expected_cmd, expected_args",
         [
-            # uvx available → uvx entry with [claude] extras
+            # uvx available → isolated MCP 2 entry
             (
                 lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
                 "uvx",
-                ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"],
+                ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
             ),
-            # no uvx, ouroboros binary available → binary entry
+            # no uvx → pipx provides another isolated package environment
             (
-                lambda cmd: "/usr/local/bin/ouroboros" if cmd == "ouroboros" else None,
-                "ouroboros",
-                ["mcp", "serve"],
-            ),
-            # no uvx, no binary → python3 -m fallback
-            (
-                lambda _cmd: None,
-                "python3",
-                ["-m", "ouroboros", "mcp", "serve"],
+                lambda cmd: "/usr/local/bin/pipx" if cmd == "pipx" else None,
+                "pipx",
+                [
+                    "run",
+                    "--spec",
+                    "ouroboros-ai[mcp]",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
             ),
         ],
-        ids=["uvx", "pipx-binary", "pip-fallback"],
+        ids=["uvx", "pipx-isolated"],
     )
     def test_setup_claude_creates_new_entry_per_install_method(
         self,
@@ -1253,6 +1254,25 @@ class TestClaudeSetup:
         entry = claude_mcp["mcpServers"]["ouroboros"]
         assert entry["command"] == expected_cmd
         assert entry["args"] == expected_args
+
+    def test_setup_claude_does_not_register_unisolated_binary(self, tmp_path: Path) -> None:
+        """Without uvx/pipx, setup must not reuse the Claude SDK environment."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        claude_config = tmp_path / ".claude" / "mcp.json"
+        claude_config.parent.mkdir()
+        claude_config.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+        ):
+            setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        data = json.loads(claude_config.read_text(encoding="utf-8"))
+        assert "ouroboros" not in data["mcpServers"]
 
     def test_setup_claude_preserves_custom_command(self, tmp_path: Path) -> None:
         """Custom (non-standard) MCP command should not be overwritten."""
@@ -1328,7 +1348,7 @@ class TestClaudeSetup:
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         # Should be updated from python3 to uvx
         assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
-        assert "ouroboros-ai[mcp,claude]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
+        assert "ouroboros-ai[mcp]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
 
     def test_setup_claude_skips_write_when_args_already_current(self, tmp_path: Path) -> None:
         """No file write when args are already up to date."""
@@ -1337,7 +1357,7 @@ class TestClaudeSetup:
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
 
-        current_args = ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
+        current_args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"
@@ -3357,7 +3377,7 @@ class TestGjcSetup:
         assert entry["command"] == "uvx"
         assert entry["args"] == [
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",
@@ -3459,7 +3479,7 @@ class TestGjcSetup:
                             "command": "uvx",
                             "args": [
                                 "--from",
-                                "ouroboros-ai[mcp,claude]",
+                                "ouroboros-ai[mcp]",
                                 "ouroboros",
                                 "mcp",
                                 "serve",

@@ -1055,7 +1055,7 @@ ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
 
 For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
 
-FastMCP caveats: Network serving uses the MCP SDK's FastMCP server. The streamable HTTP path is FastMCP's default `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for FastMCP transports because FastMCP does not pass credentials or stable client identity to handlers; protect `0.0.0.0` binds with normal network controls.
+MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for SDK-managed transports because the handler boundary does not expose credentials or stable client identity; protect `0.0.0.0` binds with normal network controls.
 
 **Startup behavior:**
 
@@ -1071,7 +1071,7 @@ To register manually, add to `~/.claude/mcp.json`:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
     }
   }
 }

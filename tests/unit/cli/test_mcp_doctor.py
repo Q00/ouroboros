@@ -128,11 +128,21 @@ class TestCheckMcpImport:
         mock_mcp = MagicMock()
         with (
             patch.dict("sys.modules", {"mcp": mock_mcp}),
-            patch("importlib.metadata.version", return_value="1.26.0"),
+            patch("importlib.metadata.version", return_value="2.0.0"),
         ):
             result = check_mcp_import()
         assert result.status == "pass"
-        assert "1.26.0" in result.message
+        assert "2.0.0" in result.message
+
+    def test_fails_for_legacy_mcp_major(self):
+        mock_mcp = MagicMock()
+        with (
+            patch.dict("sys.modules", {"mcp": mock_mcp}),
+            patch("importlib.metadata.version", return_value="1.28.1"),
+        ):
+            result = check_mcp_import()
+        assert result.status == "fail"
+        assert "separate server process" in result.remediation
 
     def test_fails_when_not_importable(self):
         with patch.dict("sys.modules", {"mcp": None}):
@@ -140,17 +150,23 @@ class TestCheckMcpImport:
             with patch("builtins.__import__", side_effect=_import_error_for("mcp")):
                 result = check_mcp_import()
         assert result.status == "fail"
-        # The remediation must name the canonical extras: uv tool install
-        # replaces the tool env with exactly the requested extras, so a
-        # subset spec would strip the user's other extras.
-        assert "[mcp,claude]" in result.remediation
+        assert "ouroboros-ai[mcp]" in result.remediation
 
-    def test_passes_when_installed_returns_version(self):
-        # mcp is installed — check that version string is included in the message
+    def test_reports_the_installed_profile_version(self):
+        from importlib.metadata import version
+
         result = check_mcp_import()
-        # mcp is an actual dependency of this project, so it should pass
-        assert result.status == "pass"
+        installed = version("mcp")
+
+        assert installed in result.message
         assert result.name == "mcp_import"
+        if installed.startswith("2."):
+            assert result.status == "pass"
+        else:
+            # The standalone Claude profile intentionally carries MCP 1.x;
+            # doctor must direct MCP serving to the isolated MCP 2 process.
+            assert result.status == "fail"
+            assert "separate server process" in result.remediation
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +197,8 @@ class TestCheckClaudeAgentSdkImport:
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "fail"
-        assert "[mcp,claude]" in result.remediation
+        assert "separate" in result.remediation
+        assert "[mcp] and [claude]" in result.remediation
 
     def test_warns_when_not_importable_on_codex_backend(self):
         """Missing SDK on a Codex runtime is only a warning, not a failure."""
@@ -190,14 +207,16 @@ class TestCheckClaudeAgentSdkImport:
                 "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
                 return_value="codex",
             ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_llm_backend",
+                return_value="codex",
+            ),
             patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "warn"
         assert "codex" in result.message
-        # The remediation must name the canonical extras (see check_mcp_import's
-        # test for why a subset spec would regress the operator-facing fix).
-        assert "[mcp,claude]" in result.remediation
+        assert "ouroboros-ai[claude]" in result.remediation
 
     def test_warns_when_not_importable_on_opencode_backend(self):
         """Missing SDK on an OpenCode runtime is only a warning."""
@@ -206,12 +225,33 @@ class TestCheckClaudeAgentSdkImport:
                 "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
                 return_value="opencode",
             ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_llm_backend",
+                return_value="opencode",
+            ),
             patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "warn"
         assert "opencode" in result.message
-        assert "[mcp,claude]" in result.remediation
+        assert "ouroboros-ai[claude]" in result.remediation
+
+    def test_fails_for_non_claude_runtime_with_claude_llm(self):
+        """The completion backend is independently SDK-dependent."""
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="codex",
+            ),
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_llm_backend",
+                return_value="claude_code",
+            ),
+            patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
+        ):
+            result = check_claude_agent_sdk_import()
+        assert result.status == "fail"
+        assert "CLI-backed runtime and LLM backend" in result.remediation
 
     def test_passes_with_unknown_version(self):
         mock_sdk = MagicMock()
@@ -273,10 +313,7 @@ class TestCheckLitellmImport:
         with patch("builtins.__import__", side_effect=_import_error_for("litellm")):
             result = check_litellm_import()
         assert result.status == "warn"
-        # The uv-tool form must name the full canonical extras: uv tool install
-        # replaces the tool env with exactly the requested extras, so a subset
-        # spec would strip the user's other extras (mcp, claude).
-        assert "[mcp,claude,litellm]" in result.remediation
+        assert "ouroboros-ai[litellm]" in result.remediation
 
     def test_does_not_fail_when_missing(self):
         with patch("builtins.__import__", side_effect=_import_error_for("litellm")):
@@ -296,7 +333,7 @@ class TestCheckLitellmImport:
         assert "Python 3.13" in result.remediation
         assert "python3.13 -m pip install 'ouroboros-ai[litellm]'" in result.remediation
         assert "uv tool install --python 3.13 --force" in result.remediation
-        assert "[mcp,claude,litellm]" in result.remediation
+        assert "ouroboros-ai[litellm]" in result.remediation
         assert "python3.14" not in result.remediation.lower()
 
 
@@ -612,7 +649,7 @@ class TestDoctorCommand:
 
     def test_human_output_shows_symbols(self):
         app = _make_app()
-        check_result = CheckResult(name="mcp", status="pass", message="mcp 1.26.0")
+        check_result = CheckResult(name="mcp", status="pass", message="mcp 2.0.0")
         with patch(
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: check_result],
@@ -655,7 +692,7 @@ class TestDoctorCommand:
             status="warn",
             message="claude-agent-sdk not installed (not required for codex runtime)",
         )
-        pass_result = CheckResult(name="mcp_import", status="pass", message="mcp 1.26.0")
+        pass_result = CheckResult(name="mcp_import", status="pass", message="mcp 2.0.0")
         with patch(
             "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
             [lambda: pass_result, lambda: warn_result],

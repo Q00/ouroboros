@@ -619,7 +619,6 @@ async def _run_mcp_server(
         # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
         server = create_ouroboros_server(
             name="ouroboros-mcp",
-            version="1.0.0",
             event_store=event_store,
             brownfield_store=brownfield_store,
             runtime_backend=runtime_backend,
@@ -1049,7 +1048,6 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        version="1.0.0",
         runtime_backend=runtime.value if runtime else None,
         llm_backend=llm_backend.value if llm_backend else None,
     )
