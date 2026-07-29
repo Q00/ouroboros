@@ -692,7 +692,10 @@ def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:
     ) as run_git_command:
         _require_supported_git()
 
-    run_git_command.assert_called_once_with("--version")
+    assert run_git_command.call_count == 1
+    assert run_git_command.call_args.args == ("--version",)
+    # The probe targets the exact executable its cache key resolved (#1796).
+    assert run_git_command.call_args.kwargs.get("executable", "git")
 
 
 def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
@@ -1023,6 +1026,103 @@ class TestGitCapabilityProbeCache:
     failure paths are unchanged.
     """
 
+    def test_probe_targets_the_exact_executable_the_key_resolved(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Key resolution and the probe must not race a mutable PATH.
+
+        If the probe performs its own PATH lookup, a concurrent switch can
+        verify binary B and cache its success under binary A's key; later
+        calls then accept A without validation.
+        """
+        git_a = tmp_path / "git-a"
+        git_a.write_text("#!/bin/sh\n")
+        git_b = tmp_path / "git-b"
+        git_b.write_text("#!/bin/sh\n")
+
+        lookups = {"n": 0}
+
+        def switching_which(_name: str) -> str:
+            lookups["n"] += 1
+            return str(git_a) if lookups["n"] == 1 else str(git_b)
+
+        monkeypatch.setattr(project_identity.shutil, "which", switching_which)
+
+        invoked: list[str] = []
+
+        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            invoked.append(argv[0])
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
+
+        project_identity._require_supported_git()
+
+        assert invoked == [str(git_a)], (
+            "the probe ran a PATH lookup of its own instead of the key's executable"
+        )
+
+    def test_same_path_replacement_invalidates_the_cache(self, monkeypatch, tmp_path) -> None:
+        """Replacing the binary at the SAME path must re-probe (inode/mtime)."""
+        git_path = tmp_path / "git"
+        git_path.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
+
+        probes = {"n": 0}
+
+        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            probes["n"] += 1
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
+
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert probes["n"] == 1
+
+        git_path.unlink()
+        git_path.write_text("#!/bin/sh\necho replaced\n")
+        project_identity._require_supported_git()
+        assert probes["n"] == 2
+
+    def test_forked_child_reverifies(self, monkeypatch, tmp_path) -> None:
+        """The PID key field makes a forked child re-probe."""
+        git_path = tmp_path / "git"
+        git_path.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
+
+        probes = {"n": 0}
+
+        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            probes["n"] += 1
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
+
+        monkeypatch.setattr(project_identity.os, "getpid", lambda: 11111)
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert probes["n"] == 1
+
+        monkeypatch.setattr(project_identity.os, "getpid", lambda: 22222)
+        project_identity._require_supported_git()
+        assert probes["n"] == 2
+
     def test_warm_cache_fails_closed_when_git_disappears(self, monkeypatch) -> None:
         """A warmed cache must not outlive the executable it verified.
 
@@ -1034,7 +1134,7 @@ class TestGitCapabilityProbeCache:
         monkeypatch.setattr(
             project_identity,
             "_run_git_command",
-            lambda *a: b"git version 2.44.0\n" if a == ("--version",) else b"",
+            lambda *a, **_kw: b"git version 2.44.0\n" if a == ("--version",) else b"",
         )
         project_identity._require_supported_git()
 
@@ -1051,7 +1151,7 @@ class TestGitCapabilityProbeCache:
 
         probes = {"n": 0}
 
-        def probing(*arguments: str) -> bytes:
+        def probing(*arguments: str, executable: str = "git") -> bytes:
             assert arguments == ("--version",)
             probes["n"] += 1
             return b"git version 2.44.0\n"
@@ -1070,7 +1170,7 @@ class TestGitCapabilityProbeCache:
         calls: list[tuple[str, ...]] = []
         real = project_identity._run_git_command
 
-        def counting(*arguments: str) -> bytes:
+        def counting(*arguments: str, executable: str = "git") -> bytes:
             calls.append(arguments)
             if arguments == ("--version",):
                 return b"git version 2.44.0\n"
@@ -1087,7 +1187,7 @@ class TestGitCapabilityProbeCache:
     def test_transient_failure_is_not_cached(self, monkeypatch) -> None:
         attempts = {"n": 0}
 
-        def flaky(*arguments: str) -> bytes:
+        def flaky(*arguments: str, executable: str = "git") -> bytes:
             assert arguments == ("--version",)
             attempts["n"] += 1
             if attempts["n"] == 1:
@@ -1109,7 +1209,7 @@ class TestGitCapabilityProbeCache:
     def test_version_rejection_is_not_cached(self, monkeypatch) -> None:
         outputs = [b"git version 2.20.0\n", b"git version 2.44.0\n"]
 
-        def upgrading(*arguments: str) -> bytes:
+        def upgrading(*arguments: str, executable: str = "git") -> bytes:
             assert arguments == ("--version",)
             return outputs.pop(0)
 

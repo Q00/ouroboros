@@ -233,17 +233,19 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _run_git_command(*arguments: str) -> bytes:
+def _run_git_command(*arguments: str, executable: str = "git") -> bytes:
     """Run one bounded, non-interactive Git command and return complete stdout.
 
     A nonzero exit is unavailable because Git does not expose a portable
     exit-code distinction between malformed topology and transient repository
-    I/O.
+    I/O. ``executable`` lets the capability gate probe the exact binary its
+    cache key resolved instead of racing a second mutable-PATH lookup
+    (#1796 review round two).
     """
     try:
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run(
-                ["git", *arguments],
+                [executable, *arguments],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=output,
@@ -285,8 +287,8 @@ def _current_git_key() -> tuple[str, int, int, int, int]:
 
     The key binds the cached verification to the concrete binary selected by
     the (mutable) ``PATH`` — resolved path plus its device, inode, and mtime —
-    and to the current PID so forked children re-verify. Resolving it costs
-    two syscalls, no subprocess.
+    and to the current PID so forked children re-verify. Resolving it is a
+    filesystem metadata lookup — no subprocess is spawned.
     """
     executable = shutil.which("git")
     if executable is None:
@@ -314,7 +316,10 @@ def _require_supported_git() -> None:
     current_key = _current_git_key()
     if _verified_git_key == current_key:
         return
-    output = _run_git_command("--version")
+    # Probe the exact executable the key resolved: PATH is process-global and
+    # mutable, so a second lookup inside the probe could verify a different
+    # binary than the one this key represents.
+    output = _run_git_command("--version", executable=current_key[0])
     match = _GIT_VERSION_PATTERN.fullmatch(output)
     if match is None:
         raise ProjectIdentityGitVersionError(
