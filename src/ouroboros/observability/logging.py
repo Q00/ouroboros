@@ -324,7 +324,12 @@ def _get_file_processors() -> list[Any]:
 
 # Global flag to control console log output
 _console_logging_enabled: bool = True
-_reset_baseline_active: bool = False
+# The live sink: every _FileWritingPrintLogger instance routes through this
+# module state, so bound loggers cached before a reset or reconfiguration
+# (cache_logger_on_first_use) always follow the CURRENT configuration
+# instead of a frozen wrapper/handler pair (#1794 rounds five and six).
+_current_min_level: int = logging.INFO
+_current_file_handler: TimedRotatingFileHandler | None = None
 
 
 def set_console_logging(enabled: bool) -> None:
@@ -369,22 +374,18 @@ class _FileWritingPrintLogger:
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
 
-        if _reset_baseline_active:
-            # Post-reset baseline: cached bound loggers materialized under the
-            # previous configuration (cache_logger_on_first_use) still route
-            # through this instance, so enforce the resource-free INFO/stderr
-            # contract here — never below INFO, never the old file handler
-            # (#1794 round five).
-            if level >= logging.INFO and _console_logging_enabled:
-                print(message, file=sys.stderr)
+        # Route through the live sink, not per-instance state: cached bound
+        # loggers keep their old wrapper (and old filtering), so the floor and
+        # the file handler must come from the current configuration.
+        if level < _current_min_level:
             return
 
         # Print to stderr only if console logging is enabled
         if _console_logging_enabled:
             print(message, file=sys.stderr)
 
-        # Write to file if handler exists
-        if self._file_handler:
+        # Write to file if the CURRENT configuration has one
+        if _current_file_handler is not None:
             record = logging.LogRecord(
                 name="ouroboros",
                 level=level,
@@ -394,7 +395,7 @@ class _FileWritingPrintLogger:
                 args=(),
                 exc_info=None,
             )
-            self._file_handler.emit(record)
+            _current_file_handler.emit(record)
 
     def msg(self, message: str) -> None:
         """Log a message to console and file (default INFO level)."""
@@ -479,8 +480,6 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # Or specify config explicitly
         configure_logging(LoggingConfig(mode=LogMode.PROD, max_log_days=14))
     """
-    global _reset_baseline_active
-    _reset_baseline_active = False
     global _configured, _current_config
 
     if config is None:
@@ -505,6 +504,11 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
 
     # Get processors for console output
     processors = _get_console_processors(config.mode)
+
+    # Publish the live sink for every logger instance, cached ones included
+    global _current_min_level, _current_file_handler
+    _current_min_level = log_level
+    _current_file_handler = file_handler
 
     # Create logger factory that writes to both console and file
     logger_factory = _FileWritingPrintLoggerFactory(file_handler)
@@ -626,10 +630,11 @@ def reset_logging() -> None:
     import-time ``get_logger`` proxies stay quiet on stdout until the next
     ``configure_logging()``.
     """
-    global _configured, _current_config, _reset_baseline_active
+    global _configured, _current_config, _current_min_level, _current_file_handler
     _configured = False
     _current_config = None
-    _reset_baseline_active = True
+    _current_min_level = logging.INFO
+    _current_file_handler = None
     _close_root_handlers()
     # Clear any bound context
     structlog.contextvars.clear_contextvars()

@@ -831,6 +831,20 @@ class EventStore:
         return None
 
     async def append_session_start_if_absent(self, event: BaseEvent) -> None:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_start_if_absent_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+        )
+
+    async def _append_session_start_if_absent_unfenced(self, event: BaseEvent) -> None:
         """Publish exactly one immutable start identity for a session ID."""
         if self._engine is None:
             raise PersistenceError(
@@ -940,6 +954,20 @@ class EventStore:
         )
 
     async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_terminal_if_active_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+        )
+
+    async def _append_session_terminal_if_active_unfenced(self, event: BaseEvent) -> bool:
         """Append one terminal session event only while no terminal event exists.
 
         Returns ``True`` when ``event`` was inserted and ``False`` when another
@@ -1194,6 +1222,20 @@ class EventStore:
         return True
 
     async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_pause_if_active_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+        )
+
+    async def _append_session_pause_if_active_unfenced(self, event: BaseEvent) -> bool:
         """Append PAUSED only while no explicit terminal session event exists.
 
         Returns ``True`` when the pause event was inserted and ``False`` when

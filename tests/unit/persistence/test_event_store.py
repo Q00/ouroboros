@@ -2522,6 +2522,76 @@ class TestCancellationSettlement:
         await reopened.close()
 
     @pytest.mark.asyncio
+    async def test_session_lifecycle_appends_during_close_are_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Session start/terminal CAS paths must honor the closing fence too.
+
+        They dispatch above append()'s settlement wrapper, so without their
+        own admission a session-start racing close() committed after
+        disposal.
+        """
+        db_path = tmp_path / "lifecycle-close.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        started = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="sess-live",
+            data={"execution_id": "exec-live"},
+        )
+        await store.append(started)
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_checkpoint = store.checkpoint_wal
+
+        async def gated_checkpoint() -> bool:
+            entered.set()
+            await gate.wait()
+            return await orig_checkpoint()
+
+        monkeypatch.setattr(store, "checkpoint_wal", gated_checkpoint)
+
+        close_task = asyncio.create_task(store.close())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="orchestrator.session.started",
+                        aggregate_type="session",
+                        aggregate_id="sess-during-close",
+                        data={"execution_id": "exec-during-close"},
+                    )
+                )
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="orchestrator.session.completed",
+                        aggregate_type="session",
+                        aggregate_id="sess-live",
+                        data={},
+                    )
+                )
+        finally:
+            gate.set()
+            await asyncio.wait_for(close_task, timeout=10)
+
+        reopened = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await reopened.initialize()
+        assert await reopened.replay("session", "sess-during-close") == []
+        terminal = [
+            e
+            for e in await reopened.replay("session", "sess-live")
+            if e.type == "orchestrator.session.completed"
+        ]
+        assert terminal == []
+        await reopened.close()
+
+    @pytest.mark.asyncio
     async def test_cancelled_append_with_failing_commit_still_raises_cancellation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -490,6 +490,41 @@ class TestResetLogging:
         assert "debug-should-be-filtered" not in captured.err
         assert "info-should-go-to-stderr" in captured.err
 
+    def test_cached_proxies_follow_reconfiguration_after_reset(
+        self, capsys: Any, tmp_path: Any
+    ) -> None:
+        """#1794 round six: reconfiguring must not revive stale cached sinks.
+
+        A proxy cached under DEBUG/file logging, after reset and an
+        INFO/no-file reconfiguration, must obey the NEW configuration — no
+        DEBUG output, no writes through the old (closed) file handler.
+        """
+        old_dir = tmp_path / "old-logs"
+        configure_logging(
+            LoggingConfig(
+                log_level="DEBUG",
+                enable_file_logging=True,
+                log_dir=str(old_dir),
+            )
+        )
+        proxy = structlog.get_logger("stale-proxy")
+        proxy.debug("materialize-under-debug-file")
+        old_files = list(old_dir.glob("*"))
+        sizes_before = {f: f.stat().st_size for f in old_files}
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+
+        proxy.debug("stale-debug-must-not-emit")
+        proxy.info("stale-info-goes-to-current-sink")
+        captured = capsys.readouterr()
+        assert "stale-debug-must-not-emit" not in captured.err
+        assert "stale-debug-must-not-emit" not in captured.out
+        assert "stale-info-goes-to-current-sink" in captured.err
+        for f, size in sizes_before.items():
+            assert f.stat().st_size == size, "old file handler was written after reset"
+
     def test_reset_baseline_governs_cached_pre_used_proxies(
         self, capsys: Any, tmp_path: Any
     ) -> None:
