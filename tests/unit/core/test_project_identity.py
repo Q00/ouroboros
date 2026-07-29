@@ -1023,6 +1023,49 @@ class TestGitCapabilityProbeCache:
     failure paths are unchanged.
     """
 
+    def test_warm_cache_fails_closed_when_git_disappears(self, monkeypatch) -> None:
+        """A warmed cache must not outlive the executable it verified.
+
+        After a successful probe, deleting git from PATH must surface
+        unavailability on the next gate call — without this the local-first
+        resolution of a non-Git directory succeeds with zero git commands
+        while git is gone, violating the fail-closed contract.
+        """
+        monkeypatch.setattr(
+            project_identity,
+            "_run_git_command",
+            lambda *a: b"git version 2.44.0\n" if a == ("--version",) else b"",
+        )
+        project_identity._require_supported_git()
+
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _name: None)
+        with pytest.raises(project_identity.ProjectIdentityUnavailableError):
+            project_identity._require_supported_git()
+
+    def test_warm_cache_reprobes_when_git_is_replaced(self, monkeypatch, tmp_path) -> None:
+        """A different executable identity must invalidate the cache."""
+        git_a = tmp_path / "git-a"
+        git_a.write_text("#!/bin/sh\n")
+        git_b = tmp_path / "git-b"
+        git_b.write_text("#!/bin/sh\necho\n")
+
+        probes = {"n": 0}
+
+        def probing(*arguments: str) -> bytes:
+            assert arguments == ("--version",)
+            probes["n"] += 1
+            return b"git version 2.44.0\n"
+
+        monkeypatch.setattr(project_identity, "_run_git_command", probing)
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_a))
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert probes["n"] == 1
+
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_b))
+        project_identity._require_supported_git()
+        assert probes["n"] == 2
+
     def test_successful_probe_runs_git_version_once(self, monkeypatch) -> None:
         calls: list[tuple[str, ...]] = []
         real = project_identity._run_git_command

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -270,26 +271,48 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     return _run_git_command("-C", str(start), *arguments)
 
 
-_git_capability_verified: bool = False
+_verified_git_key: tuple[str, int, int, int, int] | None = None
 
 
 def _reset_git_capability_cache_for_tests() -> None:
-    """Clear the process-lifetime capability cache (test isolation only)."""
-    global _git_capability_verified
-    _git_capability_verified = False
+    """Clear the capability cache (test isolation only)."""
+    global _verified_git_key
+    _verified_git_key = None
+
+
+def _current_git_key() -> tuple[str, int, int, int, int]:
+    """Identify the Git executable the next command would run.
+
+    The key binds the cached verification to the concrete binary selected by
+    the (mutable) ``PATH`` — resolved path plus its device, inode, and mtime —
+    and to the current PID so forked children re-verify. Resolving it costs
+    two syscalls, no subprocess.
+    """
+    executable = shutil.which("git")
+    if executable is None:
+        raise ProjectIdentityUnavailableError("Git executable is unavailable on PATH")
+    try:
+        status = os.stat(executable)
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError("Git executable is unavailable") from exc
+    return (executable, status.st_dev, status.st_ino, status.st_mtime_ns, os.getpid())
 
 
 def _require_supported_git() -> None:
     """Reject Git versions that lack the unambiguous topology query grammar.
 
-    A successful probe is cached for the process lifetime: the installed Git
-    binary cannot meaningfully change within one process, and this gate runs
-    on every identity resolution — at least twice per session start (#1796).
-    Failures are never cached, so a transient spawn failure keeps re-probing
-    and a version rejection retains its original per-call semantics.
+    A successful probe is cached per executable identity (#1796): the gate
+    runs on every identity resolution — at least twice per session start —
+    and re-spawning ``git --version`` for an unchanged binary is pure waste.
+    The cache is bound to the concrete executable (path/device/inode/mtime)
+    and the PID, so a Git that disappears from ``PATH`` fails closed
+    immediately, a replaced binary is re-probed, and failures themselves are
+    never cached — a transient spawn failure keeps re-probing and a version
+    rejection retains its original per-call semantics.
     """
-    global _git_capability_verified
-    if _git_capability_verified:
+    global _verified_git_key
+    current_key = _current_git_key()
+    if _verified_git_key == current_key:
         return
     output = _run_git_command("--version")
     match = _GIT_VERSION_PATTERN.fullmatch(output)
@@ -305,7 +328,7 @@ def _require_supported_git() -> None:
             f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
             f"found {found}"
         )
-    _git_capability_verified = True
+    _verified_git_key = current_key
 
 
 def _git_path(output: bytes) -> Path:
