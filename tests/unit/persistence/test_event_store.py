@@ -2686,6 +2686,88 @@ class TestCancellationSettlement:
         await reopened.close()
 
     @pytest.mark.asyncio
+    async def test_close_started_during_initialize_waits_for_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """initialize/close must be mutually exclusive in both orders.
+
+        The close gate only guarded an already-running close; a close started
+        DURING initialization returned first, leaving initialize reporting
+        success on a disposed store.
+        """
+        import aiosqlite
+
+        db_path = tmp_path / "init-order.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        init_task = asyncio.create_task(store.initialize())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            close_task = asyncio.create_task(store.close())
+            await asyncio.sleep(0.05)
+            assert not close_task.done(), "close() finished while initialize() was still in flight"
+        finally:
+            gate.set()
+        await asyncio.wait_for(init_task, timeout=10)
+        await asyncio.wait_for(close_task, timeout=10)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_close_leaves_recoverable_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Cancelling close() mid-drain must not wedge the lifecycle.
+
+        Before the fix, cancellation during the drain left the closing flag
+        set and the gate cleared forever; the next initialize() hung.
+        """
+        import aiosqlite
+
+        db_path = tmp_path / "close-cancel.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        append_task = asyncio.create_task(store.append(_make_event(aggregate_id="wedge")))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        append_task.cancel()
+
+        close_task = asyncio.create_task(store.close())
+        await asyncio.sleep(0.05)
+        close_task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(close_task, timeout=10)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(append_task, timeout=10)
+
+        await asyncio.wait_for(store.initialize(), timeout=5)
+        await store.append(_make_event(aggregate_id="recovered"))
+        events = await store.replay("test", "recovered")
+        assert len(events) == 1
+        await store.close()
+
+    @pytest.mark.asyncio
     async def test_cancelled_append_with_failing_commit_still_raises_cancellation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

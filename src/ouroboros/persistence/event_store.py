@@ -570,8 +570,7 @@ class EventStore:
         self._read_only = read_only
         self._settling_writes = set()
         self._closing = False
-        self._close_gate = asyncio.Event()
-        self._close_gate.set()
+        self._lifecycle_lock = asyncio.Lock()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
@@ -700,11 +699,15 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
-        # Serialize with an in-flight close(): reopening admission before
-        # the drain/checkpoint/dispose sequence finishes would let a write
-        # slip in and commit after shutdown (review round seven).
-        await self._close_gate.wait()
-        self._closing = False
+        # Mutually exclusive with close() in BOTH orders (review rounds
+        # seven and eight): initialization during an in-flight close waits for
+        # the full drain/checkpoint/dispose sequence, and a close started
+        # during initialization waits for initialization to finish.
+        async with self._lifecycle_lock:
+            self._closing = False
+            await self._initialize_locked(create_schema=create_schema)
+
+    async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if create_schema is None:
             create_schema = not self._read_only
 
@@ -2822,33 +2825,39 @@ class EventStore:
         caller must land before the WAL checkpoint and engine disposal, or
         durable history could change after shutdown (review round four).
         """
-        self._closing = True
-        self._close_gate.clear()
-        while self._settling_writes:
-            done, _ = await asyncio.wait(tuple(self._settling_writes))
-            for task in done:
-                if not task.cancelled() and task.exception() is not None:
-                    logger.debug(
-                        "event_store.close.drained_failed_write",
-                        exc_info=task.exception(),
-                    )
-        try:
-            if self._engine is not None:
-                # Collapse the WAL before disposing so the -wal file does not
-                # survive shutdown. Best effort — see checkpoint_wal().
-                await self.checkpoint_wal()
-                await self._engine.dispose()
-                self._engine = None
-            if self._memory_keepalive is not None:
-                # Release the shared in-memory database anchor last so pooled
-                # connections never observe the database disappearing
-                # mid-dispose.
-                try:
-                    self._memory_keepalive.close()
-                finally:
-                    self._memory_keepalive = None
-        finally:
-            self._close_gate.set()
+        async with self._lifecycle_lock:
+            self._closing = True
+            try:
+                while self._settling_writes:
+                    done, _ = await asyncio.wait(tuple(self._settling_writes))
+                    for task in done:
+                        if not task.cancelled() and task.exception() is not None:
+                            logger.debug(
+                                "event_store.close.drained_failed_write",
+                                exc_info=task.exception(),
+                            )
+                if self._engine is not None:
+                    # Collapse the WAL before disposing so the -wal file does
+                    # not survive shutdown. Best effort — see checkpoint_wal().
+                    await self.checkpoint_wal()
+                    await self._engine.dispose()
+                    self._engine = None
+                if self._memory_keepalive is not None:
+                    # Release the shared in-memory database anchor last so
+                    # pooled connections never observe the database
+                    # disappearing mid-dispose.
+                    try:
+                        self._memory_keepalive.close()
+                    finally:
+                        self._memory_keepalive = None
+            except asyncio.CancelledError:
+                # A cancelled close must leave a recoverable lifecycle, not a
+                # permanently closing store: writes drained so far are
+                # durable, and if the engine still exists the store stays
+                # usable (review round eight).
+                if self._engine is not None:
+                    self._closing = False
+                raise
 
 
 @dataclass(frozen=True, slots=True)

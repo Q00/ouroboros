@@ -354,8 +354,9 @@ def is_console_logging_enabled() -> bool:
 class _FileWritingPrintLogger:
     """Print logger that also writes to a file handler.
 
-    This logger writes to stdout (for console output) and optionally
-    to a file handler for persistent logging. Supports proper log levels.
+    This logger writes to stderr (for console output, keeping stdout reserved
+    for command output) and optionally to a file handler for persistent
+    logging. Supports proper log levels.
     """
 
     def __init__(self, file_handler: TimedRotatingFileHandler | None = None) -> None:
@@ -523,7 +524,10 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # processors, so proxies materialized under one configuration would
         # ignore later ones in BOTH directions — a stale INFO wrapper defeats
         # an operator's DEBUG setting, and a stale DEV renderer defeats PROD
-        # output contracts (#1794 round seven).
+        # output contracts (#1794 round seven). Known limitation: a logger
+        # materialized explicitly via ``get_logger().bind(...)`` snapshots the
+        # processor chain at bind time and will not follow reconfiguration —
+        # keep module-level loggers as bare lazy proxies.
         cache_logger_on_first_use=False,
     )
 
