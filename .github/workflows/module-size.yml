@@ -26,6 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # Need origin/main so the gate can compare the proposed policy
+          # against its predecessor. GRANDFATHERED and SOFT_CAP are editable in
+          # the same commit they gate, so without the base ref a PR could grow
+          # a module and raise its budget together and still report OK.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
@@ -33,4 +39,4 @@ jobs:
           python-version: "3.12"
 
       - name: Enforce module size ratchet
-        run: python3 scripts/check-module-size.py
+        run: python3 scripts/check-module-size.py --baseline-ref origin/main

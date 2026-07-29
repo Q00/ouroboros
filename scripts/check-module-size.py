@@ -27,26 +27,42 @@ The rule has two halves:
    contributor to spend. The failure message prints the exact replacement
    line, so satisfying it is a one-line edit in the same PR.
 
-Physical lines are counted, including blanks and comments. That is gameable in
-principle by writing longer lines, but `line-length = 100` in pyproject.toml
-already bounds that, and physical length is what actually costs a reviewer.
+3. The policy itself may only tighten. GRANDFATHERED and SOFT_CAP are editable
+   in the same commit they gate, so measuring source against the *proposed*
+   table proves nothing on its own: a PR could grow a module and raise its
+   budget together, or add a new oversized module and grandfather it, and the
+   gate would report OK. So the proposed policy is also compared against the
+   base branch's: no key may be added, no budget may increase, and SOFT_CAP may
+   not rise. Removals and decreases are the only permitted direction.
+
+Physical lines are counted, including blanks and comments. That is gameable by
+writing longer lines. `line-length = 100` in pyproject.toml makes that awkward,
+but it is not a hard bound -- `E501` is in the ruff ignore list, and the
+formatter cannot split a long string literal or URL. The count is a proxy for
+what costs a reviewer, not a tamper-proof metric; the base-branch comparison in
+rule 3 is what actually makes the gate hard to walk around.
 
 Run locally:
-    python3 scripts/check-module-size.py
+    python3 scripts/check-module-size.py                    # current state only
+    python3 scripts/check-module-size.py --baseline-ref origin/main
 
 CI:
-    .github/workflows/module-size.yml runs this on every PR.
+    .github/workflows/module-size.yml runs this on every PR with
+    --baseline-ref origin/main and fetch-depth: 0.
 
 Retiring an entry:
     When a grandfathered module falls to SOFT_CAP or below, delete its line
-    from GRANDFATHERED entirely. It is then held by the universal cap and can
-    never be grandfathered again. That deletion is the unit of progress on
-    #1797.
+    from GRANDFATHERED entirely. It is then held by the universal cap and, by
+    rule 3, can never be grandfathered again. That deletion is the unit of
+    progress on #1797.
 """
 
 from __future__ import annotations
 
+import argparse
+import ast
 from pathlib import Path
+import subprocess
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -112,13 +128,134 @@ def _measure() -> dict[str, int]:
     }
 
 
-def main() -> int:
+SELF_PATH = "scripts/check-module-size.py"
+
+
+class BaselineUnavailable(Exception):
+    """Raised when a requested baseline ref cannot be read."""
+
+
+def _policy_literals(source: str) -> tuple[dict[str, int], int]:
+    """Extract GRANDFATHERED and SOFT_CAP from a version of this script.
+
+    Parsed with ``ast`` rather than imported: the baseline comes from another
+    commit, and a gate must never execute the code it is judging.
+    """
+    module = ast.parse(source)
+    found: dict[str, object] = {}
+    for node in module.body:
+        targets = (
+            [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else node.targets
+            if isinstance(node, ast.Assign)
+            else []
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in {"GRANDFATHERED", "SOFT_CAP"}:
+                if node.value is None:
+                    continue
+                try:
+                    found[target.id] = ast.literal_eval(node.value)
+                except ValueError as exc:
+                    raise BaselineUnavailable(
+                        f"{target.id} is not a literal in the baseline copy"
+                    ) from exc
+    table = found.get("GRANDFATHERED")
+    cap = found.get("SOFT_CAP")
+    if not isinstance(table, dict) or not isinstance(cap, int):
+        raise BaselineUnavailable("baseline copy does not define GRANDFATHERED and SOFT_CAP")
+    return {str(k): int(v) for k, v in table.items()}, cap
+
+
+def _baseline_policy(ref: str) -> tuple[dict[str, int], int] | None:
+    """Return the policy recorded at ``ref``, or None if the gate is new there.
+
+    A ref that does not resolve is an error: a silently skipped comparison is
+    exactly the hole this check exists to close. A ref that resolves but has no
+    copy of this script is the gate's own introducing PR, which has no
+    predecessor policy to tighten.
+    """
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise BaselineUnavailable(
+            f"baseline ref {ref!r} does not resolve; ensure the checkout uses "
+            "fetch-depth: 0 and that the ref has been fetched"
+        ) from exc
+    try:
+        completed = subprocess.run(
+            ["git", "show", f"{ref}:{SELF_PATH}"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    except OSError as exc:
+        raise BaselineUnavailable(f"could not read {SELF_PATH} at {ref!r}: {exc}") from exc
+    return _policy_literals(completed.stdout)
+
+
+def _policy_regressions(
+    baseline: tuple[dict[str, int], int],
+) -> tuple[list[str], list[tuple[str, int, int]], tuple[int, int] | None]:
+    """Compare the proposed policy against the baseline's."""
+    baseline_table, baseline_cap = baseline
+    added = sorted(set(GRANDFATHERED) - set(baseline_table))
+    raised = sorted(
+        (key, GRANDFATHERED[key], baseline_table[key])
+        for key in set(GRANDFATHERED) & set(baseline_table)
+        if GRANDFATHERED[key] > baseline_table[key]
+    )
+    cap_raised = (SOFT_CAP, baseline_cap) if baseline_cap < SOFT_CAP else None
+    return added, raised, cap_raised
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--baseline-ref",
+        default=None,
+        help=(
+            "Git ref holding the policy this run must not loosen (CI passes "
+            "origin/main). Omitted: only the current source snapshot is checked."
+        ),
+    )
+    args = parser.parse_args(argv)
+
     if not SOURCE_ROOT.is_dir():
         sys.stderr.write(
             f"module-size: FAILED -- source root {_relative(SOURCE_ROOT)} does not exist.\n"
             "This gate cannot verify anything; fix the checkout or update SOURCE_ROOT.\n"
         )
         return 1
+
+    added: list[str] = []
+    raised: list[tuple[str, int, int]] = []
+    cap_raised: tuple[int, int] | None = None
+    if args.baseline_ref is not None:
+        try:
+            baseline = _baseline_policy(args.baseline_ref)
+        except BaselineUnavailable as exc:
+            sys.stderr.write(
+                f"module-size: FAILED -- {exc}.\nRefusing to pass without the "
+                "baseline policy: an unchecked table can grandfather anything.\n"
+            )
+            return 1
+        if baseline is None:
+            print(
+                f"module-size: no policy at {args.baseline_ref} -- this is the "
+                "gate's introducing commit; skipping the tightening check."
+            )
+        else:
+            added, raised, cap_raised = _policy_regressions(baseline)
 
     sizes = _measure()
 
@@ -146,7 +283,10 @@ def main() -> int:
         elif budget - count > RESEED_SLACK:
             needs_reseed.append((rel, count, budget))
 
-    if not (vanished or over_cap or over_budget or needs_reseed or retired):
+    if (
+        not (vanished or over_cap or over_budget or needs_reseed or retired or added or raised)
+        and cap_raised is None
+    ):
         print(
             f"module-size: OK ({len(sizes)} modules, cap {SOFT_CAP}, "
             f"{len(GRANDFATHERED)} grandfathered)"
@@ -155,6 +295,36 @@ def main() -> int:
 
     write = sys.stderr.write
     write("module-size: FAILED\n\n")
+
+    if cap_raised is not None:
+        proposed, previous = cap_raised
+        write(
+            f"SOFT_CAP was raised from {previous} to {proposed}. The cap is the "
+            "policy this\ngate enforces; raising it in the commit it governs "
+            "would let any module\nthrough. It may only be lowered.\n\n"
+        )
+
+    if added:
+        write(
+            "Modules were added to GRANDFATHERED. The set is closed (frozen "
+            "2026-07-29):\nentries may only be removed. Split the module, or "
+            "keep it under the cap --\nadding it here would grandfather new "
+            "debt, and would also let a module that\nalready earned its way "
+            "out come back in:\n"
+        )
+        for rel in added:
+            write(f"  {rel}: {GRANDFATHERED[rel]}\n")
+        write("\n")
+
+    if raised:
+        write(
+            "Grandfathered budgets were raised. A budget may only decrease -- "
+            "raising it\nin the same commit that grows the module is exactly "
+            "the bypass this gate\nexists to prevent:\n"
+        )
+        for rel, proposed, previous in raised:
+            write(f"  {rel}: {previous} -> {proposed} (+{proposed - previous})\n")
+        write("\n")
 
     if vanished:
         write(
