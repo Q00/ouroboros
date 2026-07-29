@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import plistlib
-from xml.parsers.expat import ExpatError
 
 ZCODE_SCRIPT_SUFFIXES = (".cjs", ".js", ".mjs")
 ZCODE_NODE_BUNDLE_METADATA = ".node-bundle-meta.json"
@@ -67,7 +66,16 @@ def resolve_zcode_electron_node_path(cli_path: str | Path | None) -> str | None:
     try:
         with info_plist.open("rb") as stream:
             bundle_info = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException, ExpatError) as exc:
+    except Exception as exc:
+        # This resolver normalizes every other bundle-metadata failure to RuntimeError,
+        # so the parse arm has to cover whatever `plistlib.load()` can raise. Enumerating
+        # the types kept missing one, and they share no useful base class:
+        #   binary plist, bad header            -> plistlib.InvalidFileException
+        #   malformed XML                       -> xml.parsers.expat.ExpatError
+        #   well-formed XML, bad <integer>/<real> -> ValueError
+        #   well-formed XML, bad <date>         -> AttributeError
+        # An unreadable file is operator-facing input, so any failure to turn it into a
+        # dict becomes the actionable message rather than leaking a parser internal.
         msg = f"ZCode app bundle metadata is present but {info_plist} is unreadable: {exc}"
         raise RuntimeError(msg) from exc
 
