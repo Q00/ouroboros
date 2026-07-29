@@ -843,22 +843,77 @@ def _trim_managed_codex_comments(lines: list[str]) -> None:
 
 def _toml_parent_table_assignment_key(line: str, parent_path: tuple[str, ...]) -> str | None:
     """Return the key assigned in a parent table line, if parseable."""
+    path = _toml_assignment_path(line, parent_path=parent_path)
+    if path is None or len(path) != len(parent_path) + 1 or path[: len(parent_path)] != parent_path:
+        return None
+    return path[-1]
+
+
+def _toml_assignment_path(
+    line: str, *, parent_path: tuple[str, ...] = ()
+) -> tuple[str, ...] | None:
+    """Return the TOML key path assigned by one line, if parseable."""
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or "=" not in stripped:
         return None
-    table_header = ".".join(_render_toml_key(part) for part in parent_path)
+
+    quote: str | None = None
+    escaped = False
+    equals_index: int | None = None
+    for index, char in enumerate(stripped):
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "=":
+            equals_index = index
+            break
+    if equals_index is None:
+        return None
+
+    key = stripped[:equals_index].strip()
+    if not key:
+        return None
     try:
-        parsed = tomllib.loads(f"[{table_header}]\n{stripped}\n")
+        path = _toml_table_path_from_body(key)
     except tomllib.TOMLDecodeError:
         return None
-    node: object = parsed
-    for part in parent_path:
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    if not isinstance(node, dict) or len(node) != 1:
+    if path is None:
         return None
-    return next(iter(node))
+    return parent_path + path
+
+
+def _toml_table_path_from_body(body: str) -> tuple[str, ...] | None:
+    """Parse a TOML dotted key/table body into a path tuple."""
+    marker = "__ouroboros_table_header_marker__"
+    parsed = tomllib.loads(f"[{body}]\n{marker} = true\n")
+
+    path: list[str] = []
+
+    def _walk(node: object) -> bool:
+        if not isinstance(node, dict):
+            return False
+        if node.get(marker) is True:
+            return True
+        for key, value in node.items():
+            if key == marker:
+                continue
+            path.append(str(key))
+            if _walk(value):
+                return True
+            path.pop()
+        return False
+
+    return tuple(path) if _walk(parsed) else None
 
 
 def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
@@ -895,9 +950,8 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
                 output_lines.extend(preserved_comments)
             continue
 
-        if current_table_path == ("mcp_servers",) and (
-            _toml_parent_table_assignment_key(stripped, ("mcp_servers",)) == "ouroboros"
-        ):
+        assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        if assignment_path is not None and assignment_path[:2] == ("mcp_servers", "ouroboros"):
             existed_before = True
             index += 1
             continue
@@ -1212,8 +1266,12 @@ def _remove_codex_legacy_profile_sections(
     input_lines = raw.splitlines()
     output_lines: list[str] = []
     index = 0
+    current_table_path: tuple[str, ...] | None = None
     while index < len(input_lines):
         stripped = input_lines[index].strip()
+        path = _toml_table_header_path(stripped)
+        if path is not None:
+            current_table_path = path
         if _is_codex_ouroboros_profile_header(stripped, profile_names):
             _trim_managed_codex_worker_profile_comments(output_lines)
             while output_lines and output_lines[-1] == _CODEX_PROFILE_COMMENT:
@@ -1230,6 +1288,19 @@ def _remove_codex_legacy_profile_sections(
                 ):
                     break
                 index += 1
+            continue
+
+        assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        if (
+            assignment_path is not None
+            and len(assignment_path) >= 2
+            and assignment_path[0] == "profiles"
+            and assignment_path[1] in profile_names
+        ):
+            _trim_managed_codex_worker_profile_comments(output_lines)
+            while output_lines and output_lines[-1] == _CODEX_PROFILE_COMMENT:
+                output_lines.pop()
+            index += 1
             continue
 
         output_lines.append(input_lines[index])
@@ -2147,13 +2218,23 @@ def _snapshot_codex_artifact_setup_paths(codex_home: Path) -> dict[Path, _PathSn
     }
 
 
-def _snapshot_codex_profile_setup_paths(codex_home: Path) -> dict[Path, _PathSnapshot]:
-    """Snapshot managed Codex profile-v2 files after setup-owned profile retirement."""
-    return {
-        path: _snapshot_path(path)
-        for path in _managed_codex_setup_paths(codex_home)
-        if path.name.endswith(".config.toml")
-    }
+def _snapshot_codex_profile_setup_paths(
+    codex_home: Path,
+    *,
+    config_baseline: _PathSnapshot | None = None,
+) -> dict[Path, _PathSnapshot]:
+    """Snapshot managed Codex profile paths after setup-owned profile retirement."""
+    snapshots: dict[Path, _PathSnapshot] = {}
+    for path in _managed_codex_setup_paths(codex_home):
+        if path.name.endswith(".config.toml"):
+            snapshots[path] = _snapshot_path(path)
+            continue
+        if path.name != "config.toml":
+            continue
+        current_snapshot = _snapshot_path(path)
+        if config_baseline is None or current_snapshot != config_baseline:
+            snapshots[path] = current_snapshot
+    return snapshots
 
 
 def _snapshot_created_directory_topology(paths: tuple[Path, ...]) -> dict[Path, bool]:
@@ -2450,9 +2531,15 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
             raise OSError("Codex artifact installation failed")
         if managed_codex_expected_snapshot is not None:
             managed_codex_expected_snapshot.update(_snapshot_codex_artifact_setup_paths(codex_home))
+        codex_config_before_profile_retirement = _snapshot_path(codex_home / "config.toml")
         _retire_codex_default_profiles(protected_profile_names=protected_legacy_profiles)
         if managed_codex_expected_snapshot is not None:
-            managed_codex_expected_snapshot.update(_snapshot_codex_profile_setup_paths(codex_home))
+            managed_codex_expected_snapshot.update(
+                _snapshot_codex_profile_setup_paths(
+                    codex_home,
+                    config_baseline=codex_config_before_profile_retirement,
+                )
+            )
         if not _register_codex_worker_profile(codex_path=codex_path):
             raise OSError("Codex worker profile registration failed")
     except (OSError, TypeError, ValueError) as exc:

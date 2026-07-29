@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -83,6 +86,20 @@ class TestCodexCommandDispatcher:
         assert original["kind"] == changed["kind"]
         assert original["implementation_sha256"]
         assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_is_stable_across_fresh_interpreters(self) -> None:
+        """Portable dispatcher identity must not include process-local code repr addresses."""
+        script = (
+            "import json;"
+            "from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher;"
+            "print(json.dumps(CodexCommandDispatcher(cwd='/tmp/project').stable_identity_contract(), sort_keys=True))"
+        )
+
+        first = subprocess.check_output([sys.executable, "-c", script], text=True).strip()
+        second = subprocess.check_output([sys.executable, "-c", script], text=True).strip()
+
+        assert json.loads(first)["implementation_sha256"]
+        assert first == second
 
     @staticmethod
     def _write_skill(

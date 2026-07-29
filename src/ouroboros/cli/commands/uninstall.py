@@ -588,3 +588,5 @@ def uninstall(
     )
     console.print("  claude plugin uninstall ouroboros   [dim]# if using Claude Code plugin[/dim]")
     console.print()
+    if failed:
+        raise typer.Exit(1)

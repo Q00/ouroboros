@@ -620,6 +620,38 @@ class TestCodexSetup:
         assert contents.count("ouroboros = {") == 0
         assert contents.count("[mcp_servers.ouroboros]") == 1
 
+    def test_register_codex_mcp_server_replaces_managed_root_dotted_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Root dotted `mcp_servers.ouroboros = {...}` entries must not duplicate."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    'mcp_servers.other = { command = "other" }',
+                    (
+                        'mcp_servers.ouroboros = { command = "uvx", args = ["--from", '
+                        '"ouroboros-ai", "ouroboros", "mcp", "serve"] }'
+                    ),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+
+        assert parsed["mcp_servers"]["other"]["command"] == "other"
+        assert parsed["mcp_servers"]["ouroboros"]["command"]
+        assert "mcp_servers.ouroboros =" not in contents
+        assert contents.count("[mcp_servers.ouroboros]") == 1
+
     def test_register_codex_mcp_server_stdio_repairs_endpointless_entry(
         self,
         tmp_path: Path,
@@ -1292,6 +1324,40 @@ class TestCodexSetup:
         assert contents.count('[profiles."ouroboros-worker"]') == 0
         assert 'model = "operator-model"' in contents
         assert 'inherit = "all"' in contents
+
+    def test_register_codex_worker_profile_migrates_inline_parent_assignment_to_profile_v2(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Inline `[profiles] "ouroboros-worker" = {...}` must be removed after v2 migration."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles]",
+                    'other = { model = "keep-me" }',
+                    '"ouroboros-worker" = { model = "o3-mini", sandbox = "workspace-write" }',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            assert setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+        worker_profile = (codex_dir / "ouroboros-worker.config.toml").read_text(encoding="utf-8")
+
+        assert parsed["profiles"]["other"]["model"] == "keep-me"
+        assert "ouroboros-worker" not in parsed["profiles"]
+        assert 'model = "o3-mini"' in worker_profile
+        assert 'sandbox = "workspace-write"' in worker_profile
 
     def test_register_codex_worker_profile_migrates_trailing_comment_header_to_profile_v2(
         self,
@@ -2132,6 +2198,48 @@ class TestCodexSetup:
             patch(
                 "ouroboros.cli.commands.setup._register_codex_worker_profile",
                 side_effect=TypeError("unsupported TOML value"),
+            ),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == original_toml
+
+    def test_setup_codex_rolls_back_config_after_profile_retirement_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Profile retirement edits to config.toml remain setup-owned on later failure."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        codex_config = codex_home / "config.toml"
+        original_toml = '[mcp_servers.ouroboros]\ncommand = "old"\n'
+        codex_config.write_text(original_toml, encoding="utf-8")
+
+        def _register(**_kwargs: object) -> bool:
+            codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            return True
+
+        def _retire(**_kwargs: object) -> None:
+            codex_config.write_text(
+                '[mcp_servers.ouroboros]\ncommand = "new"\n\n[operator]\nvalue = "retired"\n',
+                encoding="utf-8",
+            )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server", side_effect=_register),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=True),
+            patch(
+                "ouroboros.cli.commands.setup._retire_codex_default_profiles", side_effect=_retire
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile", return_value=False
             ),
         ):
             assert setup_cmd._setup_codex("/usr/local/bin/codex") is False

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+from types import CodeType
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -93,13 +94,57 @@ class CodexCommandDispatcher:
         payload = {
             "module": getattr(function, "__module__", None),
             "qualname": getattr(function, "__qualname__", None),
-            "bytecode": code.co_code.hex(),
-            "consts": repr(code.co_consts),
-            "names": list(code.co_names),
-            "varnames": list(code.co_varnames),
+            "code": CodexCommandDispatcher._code_object_identity_payload(code),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _code_object_identity_payload(code: CodeType) -> dict[str, object]:
+        """Serialize a code object without process-local repr addresses.
+
+        ``repr(code.co_consts)`` includes memory addresses for nested code
+        objects.  Portable dispatcher identity must be stable across fresh
+        interpreters while still changing when nested implementation code
+        changes.
+        """
+
+        def _const_payload(value: object) -> object:
+            if isinstance(value, CodeType):
+                return {
+                    "type": "code",
+                    "payload": CodexCommandDispatcher._code_object_identity_payload(value),
+                }
+            if isinstance(value, tuple):
+                return {"type": "tuple", "items": [_const_payload(item) for item in value]}
+            if isinstance(value, frozenset):
+                return {
+                    "type": "frozenset",
+                    "items": sorted(
+                        (_const_payload(item) for item in value),
+                        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+                    ),
+                }
+            if isinstance(value, bytes):
+                return {"type": "bytes", "hex": value.hex()}
+            if value is None or isinstance(value, str | int | float | bool):
+                return value
+            return {"type": type(value).__name__, "repr": repr(value)}
+
+        return {
+            "argcount": code.co_argcount,
+            "posonlyargcount": code.co_posonlyargcount,
+            "kwonlyargcount": code.co_kwonlyargcount,
+            "nlocals": code.co_nlocals,
+            "stacksize": code.co_stacksize,
+            "flags": code.co_flags,
+            "bytecode": code.co_code.hex(),
+            "consts": [_const_payload(const) for const in code.co_consts],
+            "names": list(code.co_names),
+            "varnames": list(code.co_varnames),
+            "freevars": list(code.co_freevars),
+            "cellvars": list(code.co_cellvars),
+        }
 
     def _resume_handle_backend(self) -> str:
         """Map the configured runtime backend to a persisted runtime-handle backend."""
