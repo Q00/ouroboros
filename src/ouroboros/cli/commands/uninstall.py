@@ -118,7 +118,6 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     if not removed:
         print_warning("Codex MCP ownership was detected but no removable TOML entry was found.")
         return False
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip() + "\n"
     try:
         tomllib.loads(cleaned)
     except tomllib.TOMLDecodeError:

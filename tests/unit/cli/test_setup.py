@@ -196,6 +196,7 @@ class TestCodexSetup:
                 "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
             ),
             patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
         ):
             setup_cmd._register_codex_mcp_server()
 
@@ -209,7 +210,7 @@ class TestCodexSetup:
         assert 'OUROBOROS_AGENT_RUNTIME = "codex"' in contents
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
-        assert 'command = "uvx"' in contents
+        assert 'command = "/usr/local/bin/uvx"' in contents
         assert 'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]' in contents
 
     def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
@@ -500,11 +501,12 @@ class TestCodexSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.cli.commands.setup.__file__", str(wheel_setup)),
             patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
         ):
             setup_cmd._register_codex_mcp_server()
 
         contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
-        assert 'command = "uvx"' in contents
+        assert 'command = "/usr/local/bin/uvx"' in contents
         assert f"command = {json.dumps(sys.executable)}" not in contents
 
     def test_register_codex_mcp_server_preserves_customized_legacy_uvx_by_default(
@@ -712,6 +714,28 @@ class TestCodexSetup:
         assert "mcp_servers = {" not in contents
         assert contents.count("[mcp_servers.ouroboros]") == 1
 
+    def test_register_codex_mcp_server_preserves_non_bmp_inline_values(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """TOML rewrites emit Unicode scalars instead of invalid surrogate pairs."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            'mcp_servers = { other = { command = "😀" }, ouroboros = { command = "uvx", '
+            'args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"] } }\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+
+        assert parsed["mcp_servers"]["other"]["command"] == "😀"
+        assert "\\ud83d" not in contents.lower()
+
     def test_register_codex_mcp_server_preserves_structure_like_multiline_text(
         self,
         tmp_path: Path,
@@ -831,12 +855,13 @@ class TestCodexSetup:
                 "ouroboros.cli.commands.setup._is_source_tree_ouroboros_build", return_value=False
             ),
             patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value="/usr/local/bin/uvx"),
         ):
             setup_cmd._register_codex_mcp_server(mode="stdio")
 
         contents = codex_config.read_text(encoding="utf-8")
         assert 'url = "http://127.0.0.1:12000/mcp"' not in contents
-        assert 'command = "uvx"' in contents
+        assert 'command = "/usr/local/bin/uvx"' in contents
         assert "[mcp_servers.ouroboros.env]" in contents
 
     def test_register_codex_mcp_server_preserve_mode_does_not_create_config(
@@ -2152,6 +2177,26 @@ class TestCodexSetup:
         mock_install.assert_not_called()
         mock_retire.assert_not_called()
         mock_worker_profile.assert_not_called()
+
+    def test_setup_codex_fails_when_release_mcp_has_no_launcher(self, tmp_path: Path) -> None:
+        """Setup never commits a release MCP endpoint whose command is unavailable."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._is_dev_ouroboros_build", return_value=False),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+            patch("ouroboros.cli.commands.setup.importlib_util.find_spec", return_value=None),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert not (tmp_path / ".codex" / "config.toml").exists()
 
     def test_setup_codex_rolls_back_mcp_when_registration_write_raises(
         self, tmp_path: Path

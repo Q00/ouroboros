@@ -9,6 +9,7 @@ import importlib.resources
 import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Literal
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
@@ -380,6 +381,36 @@ def _installed_artifact_exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _atomic_install_file(
+    target_path: Path,
+    *,
+    source_path: Path,
+    contents: bytes | None = None,
+) -> None:
+    """Atomically replace one managed file with complete packaged bytes."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target_path.name}.",
+        suffix=".tmp",
+        dir=str(target_path.parent),
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        if contents is None:
+            shutil.copy2(source_path, temp_path)
+        else:
+            temp_path.write_bytes(contents)
+            temp_path.chmod(source_path.stat().st_mode & 0o7777)
+        os.replace(temp_path, target_path)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _is_namespaced_rule_artifact(path: Path) -> bool:
     """Return whether a rules entry is managed by Ouroboros."""
     if path.name == CODEX_RULE_FILENAME:
@@ -411,15 +442,18 @@ def install_codex_rules(
         primary_source_path = _select_primary_packaged_codex_rule(packaged_rules)
         for source_path in packaged_rules:
             target_path = target_root / source_path.name
-            if _installed_artifact_exists(target_path):
+            if target_path.is_dir() and not target_path.is_symlink():
                 _remove_installed_artifact(target_path)
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(target_path, missing=True))
 
             if source_path == primary_source_path:
                 rendered = _render_codex_rules(source_path.read_text(encoding="utf-8"))
-                target_path.write_text(rendered, encoding="utf-8")
-                target_path.chmod(source_path.stat().st_mode & 0o7777)
+                _atomic_install_file(
+                    target_path,
+                    source_path=source_path,
+                    contents=rendered.encode("utf-8"),
+                )
                 if on_generation is not None:
                     on_generation(
                         CodexArtifactGeneration(
@@ -430,7 +464,7 @@ def install_codex_rules(
                     )
                 primary_target_path = target_path
             else:
-                shutil.copy2(source_path, target_path)
+                _atomic_install_file(target_path, source_path=source_path)
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(target_path, source_path=source_path))
             installed_names.add(target_path.name)

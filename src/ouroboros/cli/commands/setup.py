@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from datetime import time as datetime_time
 from importlib import metadata as importlib_metadata
+from importlib import util as importlib_util
 import json
 import os
 from pathlib import Path
@@ -568,7 +569,42 @@ def _is_dev_ouroboros_build() -> bool:
     return ".dev" in version or "+" in version
 
 
-def _render_codex_mcp_section() -> str:
+def _toml_string(value: str) -> str:
+    """Render one TOML basic string without invalid surrogate escapes."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
+    """Resolve a launchable release MCP command for the current machine."""
+    uvx_path = shutil.which("uvx")
+    if uvx_path:
+        return uvx_path, list(_CODEX_UVX_MCP_ARGS)
+
+    ouroboros_path = shutil.which("ouroboros")
+    if ouroboros_path:
+        try:
+            result = subprocess.run(
+                [ouroboros_path, "mcp", "serve", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            result = None
+        if result is not None and result.returncode == 0:
+            return ouroboros_path, list(_CODEX_DIRECT_MCP_ARGS)
+
+    if (
+        Path(sys.executable).is_file()
+        and os.access(sys.executable, os.X_OK)
+        and importlib_util.find_spec("mcp") is not None
+    ):
+        return sys.executable, list(_CODEX_MODULE_MCP_ARGS)
+    return None
+
+
+def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
     Release installs keep the historical ``uvx --from ouroboros-ai[mcp]``
@@ -578,19 +614,25 @@ def _render_codex_mcp_section() -> str:
     to the latest PyPI release and hides main-branch fixes under test.
     """
     if _is_dev_ouroboros_build():
-        command_lines = "\n".join(
-            (
-                f"command = {json.dumps(sys.executable)}",
-                f"args = {json.dumps(_CODEX_MODULE_MCP_ARGS)}",
-            )
-        )
+        if (
+            not Path(sys.executable).is_file()
+            or not os.access(sys.executable, os.X_OK)
+            or importlib_util.find_spec("mcp") is None
+        ):
+            return None
+        command = sys.executable
+        args = list(_CODEX_MODULE_MCP_ARGS)
     else:
-        command_lines = "\n".join(
-            (
-                'command = "uvx"',
-                f"args = {json.dumps(_CODEX_UVX_MCP_ARGS)}",
-            )
+        launcher = _codex_release_mcp_launcher()
+        if launcher is None:
+            return None
+        command, args = launcher
+    command_lines = "\n".join(
+        (
+            f"command = {_toml_string(command)}",
+            "args = [" + ", ".join(_toml_string(arg) for arg in args) + "]",
         )
+    )
     return _CODEX_MCP_SECTION_TEMPLATE.format(command_lines=command_lines)
 
 
@@ -630,7 +672,7 @@ def _is_setup_managed_codex_mcp_entry(
     if set(entry) - {"command", "args", "env"}:
         return False
 
-    if command == "uvx":
+    if Path(command).name == "uvx":
         return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
     if not has_managed_comment:
         return False
@@ -1065,13 +1107,13 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
     return (cleaned + ("\n" if cleaned else "")), existed_before
 
 
-def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
+def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
     """Insert or replace the managed Codex MCP block.
 
     Returns:
         Tuple of (updated_contents, existed_before).
     """
-    section_lines = _render_codex_mcp_section().strip("\n").splitlines()
+    section_lines = section.strip("\n").splitlines()
     cleaned_raw, existed_before = _remove_codex_mcp_section(raw)
     output_lines = cleaned_raw.splitlines()
     if output_lines and output_lines[-1].strip():
@@ -1150,6 +1192,14 @@ def _register_codex_mcp_server(
         print_info("Preserved Codex MCP config.")
         return True
 
+    rendered_section = _render_codex_mcp_section()
+    if rendered_section is None:
+        print_error(
+            "Could not find a launchable Ouroboros MCP command. Install uv, or install "
+            "Ouroboros with the [mcp] extra, then rerun setup."
+        )
+        return False
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1182,7 +1232,7 @@ def _register_codex_mcp_server(
             )
             return True
 
-        updated_raw, existed_before = _upsert_codex_mcp_section(raw)
+        updated_raw, existed_before = _upsert_codex_mcp_section(raw, rendered_section)
         if updated_raw == raw:
             print_info("Codex MCP server already up to date.")
             return True
@@ -1203,9 +1253,7 @@ def _register_codex_mcp_server(
         else:
             print_success(f"Registered Ouroboros MCP server in {codex_config}")
     else:
-        written_snapshot = _atomic_write_text(
-            codex_config, _render_codex_mcp_section().lstrip("\n")
-        )
+        written_snapshot = _atomic_write_text(codex_config, rendered_section.lstrip("\n"))
         if expected_snapshots is not None:
             expected_snapshots[codex_config] = written_snapshot
         print_success(f"Registered Ouroboros MCP server in {codex_config}")
@@ -1217,7 +1265,7 @@ def _render_codex_profile_section(name: str, settings: _CodexProfileSettings) ->
     lines = [_CODEX_PROFILE_COMMENT, f"[profiles.{name}]"]
     for key, value in settings.items():
         if not isinstance(value, dict):
-            lines.append(f"{key} = {json.dumps(value)}")
+            lines.append(f"{_render_toml_key(key)} = {_render_toml_value(value)}")
     return "\n".join(lines)
 
 
@@ -1231,13 +1279,13 @@ def _render_toml_key(key: str) -> str:
     """Render a TOML key without changing dotted/custom key semantics."""
     if key and all(char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in key):
         return key
-    return json.dumps(key)
+    return _toml_string(key)
 
 
 def _render_toml_value(value: object) -> str:
     """Render a parsed TOML scalar/list value back to TOML without type loss."""
     if isinstance(value, str):
-        return json.dumps(value)
+        return _toml_string(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int | float):

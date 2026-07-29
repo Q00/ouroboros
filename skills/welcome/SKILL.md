@@ -208,6 +208,17 @@ def codex_cli_ready(candidate: object) -> bool:
         return executable_candidate("codex")
     return executable_candidate(value)
 
+
+def mcp_endpoint_ready(entry: object) -> bool:
+    """Return whether the configured MCP endpoint can actually launch."""
+    if not isinstance(entry, dict):
+        return False
+    command = entry.get("command")
+    if isinstance(command, str) and command.strip():
+        return executable_candidate(command)
+    url = entry.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
 try:
     config = yaml_mapping(config_path.read_text(encoding="utf-8"))
     codex_source = codex_config_path.read_text(encoding="utf-8")
@@ -231,17 +242,7 @@ ready = (
     and isinstance(llm, dict)
     and llm.get("backend") == "codex"
     and codex_cli_ready(codex_cli_path)
-    and isinstance(ouroboros_mcp, dict)
-    and (
-        (
-            isinstance(ouroboros_mcp.get("command"), str)
-            and bool(ouroboros_mcp.get("command", "").strip())
-        )
-        or (
-            isinstance(ouroboros_mcp.get("url"), str)
-            and bool(ouroboros_mcp.get("url", "").strip())
-        )
-    )
+    and mcp_endpoint_ready(ouroboros_mcp)
 )
 raise SystemExit(0 if ready else 1)
 PY
@@ -620,6 +621,17 @@ def codex_cli_ready(candidate: object) -> bool:
         return executable_candidate("codex")
     return executable_candidate(value)
 
+
+def mcp_endpoint_ready(entry: object) -> bool:
+    """Return whether the configured MCP endpoint can actually launch."""
+    if not isinstance(entry, dict):
+        return False
+    command = entry.get("command")
+    if isinstance(command, str) and command.strip():
+        return executable_candidate(command)
+    url = entry.get("url")
+    return isinstance(url, str) and bool(url.strip())
+
 try:
     config = yaml_mapping(config_path.read_text(encoding="utf-8"))
     codex_source = codex_config_path.read_text(encoding="utf-8")
@@ -644,17 +656,7 @@ ready = (
     and isinstance(llm, dict)
     and llm.get("backend") == "codex"
     and codex_cli_ready(codex_cli_path)
-    and isinstance(ouroboros_mcp, dict)
-    and (
-        (
-            isinstance(ouroboros_mcp.get("command"), str)
-            and bool(ouroboros_mcp.get("command", "").strip())
-        )
-        or (
-            isinstance(ouroboros_mcp.get("url"), str)
-            and bool(ouroboros_mcp.get("url", "").strip())
-        )
-    )
+    and mcp_endpoint_ready(ouroboros_mcp)
 )
 raise SystemExit(0 if ready else 1)
 PY

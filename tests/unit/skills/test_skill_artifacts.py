@@ -162,7 +162,7 @@ def test_codex_setup_gate_accepts_reordered_yaml_and_quoted_toml_mcp_key(tmp_pat
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text(
-        """[mcp_servers]\n\"ouroboros\" = { command = \"ouroboros\" }\n""",
+        f"""[mcp_servers]\n\"ouroboros\" = {{ command = \"{sys.executable}\" }}\n""",
         encoding="utf-8",
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
@@ -185,7 +185,7 @@ def test_codex_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text(
-        '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+        f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
@@ -194,6 +194,30 @@ def test_codex_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
     gate = skill[start : skill.index("\n```", start)]
 
     assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == "CODEX_READY"
+
+
+def test_codex_setup_gate_rejects_unavailable_mcp_command(tmp_path: Path) -> None:
+    """A configured but missing MCP launcher must force setup repair."""
+    repo_root = Path(__file__).resolve().parents[3]
+    codex_home = tmp_path / "alternate-codex-home"
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    codex_home.mkdir()
+    config_path.write_text(
+        f"orchestrator: {{runtime_backend: codex, codex_cli_path: {sys.executable}}}\n"
+        "llm: {backend: codex}\n",
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.ouroboros]\ncommand = "/definitely/missing/uvx"\n',
+        encoding="utf-8",
+    )
+    skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
+    setup_gate_start = skill.index("### Setup Gate: First Use")
+    start = skill.index("CODEX_HOME_DIR=", setup_gate_start)
+    gate = skill[start : skill.index("\n```", start)]
+
+    assert _run_setup_gate(gate, home=tmp_path, codex_home=codex_home) == ("CODEX_SETUP_REQUIRED")
 
 
 def test_codex_setup_gate_expands_tilde_codex_home(tmp_path: Path) -> None:
@@ -208,7 +232,7 @@ def test_codex_setup_gate_expands_tilde_codex_home(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text(
-        '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+        f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
@@ -235,7 +259,7 @@ def test_codex_setup_gate_rejects_stale_configured_cli_path(tmp_path: Path) -> N
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text(
-        '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+        f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")
@@ -325,7 +349,7 @@ def test_codex_completed_welcome_precheck_accepts_yaml_flow_mappings(
         encoding="utf-8",
     )
     (codex_home / "config.toml").write_text(
-        '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+        f'[mcp_servers.ouroboros]\ncommand = "{sys.executable}"\n',
         encoding="utf-8",
     )
     skill = (repo_root / "skills" / "welcome" / "SKILL.md").read_text(encoding="utf-8")

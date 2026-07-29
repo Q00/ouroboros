@@ -65,6 +65,34 @@ class TestInstallCodexRules:
         assert secondary_target_path.read_text(encoding="utf-8") == "# status rules\n"
         assert not rules_dir.joinpath("team.md").exists()
 
+    def test_partial_primary_rule_write_preserves_existing_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed temp-file write never exposes partial bytes at the managed path."""
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "rules" / CODEX_RULE_FILENAME
+        target_path.parent.mkdir(parents=True)
+        target_path.write_text("original rule\n", encoding="utf-8")
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, "# fresh rules\n")
+        original_write_bytes = Path.write_bytes
+
+        def _partial_write(path: Path, data: bytes) -> int:
+            if path.parent == target_path.parent and path.suffix == ".tmp":
+                original_write_bytes(path, data[:8])
+                raise OSError("synthetic partial write")
+            return original_write_bytes(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", _partial_write)
+
+        with pytest.raises(OSError, match="synthetic partial write"):
+            install_codex_rules(codex_dir=codex_dir, rules_dir=packaged_rules_dir)
+
+        assert target_path.read_text(encoding="utf-8") == "original rule\n"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+
     def test_packaged_rules_delegate_auto_monitoring_out_of_main_session(self) -> None:
         """Codex rules should assign one child observer exclusive polling ownership."""
         rules = load_packaged_codex_rules()

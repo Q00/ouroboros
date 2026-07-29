@@ -291,6 +291,27 @@ class TestRemoveCodexMcp:
         assert parsed["instructions"] == instructions
         assert "ouroboros" not in parsed.get("mcp_servers", {})
 
+    def test_removal_preserves_repeated_newlines_inside_multiline_text(
+        self, tmp_path: Path
+    ) -> None:
+        """Formatting cleanup must not normalize newlines inside TOML values."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        instructions = "first\n\n\nsecond\n"
+        codex_config.write_text(
+            'instructions = """\nfirst\n\n\nsecond\n"""\n\n'
+            '[mcp_servers.ouroboros]\ncommand = "uvx"\n'
+            'args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert _remove_codex_mcp(dry_run=False) is True
+
+        parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+
+        assert parsed["instructions"] == instructions
+
     def test_managed_comment_block_only_removes_known_prefix(self, tmp_path: Path) -> None:
         """Comment block removal stops at blank lines (non-# lines)."""
         codex_config = tmp_path / ".codex" / "config.toml"
