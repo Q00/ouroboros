@@ -2291,3 +2291,97 @@ class TestEventStoreCloseWalCheckpoint:
 
         assert not any("wal_checkpoint" in sql.lower() for sql in executed)
         assert store._engine is None  # type: ignore[attr-defined]
+
+
+def _make_event(*, aggregate_id: str) -> BaseEvent:
+    return BaseEvent(
+        type="test.event.created",
+        aggregate_type="test",
+        aggregate_id=aggregate_id,
+        data={},
+    )
+
+
+class TestCancellationSettlement:
+    """#1794: a cancelled append must settle before cancellation surfaces.
+
+    Shield-only semantics let the write outlive the caller — a probe that
+    blocked ``aiosqlite.Connection.commit`` showed ``close()`` returning and
+    the events committing afterward, mutating durable history after shutdown.
+    The contract pinned here: cancellation is re-raised only once the
+    transaction task has completed, so no write can escape the store
+    lifecycle.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancelled_append_settles_before_cancellation_surfaces(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import aiosqlite
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        event = _make_event(aggregate_id="settle-append")
+        task = asyncio.create_task(store.append(event))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), (
+            "cancellation surfaced while the commit was still in flight — "
+            "the write escaped the caller's lifetime"
+        )
+
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        events = await store.replay("test", "settle-append")
+        assert len(events) == 1
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_append_batch_settles_before_cancellation_surfaces(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import aiosqlite
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        events = [_make_event(aggregate_id="settle-batch") for _ in range(2)]
+        task = asyncio.create_task(store.append_batch(events))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "batch cancellation surfaced while the commit was still in flight"
+
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        stored = await store.replay("test", "settle-batch")
+        assert len(stored) == 2
+        await store.close()

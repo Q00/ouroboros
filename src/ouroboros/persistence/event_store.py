@@ -7,7 +7,7 @@ with aiosqlite backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -90,6 +90,36 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
         "invalid",
     }
 )
+
+
+async def _run_to_settlement[T](coro: Coroutine[Any, Any, T]) -> T:
+    """Run a transactional coroutine, settling it before cancellation surfaces.
+
+    A write, once begun, must commit or roll back inside the caller's
+    lifetime: shield-only semantics let a cancelled caller (and even
+    ``EventStore.close()``) return while the transaction was still pending,
+    so durable history could change after shutdown. Cancellation is re-raised
+    only after the inner task completes, which both preserves the
+    cancellation-atomicity contract and keeps every write within the store
+    lifecycle (#1794 review rounds one and two).
+    """
+    inner: asyncio.Task[T] = asyncio.ensure_future(coro)
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        while not inner.done():
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                continue
+        if not inner.cancelled() and inner.exception() is not None:
+            # Cancellation outranks the write's own failure; consume it so the
+            # loop does not warn about an unretrieved task exception.
+            logger.debug(
+                "event_store.append.settled_with_error",
+                exc_info=inner.exception(),
+            )
+        raise
 
 
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
@@ -1313,9 +1343,7 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                # shield: cancellation surfaces to the caller immediately, but
-                # the write itself runs to completion in the background.
-                return await asyncio.shield(_insert_once())
+                return await _run_to_settlement(_insert_once())
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1437,7 +1465,7 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                await asyncio.shield(_insert_batch_once())
+                await _run_to_settlement(_insert_batch_once())
                 return
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
