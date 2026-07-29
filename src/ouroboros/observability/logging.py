@@ -519,7 +519,12 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
         logger_factory=logger_factory,
-        cache_logger_on_first_use=True,
+        # Never cache bound loggers: a cached wrapper freezes filtering and
+        # processors, so proxies materialized under one configuration would
+        # ignore later ones in BOTH directions — a stale INFO wrapper defeats
+        # an operator's DEBUG setting, and a stale DEV renderer defeats PROD
+        # output contracts (#1794 round seven).
+        cache_logger_on_first_use=False,
     )
 
     _configured = True
@@ -653,4 +658,5 @@ def reset_logging() -> None:
         # set_console_logging(); capturing the stream object here would keep a
         # capsys/redirect buffer alive past its teardown and raise on write.
         logger_factory=_FileWritingPrintLoggerFactory(None),
+        cache_logger_on_first_use=False,
     )

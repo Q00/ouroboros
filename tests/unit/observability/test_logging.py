@@ -490,6 +490,43 @@ class TestResetLogging:
         assert "debug-should-be-filtered" not in captured.err
         assert "info-should-go-to-stderr" in captured.err
 
+    def test_cached_proxies_follow_more_permissive_reconfiguration(self, capsys: Any) -> None:
+        """#1794 round seven: relaxation must work too, not just restriction.
+
+        A proxy materialized under INFO must emit DEBUG after a DEBUG
+        reconfiguration — a frozen filtering wrapper would silently defeat an
+        operator's debug setting.
+        """
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+        proxy = structlog.get_logger("relax-proxy")
+        proxy.info("materialize-under-info")
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(LoggingConfig(log_level="DEBUG", enable_file_logging=False))
+
+        proxy.debug("debug-after-relaxation")
+        captured = capsys.readouterr()
+        assert "debug-after-relaxation" in captured.err
+
+    def test_cached_proxies_follow_renderer_reconfiguration(self, capsys: Any) -> None:
+        """A DEV-cached proxy must render PROD (JSON) after reconfiguration."""
+        configure_logging(
+            LoggingConfig(mode=LogMode.DEV, log_level="INFO", enable_file_logging=False)
+        )
+        proxy = structlog.get_logger("renderer-proxy")
+        proxy.info("materialize-under-dev")
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_level="INFO", enable_file_logging=False)
+        )
+
+        proxy.info("render-as-json-now")
+        captured = capsys.readouterr()
+        assert '"event": "render-as-json-now"' in captured.err
+
     def test_cached_proxies_follow_reconfiguration_after_reset(
         self, capsys: Any, tmp_path: Any
     ) -> None:

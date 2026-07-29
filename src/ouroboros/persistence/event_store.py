@@ -97,6 +97,7 @@ async def _run_to_settlement[T](
     *,
     registry: set[asyncio.Task[Any]] | None = None,
     refuse_when: Callable[[], bool] | None = None,
+    operation: str = "append",
 ) -> T:
     """Run a transactional coroutine, settling it before cancellation surfaces.
 
@@ -116,7 +117,7 @@ async def _run_to_settlement[T](
         coro.close()
         raise PersistenceError(
             "EventStore is closing; write refused.",
-            operation="append",
+            operation=operation,
         )
     inner: asyncio.Task[T] = asyncio.ensure_future(coro)
     if registry is not None:
@@ -569,6 +570,8 @@ class EventStore:
         self._read_only = read_only
         self._settling_writes = set()
         self._closing = False
+        self._close_gate = asyncio.Event()
+        self._close_gate.set()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
@@ -697,6 +700,10 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
+        # Serialize with an in-flight close(): reopening admission before
+        # the drain/checkpoint/dispose sequence finishes would let a write
+        # slip in and commit after shutdown (review round seven).
+        await self._close_gate.wait()
         self._closing = False
         if create_schema is None:
             create_schema = not self._read_only
@@ -842,6 +849,7 @@ class EventStore:
             self._append_session_start_if_absent_unfenced(event),
             registry=self._settling_writes,
             refuse_when=lambda: self._closing,
+            operation="append_session_start_if_absent",
         )
 
     async def _append_session_start_if_absent_unfenced(self, event: BaseEvent) -> None:
@@ -965,6 +973,7 @@ class EventStore:
             self._append_session_terminal_if_active_unfenced(event),
             registry=self._settling_writes,
             refuse_when=lambda: self._closing,
+            operation="append_session_terminal_if_active",
         )
 
     async def _append_session_terminal_if_active_unfenced(self, event: BaseEvent) -> bool:
@@ -1233,6 +1242,7 @@ class EventStore:
             self._append_session_pause_if_active_unfenced(event),
             registry=self._settling_writes,
             refuse_when=lambda: self._closing,
+            operation="append_session_pause_if_active",
         )
 
     async def _append_session_pause_if_active_unfenced(self, event: BaseEvent) -> bool:
@@ -1424,6 +1434,7 @@ class EventStore:
                     _insert_once(),
                     registry=self._settling_writes,
                     refuse_when=lambda: self._closing,
+                    operation="append_with_rowid",
                 )
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
@@ -1550,6 +1561,7 @@ class EventStore:
                     _insert_batch_once(),
                     registry=self._settling_writes,
                     refuse_when=lambda: self._closing,
+                    operation="append_batch",
                 )
                 return
             except Exception as e:
@@ -2811,6 +2823,7 @@ class EventStore:
         durable history could change after shutdown (review round four).
         """
         self._closing = True
+        self._close_gate.clear()
         while self._settling_writes:
             done, _ = await asyncio.wait(tuple(self._settling_writes))
             for task in done:
@@ -2819,19 +2832,23 @@ class EventStore:
                         "event_store.close.drained_failed_write",
                         exc_info=task.exception(),
                     )
-        if self._engine is not None:
-            # Collapse the WAL before disposing so the -wal file does not
-            # survive shutdown. Best effort — see checkpoint_wal().
-            await self.checkpoint_wal()
-            await self._engine.dispose()
-            self._engine = None
-        if self._memory_keepalive is not None:
-            # Release the shared in-memory database anchor last so pooled
-            # connections never observe the database disappearing mid-dispose.
-            try:
-                self._memory_keepalive.close()
-            finally:
-                self._memory_keepalive = None
+        try:
+            if self._engine is not None:
+                # Collapse the WAL before disposing so the -wal file does not
+                # survive shutdown. Best effort — see checkpoint_wal().
+                await self.checkpoint_wal()
+                await self._engine.dispose()
+                self._engine = None
+            if self._memory_keepalive is not None:
+                # Release the shared in-memory database anchor last so pooled
+                # connections never observe the database disappearing
+                # mid-dispose.
+                try:
+                    self._memory_keepalive.close()
+                finally:
+                    self._memory_keepalive = None
+        finally:
+            self._close_gate.set()
 
 
 @dataclass(frozen=True, slots=True)

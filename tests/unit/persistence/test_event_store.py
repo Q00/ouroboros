@@ -2592,6 +2592,100 @@ class TestCancellationSettlement:
         await reopened.close()
 
     @pytest.mark.asyncio
+    async def test_initialize_cannot_reopen_admission_during_close(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """initialize() must serialize with an in-flight close().
+
+        Clearing the closing flag mid-close reopened write admission: a probe
+        paused close in the checkpoint, called initialize(), appended, and
+        found the event durable after reopen.
+        """
+        db_path = tmp_path / "init-during-close.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_checkpoint = store.checkpoint_wal
+
+        async def gated_checkpoint() -> bool:
+            entered.set()
+            await gate.wait()
+            return await orig_checkpoint()
+
+        monkeypatch.setattr(store, "checkpoint_wal", gated_checkpoint)
+
+        close_task = asyncio.create_task(store.close())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+
+            init_task = asyncio.create_task(store.initialize())
+            await asyncio.sleep(0.05)
+            with pytest.raises(PersistenceError):
+                await store.append(_make_event(aggregate_id="init-during-close"))
+        finally:
+            gate.set()
+            await asyncio.wait_for(close_task, timeout=10)
+        await asyncio.wait_for(init_task, timeout=10)
+
+        assert await store.replay("test", "init-during-close") == []
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_session_pause_append_during_close_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        db_path = tmp_path / "pause-close.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-pause",
+                data={"execution_id": "exec-pause"},
+            )
+        )
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_checkpoint = store.checkpoint_wal
+
+        async def gated_checkpoint() -> bool:
+            entered.set()
+            await gate.wait()
+            return await orig_checkpoint()
+
+        monkeypatch.setattr(store, "checkpoint_wal", gated_checkpoint)
+
+        close_task = asyncio.create_task(store.close())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            with pytest.raises(PersistenceError):
+                await store.append_session_pause_if_active(
+                    BaseEvent(
+                        type="orchestrator.session.paused",
+                        aggregate_type="session",
+                        aggregate_id="sess-pause",
+                        data={},
+                    )
+                )
+        finally:
+            gate.set()
+            await asyncio.wait_for(close_task, timeout=10)
+
+        reopened = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await reopened.initialize()
+        paused = [
+            e
+            for e in await reopened.replay("session", "sess-pause")
+            if e.type == "orchestrator.session.paused"
+        ]
+        assert paused == []
+        await reopened.close()
+
+    @pytest.mark.asyncio
     async def test_cancelled_append_with_failing_commit_still_raises_cancellation(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
