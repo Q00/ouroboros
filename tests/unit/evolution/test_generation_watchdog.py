@@ -201,8 +201,19 @@ async def test_productive_long_run_resets_material_progress_timeout(
 
 
 @pytest.mark.asyncio
-async def test_busy_run_without_material_progress_times_out() -> None:
-    """Activity alone does not count as material progress."""
+async def test_busy_run_without_material_progress_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity alone does not count as material progress.
+
+    Runs on the fake monotonic clock so the no-progress threshold cannot race
+    the (much larger) idle threshold on wall-clock time: total fake elapsed
+    when the no-progress window trips stays far below the idle default, so a
+    starved poll loop can never cancel the generation for the wrong reason
+    (#1794).
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-busy"
     execution_id = "exec-busy"
@@ -211,14 +222,22 @@ async def test_busy_run_without_material_progress_times_out() -> None:
         lineage_id=lineage_id,
         execution_id=execution_id,
         generation_no_progress_timeout_seconds=0.07,
+        watchdog_poll_seconds=0.005,
     )
 
     async def busy_work() -> str:
         await event_store.append(_workflow_progress(execution_id, completed_count=0))
         try:
             while True:
-                await asyncio.sleep(0.02)
-                await event_store.append(_workflow_progress(execution_id, completed_count=0))
+                await asyncio.sleep(0.01)
+                clock.advance(0.02)
+                # Shield the append: watchdog cancellation must not abandon a
+                # store transaction mid-flight, or the poisoned connection
+                # makes the watchdog's own decision batch fail its documented
+                # fail-closed persistence and the decision event never lands.
+                await asyncio.shield(
+                    event_store.append(_workflow_progress(execution_id, completed_count=0))
+                )
         except asyncio.CancelledError:
             try:
                 await event_store.append(
@@ -266,7 +285,9 @@ async def test_busy_run_without_material_progress_times_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_progress_timeout_emits_retry_directive() -> None:
+async def test_no_progress_timeout_emits_retry_directive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Issue #578 directive-mapping contract.
 
     A ``no_material_progress_timeout`` is surfaced as a failed generation
@@ -284,6 +305,8 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
        projectors can attribute the directive to its source.
     3. ``is_terminal`` matches the directive (RETRY is non-terminal).
     """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-578-unstuck"
     execution_id = "exec-578-unstuck"
@@ -292,6 +315,7 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
         lineage_id=lineage_id,
         execution_id=execution_id,
         generation_no_progress_timeout_seconds=0.07,
+        watchdog_poll_seconds=0.005,
     )
 
     async def busy_work() -> str:
@@ -299,8 +323,15 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
         await event_store.append(_workflow_progress(execution_id, completed_count=0))
         try:
             while True:
-                await asyncio.sleep(0.02)
-                await event_store.append(_workflow_progress(execution_id, completed_count=0))
+                await asyncio.sleep(0.01)
+                clock.advance(0.02)
+                # Shield the append: watchdog cancellation must not abandon a
+                # store transaction mid-flight, or the poisoned connection
+                # makes the watchdog's own decision batch fail its documented
+                # fail-closed persistence and the decision event never lands.
+                await asyncio.shield(
+                    event_store.append(_workflow_progress(execution_id, completed_count=0))
+                )
         except asyncio.CancelledError:
             raise
 
@@ -442,8 +473,17 @@ async def test_directive_emission_alphabet_matches_watchdog_raises(
 
 
 @pytest.mark.asyncio
-async def test_session_activity_resets_idle_timeout() -> None:
-    """Session aggregate tool/message events prove generation liveness."""
+async def test_session_activity_resets_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session aggregate tool/message events prove generation liveness.
+
+    Uses the direct poll idiom on the fake clock (like the AC heartbeat test
+    below) so liveness is asserted against controlled elapsed time instead of
+    racing real sleeps against the idle threshold (#1794).
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     session_id = "session-active"
     execution_id = "exec-session-active"
@@ -454,14 +494,23 @@ async def test_session_activity_resets_idle_timeout() -> None:
         generation_no_progress_timeout_seconds=0,
     )
 
-    async def session_work() -> str:
-        await event_store.append(_session_started(session_id, execution_id))
-        for _ in range(4):
-            await asyncio.sleep(0.04)
-            await event_store.append(_session_tool_called(session_id))
-        return "done"
+    await watchdog.initialize_baseline()
+    await event_store.append(_session_started(session_id, execution_id))
+    await watchdog.poll()
 
-    assert await watchdog.watch(session_work()) == "done"
+    for _ in range(4):
+        clock.advance(0.05)
+        await event_store.append(_session_tool_called(session_id))
+        await watchdog.poll()
+        watchdog._raise_if_threshold_exceeded()
+
+    # The generation stayed alive across 0.2s of fake elapsed time — far past
+    # the 0.07s idle threshold — only because each observed session event
+    # reset the idle timer. Prove the threshold itself is still armed.
+    clock.advance(0.08)
+    with pytest.raises(GenerationWatchdogTimeout) as exc_info:
+        watchdog._raise_if_threshold_exceeded()
+    assert exc_info.value.timeout_kind == "idle_timeout"
 
 
 @pytest.mark.asyncio

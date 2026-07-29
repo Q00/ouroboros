@@ -45,6 +45,7 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -619,3 +620,14 @@ def reset_logging() -> None:
     structlog.contextvars.clear_contextvars()
     # Reset structlog configuration
     structlog.reset_defaults()
+    # Library defaults emit every level to stdout, and the src modules that
+    # bind ``structlog.get_logger`` at import time keep logging through
+    # whatever this reset leaves behind — ``_configured`` only reconfigures
+    # loggers requested after the next ``get_logger``. Leave a resource-free
+    # baseline matching a configured logger's contract (filter at INFO,
+    # stderr) so a reset in one test cannot leak debug lines into another
+    # test's captured stdout (#1794).
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(sys.stderr),
+    )

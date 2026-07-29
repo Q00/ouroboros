@@ -12,6 +12,7 @@ from unittest.mock import patch
 import warnings
 
 import pytest
+import structlog
 
 from ouroboros.observability.logging import (
     LoggingConfig,
@@ -468,6 +469,26 @@ class TestLogRotation:
 
 class TestResetLogging:
     """Test reset_logging function."""
+
+    def test_reset_leaves_import_time_proxies_quiet_on_stdout(self, capsys: Any) -> None:
+        """#1794: reset must not restore structlog's print-everything defaults.
+
+        Modules that bind ``structlog.get_logger`` at import time keep logging
+        through whatever configuration reset leaves behind, and CLI tests
+        reserve stdout for command output — so the post-reset baseline must
+        filter below INFO and route to stderr, like a configured logger.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        proxy = structlog.get_logger("import-time-proxy")
+        proxy.debug("debug-should-be-filtered")
+        proxy.info("info-should-go-to-stderr")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "debug-should-be-filtered" not in captured.err
+        assert "info-should-go-to-stderr" in captured.err
 
     def test_reset_clears_configured_state(self) -> None:
         """reset_logging clears configured state."""
