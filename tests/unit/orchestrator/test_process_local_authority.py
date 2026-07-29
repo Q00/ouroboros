@@ -7012,10 +7012,10 @@ async def test_prepare_session_shares_one_capability_probe(tmp_path: Path) -> No
     probes = {"n": 0}
     real = project_identity_module._run_git_command
 
-    def counting(*arguments: str) -> bytes:
+    def counting(*arguments: str, executable: str | None = None) -> bytes:
         if arguments == ("--version",):
             probes["n"] += 1
-        return real(*arguments)
+        return real(*arguments, executable=executable)
 
     with _patch.object(project_identity_module, "_run_git_command", counting):
         prepared = await runner.prepare_session(

@@ -692,7 +692,8 @@ def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:
     ) as run_git_command:
         _require_supported_git()
 
-    run_git_command.assert_called_once_with("--version")
+    assert run_git_command.call_count == 1
+    assert run_git_command.call_args.args == ("--version",)
 
 
 def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
@@ -1020,13 +1021,86 @@ class TestGitCapabilityProbeScope:
     def _counting_probe(self, monkeypatch):
         calls = {"n": 0}
 
-        def fake(*arguments: str) -> bytes:
+        def fake(*arguments: str, executable: str | None = None) -> bytes:
             assert arguments == ("--version",)
             calls["n"] += 1
             return b"git version 2.44.0\n"
 
         monkeypatch.setattr(project_identity, "_run_git_command", fake)
         return calls
+
+    def test_scoped_commands_run_the_verified_executable(self, monkeypatch, tmp_path) -> None:
+        """Every git command inside a scope binds to the verified binary.
+
+        Skipping the publication resolver's probe is only sound if its
+        topology queries cannot run a different git than the one the scope
+        verified — so the scope pins argv[0] to the verified absolute
+        executable, and a PATH switch mid-scope changes nothing.
+        """
+        git_a = tmp_path / "git-a"
+        git_a.write_text("")
+        git_b = tmp_path / "git-b"
+        git_b.write_text("")
+
+        lookups = {"n": 0}
+
+        def switching_which(_name: str) -> str:
+            lookups["n"] += 1
+            return str(git_a) if lookups["n"] == 1 else str(git_b)
+
+        monkeypatch.setattr(project_identity.shutil, "which", switching_which)
+
+        invoked: list[str] = []
+
+        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            invoked.append(argv[0])
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
+
+        with project_identity.git_capability_probe_scope():
+            project_identity._require_supported_git()
+            project_identity._run_git_command("--version")
+            project_identity._require_supported_git()
+            project_identity._run_git_command("rev-parse", "--show-toplevel")
+
+        assert invoked == [str(git_a)] * 3, (
+            "a scoped git command escaped the verified executable binding"
+        )
+
+    def test_escaped_child_task_loses_the_scope_trust(self, monkeypatch) -> None:
+        """A task created inside the scope must re-probe after scope exit."""
+        import asyncio
+
+        calls = {"n": 0}
+
+        def fake(*arguments: str, executable: str | None = None) -> bytes:
+            calls["n"] += 1
+            return b"git version 2.44.0\n"
+
+        monkeypatch.setattr(project_identity, "_run_git_command", fake)
+
+        async def scenario() -> None:
+            release = asyncio.Event()
+
+            async def escaped_child() -> None:
+                await release.wait()
+                project_identity._require_supported_git()
+
+            with project_identity.git_capability_probe_scope():
+                project_identity._require_supported_git()
+                child = asyncio.create_task(escaped_child())
+                await asyncio.sleep(0)
+            release.set()
+            await child
+
+        asyncio.run(scenario())
+        assert calls["n"] == 2, "an escaped child reused the scope's verification after exit"
 
     def test_without_scope_every_call_probes(self, monkeypatch) -> None:
         calls = self._counting_probe(monkeypatch)
@@ -1052,7 +1126,7 @@ class TestGitCapabilityProbeScope:
     def test_scope_failure_is_not_memoized(self, monkeypatch) -> None:
         attempts = {"n": 0}
 
-        def flaky(*arguments: str) -> bytes:
+        def flaky(*arguments: str, executable: str | None = None) -> bytes:
             attempts["n"] += 1
             if attempts["n"] == 1:
                 raise project_identity.ProjectIdentityUnavailableError("transient")

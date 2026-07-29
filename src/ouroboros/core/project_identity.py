@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -235,17 +236,26 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _run_git_command(*arguments: str) -> bytes:
+def _run_git_command(*arguments: str, executable: str | None = None) -> bytes:
     """Run one bounded, non-interactive Git command and return complete stdout.
 
     A nonzero exit is unavailable because Git does not expose a portable
     exit-code distinction between malformed topology and transient repository
-    I/O.
+    I/O. Inside a capability probe scope every command binds to the executable
+    that scope verified; outside one, ``git`` resolves from PATH per call as
+    it always has.
     """
+    if executable is None:
+        scope_cell = _active_probe_scope()
+        executable = (
+            scope_cell.executable
+            if scope_cell is not None and scope_cell.executable is not None
+            else "git"
+        )
     try:
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run(
-                ["git", *arguments],
+                [executable, *arguments],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=output,
@@ -273,13 +283,40 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     return _run_git_command("-C", str(start), *arguments)
 
 
-# ``None`` = no scope: every call probes, exactly as before #1796. An open
-# scope carries a single-element mutable cell — resolutions inside the scope
-# frequently run under ``asyncio.to_thread``, whose copied context shares the
-# cell object, so a verification recorded in a worker thread is visible to
-# the scope's later resolutions while still evaporating with the scope.
-# Concurrent tasks get their own cells, so they cannot observe each other.
-_PROBE_SCOPE: ContextVar[list[bool] | None] = ContextVar("git_capability_probe_scope", default=None)
+class _ProbeScopeCell:
+    """Mutable scope state shared across context copies.
+
+    ``executable`` holds the verified absolute path once the scope's single
+    probe succeeds; every scoped git command binds to it. ``closed`` is set
+    on scope exit — the cell object is shared by reference with any context
+    copies (``asyncio.to_thread`` workers, escaped child tasks), so closing
+    it revokes the scope's trust everywhere at once.
+
+    Today's only scope (``prepare_session``) resolves sequentially; two
+    concurrent cold resolutions in one scope would issue duplicate probes,
+    which is benign (never stale) and intentionally unsynchronized — no lock
+    means nothing to inherit across ``fork()``.
+    """
+
+    __slots__ = ("closed", "executable")
+
+    def __init__(self) -> None:
+        self.executable: str | None = None
+        self.closed = False
+
+
+# ``None`` = no scope: every call probes and every command resolves ``git``
+# from PATH, exactly as before #1796.
+_PROBE_SCOPE: ContextVar[_ProbeScopeCell | None] = ContextVar(
+    "git_capability_probe_scope", default=None
+)
+
+
+def _active_probe_scope() -> _ProbeScopeCell | None:
+    cell = _PROBE_SCOPE.get()
+    if cell is None or cell.closed:
+        return None
+    return cell
 
 
 @contextmanager
@@ -289,25 +326,42 @@ def git_capability_probe_scope() -> Iterator[None]:
     A session start resolves project identity at least twice — once while the
     execution contract is built and again at the publication boundary — and
     each resolution re-ran ``git --version`` (#1796). Within one scope the
-    probe runs once; the reuse window is the same class the per-resolution
-    design already accepts between its own probe and topology queries, so no
-    cross-time cache (and none of its integrity obligations: executable
-    binding, shim detection, fork-safe locking) is introduced. Outside any
-    scope, behavior is unchanged: every resolution probes.
+    probe runs once and every scoped git command binds to the executable it
+    verified, so a later resolver skipping its own probe can never run a
+    different binary than the one proven supported. The reuse window is the
+    same class the per-resolution design already accepts between its own
+    probe and its topology queries; no cross-time cache is introduced, and
+    the scope's trust is revoked on exit even for escaped tasks. Outside any
+    scope, behavior is unchanged: every resolution probes and every command
+    resolves ``git`` from PATH.
     """
-    token = _PROBE_SCOPE.set([False])
+    cell = _ProbeScopeCell()
+    token = _PROBE_SCOPE.set(cell)
     try:
         yield
     finally:
+        # Close the shared cell before resetting: context copies in worker
+        # threads or escaped child tasks hold the same object, and nothing
+        # may outlive the scope (#1796 review round six).
+        cell.closed = True
         _PROBE_SCOPE.reset(token)
 
 
 def _require_supported_git() -> None:
     """Reject Git versions that lack the unambiguous topology query grammar."""
-    scope_cell = _PROBE_SCOPE.get()
-    if scope_cell is not None and scope_cell[0]:
-        return
-    output = _run_git_command("--version")
+    scope_cell = _active_probe_scope()
+    executable: str | None = None
+    if scope_cell is not None:
+        if scope_cell.executable is not None:
+            return
+        # Resolve the binary once and probe exactly that path; scoped commands
+        # then bind to it, so a later resolver skipping its own probe cannot
+        # run a different git than the one verified here (round six).
+        resolved = shutil.which("git")
+        if resolved is None:
+            raise ProjectIdentityUnavailableError("Git executable is unavailable on PATH")
+        executable = os.path.abspath(resolved)
+    output = _run_git_command("--version", executable=executable)
     match = _GIT_VERSION_PATTERN.fullmatch(output)
     if match is None:
         raise ProjectIdentityGitVersionError(
@@ -321,8 +375,8 @@ def _require_supported_git() -> None:
             f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
             f"found {found}"
         )
-    if scope_cell is not None:
-        scope_cell[0] = True
+    if scope_cell is not None and not scope_cell.closed:
+        scope_cell.executable = executable
 
 
 def _git_path(output: bytes) -> Path:
