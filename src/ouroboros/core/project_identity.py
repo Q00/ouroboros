@@ -270,8 +270,27 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     return _run_git_command("-C", str(start), *arguments)
 
 
+_git_capability_verified: bool = False
+
+
+def _reset_git_capability_cache_for_tests() -> None:
+    """Clear the process-lifetime capability cache (test isolation only)."""
+    global _git_capability_verified
+    _git_capability_verified = False
+
+
 def _require_supported_git() -> None:
-    """Reject Git versions that lack the unambiguous topology query grammar."""
+    """Reject Git versions that lack the unambiguous topology query grammar.
+
+    A successful probe is cached for the process lifetime: the installed Git
+    binary cannot meaningfully change within one process, and this gate runs
+    on every identity resolution — at least twice per session start (#1796).
+    Failures are never cached, so a transient spawn failure keeps re-probing
+    and a version rejection retains its original per-call semantics.
+    """
+    global _git_capability_verified
+    if _git_capability_verified:
+        return
     output = _run_git_command("--version")
     match = _GIT_VERSION_PATTERN.fullmatch(output)
     if match is None:
@@ -286,6 +305,7 @@ def _require_supported_git() -> None:
             f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
             f"found {found}"
         )
+    _git_capability_verified = True
 
 
 def _git_path(output: bytes) -> Path:

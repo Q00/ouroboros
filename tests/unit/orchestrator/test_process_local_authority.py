@@ -2177,6 +2177,15 @@ async def test_resume_identity_unavailable_stays_paused_and_releases_claim_for_r
             unavailable = patch(patch_target, new=selective_stat)
         else:
             unavailable = patch(patch_target, side_effect=failure)
+        # #1796 caches a successful git capability probe for the process
+        # lifetime, and prepare_session above verified git legitimately. This
+        # scenario models a process where git was never available, so start
+        # the unavailable window from a cold probe cache — a verified-then-
+        # vanished binary is outside the cache's supported model and defers
+        # to downstream git failures instead.
+        from ouroboros.core import project_identity as project_identity_module
+
+        project_identity_module._reset_git_capability_cache_for_tests()
         with unavailable:
             result = await runner.resume_session(tracker.session_id, _seed())
 

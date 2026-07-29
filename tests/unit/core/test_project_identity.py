@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from ouroboros.core import project_identity
 from ouroboros.core.project_identity import (
     ManagedProjectOwnershipError,
     ManagedProjectScopeError,
@@ -1011,3 +1012,67 @@ def test_project_identity_rejects_noncanonical_fields(
             project_root=project_root,
             workspace_path=workspace_path,
         )
+
+
+class TestGitCapabilityProbeCache:
+    """#1796 L1: cache the git --version capability probe per process.
+
+    Only a SUCCESSFUL probe is cached: the installed binary cannot change
+    within one process, but a transient spawn failure must keep re-probing,
+    and a genuine version rejection stays uncached so the semantics on the
+    failure paths are unchanged.
+    """
+
+    def test_successful_probe_runs_git_version_once(self, monkeypatch) -> None:
+        calls: list[tuple[str, ...]] = []
+        real = project_identity._run_git_command
+
+        def counting(*arguments: str) -> bytes:
+            calls.append(arguments)
+            if arguments == ("--version",):
+                return b"git version 2.44.0\n"
+            return real(*arguments)
+
+        monkeypatch.setattr(project_identity, "_run_git_command", counting)
+
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+
+        assert calls.count(("--version",)) == 1
+
+    def test_transient_failure_is_not_cached(self, monkeypatch) -> None:
+        attempts = {"n": 0}
+
+        def flaky(*arguments: str) -> bytes:
+            assert arguments == ("--version",)
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise project_identity.ProjectIdentityUnavailableError(
+                    "Git query is temporarily unavailable"
+                )
+            return b"git version 2.44.0\n"
+
+        monkeypatch.setattr(project_identity, "_run_git_command", flaky)
+
+        with pytest.raises(project_identity.ProjectIdentityUnavailableError):
+            project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert attempts["n"] == 2
+        # and now the success is cached
+        project_identity._require_supported_git()
+        assert attempts["n"] == 2
+
+    def test_version_rejection_is_not_cached(self, monkeypatch) -> None:
+        outputs = [b"git version 2.20.0\n", b"git version 2.44.0\n"]
+
+        def upgrading(*arguments: str) -> bytes:
+            assert arguments == ("--version",)
+            return outputs.pop(0)
+
+        monkeypatch.setattr(project_identity, "_run_git_command", upgrading)
+
+        with pytest.raises(project_identity.ProjectIdentityGitVersionError):
+            project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert outputs == []
