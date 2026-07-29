@@ -107,13 +107,40 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
-**Build** — open your AI coding agent and go:
+**First use** — open your AI coding agent and type:
+
+```
+> ooo
+```
+
+If a one-time setup is needed, Ouroboros asks before it makes changes. After
+setup, Codex follows its currently selected model and Claude Code starts with
+its recommended model settings. Choose **Directly configure models** only when
+you want to pin a stage to a specific model; it opens the local settings screen
+in your browser. You can return to those settings any time with `ooo config`.
+
+**Build** — then go:
 
 ```
 > ooo interview "I want to build a task management CLI"
 ```
 
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, and Zcode. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
+
+<details>
+<summary><strong>Codex plugin quick start</strong></summary>
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+Start a new Codex session, then enter `ooo`. On first use, Ouroboros offers to
+prepare the runtime before it changes anything. Once ready, it follows Codex's
+current default model; choose **Directly configure models** only when you want
+to pin a specific model for a pipeline stage.
+
+</details>
 
 <details>
 <summary><strong>Kiro CLI quick start</strong></summary>

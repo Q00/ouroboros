@@ -60,7 +60,98 @@ PY
 fi
 ```
 
-**If `ALREADY_COMPLETED` is true AND no `--force` flag:**
+Before honoring that completion marker, determine whether setup is ready. A
+previously completed welcome must never hide the setup gate from a user who
+chose **나중에** or whose setup was later removed:
+
+```bash
+if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    yaml = None
+
+config_path, mcp_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read the top-level mapping scalars this readiness gate owns."""
+    if yaml is not None:
+        loaded = yaml.safe_load(source) or {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+
+    def scalar_value(raw: str) -> str:
+        return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
+
+    def flow_mapping(raw: str) -> dict[str, str]:
+        value = raw.strip().split(" #", 1)[0].strip()
+        if not (value.startswith("{") and value.endswith("}")):
+            return {}
+        fields: dict[str, str] = {}
+        for part in value[1:-1].split(","):
+            key, separator, field_value = part.partition(":")
+            if separator:
+                fields[key.strip().strip("'\"")] = scalar_value(field_value)
+        return fields
+
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed[section] = flow_mapping(raw_value)
+        elif section is not None:
+            parsed.setdefault(section, {})[key.strip("'\"")] = scalar_value(raw_value)
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
+ouroboros_mcp = mcp_servers.get("ouroboros") if isinstance(mcp_servers, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "claude"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+    and isinstance(ouroboros_mcp, dict)
+    and (
+        (
+            isinstance(ouroboros_mcp.get("command"), str)
+            and bool(ouroboros_mcp.get("command", "").strip())
+        )
+        or (
+            isinstance(ouroboros_mcp.get("url"), str)
+            and bool(ouroboros_mcp.get("url", "").strip())
+        )
+    )
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
+  SETUP_READY="true"
+fi
+```
+
+**If `ALREADY_COMPLETED` is true, `SETUP_READY` is true, AND no `--force` flag:**
 
 Use **AskUserQuestion**:
 ```json
@@ -78,6 +169,9 @@ Use **AskUserQuestion**:
 ```
 - **Skip**: Mark as complete and exit
 - **Re-run welcome**: Continue to Step 1 below
+
+If the welcome was completed but `SETUP_READY` is not true, bypass this
+completion prompt and continue to the Setup Gate below.
 
 **If `--skip` flag present:**
 - Merge `welcomeShown: true`, `welcomeCompleted: <current timestamp>`, and `welcomeVersion` into `~/.ouroboros/prefs.json` without deleting existing keys:
@@ -110,6 +204,137 @@ PY
   Run /ouroboros:welcome --force to re-run onboarding.
   ```
 - Exit
+
+---
+
+### Setup Gate: First Use
+
+Before showing the welcome banner, check whether Ouroboros has been prepared
+on this machine:
+
+```bash
+if python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    yaml = None
+
+config_path, mcp_path = map(Path, sys.argv[1:])
+
+def yaml_mapping(source: str) -> dict[str, dict[str, str]]:
+    """Read only the top-level mapping scalars owned by this readiness gate."""
+    if yaml is not None:
+        loaded = yaml.safe_load(source) or {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    parsed: dict[str, dict[str, str]] = {}
+    section: str | None = None
+
+    def scalar_value(raw: str) -> str:
+        return raw.strip().split(" #", 1)[0].strip().rstrip(",}").strip().strip("'\"")
+
+    def flow_mapping(raw: str) -> dict[str, str]:
+        value = raw.strip().split(" #", 1)[0].strip()
+        if not (value.startswith("{") and value.endswith("}")):
+            return {}
+        fields: dict[str, str] = {}
+        for part in value[1:-1].split(","):
+            key, separator, field_value = part.partition(":")
+            if separator:
+                fields[key.strip().strip("'\"")] = scalar_value(field_value)
+        return fields
+
+    for raw_line in source.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        key, separator, raw_value = raw_line.strip().partition(":")
+        if not separator:
+            continue
+        if indent == 0:
+            section = key.strip("'\"")
+            parsed[section] = flow_mapping(raw_value)
+        elif section is not None:
+            parsed.setdefault(section, {})[key.strip("'\"")] = scalar_value(raw_value)
+    return parsed
+
+try:
+    config = yaml_mapping(config_path.read_text(encoding="utf-8"))
+    mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+orchestrator = config.get("orchestrator") if isinstance(config, dict) else None
+llm = config.get("llm") if isinstance(config, dict) else None
+# Existing YAML form: runtime_backend: claude. Parsing avoids assuming its order.
+mcp_servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
+ouroboros_mcp = mcp_servers.get("ouroboros") if isinstance(mcp_servers, dict) else None
+ready = (
+    isinstance(orchestrator, dict)
+    and orchestrator.get("runtime_backend") == "claude"
+    and isinstance(llm, dict)
+    and llm.get("backend") == "claude"
+    and isinstance(ouroboros_mcp, dict)
+    and (
+        (
+            isinstance(ouroboros_mcp.get("command"), str)
+            and bool(ouroboros_mcp.get("command", "").strip())
+        )
+        or (
+            isinstance(ouroboros_mcp.get("url"), str)
+            and bool(ouroboros_mcp.get("url", "").strip())
+        )
+    )
+)
+raise SystemExit(0 if ready else 1)
+PY
+then
+  echo "SETUP_READY"
+else
+  echo "SETUP_REQUIRED"
+fi
+```
+
+If setup is required, ask one concise question in the user's language. For a
+Korean conversation, use:
+
+```json
+{
+  "questions": [{
+    "question": "Ouroboros를 처음 사용하시네요. 시작하기 전에 실행 환경을 설정할까요?",
+    "header": "Ouroboros 시작하기",
+    "options": [
+      {
+        "label": "설정하고 시작하기 (권장)",
+        "description": "한 번만 설정하면 바로 사용할 수 있어요"
+      },
+      {
+        "label": "나중에",
+        "description": "지금은 기본 안내만 보고 나중에 설정할게요"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **설정하고 시작하기**: Follow `../setup/SKILL.md`. Do not ask the user
+  to copy a command when the current host can run it.
+- **나중에**: Continue with the welcome flow, but do not claim that MCP-only
+  execution features are ready.
+
+After successful setup, `../setup/SKILL.md` presents the model choice.
+Do not repeat it here; continue to Step 1 after the setup skill returns.
+
+Do not show this gate again once the Claude runtime, LLM backend, and MCP entry
+are ready. The normal settings UI remains available later through `ooo config`,
+so a model choice made now is never permanent.
 
 ---
 
@@ -164,32 +389,7 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ---
 
-### Step 3: MCP Check
-
-```bash
-cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
-```
-
-**If MCP_MISSING**, **AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
-    "header": "MCP Setup",
-    "options": [
-      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python >= 3.12)" },
-      { "label": "Skip for now", "description": "Use basic features first (interview, seed, unstuck)" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
-- **Set up now**: Read and execute `skills/setup/SKILL.md`, then return to Step 4
-- **Skip for now**: Continue to Step 4
-
----
-
-### Step 4: Quick Reference
+### Step 3: Quick Reference
 
 ```
 Available Commands:
@@ -208,7 +408,7 @@ Available Commands:
 
 ---
 
-### Step 5: First Action
+### Step 4: First Action
 
 **AskUserQuestion**:
 ```json
@@ -227,13 +427,13 @@ Available Commands:
 ```
 
 Based on choice:
-- **Start a project**: Ask "What do you want to build?" → execute `skills/interview/SKILL.md`
-- **Try the tutorial**: Execute `skills/tutorial/SKILL.md`
-- **Read the docs**: Execute `skills/help/SKILL.md`
+- **Start a project**: Ask "What do you want to build?" → execute `../interview/SKILL.md`
+- **Try the tutorial**: Execute `../tutorial/SKILL.md`
+- **Read the docs**: Execute `../help/SKILL.md`
 
 ---
 
-### Step 6: GitHub Star (Last Step)
+### Step 5: GitHub Star (Last Step)
 
 Check `gh` availability first:
 ```bash

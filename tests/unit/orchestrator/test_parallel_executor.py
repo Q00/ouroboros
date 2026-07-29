@@ -5623,7 +5623,7 @@ class TestParallelACExecutor:
         tmp_path,
     ) -> None:
         """The verify gate owns artifact and command proof for contract ACs."""
-        command = "python -c \"print('OK')\""
+        command = "python3 -c \"print('OK')\""
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
             encoding="utf-8",
@@ -5709,7 +5709,7 @@ class TestParallelACExecutor:
         artifact on disk. The verify-gate-active guard keeps those fields required,
         so the worker's self-reported evidence fails and the AC is not accepted.
         """
-        command = "python -c \"print('OK')\""
+        command = "python3 -c \"print('OK')\""
         command_json = command.replace("\\", "\\\\").replace('"', '\\"')
         # Deliberately do NOT write hello.py: the artifact is missing on disk.
         event_store, appended_events = _make_replaying_event_store()

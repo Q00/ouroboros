@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -98,8 +99,10 @@ class TestRemoveCodexMcp:
             'model = "gpt-5"\n\n'
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n\n'
+            'args = ["ouroboros", "mcp", "serve"]\n\n'
             "[mcp_servers.ouroboros.env]\n"
             'OUROBOROS_AGENT_RUNTIME = "codex"\n\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n\n'
             "[other]\nfoo = 1\n"
         )
 
@@ -124,6 +127,7 @@ class TestRemoveCodexMcp:
             "\n"
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n\n'
+            'args = ["ouroboros", "mcp", "serve"]\n\n'
             "# Comment inside other section\n"
             "[other]\nfoo = 1\n"
         )
@@ -138,6 +142,60 @@ class TestRemoveCodexMcp:
         assert "# My custom comment at top" in content
         assert "[other]" in content
 
+    def test_preserves_following_table_with_trailing_comment_header(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A valid following table header with a trailing comment stops MCP removal."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["ouroboros", "mcp", "serve"]\n'
+            "\n"
+            "[operator] # keep this table\n"
+            'value = "preserved"\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is True
+        content = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(content)
+
+        assert "ouroboros" not in parsed.get("mcp_servers", {})
+        assert parsed["operator"]["value"] == "preserved"
+        assert "[operator] # keep this table" in content
+
+    def test_removes_managed_inline_mcp_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Semantic ownership must remove inline parent-table MCP entries too."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers]\n"
+            'other = { command = "other" }\n'
+            'ouroboros = { command = "uvx", args = ["--from", '
+            '"ouroboros-ai", "ouroboros", "mcp", "serve"] }\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        content = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(content)
+
+        assert result is True
+        assert "ouroboros" not in parsed.get("mcp_servers", {})
+        assert parsed["mcp_servers"]["other"]["command"] == "other"
+        assert "ouroboros = {" not in content
+
     def test_managed_comment_block_only_removes_known_prefix(self, tmp_path: Path) -> None:
         """Comment block removal stops at blank lines (non-# lines)."""
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -149,6 +207,7 @@ class TestRemoveCodexMcp:
             "# Unrelated user comment\n"
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n\n'
+            'args = ["ouroboros", "mcp", "serve"]\n\n'
             "[other]\nfoo = 1\n"
         )
 
@@ -168,7 +227,7 @@ class TestRemoveCodexMcp:
         codex_config.write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n'
-            'args = ["ouroboros"]\n'
+            'args = ["ouroboros", "mcp", "serve"]\n'
             "\n"
             "# User note about the next section\n"
             "[other]\nfoo = 1\n"
@@ -182,6 +241,45 @@ class TestRemoveCodexMcp:
         assert "[mcp_servers.ouroboros]" not in content
         assert "# User note about the next section" in content
         assert "[other]" in content
+
+    def test_removes_managed_table_structurally_around_inner_comments(self, tmp_path: Path) -> None:
+        """Comments inside the managed table must not leave orphaned TOML keys."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            "# keep local context\n"
+            'args = ["ouroboros", "mcp", "serve"]\n'
+            "\n"
+            "[other]\nfoo = 1\n"
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is True
+        content = codex_config.read_text()
+        assert "[mcp_servers.ouroboros]" not in content
+        assert 'args = ["ouroboros", "mcp", "serve"]' not in content
+        assert "# keep local context" in content
+        assert "[other]" in content
+        tomllib.loads(content)
+
+    def test_preserves_user_managed_url_entry(self, tmp_path: Path) -> None:
+        """Uninstall must not delete a custom MCP entry setup auto would preserve."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = (
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n\n[other]\nfoo = 1\n'
+        )
+        codex_config.write_text(original)
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is False
+        assert codex_config.read_text() == original
 
     def test_no_ouroboros_returns_false(self, tmp_path: Path) -> None:
         codex_config = tmp_path / ".codex" / "config.toml"

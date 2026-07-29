@@ -15,7 +15,7 @@ from typing import Annotated, Any
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_success, print_warning
-from ouroboros.codex import install_codex_artifacts
+from ouroboros.codex import install_codex_artifacts, resolve_codex_home
 
 app = typer.Typer(
     name="codex",
@@ -61,10 +61,18 @@ def codex() -> None:
 @app.command("refresh")
 def refresh() -> None:
     """Refresh Codex rules and skills without changing MCP or Ouroboros config."""
-    codex_dir = Path.home() / ".codex"
+    configured_codex_home = os.environ.get("CODEX_HOME")
+    codex_dir = (
+        Path(configured_codex_home).expanduser()
+        if configured_codex_home
+        else Path.home() / ".codex"
+    )
     try:
         result = install_codex_artifacts(codex_dir=codex_dir, prune=False)
     except FileNotFoundError as exc:
+        print_error(str(exc))
+        raise typer.Exit(1) from exc
+    except OSError as exc:
         print_error(str(exc))
         raise typer.Exit(1) from exc
 
@@ -78,7 +86,7 @@ def doctor(
         Path | None,
         typer.Option(
             "--codex-dir",
-            help="Codex configuration directory to inspect. Defaults to ~/.codex.",
+            help="Codex configuration directory to inspect. Defaults to $CODEX_HOME or ~/.codex.",
         ),
     ] = None,
     live_mcp: Annotated[
@@ -93,7 +101,7 @@ def doctor(
     ] = False,
 ) -> None:
     """Verify installed Codex artifacts can route ``ooo auto`` to Ouroboros."""
-    resolved_codex_dir = codex_dir or Path.home() / ".codex"
+    resolved_codex_dir = resolve_codex_home(codex_dir)
     failures = _check_auto_dispatch_surface(resolved_codex_dir, live_mcp=live_mcp)
 
     if failures:

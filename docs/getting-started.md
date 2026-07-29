@@ -36,6 +36,9 @@ ooo run
 
 > `ooo` commands are Claude Code skills. They only work inside an active Claude Code session.
 > `ooo setup` registers the MCP server globally (one-time) and optionally configures your project.
+> After setup, choose **Start now** to use the recommended model settings, or
+> **Directly configure models** to select a model for each pipeline stage. You
+> can reopen those settings any time with `ooo config`.
 
 ---
 
@@ -54,6 +57,29 @@ ouroboros setup
 
 # Run a seed spec
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
+```
+
+### Codex first use
+
+For the Codex plugin, add the marketplace and install Ouroboros:
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+Start a new Codex session and enter `ooo`. If setup has not run yet, Ouroboros
+offers to prepare the runtime before it changes anything. Once prepared, it
+uses Codex's current default model automatically. Choose **Directly configure
+models** only when you want to choose or pin a model for a pipeline stage; in
+Codex this opens the local settings UI in your browser at a temporary
+`localhost` address.
+
+For a standalone Codex CLI installation without the plugin, prepare the
+integration once:
+
+```bash
+ouroboros setup --runtime codex
 ```
 
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
@@ -161,7 +187,7 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 | All runner sessions | Git >= 2.36.0 on PATH. Project identity requires the unambiguous `worktree list --porcelain -z` topology grammar even for a non-Git local workspace; an older or unrepresentable Git version is a non-retryable configuration error. |
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
-| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
+| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), `pip install 'ouroboros-ai[mcp,claude]'` (shares the Claude extras for the Agent SDK types; `[mcp]` for the MCP server). Then `ouroboros setup --runtime kiro` to register the Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), `pip install 'ouroboros-ai[mcp]'` (or `pipx`/`uv tool` install). Then `ouroboros setup --runtime copilot` to live-discover available models, pick a default, and register the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
@@ -177,11 +203,11 @@ Use WSL 2 for the supported Windows path, then run the Linux install commands fr
 # Claude-backed flows
 export ANTHROPIC_API_KEY="your-anthropic-key"
 
-# Codex-backed flows
+# Codex-backed flows when using API-key authentication
 export OPENAI_API_KEY="your-openai-key"
 ```
 
-> Claude Code plugin users: your Claude Code session provides credentials automatically. No export needed.
+> Codex CLI can also use its normal account sign-in, so `OPENAI_API_KEY` is not required unless you choose API-key authentication. Claude Code plugin users: your Claude Code session provides credentials automatically. No export needed.
 
 ### Configuration File
 
@@ -203,7 +229,7 @@ runtime_controls:
   generation_no_progress_timeout_seconds: 14400  # 4h without material progress
 ```
 
-For Codex CLI, the recommended documented baseline is GPT-5.4 with medium reasoning effort. Put Ouroboros per-role overrides in `~/.ouroboros/config.yaml`, not in `~/.codex/config.toml`:
+For Codex CLI, leave the model on Codex's default unless you intentionally need a pin. `ouroboros config --web` and `ouroboros config` offer **Use Codex default model** for that choice; choose **Enter another model ID…** when you want to pin a stage to a model that is not listed. Ouroboros applies the task's reasoning effort per invocation. The equivalent `~/.ouroboros/config.yaml` model pins look like this:
 
 ```yaml
 # ~/.ouroboros/config.yaml
@@ -217,6 +243,9 @@ llm:
 
 clarification:
   default_model: gpt-5.4
+
+execution:
+  default_model: gpt-5.4  # omit, or choose Use Codex default model in config --web
 
 evaluation:
   semantic_model: gpt-5.4

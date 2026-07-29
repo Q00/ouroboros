@@ -168,7 +168,10 @@ class LLMProviderProfileConfig(BaseModel, frozen=True):
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     max_turns: int | None = Field(default=None, ge=1)
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Provider-scoped mappings may use the Codex-native ``xhigh`` level.
+    # Keeping it here (rather than in a generated Codex profile file) lets
+    # Ouroboros apply it only to the selected Codex invocation.
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
 
 
 class LLMTaskProfileConfig(BaseModel, frozen=True):
@@ -181,6 +184,23 @@ class LLMTaskProfileConfig(BaseModel, frozen=True):
     max_turns: int | None = Field(default=None, ge=1)
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     providers: dict[str, LLMProviderProfileConfig] = Field(default_factory=dict)
+
+    @field_validator("providers")
+    @classmethod
+    def validate_provider_reasoning_efforts(
+        cls, providers: dict[str, LLMProviderProfileConfig]
+    ) -> dict[str, LLMProviderProfileConfig]:
+        """Keep Codex-only reasoning effort levels out of non-Codex providers."""
+        for provider_name, provider_config in providers.items():
+            if provider_config.reasoning_effort != "xhigh":
+                continue
+            if provider_name.strip().lower() not in {"codex", "codex_cli"}:
+                msg = (
+                    "reasoning_effort='xhigh' is only supported for Codex provider "
+                    f"profiles, not {provider_name!r}"
+                )
+                raise ValueError(msg)
+        return providers
 
 
 class ClarificationConfig(BaseModel, frozen=True):
@@ -208,6 +228,8 @@ class ExecutionConfig(BaseModel, frozen=True):
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
         auto_evaluate: When true, a successful `execute_seed` run automatically
             enqueues formal evaluation as a background job.
+        default_model: Optional model pin for every Execute-stage runtime call.
+            ``None`` (the default) keeps the runtime's own selected model.
         run_verify_commands: Whether the orchestrator checks an AC's success
             contract itself before accepting the AC: all ``expected_artifacts``
             must exist under the run workspace and ``verify_command`` must exit
@@ -235,6 +257,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True
+    default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)

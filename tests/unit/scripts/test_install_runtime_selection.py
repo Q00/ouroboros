@@ -134,6 +134,16 @@ def test_install_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_fresh_install_keeps_direct_model_settings_optional() -> None:
+    """The installer should start with the runtime default instead of forcing pins."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "Codex's current default model is ready to use." in text
+    assert 'GUI_DEFAULT="n"' in text
+    assert "Open direct model settings" in text
+    assert "Using the runtime default model." in text
+
+
 def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None:
     config_dir = tmp_path / "home" / ".ouroboros"
     config_dir.mkdir(parents=True)
@@ -216,6 +226,27 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
+
+
+def test_explicit_runtime_setup_failure_fails_install(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={
+            "pipx": "#!/bin/sh\nprintf 'pipx %s\\n' \"$*\" >> __CALLS__\nexit 0\n".replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.12": '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.12; exit 0; fi\necho \'Python 3.12.0\'\n',
+            "pi": "#!/bin/sh\nexit 0\n",
+            "ouroboros": f'#!/bin/sh\nprintf \'ouroboros %s\\n\' "$*" >> {tmp_path / "calls.log"}\nif [ "$1" = "setup" ] && [ "$2" = "--runtime" ]; then exit 42; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 42
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "ouroboros setup --runtime pi --non-interactive" in calls
+    assert "ouroboros setup refresh" not in calls
 
 
 def test_explicit_goose_installs_base_and_runs_goose_setup(tmp_path: Path) -> None:

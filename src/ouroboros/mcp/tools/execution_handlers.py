@@ -9,7 +9,6 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import inspect
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,7 +19,11 @@ import structlog
 import yaml
 
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_auto_evaluate_enabled, get_max_parallel_workers
+from ouroboros.config.loader import (
+    get_auto_evaluate_enabled,
+    get_execution_model,
+    get_max_parallel_workers,
+)
 from ouroboros.core.conductor import (
     ConductorDirective,
     validate_conductor_successor_authorization,
@@ -179,15 +182,14 @@ def _process_local_resume_block_error(
 def _resolve_execution_model(runtime_backend: str | None) -> str | None:
     """Resolve the model pin for agent-runtime execution tasks.
 
-    ``OUROBOROS_EXECUTION_MODEL`` is already honored by the MCP evolution
-    executor. Keep execute-seed and auto run-handoff aligned so CLI-backed
-    runtimes such as Pi can be smoke-tested against an explicitly authenticated
-    provider/model without changing their global defaults.
+    The one-off ``OUROBOROS_EXECUTION_MODEL`` override and persisted
+    ``execution.default_model`` setting use the same resolver across execute-
+    seed, auto handoff, and evolution. This keeps a deliberate model pin
+    consistent without changing a runtime's global default when unset.
     """
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    execution_model = get_execution_model()
     if execution_model is not None:
-        stripped = execution_model.strip()
-        return stripped or None
+        return execution_model
     if runtime_backend == "claude":
         return DEFAULT_SONNET_MODEL
     return None
@@ -195,19 +197,23 @@ def _resolve_execution_model(runtime_backend: str | None) -> str | None:
 
 def _resolve_model_tier_request(
     arguments: Mapping[str, Any],
-    *,
-    is_resume: bool,
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """Resolve public value, runner override, and delegated round-trip value.
 
-    A fresh omitted request uses the public ``medium`` default and must therefore
-    pin the run's base tier to ``standard``. An omitted resume is different: it
-    means restore the persisted routing contract, so neither the runner nor a
-    delegated plugin payload may materialize a new explicit ``medium`` override.
+    Omission is automatic model selection, not an implicit ``medium`` promise.
+    In particular, an omitted value must reach a fresh Codex execution as
+    ``None``: Codex then keeps the model selected by its App/CLI and Ouroboros
+    emits no ``--model`` flag. An explicitly supplied ``medium`` is different:
+    it pins the run's base tier to ``standard``. The same omission rule
+    preserves a resumed run's persisted routing contract.
     """
     requested = arguments.get("model_tier")
-    effective = requested if isinstance(requested, str) and requested else "medium"
-    should_override = requested is not None or not is_resume
+    # FastMCP may materialize an omitted optional argument as ``None``.  Treat
+    # that exactly like an absent key; only a non-empty string is an intentional
+    # model-tier request that may replace automatic Codex selection or a resumed
+    # routing contract.
+    should_override = isinstance(requested, str) and bool(requested)
+    effective = requested if should_override else None
     return (
         effective,
         tier_from_model_tier_arg(effective) if should_override else None,
@@ -1188,7 +1194,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     description=(
                         "Model-tier routing: small/medium/large → frugal/standard/frontier "
                         "execution tier (trusted decomposed children may run one tier below; "
-                        "retries escalate). Default: medium"
+                        "retries escalate). Omit to preserve automatic runtime selection; "
+                        "pass medium explicitly to pin standard routing."
                     ),
                     required=False,
                     enum=("small", "medium", "large"),
@@ -1295,7 +1302,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         arguments = {**arguments, "seed_content": seed_content}
         session_id = session_id or session_id_override
         model_tier, base_model_tier_override, delegated_model_tier = _resolve_model_tier_request(
-            arguments, is_resume=is_resume
+            arguments
         )
         try:
             execution_preferences, raw_efficiency_mode, raw_frugality_assurance = (
@@ -1303,9 +1310,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             )
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_execute_seed"))
-        # ``medium`` is the public response/default value, not an explicit resume
-        # override. Preserve a session's resolved routing contract unless the
-        # caller actually supplied model_tier on this invocation.
+        # Omitted model_tier is public automatic selection, not an explicit
+        # resume override. Preserve a session's resolved routing contract unless
+        # the caller actually supplied model_tier on this invocation.
         max_iterations = arguments.get("max_iterations", 10)
         if not is_resume and session_id is None:
             session_id = f"orch_{uuid4().hex[:12]}"
@@ -1375,8 +1382,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 arguments.get("auto_evaluate"),
             )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
-                arguments,
-                is_resume=is_resume,
+                arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,
@@ -2687,7 +2693,7 @@ class StartExecuteSeedHandler:
                 arguments.get("auto_evaluate"),
             )
             _effective_tier, _runner_tier, delegated_model_tier = _resolve_model_tier_request(
-                arguments, is_resume=is_resume
+                arguments
             )
             payload = build_execute_subagent(
                 seed_content=seed_content,

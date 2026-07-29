@@ -12,6 +12,7 @@ import shutil
 from typing import Literal
 
 from ouroboros.backends.capabilities import render_backend_skill_capability_guide
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.skills.artifacts import (
     SKILL_ENTRYPOINT,
     collect_skill_bundle_dirs,
@@ -309,6 +310,16 @@ def _prepare_managed_install_root(path: Path) -> None:
     _refuse_symlinked_path_component(path)
 
 
+def _codex_home_candidate(codex_dir: str | Path | None) -> Path:
+    """Return the user/config supplied Codex home path before symlink resolution."""
+    if codex_dir is not None:
+        return Path(codex_dir).expanduser()
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex"
+
+
 def _refuse_symlinked_path_component(path: Path) -> None:
     """Fail closed when any existing component in an install root is a symlink."""
     for candidate_path in _install_root_candidates(path):
@@ -372,9 +383,8 @@ def install_codex_rules(
     prune: bool = False,
 ) -> Path:
     """Install or refresh packaged Ouroboros rules into ``~/.codex/rules``."""
-    resolved_codex_dir = (
-        Path(codex_dir).expanduser() if codex_dir is not None else Path.home() / ".codex"
-    )
+    _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "rules")
+    resolved_codex_dir = resolve_codex_home(codex_dir)
     target_root = resolved_codex_dir / "rules"
     _prepare_managed_install_root(target_root)
 
@@ -421,9 +431,8 @@ def install_codex_skills(
     prune: bool = False,
 ) -> tuple[Path, ...]:
     """Install or refresh packaged Ouroboros skills into ``~/.codex/skills/ouroboros-*``."""
-    resolved_codex_dir = (
-        Path(codex_dir).expanduser() if codex_dir is not None else Path.home() / ".codex"
-    )
+    _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "skills")
+    resolved_codex_dir = resolve_codex_home(codex_dir)
     target_root = resolved_codex_dir / "skills"
     _prepare_managed_install_root(target_root)
 

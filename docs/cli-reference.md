@@ -290,7 +290,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
 - For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
-- For Codex CLI: installs managed `~/.codex/ouroboros-*.config.toml` profile-v2 anchors on current Codex releases, or legacy `[profiles.ouroboros-*]` anchors when the detected CLI still requires them
+- For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
@@ -302,7 +302,7 @@ ouroboros setup --non-interactive
 - For GJC: installs the `ooo` bridge extension into `<agent-dir>/extensions` and the renderer-generated skill capability guide into `<agent-dir>/rules/ouroboros-skill-capability-guide.md`
 - For Zcode: sets `orchestrator.runtime_backend: zcode` and `orchestrator.zcode_cli_path` while leaving the completion-only `llm.backend` unchanged
 
-> **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup on current Codex releases; profile anchors live in `~/.codex/<profile>.config.toml`. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
+> **Codex config split:** use `ouroboros config` or `ouroboros config --web` to choose **Use Codex default model** (Codex's current default) or **Enter another model ID…** to pin a model for each pipeline stage, including Execute. The web view is the same settings UI as the terminal TUI. `~/.codex/config.toml` remains the Codex MCP/env hookup file; user-created Codex `--profile` settings remain supported. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
 ### Brownfield Subcommands
 

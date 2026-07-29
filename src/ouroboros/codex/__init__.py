@@ -15,6 +15,7 @@ from ouroboros.codex.artifacts import (
     resolve_packaged_codex_assets,
     resolve_packaged_codex_skill_path,
 )
+from ouroboros.codex.home import resolve_codex_home
 
 __all__ = [
     "CodexManagedArtifact",
@@ -30,4 +31,5 @@ __all__ = [
     "load_packaged_codex_rules",
     "resolve_packaged_codex_assets",
     "resolve_packaged_codex_skill_path",
+    "resolve_codex_home",
 ]

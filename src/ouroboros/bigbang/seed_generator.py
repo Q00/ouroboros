@@ -1134,6 +1134,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
             'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
             'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
+            "CONTEXT_REFERENCES rule: respond with one single-line JSON array of objects. "
+            "Path, role, and summary values may contain any characters, including literal "
+            ": colons and | pipes; never use a bare pipe as the list separator.\n"
             "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
             "Pattern values may contain any characters, including literal | pipes; "
             "never use a bare pipe as the list separator.\n"

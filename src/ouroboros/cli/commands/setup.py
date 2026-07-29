@@ -14,13 +14,18 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
+from datetime import date, datetime
+from datetime import time as datetime_time
 from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
+import tomllib
 from typing import Annotated, Literal
 
 from rich.prompt import Prompt
@@ -49,6 +54,8 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.codex.cli_policy import resolve_codex_cli_path
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -56,6 +63,17 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
+
+
+class _SetupCodexCliLogger:
+    """Small adapter for shared Codex CLI resolution diagnostics."""
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        hint = kwargs.get("hint")
+        print_warning(f"{event}: {hint}" if hint else event)
+
+    def info(self, event: str, **kwargs: object) -> None:
+        print_info(event)
 
 
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
@@ -170,6 +188,20 @@ def _get_current_backend() -> str | None:
         return None
 
 
+def _resolve_setup_codex_cli_path(
+    *,
+    explicit_cli_path: str | Path | None = None,
+    configured_cli_path: str | None = None,
+) -> str:
+    """Resolve the Codex executable setup will persist and later runtime will use."""
+    return resolve_codex_cli_path(
+        explicit_cli_path=explicit_cli_path,
+        configured_cli_path=configured_cli_path,
+        logger=_SetupCodexCliLogger(),
+        log_namespace="setup.codex",
+    ).cli_path
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH.
 
@@ -181,6 +213,50 @@ def _detect_runtimes() -> dict[str, str | None]:
     for name in ("claude", "codex", "opencode", "hermes"):
         path = shutil.which(name)
         runtimes[name] = path
+
+    # Codex: mirror the shared runtime launch resolver so setup persists the
+    # executable that nested execution will actually use.
+    env_codex_path = os.environ.get("OUROBOROS_CODEX_CLI_PATH", "").strip()
+    if env_codex_path:
+        configured = Path(
+            _resolve_setup_codex_cli_path(explicit_cli_path=env_codex_path)
+        ).expanduser()
+        runtimes["codex"] = (
+            str(configured) if configured.is_file() and os.access(configured, os.X_OK) else None
+        )
+    else:
+        # Persisted config paths may be repaired by setup, so use them when
+        # runnable but still allow PATH/App discovery when they are stale.
+        try:
+            from ouroboros.config import get_codex_cli_path
+
+            codex_path = get_codex_cli_path()
+        except Exception:
+            codex_path = None
+        if codex_path:
+            configured = Path(
+                _resolve_setup_codex_cli_path(configured_cli_path=codex_path)
+            ).expanduser()
+            if configured.is_file() and os.access(configured, os.X_OK):
+                runtimes["codex"] = str(configured)
+
+        if runtimes["codex"] is not None:
+            resolved = Path(
+                _resolve_setup_codex_cli_path(explicit_cli_path=runtimes["codex"])
+            ).expanduser()
+            # Trust `shutil.which`: it already proved PATH executability. This
+            # keeps setup tests hermetic while still canonicalizing relative
+            # PATH entries and wrapper fallbacks through the shared resolver.
+            runtimes["codex"] = str(resolved)
+
+        # Codex App bundles this executable but does not always add it to the
+        # terminal PATH. Treat it as an available Codex runtime for App-only users.
+        if runtimes["codex"] is None and _CODEX_APP_CLI_PATH.is_file():
+            resolved = Path(
+                _resolve_setup_codex_cli_path(explicit_cli_path=_CODEX_APP_CLI_PATH)
+            ).expanduser()
+            if resolved.is_file() and os.access(resolved, os.X_OK):
+                runtimes["codex"] = str(resolved)
 
     # Gemini: prefer explicit-path config (env var / config.yaml) over PATH.
     try:
@@ -299,7 +375,17 @@ _CODEX_MCP_COMMENT_LINES = (
 )
 
 CodexMcpMode = Literal["auto", "preserve", "stdio"]
+_CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 _CODEX_UVX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+_CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
+    tuple(_CODEX_UVX_MCP_ARGS),
+    ("--from", "ouroboros-ai", "ouroboros", "mcp", "serve"),
+    ("ouroboros", "mcp", "serve"),
+)
+_CODEX_MANAGED_MCP_ENV = {
+    "OUROBOROS_AGENT_RUNTIME": "codex",
+    "OUROBOROS_LLM_BACKEND": "codex",
+}
 _CODEX_DIRECT_MCP_ARGS = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]
 _CODEX_MODULE_MCP_ARGS = ["-m", "ouroboros", *_CODEX_DIRECT_MCP_ARGS]
 _CODEX_PROFILE_COMMENT = (
@@ -324,22 +410,22 @@ _CODEX_DEFAULT_LLM_PROFILES: dict[str, dict[str, object]] = {
     "fast": {
         "max_turns": 1,
         "temperature": 0.2,
-        "providers": {"codex": {"profile": "ouroboros-fast"}},
+        "providers": {"codex": {"reasoning_effort": "low"}},
     },
     "standard": {
         "max_turns": 3,
         "temperature": 0.3,
-        "providers": {"codex": {"profile": "ouroboros-standard"}},
+        "providers": {"codex": {"reasoning_effort": "medium"}},
     },
     "deep": {
         "max_turns": 5,
         "temperature": 0.4,
-        "providers": {"codex": {"profile": "ouroboros-deep"}},
+        "providers": {"codex": {"reasoning_effort": "high"}},
     },
     "frontier": {
         "max_turns": 8,
         "temperature": 0.4,
-        "providers": {"codex": {"profile": "ouroboros-frontier"}},
+        "providers": {"codex": {"reasoning_effort": "xhigh"}},
     },
 }
 
@@ -425,6 +511,17 @@ def _codex_mcp_entry_from_toml(data: dict[str, object]) -> dict[str, object] | N
     return entry if isinstance(entry, dict) else None
 
 
+def _codex_mcp_entry_has_endpoint(entry: dict[str, object] | None) -> bool:
+    """Return whether a Codex MCP entry has a usable command or URL."""
+    if not isinstance(entry, dict):
+        return False
+    for key in ("command", "url"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
 def _is_source_tree_ouroboros_build() -> bool:
     """Return whether this module is executing from an Ouroboros source tree.
 
@@ -502,7 +599,7 @@ def _has_managed_codex_mcp_comment(raw: str) -> bool:
     lines = raw.splitlines()
     expected = list(_CODEX_MCP_COMMENT_LINES)
     for index, line in enumerate(lines):
-        if line.strip() != "[mcp_servers.ouroboros]":
+        if not _is_codex_ouroboros_table_header(line.strip()):
             continue
         comment_end = index
         while comment_end > 0 and not lines[comment_end - 1].strip():
@@ -525,13 +622,14 @@ def _is_setup_managed_codex_mcp_entry(
     if not isinstance(command, str) or not isinstance(args, list):
         return False
 
-    # Current and legacy setup-managed uvx configs both end by launching
-    # `ouroboros mcp serve`; keep accepting those even before setup added the
-    # managed comment block. Non-uvx dev/worktree shapes are only setup-owned
-    # when that managed comment is present, so user-pinned interpreters or
-    # wrapper scripts with the same args remain preserved in auto mode.
+    env = entry.get("env")
+    if env is not None and env != _CODEX_MANAGED_MCP_ENV:
+        return False
+    if set(entry) - {"command", "args", "env"}:
+        return False
+
     if command == "uvx":
-        return len(args) >= 3 and args[-3:] == ["ouroboros", "mcp", "serve"]
+        return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
     if not has_managed_comment:
         return False
     if Path(command).name == "ouroboros":
@@ -566,7 +664,16 @@ _CODEX_WORKER_PROFILE_COMMENT_LINES = (
 
 def _is_codex_ouroboros_worker_profile_header(line: str) -> bool:
     """Return True when the line starts the managed Codex worker profile table."""
-    return line == "[profiles.ouroboros-worker]" or line.startswith("[profiles.ouroboros-worker.")
+    path = _toml_table_header_path(line)
+    return (
+        path is not None
+        and len(path) >= 2
+        and path[:2]
+        == (
+            "profiles",
+            _CODEX_WORKER_PROFILE_NAME,
+        )
+    )
 
 
 def _trim_managed_codex_worker_profile_comments(lines: list[str]) -> None:
@@ -603,7 +710,9 @@ def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:
     while index < len(input_lines):
         line = input_lines[index]
         stripped = line.strip()
-        if stripped == "[profiles.ouroboros-worker]" and not refreshed:
+        path = _toml_table_header_path(stripped)
+        is_worker_root = path == ("profiles", _CODEX_WORKER_PROFILE_NAME)
+        if is_worker_root and not refreshed:
             existed_before = True
             refreshed = True
             _trim_managed_codex_worker_profile_comments(output_lines)
@@ -628,9 +737,84 @@ def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
+def _toml_table_header_body(line: str) -> str | None:
+    """Return the body of a TOML table header, accepting trailing comments."""
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    is_array_table = stripped.startswith("[[")
+    body_start = 2 if is_array_table else 1
+
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(stripped[body_start:], start=body_start):
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char != "]":
+            continue
+        suffix_start = index + 1
+        if is_array_table:
+            if suffix_start >= len(stripped) or stripped[suffix_start] != "]":
+                continue
+            suffix_start += 1
+        suffix = stripped[suffix_start:].strip()
+        if suffix and not suffix.startswith("#"):
+            return None
+        body = stripped[body_start:index].strip()
+        return body or None
+    return None
+
+
+def _toml_table_header_path(line: str) -> tuple[str, ...] | None:
+    """Return the parsed dotted TOML path for a table header line."""
+    body = _toml_table_header_body(line)
+    if body is None:
+        return None
+
+    marker = "__ouroboros_table_header_marker__"
+    try:
+        parsed = tomllib.loads(f"[{body}]\n{marker} = true\n")
+    except tomllib.TOMLDecodeError:
+        return None
+
+    path: list[str] = []
+
+    def _walk(node: object) -> bool:
+        if not isinstance(node, dict):
+            return False
+        if node.get(marker) is True:
+            return True
+        for key, value in node.items():
+            if key == marker:
+                continue
+            path.append(str(key))
+            if _walk(value):
+                return True
+            path.pop()
+        return False
+
+    return tuple(path) if _walk(parsed) else None
+
+
+def _is_toml_table_header(line: str) -> bool:
+    return _toml_table_header_path(line) is not None
+
+
 def _is_codex_ouroboros_table_header(line: str) -> bool:
     """Return True when the line starts the managed Codex MCP table."""
-    return line == "[mcp_servers.ouroboros]" or line.startswith("[mcp_servers.ouroboros.")
+    path = _toml_table_header_path(line)
+    return path is not None and len(path) >= 2 and path[:2] == ("mcp_servers", "ouroboros")
 
 
 def _trim_managed_codex_comments(lines: list[str]) -> None:
@@ -641,10 +825,88 @@ def _trim_managed_codex_comments(lines: list[str]) -> None:
     comment_index = len(lines)
     for expected in reversed(_CODEX_MCP_COMMENT_LINES):
         if comment_index == 0 or lines[comment_index - 1] != expected:
-            return
+            break
         comment_index -= 1
+    else:
+        del lines[comment_index:]
+        return
 
-    del lines[comment_index:]
+    comment_end = len(lines)
+    comment_start = comment_end
+    while comment_start > 0 and lines[comment_start - 1].strip().startswith("#"):
+        comment_start -= 1
+    if comment_start < comment_end and lines[comment_start].strip().startswith(
+        "# Ouroboros MCP hookup"
+    ):
+        del lines[comment_start:comment_end]
+
+
+def _toml_parent_table_assignment_key(line: str, parent_path: tuple[str, ...]) -> str | None:
+    """Return the key assigned in a parent table line, if parseable."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    table_header = ".".join(_render_toml_key(part) for part in parent_path)
+    try:
+        parsed = tomllib.loads(f"[{table_header}]\n{stripped}\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    node: object = parsed
+    for part in parent_path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    if not isinstance(node, dict) or len(node) != 1:
+        return None
+    return next(iter(node))
+
+
+def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
+    """Remove an existing Ouroboros Codex MCP entry from dotted or inline TOML."""
+    input_lines = raw.splitlines()
+    output_lines: list[str] = []
+    index = 0
+    existed_before = False
+    current_table_path: tuple[str, ...] | None = None
+
+    while index < len(input_lines):
+        line = input_lines[index]
+        stripped = line.strip()
+        path = _toml_table_header_path(stripped)
+        if path is not None:
+            current_table_path = path
+
+        if _is_codex_ouroboros_table_header(stripped):
+            existed_before = True
+            preserved_comments: list[str] = []
+            _trim_managed_codex_comments(output_lines)
+            index += 1
+            while index < len(input_lines):
+                next_stripped = input_lines[index].strip()
+                is_table_header = _is_toml_table_header(next_stripped)
+                if is_table_header and not _is_codex_ouroboros_table_header(next_stripped):
+                    break
+                if next_stripped.startswith("#"):
+                    preserved_comments.append(input_lines[index])
+                index += 1
+            if preserved_comments:
+                if output_lines and output_lines[-1].strip():
+                    output_lines.append("")
+                output_lines.extend(preserved_comments)
+            continue
+
+        if current_table_path == ("mcp_servers",) and (
+            _toml_parent_table_assignment_key(stripped, ("mcp_servers",)) == "ouroboros"
+        ):
+            existed_before = True
+            index += 1
+            continue
+
+        output_lines.append(line)
+        index += 1
+
+    cleaned = "\n".join(output_lines).rstrip()
+    return (cleaned + ("\n" if cleaned else "")), existed_before
 
 
 def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
@@ -654,39 +916,11 @@ def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
         Tuple of (updated_contents, existed_before).
     """
     section_lines = _render_codex_mcp_section().strip("\n").splitlines()
-    input_lines = raw.splitlines()
-    output_lines: list[str] = []
-    index = 0
-    existed_before = False
-    inserted = False
-
-    while index < len(input_lines):
-        stripped = input_lines[index].strip()
-        if _is_codex_ouroboros_table_header(stripped):
-            existed_before = True
-            if not inserted:
-                _trim_managed_codex_comments(output_lines)
-                if output_lines and output_lines[-1].strip():
-                    output_lines.append("")
-                output_lines.extend(section_lines)
-                inserted = True
-
-            index += 1
-            while index < len(input_lines):
-                next_stripped = input_lines[index].strip()
-                is_table_header = next_stripped.startswith("[") and next_stripped.endswith("]")
-                if is_table_header and not _is_codex_ouroboros_table_header(next_stripped):
-                    break
-                index += 1
-            continue
-
-        output_lines.append(input_lines[index])
-        index += 1
-
-    if not inserted:
-        if output_lines and output_lines[-1].strip():
-            output_lines.append("")
-        output_lines.extend(section_lines)
+    cleaned_raw, existed_before = _remove_codex_mcp_section(raw)
+    output_lines = cleaned_raw.splitlines()
+    if output_lines and output_lines[-1].strip():
+        output_lines.append("")
+    output_lines.extend(section_lines)
 
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
@@ -732,15 +966,31 @@ def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     return False
 
 
-def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
+def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> bool:
     """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
     import tomllib
 
     if mode == "preserve":
+        codex_config = resolve_codex_home() / "config.toml"
+        if codex_config.exists():
+            try:
+                parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+            except tomllib.TOMLDecodeError:
+                print_error(f"Could not parse {codex_config} — Codex setup not saved.")
+                return False
+            if not _codex_mcp_entry_has_endpoint(_codex_mcp_entry_from_toml(parsed)):
+                print_error(
+                    "Preserved Codex MCP config does not define a usable Ouroboros "
+                    "command or URL; Codex setup not saved."
+                )
+                return False
+        else:
+            print_error(f"{codex_config} does not exist — Codex setup not saved.")
+            return False
         print_info("Preserved Codex MCP config.")
-        return
+        return True
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -748,11 +998,17 @@ def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
         try:
             parsed = tomllib.loads(raw)
         except tomllib.TOMLDecodeError:
-            print_error(f"Could not parse {codex_config} — skipping MCP registration.")
-            return
+            print_error(f"Could not parse {codex_config} — Codex setup not saved.")
+            return False
 
         entry = _codex_mcp_entry_from_toml(parsed)
         has_managed_comment = _has_managed_codex_mcp_comment(raw)
+        if entry is not None and not _codex_mcp_entry_has_endpoint(entry) and mode != "stdio":
+            print_error(
+                "Existing Codex Ouroboros MCP config has no usable command or URL; "
+                "Codex setup not saved. Use --mcp-mode stdio to replace it."
+            )
+            return False
         if (
             mode == "auto"
             and entry is not None
@@ -764,21 +1020,30 @@ def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
                 "Preserved existing user-managed Ouroboros MCP config in "
                 f"{codex_config}. Use --mcp-mode stdio to replace it."
             )
-            return
+            return True
 
         updated_raw, existed_before = _upsert_codex_mcp_section(raw)
         if updated_raw == raw:
             print_info("Codex MCP server already up to date.")
-            return
+            return True
+        try:
+            tomllib.loads(updated_raw)
+        except tomllib.TOMLDecodeError as exc:
+            print_error(
+                f"Could not update {codex_config} — MCP registration would create invalid TOML."
+            )
+            print_info(str(exc))
+            return False
 
-        codex_config.write_text(updated_raw, encoding="utf-8")
+        _atomic_write_text(codex_config, updated_raw)
         if existed_before:
             print_success(f"Updated Ouroboros MCP server in {codex_config}")
         else:
             print_success(f"Registered Ouroboros MCP server in {codex_config}")
     else:
-        codex_config.write_text(_render_codex_mcp_section().lstrip("\n"), encoding="utf-8")
+        _atomic_write_text(codex_config, _render_codex_mcp_section().lstrip("\n"))
         print_success(f"Registered Ouroboros MCP server in {codex_config}")
+    return True
 
 
 def _render_codex_profile_section(name: str, settings: _CodexProfileSettings) -> str:
@@ -796,6 +1061,45 @@ def _render_codex_profile_v2_file(settings: _CodexProfileSettings) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_toml_key(key: str) -> str:
+    """Render a TOML key without changing dotted/custom key semantics."""
+    if key and all(char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in key):
+        return key
+    return json.dumps(key)
+
+
+def _render_toml_value(value: object) -> str:
+    """Render a parsed TOML scalar/list value back to TOML without type loss."""
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, datetime | date | datetime_time):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return _render_toml_inline_table({str(key): item for key, item in value.items()})
+    if isinstance(value, list):
+        return "[" + ", ".join(_render_toml_value(item) for item in value) + "]"
+    msg = f"Unsupported TOML value type: {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _render_toml_inline_table(settings: dict[str, object]) -> str:
+    """Render a parsed TOML table as a TOML inline table.
+
+    ``tomllib`` represents TOML arrays-of-tables as ``list[dict]``.  When
+    migrating a legacy Codex profile into a profile-v2 file those nested dicts
+    must remain valid TOML instead of crashing after earlier setup mutations.
+    """
+    items = [
+        f"{_render_toml_key(str(key))} = {_render_toml_value(value)}"
+        for key, value in settings.items()
+    ]
+    return "{ " + ", ".join(items) + " }"
+
+
 def _render_toml_mapping(settings: _CodexProfileSettings, prefix: str = "") -> list[str]:
     """Render simple TOML mappings, preserving nested profile subtables."""
     lines: list[str] = []
@@ -804,10 +1108,11 @@ def _render_toml_mapping(settings: _CodexProfileSettings, prefix: str = "") -> l
         if isinstance(value, dict):
             nested.append((key, value))
         else:
-            lines.append(f"{key} = {json.dumps(value)}")
+            lines.append(f"{_render_toml_key(str(key))} = {_render_toml_value(value)}")
 
     for key, value in nested:
-        section_name = f"{prefix}.{key}" if prefix else key
+        quoted_key = _render_toml_key(str(key))
+        section_name = f"{prefix}.{quoted_key}" if prefix else quoted_key
         if lines and lines[-1] != "":
             lines.append("")
         lines.append(f"[{section_name}]")
@@ -853,9 +1158,35 @@ def _upsert_codex_profile_sections(raw: str) -> tuple[str, list[str]]:
 
 
 def _is_codex_ouroboros_profile_header(line: str, profile_names: set[str]) -> bool:
-    for name in profile_names:
-        if line == f"[profiles.{name}]" or line.startswith(f"[profiles.{name}."):
-            return True
+    path = _toml_table_header_path(line)
+    return (
+        path is not None and len(path) >= 2 and path[0] == "profiles" and path[1] in profile_names
+    )
+
+
+def _legacy_codex_profile_section_is_generated(
+    raw: str,
+    profile_name: str,
+    settings: _CodexProfileSettings,
+) -> bool:
+    """Return whether a legacy profile section is byte-equivalent to setup output."""
+    input_lines = raw.splitlines()
+    for index, line in enumerate(input_lines):
+        path = _toml_table_header_path(line)
+        if path != ("profiles", profile_name):
+            continue
+        start = index
+        if index > 0 and input_lines[index - 1] == _CODEX_PROFILE_COMMENT:
+            start = index - 1
+        end = index + 1
+        while end < len(input_lines):
+            stripped = input_lines[end].strip()
+            is_table_header = _is_toml_table_header(stripped)
+            if is_table_header and not _is_codex_ouroboros_profile_header(stripped, {profile_name}):
+                break
+            end += 1
+        section = "\n".join(input_lines[start:end]).strip()
+        return section == _render_codex_profile_section(profile_name, settings).strip()
     return False
 
 
@@ -876,11 +1207,7 @@ def _remove_codex_legacy_profile_sections(
             for name in profile_names:
                 profile = profiles.get(name)
                 if isinstance(profile, dict):
-                    migrated[name] = {
-                        str(key): value
-                        for key, value in profile.items()
-                        if isinstance(value, str | int | float | bool | list | dict)
-                    }
+                    migrated[name] = {str(key): value for key, value in profile.items()}
 
     input_lines = raw.splitlines()
     output_lines: list[str] = []
@@ -897,7 +1224,7 @@ def _remove_codex_legacy_profile_sections(
             index += 1
             while index < len(input_lines):
                 next_stripped = input_lines[index].strip()
-                is_table_header = next_stripped.startswith("[") and next_stripped.endswith("]")
+                is_table_header = _is_toml_table_header(next_stripped)
                 if is_table_header and not _is_codex_ouroboros_profile_header(
                     next_stripped, profile_names
                 ):
@@ -926,6 +1253,58 @@ def _write_codex_profile_v2_files(
     return added_profiles
 
 
+def _render_codex_worker_profile_v2_file(settings: _CodexProfileSettings) -> str:
+    """Render the managed Codex worker profile-v2 file."""
+    return (
+        _CODEX_WORKER_PROFILE_V2_CONTENT
+        + "\n".join(_render_toml_mapping(settings)).rstrip()
+        + ("\n" if settings else "")
+    )
+
+
+def _codex_worker_profile_v2_matches_migrated_legacy(
+    profile_path: Path,
+    settings: _CodexProfileSettings,
+) -> bool:
+    """Return whether an existing worker profile-v2 file is our migration output."""
+    try:
+        return profile_path.read_text(encoding="utf-8") == _render_codex_worker_profile_v2_file(
+            settings
+        )
+    except OSError:
+        return False
+
+
+def _remove_created_profile_v2_file_if_current_matches(
+    profile_path: Path,
+    expected_content: str,
+) -> None:
+    """Remove a just-created worker profile file if it still matches setup output."""
+    try:
+        raw = profile_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if raw != expected_content:
+        return
+    try:
+        profile_path.unlink()
+    except OSError:
+        pass
+
+
+def _codex_worker_profile_v2_is_recoverable_migration(
+    profile_path: Path,
+    settings: _CodexProfileSettings,
+) -> bool:
+    """Return whether a v2 worker file is a complete or interrupted managed migration."""
+    expected = _render_codex_worker_profile_v2_file(settings)
+    try:
+        contents = profile_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return contents == expected or expected.startswith(contents)
+
+
 def _codex_profile_v2_file_exists(codex_dir: Path, profile_name: str) -> bool:
     """Return whether a Codex profile-v2 file already exists for a profile."""
     return (codex_dir / f"{profile_name}.config.toml").exists()
@@ -946,11 +1325,157 @@ def _warn_preserved_legacy_codex_profiles(codex_config: Path, profile_names: set
     )
 
 
+def _retire_codex_default_profiles(*, protected_profile_names: set[str] | None = None) -> None:
+    """Remove only untouched task-profile anchors superseded by per-run effort.
+
+    The task profiles used to contain nothing but a reasoning-effort setting.
+    That setting is now supplied with ``codex exec -c``.  Never remove a
+    profile whose parsed content differs from the generated default.
+    """
+    import tomllib
+
+    protected = protected_profile_names or set()
+    codex_dir = resolve_codex_home()
+    codex_config = codex_dir / "config.toml"
+    removed: list[str] = []
+    if codex_config.exists():
+        try:
+            raw = codex_config.read_text(encoding="utf-8")
+            parsed = tomllib.loads(raw)
+            profiles = parsed.get("profiles")
+            removable = {
+                name
+                for name, settings in _CODEX_DEFAULT_PROFILE_SECTIONS.items()
+                if name not in protected
+                if isinstance(profiles, dict) and profiles.get(name) == settings
+                if _legacy_codex_profile_section_is_generated(raw, name, settings)
+            }
+            if removable:
+                updated_raw, _ = _remove_codex_legacy_profile_sections(raw, removable)
+                _atomic_write_text(codex_config, updated_raw)
+                removed.extend(sorted(removable))
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"Could not parse {codex_config}: {exc}") from exc
+
+    for name, settings in _CODEX_DEFAULT_PROFILE_SECTIONS.items():
+        if name in protected:
+            continue
+        profile_path = codex_dir / f"{name}.config.toml"
+        try:
+            if profile_path.read_text(encoding="utf-8") == _render_codex_profile_v2_file(settings):
+                profile_path.unlink()
+                removed.append(name)
+        except OSError:
+            continue
+
+    if removed:
+        print_info(
+            "Retired superseded Codex task profile anchors: " + ", ".join(sorted(set(removed)))
+        )
+
+
+def _legacy_codex_profile_is_customized(profile_name: str) -> bool:
+    """Return whether an old Ouroboros-owned Codex anchor was edited by its user."""
+    import tomllib
+
+    expected = _CODEX_DEFAULT_PROFILE_SECTIONS[profile_name]
+    codex_dir = resolve_codex_home()
+    codex_config = codex_dir / "config.toml"
+    if codex_config.exists():
+        try:
+            raw = codex_config.read_text(encoding="utf-8")
+            profiles = tomllib.loads(raw).get("profiles")
+        except (OSError, tomllib.TOMLDecodeError):
+            # A malformed file is not ours to reinterpret or modify.
+            return True
+        if isinstance(profiles, dict) and profile_name in profiles:
+            if not _legacy_codex_profile_section_is_generated(raw, profile_name, expected):
+                return True
+
+    profile_path = codex_dir / f"{profile_name}.config.toml"
+    try:
+        if profile_path.exists() and profile_path.read_text(
+            encoding="utf-8"
+        ) != _render_codex_profile_v2_file(expected):
+            return True
+    except OSError:
+        return True
+    return False
+
+
+def _migrate_legacy_codex_profile_mappings(config_dict: dict) -> list[str]:
+    """Move untouched setup-owned profile references to per-call effort settings.
+
+    Earlier setup releases wrote both ``profile: ouroboros-*`` in config.yaml
+    and a matching native Codex profile anchor.  The two must migrate together:
+    removing only the anchor would leave existing users with a dangling
+    ``--profile`` reference.  A customized native anchor is deliberately left
+    intact because it may contain a model pin the user chose.
+    """
+    llm_profiles = config_dict.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
+        return []
+
+    migrated: list[str] = []
+    for task_profile, default in _CODEX_DEFAULT_LLM_PROFILES.items():
+        profile = llm_profiles.get(task_profile)
+        if not isinstance(profile, dict):
+            continue
+        providers = profile.get("providers")
+        if not isinstance(providers, dict):
+            continue
+        codex_provider = providers.get("codex")
+        if not isinstance(codex_provider, dict):
+            continue
+
+        native_name = f"ouroboros-{task_profile}"
+        if codex_provider.get("profile") != native_name:
+            continue
+        if "model" in codex_provider or "reasoning_effort" in codex_provider:
+            continue
+        if _legacy_codex_profile_is_customized(native_name):
+            continue
+
+        codex_provider.pop("profile")
+        codex_provider["reasoning_effort"] = default["providers"]["codex"]["reasoning_effort"]  # type: ignore[index]
+        migrated.append(task_profile)
+    return migrated
+
+
+_CODEX_PROVIDER_ALIASES = frozenset({"codex", "codex_cli"})
+
+
+def _is_codex_provider_alias(provider_name: object) -> bool:
+    """Return whether a config provider key resolves to the Codex backend."""
+    return (
+        isinstance(provider_name, str) and provider_name.strip().lower() in _CODEX_PROVIDER_ALIASES
+    )
+
+
+def _referenced_legacy_codex_profiles(config_dict: dict) -> set[str]:
+    """Find old task anchors still intentionally referenced from config.yaml."""
+    llm_profiles = config_dict.get("llm_profiles")
+    if not isinstance(llm_profiles, dict):
+        return set()
+    known = set(_CODEX_DEFAULT_PROFILE_SECTIONS)
+    referenced: set[str] = set()
+    for profile in llm_profiles.values():
+        if not isinstance(profile, dict) or not isinstance(profile.get("providers"), dict):
+            continue
+        for provider_name, provider_config in profile["providers"].items():
+            if not _is_codex_provider_alias(provider_name) or not isinstance(provider_config, dict):
+                continue
+            profile_name = provider_config.get("profile")
+            if isinstance(profile_name, str) and profile_name in known:
+                referenced.add(profile_name)
+    return referenced
+
+
 def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
@@ -983,7 +1508,15 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
         }
         added_profiles = _write_codex_profile_v2_files(codex_config.parent, profile_settings)
         if updated_raw != raw:
-            codex_config.write_text(updated_raw, encoding="utf-8")
+            try:
+                tomllib.loads(updated_raw)
+            except tomllib.TOMLDecodeError as exc:
+                print_error(
+                    f"Could not update {codex_config} — profile migration would create invalid TOML."
+                )
+                print_info(str(exc))
+                return
+            _atomic_write_text(codex_config, updated_raw)
         _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
 
         if added_profiles:
@@ -1008,15 +1541,15 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
         print_info("Codex Ouroboros task profiles already present.")
         return
 
-    codex_config.write_text(updated_raw, encoding="utf-8")
+    _atomic_write_text(codex_config, updated_raw)
     print_success(f"Registered Codex task profiles in {codex_config}: {', '.join(added_profiles)}")
 
 
-def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
+def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
 
     if codex_config.exists():
@@ -1026,42 +1559,107 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             print_error(f"Could not parse {codex_config} — skipping worker-profile registration.")
             print_info(str(exc))
-            return
+            return False
     else:
         raw = ""
 
     if _codex_uses_profile_v2(codex_path):
         profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
         legacy_profiles = _existing_codex_profile_names(raw)
-        removable_profiles = (
-            set()
-            if _codex_profile_v2_file_exists(codex_config.parent, _CODEX_WORKER_PROFILE_NAME)
-            else {_CODEX_WORKER_PROFILE_NAME}
-        )
-        preserved_legacy_profiles = (
-            legacy_profiles & {_CODEX_WORKER_PROFILE_NAME} - removable_profiles
-        )
         try:
-            updated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
-                raw, removable_profiles
+            migrated_raw, migrated_profiles = _remove_codex_legacy_profile_sections(
+                raw, {_CODEX_WORKER_PROFILE_NAME}
             )
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             print_error(f"Could not parse {codex_config} — skipping worker-profile registration.")
             print_info(str(exc))
-            return
+            return False
 
         settings = migrated_profiles.get(_CODEX_WORKER_PROFILE_NAME, {})
+        profile_exists = _codex_profile_v2_file_exists(
+            codex_config.parent, _CODEX_WORKER_PROFILE_NAME
+        )
+        recover_interrupted_migration = (
+            _CODEX_WORKER_PROFILE_NAME in legacy_profiles
+            and profile_exists
+            and _codex_worker_profile_v2_is_recoverable_migration(profile_path, settings)
+        )
+        removable_profiles = (
+            {_CODEX_WORKER_PROFILE_NAME}
+            if not profile_exists or recover_interrupted_migration
+            else set()
+        )
+        updated_raw = migrated_raw if removable_profiles else raw
+        preserved_legacy_profiles = (
+            legacy_profiles & {_CODEX_WORKER_PROFILE_NAME} - removable_profiles
+        )
         created_profile = False
-        if not profile_path.exists():
-            profile_path.write_text(
-                _CODEX_WORKER_PROFILE_V2_CONTENT
-                + "\n".join(_render_toml_mapping(settings)).rstrip()
-                + ("\n" if settings else ""),
-                encoding="utf-8",
-            )
+        profile_snapshot: _PathSnapshot | None = None
+        profile_expected_snapshot: _PathSnapshot | None = None
+        profile_content: str | None = None
+
+        def _rollback_profile_write() -> None:
+            if not created_profile or profile_content is None:
+                return
+            if not profile_exists:
+                _remove_created_profile_v2_file_if_current_matches(
+                    profile_path,
+                    profile_content,
+                )
+                return
+            if profile_snapshot is not None:
+                _restore_path_snapshot_if_current_matches(
+                    profile_path,
+                    profile_snapshot,
+                    profile_expected_snapshot,
+                    restore_link_targets=False,
+                )
+
+        if not profile_exists or recover_interrupted_migration:
+            profile_content = _render_codex_worker_profile_v2_file(settings)
+            try:
+                tomllib.loads(profile_content)
+            except tomllib.TOMLDecodeError as exc:
+                print_error(
+                    f"Could not update {profile_path} — worker-profile migration would create invalid TOML."
+                )
+                print_info(str(exc))
+                return False
+            if profile_exists:
+                profile_snapshot = _snapshot_path(profile_path)
+            _atomic_write_text(profile_path, profile_content)
+            profile_expected_snapshot = _snapshot_path(profile_path)
             created_profile = True
         if updated_raw != raw:
-            codex_config.write_text(updated_raw, encoding="utf-8")
+            try:
+                tomllib.loads(updated_raw)
+            except tomllib.TOMLDecodeError as exc:
+                print_error(
+                    f"Could not update {codex_config} — worker-profile migration would create invalid TOML."
+                )
+                print_info(str(exc))
+                _rollback_profile_write()
+                return False
+            try:
+                current_raw = (
+                    codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
+                )
+            except OSError as exc:
+                print_error(f"Could not read {codex_config} before worker-profile migration.")
+                print_info(str(exc))
+                _rollback_profile_write()
+                return False
+            if current_raw != raw:
+                print_error(
+                    f"Could not update {codex_config} — it changed during worker-profile migration."
+                )
+                _rollback_profile_write()
+                return False
+            try:
+                _atomic_write_text(codex_config, updated_raw)
+            except OSError:
+                _rollback_profile_write()
+                raise
             _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_success(f"Migrated legacy Codex worker profile out of {codex_config}")
         elif created_profile:
@@ -1070,7 +1668,7 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
         else:
             _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_info("Codex worker profile-v2 file already present.")
-        return
+        return True
 
     updated_raw, existed_before = _upsert_codex_worker_profile_section(raw)
     try:
@@ -1080,16 +1678,17 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> None:
             f"Could not update {codex_config} — worker-profile registration would create invalid TOML."
         )
         print_info(str(exc))
-        return
+        return False
     if updated_raw == raw:
         print_info("Codex worker profile already up to date.")
-        return
+        return True
 
-    codex_config.write_text(updated_raw, encoding="utf-8")
+    _atomic_write_text(codex_config, updated_raw)
     if existed_before:
         print_success(f"Updated Codex worker profile in {codex_config}")
     else:
         print_success(f"Registered Codex worker profile in {codex_config}")
+    return True
 
 
 def _ensure_mapping_section(config_dict: dict, key: str) -> dict:
@@ -1126,6 +1725,54 @@ def _ensure_profile_provider_mapping(profile: dict, provider: str) -> dict:
     return provider_config
 
 
+def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
+    """Return the existing Codex provider slot, or create the canonical one.
+
+    ``codex`` and ``codex_cli`` resolve to the same backend.  In particular,
+    do not add an effort-only ``codex`` mapping beside a user-owned
+    ``codex_cli`` model/profile mapping: profile resolution intentionally
+    prefers the exact canonical key, so doing so would silently shadow the
+    user's effective pin.
+    """
+    providers = profile.get("providers")
+    if not isinstance(providers, dict):
+        if providers is not None:
+            msg = "Invalid non-mapping 'providers' in an LLM profile."
+            raise ValueError(msg)
+        providers = {}
+        profile["providers"] = providers
+
+    codex_entries = [
+        (provider, provider_config)
+        for provider, provider_config in providers.items()
+        if _is_codex_provider_alias(provider)
+    ]
+    if len(codex_entries) > 1:
+        names = ", ".join(repr(provider) for provider, _ in codex_entries)
+        msg = f"Duplicate Codex provider aliases in an LLM profile: {names}"
+        raise ValueError(msg)
+
+    for provider in ("codex", "codex_cli"):
+        provider_config = providers.get(provider)
+        if isinstance(provider_config, dict):
+            return provider_config
+        if provider_config is not None:
+            msg = f"Invalid non-mapping {provider!r} provider profile."
+            raise ValueError(msg)
+
+    for provider, provider_config in providers.items():
+        if not _is_codex_provider_alias(provider):
+            continue
+        if isinstance(provider_config, dict):
+            return provider_config
+        msg = f"Invalid non-mapping {provider!r} provider profile."
+        raise ValueError(msg)
+
+    provider_config = {}
+    providers["codex"] = provider_config
+    return provider_config
+
+
 def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
     """Read a nested config value, returning _MISSING when absent."""
     current: object = config_dict
@@ -1137,23 +1784,44 @@ def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
 
 
 def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True when an existing model setting should beat setup defaults."""
-    for path, _default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
+    """Return True only when an existing legacy setting is a real user pin.
+
+    Default configs serialize their legacy model fields, including values from
+    prior shipped releases.  Field presence is consequently not provenance:
+    match the loader's shipped-default classification before deciding a field
+    should suppress the role's Codex effort profile.
+    """
+    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
         value = _get_nested_value(config_dict, path)
-        if value is not _MISSING:
+        if value is _MISSING:
+            continue
+        if isinstance(default, str) and value in recognized_shipped_defaults(default):
+            continue
+        if (
+            isinstance(default, tuple)
+            and isinstance(value, (list, tuple))
+            and _is_shipped_default_roster(value, default)
+        ):
+            continue
+        if value != default:
             return True
     return False
 
 
 def _install_codex_default_llm_profiles(
     config_dict: dict,
+    *,
+    preserve_legacy_model_overrides: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     """Install missing provider-neutral Ouroboros task profiles for Codex setup.
 
     Existing profile definitions and explicit legacy per-role model overrides
-    are preserved. If a default profile name already exists for another backend,
-    merge in only the missing Codex provider mapping before adding role defaults
-    that target that profile.
+    are preserved. A freshly generated config is the exception: its shipped
+    legacy model fields are defaults, not user pins, so callers pass
+    ``preserve_legacy_model_overrides=False`` to establish every Codex role
+    effort mapping. If a default profile name already exists for another
+    backend, merge in only the missing Codex provider mapping before adding
+    role defaults that target that profile.
     """
     llm_profiles = _ensure_mapping_section(config_dict, "llm_profiles")
     llm_role_profiles = _ensure_mapping_section(config_dict, "llm_role_profiles")
@@ -1172,14 +1840,23 @@ def _install_codex_default_llm_profiles(
             raise ValueError(msg)
 
         default_codex = profile["providers"]["codex"]  # type: ignore[index]
-        codex_provider = _ensure_profile_provider_mapping(existing_profile, "codex")
-        if "profile" not in codex_provider and "model" not in codex_provider:
-            codex_provider["profile"] = default_codex["profile"]  # type: ignore[index]
+        codex_provider = _ensure_codex_profile_provider_mapping(existing_profile)
+        provider_had_profile = "profile" in codex_provider
+        provider_had_model = "model" in codex_provider
+        provider_had_effort = "reasoning_effort" in codex_provider
+        changed = False
+        if not provider_had_profile and not provider_had_model and not provider_had_effort:
+            codex_provider["reasoning_effort"] = default_codex["reasoning_effort"]  # type: ignore[index]
+            changed = True
+        if changed:
             updated_profiles.append(name)
 
     added_role_profiles: list[str] = []
     for role, profile_name in _CODEX_DEFAULT_LLM_ROLE_PROFILES.items():
-        if role in llm_role_profiles or _has_explicit_codex_model_override(config_dict, role):
+        if role in llm_role_profiles or (
+            preserve_legacy_model_overrides
+            and _has_explicit_codex_model_override(config_dict, role)
+        ):
             continue
         llm_role_profiles[role] = profile_name
         added_role_profiles.append(role)
@@ -1191,42 +1868,468 @@ def _print_codex_config_guidance(config_path: Path) -> None:
     """Explain where Codex users should configure Ouroboros vs. Codex settings."""
     print_info(f"Configure Ouroboros runtime and per-role model overrides in {config_path}.")
     print_info(
-        "Use ~/.codex/config.toml for the Codex MCP/env hookup. Codex profile-v2 anchors live in ~/.codex/<profile>.config.toml on current Codex CLI releases."
+        f"Use {resolve_codex_home() / 'config.toml'} for the Codex MCP/env hookup and any profiles you manage yourself."
     )
 
 
-def _install_codex_artifacts() -> None:
+def _codex_home_candidate_for_setup() -> Path:
+    """Return Codex home exactly as supplied before symlink resolution."""
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex"
+
+
+def _install_codex_artifacts(codex_dir: str | Path | None = None) -> bool:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
     from ouroboros.codex import install_codex_artifacts
 
-    codex_dir = Path.home() / ".codex"
+    install_target = _codex_home_candidate_for_setup() if codex_dir is None else codex_dir
+    display_dir = Path(install_target).expanduser()
 
     try:
-        result = install_codex_artifacts(codex_dir=codex_dir, prune=True)
+        result = install_codex_artifacts(codex_dir=install_target, prune=True)
         print_success(f"Installed Codex rules → {result.rules_path}")
-        print_success(f"Installed {len(result.skill_paths)} Codex skills → {codex_dir / 'skills'}")
+        print_success(
+            f"Installed {len(result.skill_paths)} Codex skills → {display_dir / 'skills'}"
+        )
+        return True
+    except (FileNotFoundError, OSError) as exc:
+        print_error(f"Could not install packaged Codex rules or skills: {exc}")
+        return False
+
+
+def _snapshot_file(path: Path) -> bytes | None:
+    """Return a file snapshot for rollback, or ``None`` if it did not exist."""
+    try:
+        return path.read_bytes()
     except FileNotFoundError:
-        print_error("Could not locate packaged Codex rules or skills.")
+        return None
 
 
-def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
-    """Configure Ouroboros for the Codex runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
+def _restore_file_snapshot(path: Path, snapshot: bytes | None) -> None:
+    """Restore a file snapshot captured before a setup side effect."""
+    if snapshot is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(snapshot)
 
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
 
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+@dataclass(frozen=True)
+class _PathSnapshot:
+    """Topology-preserving snapshot for one managed setup path."""
+
+    kind: Literal["missing", "file", "directory", "symlink", "other"]
+    mode: int | None = None
+    contents: bytes | None = None
+    link_target: str | None = None
+    link_target_mode: int | None = None
+    link_target_contents: bytes | None = None
+    link_target_missing: bool = False
+    link_target_snapshot: _PathSnapshot | None = None
+    children: tuple[tuple[str, _PathSnapshot], ...] = ()
+
+
+def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
+    """Snapshot a managed file or directory without following symlinks."""
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError:
+        return _PathSnapshot(kind="missing")
+
+    current_path = path.expanduser().absolute()
+    mode = stat.S_IMODE(stat_result.st_mode)
+    if stat.S_ISLNK(stat_result.st_mode):
+        link_target = os.readlink(path)
+        target_path = Path(link_target)
+        if not target_path.is_absolute():
+            target_path = path.parent / target_path
+        normalized_target = target_path.expanduser().absolute()
+        if normalized_target in _seen:
+            return _PathSnapshot(kind="symlink", mode=mode, link_target=link_target)
+        target_snapshot = _snapshot_path(
+            target_path,
+            _seen=_seen | {current_path},
+        )
+        try:
+            target_stat = target_path.lstat()
+        except FileNotFoundError:
+            return _PathSnapshot(
+                kind="symlink",
+                mode=mode,
+                link_target=link_target,
+                link_target_missing=True,
+                link_target_snapshot=target_snapshot,
+            )
+        if stat.S_ISREG(target_stat.st_mode):
+            return _PathSnapshot(
+                kind="symlink",
+                mode=mode,
+                link_target=link_target,
+                link_target_mode=stat.S_IMODE(target_stat.st_mode),
+                link_target_contents=target_path.read_bytes(),
+                link_target_snapshot=target_snapshot,
+            )
+        return _PathSnapshot(
+            kind="symlink",
+            mode=mode,
+            link_target=link_target,
+            link_target_snapshot=target_snapshot,
+        )
+    if stat.S_ISREG(stat_result.st_mode):
+        return _PathSnapshot(kind="file", mode=mode, contents=path.read_bytes())
+    if not stat.S_ISDIR(stat_result.st_mode):
+        return _PathSnapshot(kind="other", mode=mode)
+
+    children: list[tuple[str, _PathSnapshot]] = []
+    for child in sorted(path.iterdir(), key=lambda item: item.name):
+        children.append((child.name, _snapshot_path(child, _seen=_seen | {current_path})))
+    return _PathSnapshot(kind="directory", mode=mode, children=tuple(children))
+
+
+def _remove_path_topology(path: Path) -> None:
+    """Remove a path without following directory symlinks."""
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(stat_result.st_mode) and not stat.S_ISLNK(stat_result.st_mode):
+        for child in path.iterdir():
+            _remove_path_topology(child)
+        path.rmdir()
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        path.unlink()
 
-    if not isinstance(config_dict, dict):
-        print_error("Invalid non-mapping config.yaml contents; aborting without changes.")
+
+def _restore_path_snapshot(
+    path: Path,
+    snapshot: _PathSnapshot,
+    *,
+    restore_link_targets: bool = True,
+) -> None:
+    """Restore one managed path without touching sibling Codex user state."""
+    if snapshot.kind == "missing":
+        _remove_path_topology(path)
         return
 
+    _remove_path_topology(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if snapshot.kind == "symlink":
+        if snapshot.link_target is not None:
+            os.symlink(snapshot.link_target, path)
+            target_path = Path(snapshot.link_target)
+            if not target_path.is_absolute():
+                target_path = path.parent / target_path
+            if restore_link_targets and snapshot.link_target_snapshot is not None:
+                _restore_path_snapshot(target_path, snapshot.link_target_snapshot)
+            elif restore_link_targets and snapshot.link_target_missing:
+                _remove_path_topology(target_path)
+            elif restore_link_targets and snapshot.link_target_contents is not None:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(snapshot.link_target_contents)
+                if snapshot.link_target_mode is not None:
+                    target_path.chmod(snapshot.link_target_mode)
+        return
+
+    if snapshot.kind == "file":
+        path.write_bytes(snapshot.contents or b"")
+        if snapshot.mode is not None:
+            path.chmod(snapshot.mode)
+        return
+
+    if snapshot.kind == "directory":
+        path.mkdir(parents=True, exist_ok=True)
+        if snapshot.mode is not None:
+            path.chmod(snapshot.mode)
+        for child_name, child_snapshot in snapshot.children:
+            _restore_path_snapshot(
+                path / child_name,
+                child_snapshot,
+                restore_link_targets=restore_link_targets,
+            )
+
+
+def _restore_path_snapshot_if_current_matches(
+    path: Path,
+    snapshot: _PathSnapshot,
+    expected_current: _PathSnapshot | None,
+    *,
+    restore_link_targets: bool = True,
+) -> bool:
+    """Restore only when the current path still matches setup's last known write."""
+    if expected_current is not None and _snapshot_path(path) != expected_current:
+        print_warning(f"Preserved concurrently changed setup path during rollback: {path}")
+        return False
+    _restore_path_snapshot(
+        path,
+        snapshot,
+        restore_link_targets=restore_link_targets,
+    )
+    return True
+
+
+def _managed_codex_setup_paths(codex_home: Path) -> tuple[Path, ...]:
+    """Return only Codex paths Ouroboros setup owns and may roll back."""
+    paths: set[Path] = {
+        codex_home / "config.toml",
+        codex_home / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml",
+        *(
+            codex_home / f"{profile_name}.config.toml"
+            for profile_name in _CODEX_DEFAULT_PROFILE_SECTIONS
+        ),
+    }
+
+    rules_dir = codex_home / "rules"
+    if rules_dir.is_dir():
+        paths.update(
+            path
+            for path in rules_dir.iterdir()
+            if path.name == "ouroboros.md"
+            or (path.name.startswith("ouroboros-") and path.suffix == ".md")
+        )
+    elif rules_dir.exists():
+        paths.add(rules_dir)
+    skills_dir = codex_home / "skills"
+    if skills_dir.is_dir():
+        paths.update(path for path in skills_dir.iterdir() if path.name.startswith("ouroboros-"))
+    elif skills_dir.exists():
+        paths.add(skills_dir)
+
     try:
+        from ouroboros.codex import resolve_packaged_codex_assets
+
+        with resolve_packaged_codex_assets() as assets:
+            paths.update(
+                codex_home / artifact.relative_install_path for artifact in assets.managed_artifacts
+            )
+    except (FileNotFoundError, OSError, ValueError):
+        # Artifact installation will surface the real failure later.  Rollback
+        # still protects already-installed managed paths discovered above.
+        pass
+
+    return tuple(sorted(paths))
+
+
+def _snapshot_managed_codex_setup_paths(
+    codex_home: Path,
+) -> dict[Path, _PathSnapshot]:
+    """Snapshot setup-owned Codex paths without snapshotting the whole home."""
+    return {path: _snapshot_path(path) for path in _managed_codex_setup_paths(codex_home)}
+
+
+def _restore_managed_codex_setup_paths(
+    snapshot: dict[Path, _PathSnapshot],
+    *,
+    expected_current: dict[Path, _PathSnapshot] | None = None,
+) -> None:
+    """Restore only setup-owned Codex paths captured before setup."""
+    for path, path_snapshot in snapshot.items():
+        _restore_path_snapshot_if_current_matches(
+            path,
+            path_snapshot,
+            None if expected_current is None else expected_current.get(path),
+            restore_link_targets=False,
+        )
+
+
+def _snapshot_codex_artifact_setup_paths(codex_home: Path) -> dict[Path, _PathSnapshot]:
+    """Snapshot only managed Codex instruction artifact paths."""
+    artifact_roots = (codex_home / "rules", codex_home / "skills")
+    return {
+        path: _snapshot_path(path)
+        for path in _managed_codex_setup_paths(codex_home)
+        if any(path == root or root in path.parents for root in artifact_roots)
+    }
+
+
+def _snapshot_codex_profile_setup_paths(codex_home: Path) -> dict[Path, _PathSnapshot]:
+    """Snapshot managed Codex profile-v2 files after setup-owned profile retirement."""
+    return {
+        path: _snapshot_path(path)
+        for path in _managed_codex_setup_paths(codex_home)
+        if path.name.endswith(".config.toml")
+    }
+
+
+def _snapshot_created_directory_topology(paths: tuple[Path, ...]) -> dict[Path, bool]:
+    """Record which setup-created parent directories did not exist beforehand."""
+    return {path: path.exists() for path in paths}
+
+
+def _restore_created_directory_topology(snapshot: dict[Path, bool]) -> None:
+    """Remove directories setup created, but only when they are still empty."""
+    for path, existed_before in sorted(
+        snapshot.items(),
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        if existed_before:
+            continue
+        try:
+            path.rmdir()
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            pass
+
+
+def _find_managed_codex_symlink_conflicts(codex_home: Path) -> list[Path]:
+    """Return managed Codex paths that setup would write through as symlinks."""
+    candidates: set[Path] = {
+        codex_home / "config.toml",
+        codex_home / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml",
+        codex_home / "rules",
+        codex_home / "skills",
+        *(
+            codex_home / f"{profile_name}.config.toml"
+            for profile_name in _CODEX_DEFAULT_PROFILE_SECTIONS
+        ),
+    }
+    for path in _managed_codex_setup_paths(codex_home):
+        candidates.add(path)
+        parent = path.parent
+        while parent != codex_home and codex_home in (parent, *parent.parents):
+            candidates.add(parent)
+            parent = parent.parent
+
+    conflicts: list[Path] = []
+    for path in sorted(candidates):
+        try:
+            if path.is_symlink():
+                conflicts.append(path)
+        except OSError:
+            conflicts.append(path)
+    return conflicts
+
+
+def _find_managed_codex_topology_conflicts(codex_home: Path) -> list[Path]:
+    """Return managed Codex directories blocked by non-directory leaves."""
+    conflicts: list[Path] = []
+    for directory in (codex_home / "rules", codex_home / "skills"):
+        try:
+            stat_result = directory.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(stat_result.st_mode):
+            continue
+        if not stat.S_ISDIR(stat_result.st_mode):
+            conflicts.append(directory)
+    return conflicts
+
+
+def _find_ouroboros_config_symlink_conflicts(config_dir: Path) -> list[Path]:
+    """Return Ouroboros setup files that are unsafe write-through symlinks."""
+    conflicts: list[Path] = []
+    for path in (config_dir / "config.yaml", config_dir / "credentials.yaml"):
+        try:
+            if stat.S_ISLNK(path.lstat().st_mode):
+                conflicts.append(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            conflicts.append(path)
+    return conflicts
+
+
+def _snapshot_directory(path: Path) -> dict[Path, bytes]:
+    """Return a recursive file snapshot for rollback."""
+    snapshot: dict[Path, bytes] = {}
+    if not path.exists():
+        return snapshot
+    for child in path.rglob("*"):
+        if child.is_file():
+            snapshot[child.relative_to(path)] = child.read_bytes()
+    return snapshot
+
+
+def _restore_directory_snapshot(path: Path, snapshot: dict[Path, bytes]) -> None:
+    """Restore a directory snapshot, including files deleted during setup."""
+    if path.exists():
+        for child in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if child.is_file() and child.relative_to(path) not in snapshot:
+                child.unlink()
+            elif child.is_dir():
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass
+
+    for relative_path, contents in snapshot.items():
+        target = path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+
+
+def _config_execute_runtime_backend(config_dict: dict) -> str:
+    """Return the saved Execute runtime backend using setup's inheritance rules."""
+    orchestrator = config_dict.get("orchestrator")
+    if not isinstance(orchestrator, dict):
+        return "claude"
+    runtime_profile = orchestrator.get("runtime_profile")
+    stage_backend = None
+    profile_default = None
+    if isinstance(runtime_profile, dict):
+        stages = runtime_profile.get("stages")
+        if isinstance(stages, dict):
+            stage_backend = stages.get("execute")
+        profile_default = runtime_profile.get("default")
+    backend = str(
+        stage_backend or profile_default or orchestrator.get("runtime_backend") or "claude"
+    )
+    return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
+
+
+def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
+    """Configure Ouroboros for the Codex runtime."""
+    from ouroboros.config.loader import ensure_config_dir, get_default_config
+    from ouroboros.config.models import get_config_dir, get_default_credentials
+
+    codex_home = resolve_codex_home()
+    config_dir_candidate = get_config_dir()
+    setup_directory_topology_snapshot = _snapshot_created_directory_topology(
+        (
+            config_dir_candidate / "data",
+            config_dir_candidate / "logs",
+            config_dir_candidate,
+            codex_home,
+            codex_home / "rules",
+            codex_home / "skills",
+        )
+    )
+    config_dir = ensure_config_dir()
+    ouroboros_symlink_conflicts = _find_ouroboros_config_symlink_conflicts(config_dir)
+    if ouroboros_symlink_conflicts:
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        formatted = ", ".join(str(path) for path in ouroboros_symlink_conflicts)
+        print_error(
+            f"Codex setup refuses to rewrite Ouroboros config through symlinks: {formatted}"
+        )
+        print_info("Replace the symlink with a regular Ouroboros config file, then rerun setup.")
+        return False
+    config_path = config_dir / "config.yaml"
+    credentials_path = config_dir / "credentials.yaml"
+    fresh_config = not config_path.exists()
+
+    if not fresh_config:
+        try:
+            config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            _restore_created_directory_topology(setup_directory_topology_snapshot)
+            print_error(f"Could not read config.yaml; aborting without changes: {exc}")
+            return False
+    else:
+        config_dict = get_default_config().model_dump(mode="json")
+
+    if not isinstance(config_dict, dict):
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        print_error("Invalid non-mapping config.yaml contents; aborting without changes.")
+        return False
+
+    try:
+        previous_execute_backend = _config_execute_runtime_backend(config_dict)
         # Set runtime and LLM backend to codex
         orchestrator_config = _ensure_mapping_section(config_dict, "orchestrator")
         orchestrator_config["runtime_backend"] = "codex"
@@ -1236,16 +2339,141 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
         llm_config["backend"] = "codex"
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
-            config_dict
+            config_dict,
+            preserve_legacy_model_overrides=not fresh_config,
         )
+        next_execute_backend = _config_execute_runtime_backend(config_dict)
+        execution_config = config_dict.get("execution")
+        if (
+            isinstance(execution_config, dict)
+            and "default_model" in execution_config
+            and previous_execute_backend != next_execute_backend
+            and next_execute_backend == "codex"
+        ):
+            execution_config["default_model"] = None
+        migrated_legacy_profiles = _migrate_legacy_codex_profile_mappings(config_dict)
+        protected_legacy_profiles = _referenced_legacy_codex_profiles(config_dict)
     except ValueError as exc:
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_error(f"Invalid config.yaml structure: {exc}")
         print_info("Aborting Codex setup without rewriting config.yaml.")
-        return
+        return False
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    # Register MCP before committing Codex runtime selection.  A config.yaml that
+    # says "codex" without a launchable Codex MCP endpoint strands first-use
+    # setup in a false-success state.
+    topology_conflicts = _find_managed_codex_topology_conflicts(codex_home)
+    if topology_conflicts:
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        formatted = ", ".join(str(path) for path in topology_conflicts)
+        print_error(
+            f"Codex setup refuses to install managed rules/skills over non-directories: {formatted}"
+        )
+        print_info("Move or remove the stale file, then rerun setup.")
+        return False
+    symlink_conflicts = _find_managed_codex_symlink_conflicts(codex_home)
+    if symlink_conflicts:
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        formatted = ", ".join(str(path) for path in symlink_conflicts)
+        print_error(f"Codex setup refuses to rewrite managed paths through symlinks: {formatted}")
+        print_info("Replace the symlink with a regular Codex config path, then rerun setup.")
+        return False
+    managed_codex_snapshot = _snapshot_managed_codex_setup_paths(codex_home)
+    config_snapshot = _snapshot_path(config_path)
+    credentials_snapshot = _snapshot_path(credentials_path)
+    managed_codex_expected_snapshot: dict[Path, _PathSnapshot] | None = None
+    config_expected_snapshot: _PathSnapshot | None = None
+    credentials_expected_snapshot: _PathSnapshot | None = credentials_snapshot
+    try:
+        mcp_registered = _register_codex_mcp_server(mode=mcp_mode)
+    except OSError as exc:
+        _restore_managed_codex_setup_paths(
+            managed_codex_snapshot,
+            expected_current=managed_codex_snapshot,
+        )
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        print_error(f"Could not save Codex MCP config: {exc}")
+        print_info("Restored unchanged Codex MCP config paths; setup incomplete.")
+        return False
+    if not mcp_registered:
+        _restore_managed_codex_setup_paths(
+            managed_codex_snapshot,
+            expected_current=managed_codex_snapshot,
+        )
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        print_info("Aborting Codex setup without rewriting config.yaml.")
+        return False
+    managed_codex_expected_snapshot = _snapshot_managed_codex_setup_paths(codex_home)
 
+    try:
+        _atomic_write_text(
+            config_path, yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+        )
+        config_expected_snapshot = _snapshot_path(config_path)
+        if fresh_config and not credentials_path.exists():
+            credentials_dict = get_default_credentials().model_dump(mode="json")
+            _atomic_write_text(
+                credentials_path,
+                yaml.dump(credentials_dict, default_flow_style=False, sort_keys=False),
+                mode=0o600,
+            )
+            credentials_expected_snapshot = _snapshot_path(credentials_path)
+    except OSError as exc:
+        if fresh_config and credentials_snapshot.kind == "missing" and credentials_path.exists():
+            credentials_expected_snapshot = _snapshot_path(credentials_path)
+        _restore_managed_codex_setup_paths(
+            managed_codex_snapshot,
+            expected_current=managed_codex_expected_snapshot,
+        )
+        _restore_path_snapshot_if_current_matches(
+            config_path,
+            config_snapshot,
+            config_expected_snapshot,
+        )
+        _restore_path_snapshot_if_current_matches(
+            credentials_path,
+            credentials_snapshot,
+            credentials_expected_snapshot,
+        )
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        print_error(f"Could not save Codex runtime config: {exc}")
+        print_info("Restored Codex MCP config; setup incomplete.")
+        return False
+
+    try:
+        # Install Codex-native rules and skills into the active Codex home.
+        if not _install_codex_artifacts():
+            if managed_codex_expected_snapshot is not None:
+                managed_codex_expected_snapshot.update(
+                    _snapshot_codex_artifact_setup_paths(codex_home)
+                )
+            raise OSError("Codex artifact installation failed")
+        if managed_codex_expected_snapshot is not None:
+            managed_codex_expected_snapshot.update(_snapshot_codex_artifact_setup_paths(codex_home))
+        _retire_codex_default_profiles(protected_profile_names=protected_legacy_profiles)
+        if managed_codex_expected_snapshot is not None:
+            managed_codex_expected_snapshot.update(_snapshot_codex_profile_setup_paths(codex_home))
+        if not _register_codex_worker_profile(codex_path=codex_path):
+            raise OSError("Codex worker profile registration failed")
+    except (OSError, TypeError, ValueError) as exc:
+        _restore_managed_codex_setup_paths(
+            managed_codex_snapshot,
+            expected_current=managed_codex_expected_snapshot,
+        )
+        _restore_path_snapshot_if_current_matches(
+            config_path,
+            config_snapshot,
+            config_expected_snapshot,
+        )
+        _restore_path_snapshot_if_current_matches(
+            credentials_path,
+            credentials_snapshot,
+            credentials_expected_snapshot,
+        )
+        _restore_created_directory_topology(setup_directory_topology_snapshot)
+        print_error(f"Could not finish Codex setup: {exc}")
+        print_info("Restored Codex and Ouroboros config; setup incomplete.")
+        return False
     print_success(f"Configured Codex runtime (CLI: {codex_path})")
     print_info(f"Config saved to: {config_path}")
     if added_profiles:
@@ -1255,19 +2483,17 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> None:
             "Added Codex provider mappings to existing Ouroboros LLM profiles: "
             f"{', '.join(updated_profiles)}"
         )
+    if migrated_legacy_profiles:
+        print_info(
+            "Migrated legacy Codex task profiles to per-run reasoning effort: "
+            + ", ".join(migrated_legacy_profiles)
+        )
     if added_role_profiles:
         print_info(
             f"Installed Ouroboros role profile defaults for {len(added_role_profiles)} roles."
         )
-
-    # Install Codex-native rules and skills into ~/.codex/
-    _install_codex_artifacts()
-
-    # Register MCP server in Codex config (~/.codex/config.toml)
-    _register_codex_mcp_server(mode=mcp_mode)
-    _register_codex_default_profiles(codex_path=codex_path)
-    _register_codex_worker_profile(codex_path=codex_path)
     _print_codex_config_guidance(config_path)
+    return True
 
 
 def _install_hermes_artifacts() -> None:
@@ -2538,7 +3764,7 @@ def _bridge_plugin_source_text() -> str | None:
         return None
 
 
-def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
+def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> None:
     """Write *content* to *path* atomically — temp file + ``os.replace``.
 
     Readers always see either the pre-existing file or the final content —
@@ -2549,21 +3775,32 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
     import os
     import tempfile
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    write_path = path.resolve(strict=False) if path.is_symlink() else path
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(write_path.lstat().st_mode)
+        except FileNotFoundError:
+            mode = 0o644
     fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
+        prefix=f".{write_path.name}.",
         suffix=".tmp",
-        dir=str(path.parent),
+        dir=str(write_path.parent),
     )
     try:
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(tmp_name, path)
+        os.replace(tmp_name, write_path)
         try:
-            os.chmod(path, mode)
+            os.chmod(write_path, mode)
         except OSError:
             pass  # e.g. Windows FAT — not fatal
     except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             Path(tmp_name).unlink()
         except OSError:
@@ -3169,9 +4406,17 @@ def setup(
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:
-            print_error("Codex CLI not found in PATH.")
+            env_codex_path = os.environ.get("OUROBOROS_CODEX_CLI_PATH", "").strip()
+            if env_codex_path:
+                print_error(
+                    "Configured Codex CLI override is not executable: "
+                    f"OUROBOROS_CODEX_CLI_PATH={env_codex_path}"
+                )
+            else:
+                print_error("Codex CLI not found in PATH or Codex App bundle.")
             raise typer.Exit(1)
-        _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode))
+        if not _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode)):
+            raise typer.Exit(1)
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")
         if not opencode_path:
@@ -3344,7 +4589,7 @@ def refresh_artifacts() -> None:
 
     refreshed: list[str] = []
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _codex_home_candidate_for_setup()
     if codex_dir.exists() or shutil.which("codex"):
         from ouroboros.codex import install_codex_artifacts
 

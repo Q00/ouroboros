@@ -7,16 +7,16 @@ doc_metadata:
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
-Ouroboros can use **OpenAI Codex CLI** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local Codex execution surface that the adapter talks to. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable.
+Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local execution surface that the adapter talks to; on macOS, setup also detects the executable bundled with the ChatGPT app when it is not on your `PATH`. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable. By default, Ouroboros uses the model currently selected by Codex and supplies only the role's reasoning effort.
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
-> **Model recommendation:** Use **GPT-5.4** with **medium** reasoning effort for the documented Codex setup. GPT-5.4 provides strong coding, multi-step reasoning, and agentic task execution that pairs well with the Ouroboros specification-first workflow harness.
+> **Model recommendation:** Start with Codex's current default model. Ouroboros applies role-specific reasoning effort per invocation; pin a model in Ouroboros settings only when you need a deliberate override.
 
 ## Prerequisites
 
-- **Codex CLI** installed and on your `PATH` (see [install steps](#installing-codex-cli) below)
-- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`). See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
+- **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
+- A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
 - **Python >= 3.12**
 
 ## Installing Codex CLI
@@ -68,9 +68,13 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 ### Where Codex users configure what
 
-Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings and per-role model overrides.
+Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings. For everyday model selection, open `ouroboros config` or `ouroboros config --web`; both open the same settings UI.
 
-Use `~/.codex/config.toml` only for the Codex MCP/env hookup. Current Codex CLI releases load `--profile <name>` from `~/.codex/<name>.config.toml`; `ouroboros setup --runtime codex` writes the managed Ouroboros profile anchors there.
+Choose **Use Codex default model** to keep Codex's current default model. This is the recommended setting: Ouroboros passes only the role's reasoning effort to each Codex invocation, so a newer model selected in Codex App or CLI is used automatically. Choose a listed model or **Enter another model ID…** only when you deliberately want to pin a model for a stage, including Execute.
+
+Use `$CODEX_HOME/config.toml` for the Codex MCP/env hookup and any user-managed
+native Codex profiles. If `CODEX_HOME` is unset, Codex uses
+`~/.codex/config.toml`.
 
 If you want Codex-backed Ouroboros roles to use explicit models instead of inheriting Codex CLI's active default/profile, set the existing `config.yaml` keys directly:
 
@@ -97,7 +101,7 @@ consensus:
   # Optional: the simple-voting roster also lives here as `consensus.models`
 ```
 
-When these keys are left at their shipped defaults, Codex setup can install provider-neutral `llm_profiles` plus `llm_role_profiles` mappings. Those mappings target sparse Codex profile anchors named `ouroboros-fast`, `ouroboros-standard`, `ouroboros-deep`, and `ouroboros-frontier`. On current Codex CLI releases, those anchors are `~/.codex/ouroboros-*.config.toml` files; older Codex CLI releases used `[profiles.ouroboros-*]` tables in `~/.codex/config.toml`. Explicit `config.yaml` model values still win.
+When these keys are left at their shipped defaults, Codex setup adds provider-neutral `llm_profiles` plus `llm_role_profiles` mappings. Their Codex mappings set the per-invocation reasoning effort (fast: low, standard: medium, deep: high, frontier: xhigh) without selecting a Codex model or generated Codex profile. Explicit `config.yaml` model values still win.
 
 ## Command Surface
 
@@ -109,15 +113,15 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 
 - Detects the `codex` binary on your `PATH`
 - Writes `orchestrator.runtime_backend: codex` and `llm.backend: codex` to `~/.ouroboros/config.yaml`
-- Adds missing provider-neutral `llm_profiles` and `llm_role_profiles` defaults for Codex LLM calls and agent-runtime sessions
+- Adds missing provider-neutral `llm_profiles` and `llm_role_profiles` defaults for Codex LLM calls and agent-runtime sessions, with per-invocation reasoning effort and no model pin
 - Records `orchestrator.codex_cli_path` when available
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
 - Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
-- Adds missing `ouroboros-*.config.toml` Codex profile-v2 anchors without overwriting existing profile files
+- Retires only untouched legacy generated `ouroboros-*.config.toml` task-profile anchors; user-created Codex profiles are preserved
 - Registers a managed `ouroboros-worker.config.toml` file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
-`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, `consensus`, `llm_profiles`, and `llm_role_profiles` settings in `~/.ouroboros/config.yaml`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+`~/.codex/config.toml` is not where Ouroboros stage model pins belong. Use the settings UI or the equivalent `~/.ouroboros/config.yaml` values; keep user-managed native Codex profiles when you need an explicit `--profile`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
 
 ### Worker subprocess isolation (Agent OS `runtime_profile`)
 
@@ -217,7 +221,7 @@ The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as its transport
 ## Codex CLI Strengths
 
 - **Session-aware Codex runtime** -- Ouroboros preserves Codex session handles and resume state across workflow steps
-- **Strong coding and reasoning** -- GPT-5.4 with medium reasoning effort provides robust code generation and multi-file editing across languages
+- **Strong coding and reasoning** -- uses the model currently selected by Codex, while Ouroboros applies the appropriate task reasoning effort
 - **Agentic task execution** -- effective at decomposing complex tasks into sequential steps and iterating autonomously
 - **Open-source** -- Codex CLI is open-source (Apache 2.0), allowing inspection and contribution
 - **Ouroboros harness** -- the specification-first workflow engine adds structured acceptance criteria, evaluation principles, and deterministic exit conditions on top of Codex CLI's capabilities
@@ -230,7 +234,7 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 |--------|-----------|-------------|
 | What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
 | Authentication | OpenAI API key | Max Plan subscription |
-| Model | GPT-5.4 with medium reasoning effort (recommended) | Claude (via claude-agent-sdk) |
+| Model | Codex's current default model (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
 | Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
@@ -289,9 +293,20 @@ npm install -g @openai/codex
 
 See the [Codex CLI README](https://github.com/openai/codex#readme) for alternative installation methods.
 
-### API key errors
+### Authentication errors
 
-Verify your OpenAI API key is set and has access to GPT-5.4:
+Codex CLI can authenticate through the Codex login stored under
+`$CODEX_HOME/auth.json` (or `~/.codex/auth.json` when `CODEX_HOME` is unset), or
+through an OpenAI API key depending on how your Codex CLI is configured.
+
+For OAuth-backed Codex CLI, run:
+
+```bash
+codex login
+```
+
+For API-key-backed Codex CLI, verify your OpenAI API key is set and has access
+to the selected model:
 
 ```bash
 echo $OPENAI_API_KEY  # should be set
@@ -307,9 +322,11 @@ The database will be created automatically at `~/.ouroboros/ouroboros.db`.
 
 ## Cost
 
-Using Codex CLI as the runtime backend requires an OpenAI API key and incurs standard OpenAI API usage charges. Costs depend on:
+Using Codex CLI as the runtime backend uses the authentication and billing path
+configured for your Codex CLI. Depending on your setup, that may be Codex OAuth
+or direct OpenAI API-key usage. Costs depend on:
 
-- Model used (GPT-5.4 with medium reasoning effort recommended)
+- Model selected by Codex (**Use Codex default model** is recommended)
 - Task complexity and token usage
 - Number of tool calls and iterations
 

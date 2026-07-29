@@ -65,7 +65,7 @@ Format: single-line JSON array of objects with "name", "description", and "crite
 ### 7. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
-- **CONTEXT_REFERENCES**: single-line JSON array of objects with "path", "role" (primary or reference), and optional "summary"
+- **CONTEXT_REFERENCES**: single-line JSON array of objects with "path", "role" ('primary' or 'reference'), and optional "summary" so colons and pipes inside values survive as data
 - **EXISTING_PATTERNS**: Key patterns that must be followed (single-line JSON array of strings)
 - **EXISTING_DEPENDENCIES**: Key dependencies to reuse (single-line JSON array of strings)
 

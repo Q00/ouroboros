@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +43,63 @@ class CodexCommandDispatcher:
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
         self._server: MCPServerAdapter | None = None
+
+    def stable_identity_contract(self) -> dict[str, str | None]:
+        """Return the portable identity for Ouroboros-owned dispatch authority."""
+        return {
+            "kind": "ouroboros_codex_command_dispatcher_v1",
+            "cwd": self._cwd,
+            "runtime_backend": self._runtime_backend,
+            "llm_backend": self._llm_backend,
+            "implementation_sha256": self._dispatcher_implementation_digest(),
+        }
+
+    def _dispatcher_implementation_digest(self) -> str:
+        """Return a digest covering the transitive dispatch implementation."""
+        payload = {
+            name: self._callable_implementation_digest(getattr(self, name))
+            for name in (
+                "_resume_handle_backend",
+                "_get_server",
+                "_build_tool_arguments",
+                "_build_resume_handle",
+                "_build_tool_call_message",
+                "_build_recoverable_failure_messages",
+                "dispatch",
+            )
+        }
+        from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
+
+        payload.update(
+            {
+                "external:create_ouroboros_server": self._callable_implementation_digest(
+                    create_ouroboros_server
+                ),
+                "external:MCPServerAdapter.call_tool": self._callable_implementation_digest(
+                    MCPServerAdapter.call_tool
+                ),
+            }
+        )
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _callable_implementation_digest(callable_obj: object) -> str | None:
+        """Return a stable digest for a Python callable's implementation."""
+        function = getattr(callable_obj, "__func__", callable_obj)
+        code = getattr(function, "__code__", None)
+        if code is None:
+            return None
+        payload = {
+            "module": getattr(function, "__module__", None),
+            "qualname": getattr(function, "__qualname__", None),
+            "bytecode": code.co_code.hex(),
+            "consts": repr(code.co_consts),
+            "names": list(code.co_names),
+            "varnames": list(code.co_varnames),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def _resume_handle_backend(self) -> str:
         """Map the configured runtime backend to a persisted runtime-handle backend."""

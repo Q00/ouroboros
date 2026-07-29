@@ -279,6 +279,21 @@ class TestLLMTaskProfileConfig:
         with pytest.raises(ValidationError):
             LLMProviderProfileConfig(max_turns=0)
 
+    def test_provider_profile_accepts_codex_native_xhigh_effort(self) -> None:
+        """Codex task profiles can use their native maximum effort level."""
+        profile = LLMTaskProfileConfig(
+            providers={"codex": LLMProviderProfileConfig(reasoning_effort="xhigh")}
+        )
+
+        assert profile.providers["codex"].reasoning_effort == "xhigh"
+
+    def test_provider_profile_rejects_codex_native_xhigh_for_non_codex(self) -> None:
+        """Non-Codex providers must not accept Codex-only reasoning efforts."""
+        with pytest.raises(ValidationError, match="only supported for Codex"):
+            LLMTaskProfileConfig(
+                providers={"anthropic": LLMProviderProfileConfig(reasoning_effort="xhigh")}
+            )
+
 
 class TestExecutionConfig:
     """Test ExecutionConfig for Phase 2 settings."""
@@ -297,6 +312,7 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
+        assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is False
 
@@ -307,6 +323,7 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
+        assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is True
 
