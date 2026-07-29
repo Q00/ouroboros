@@ -197,6 +197,13 @@ def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> floa
             raise ValueError(
                 f"{field_label} entry field 'weight' must be a number; got {raw_weight!r}."
             )
+        if isinstance(raw_weight, _JsonNonFiniteToken):
+            # Non-standard constants (NaN/Infinity/-Infinity) are not JSON
+            # numbers, so they take the documented 1.0 default rather than
+            # the sign-saturation reserved for genuine numeric overflow;
+            # without this check float(str(...)) below would turn a stored
+            # -Infinity literal into a 0.0 clamp (#1766).
+            return 1.0
         try:
             numeric = float(str(raw_weight).strip())
         except (ValueError, OverflowError):

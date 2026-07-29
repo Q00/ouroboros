@@ -1544,6 +1544,23 @@ class TestObjectArrayExtractionContract:
             ":description:0.5 | complete::0.4 | valid:Description:0.25"
         ) == (EvaluationPrinciple(name="valid", description="Description", weight=0.25),)
 
+    def test_lenient_nonfinite_tokens_all_default_to_one(self) -> None:
+        """#1766: every non-standard constant defaults to 1.0 in lenient mode.
+
+        The token marker must be recognized before numeric conversion so a
+        stored -Infinity literal is not conflated with genuine negative
+        overflow (which keeps saturating to 0.0 by sign).
+        """
+        for token in ("NaN", "Infinity", "-Infinity"):
+            principles = _parse_evaluation_principles(
+                f'[{{"name": "x", "description": "d", "weight": {token}}}]'
+            )
+            assert principles[0].weight == 1.0, f"token {token} did not default to 1.0"
+        overflow = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]'
+        )
+        assert overflow[0].weight == 0.0
+
     def test_weights_beyond_interpreter_digit_limit_never_raise(self) -> None:
         huge = "9" * 5000
         lenient = _parse_evaluation_principles(
