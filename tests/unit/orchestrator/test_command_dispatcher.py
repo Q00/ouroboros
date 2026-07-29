@@ -124,6 +124,24 @@ class TestCodexCommandDispatcher:
 
         assert original["implementation_sha256"] != changed["implementation_sha256"]
 
+    def test_stable_identity_tracks_orchestrator_resume_semantics_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind behavior behind registered resume handlers."""
+        from ouroboros.orchestrator.runner import OrchestratorRunner
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        async def replacement_resume_session(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+            return None
+
+        monkeypatch.setattr(OrchestratorRunner, "resume_session", replacement_resume_session)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
     def test_stable_identity_is_stable_across_fresh_interpreters(self) -> None:
         """Portable dispatcher identity must not include process-local code repr addresses."""
         script = (

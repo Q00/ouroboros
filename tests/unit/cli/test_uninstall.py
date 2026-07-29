@@ -115,6 +115,49 @@ class TestRemoveCodexMcp:
         assert "[other]" in content
         assert 'model = "gpt-5"' in content
 
+    def test_preserves_concurrent_codex_edit_before_atomic_removal(self, tmp_path: Path) -> None:
+        """Uninstall must reject a stale transform rather than lose an operator edit."""
+        from ouroboros.cli.commands import setup as setup_cmd
+
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            'model = "gpt-5"\n\n'
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+        operator_toml = 'model = "operator-edit"\n'
+        original_write = setup_cmd._atomic_write_text_if_current_matches
+
+        def _write(
+            path: Path,
+            content: str,
+            expected_current: setup_cmd._PathSnapshot,
+            *,
+            mode: int | None = None,
+        ) -> setup_cmd._PathSnapshot:
+            codex_config.write_text(operator_toml, encoding="utf-8")
+            return original_write(
+                path,
+                content,
+                expected_current,
+                mode=mode,
+            )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text_if_current_matches",
+                side_effect=_write,
+            ),
+        ):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is False
+        assert codex_config.read_text(encoding="utf-8") == operator_toml
+
     def test_preserves_user_comments_outside_managed_block(self, tmp_path: Path) -> None:
         """User comments outside the ouroboros section are preserved."""
         codex_config = tmp_path / ".codex" / "config.toml"

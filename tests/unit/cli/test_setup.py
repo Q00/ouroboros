@@ -2716,6 +2716,40 @@ class TestCodexSetup:
         assert config_path.read_text(encoding="utf-8") == operator_config
         mock_install.assert_not_called()
 
+    def test_setup_codex_binds_config_generation_before_reading(self, tmp_path: Path) -> None:
+        """An edit arriving immediately after the read must not be overwritten."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        operator_config = "operator: config-edit-after-read\n"
+        original_read_text = Path.read_text
+        injected = False
+
+        def _read_text(path: Path, *args: object, **kwargs: object) -> str:
+            nonlocal injected
+            text = original_read_text(path, *args, **kwargs)
+            if path == config_path and not injected:
+                injected = True
+                config_path.write_text(operator_config, encoding="utf-8")
+            return text
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.read_text", side_effect=_read_text, autospec=True),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server", return_value=True),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert injected
+        assert config_path.read_text(encoding="utf-8") == operator_config
+        mock_install.assert_not_called()
+
     def test_atomic_setup_write_rechecks_generation_immediately_before_replace(
         self, tmp_path: Path
     ) -> None:

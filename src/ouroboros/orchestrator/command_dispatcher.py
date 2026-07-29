@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -28,6 +29,20 @@ if TYPE_CHECKING:
 
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
+
+
+@lru_cache(maxsize=1)
+def _ouroboros_package_build_digest() -> str:
+    """Hash the installed Ouroboros Python build using install-path-neutral names."""
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative_path = source_path.relative_to(package_root).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class CodexCommandDispatcher:
@@ -73,6 +88,7 @@ class CodexCommandDispatcher:
             "_INTERVIEW_SESSION_METADATA_KEY": _INTERVIEW_SESSION_METADATA_KEY,
         }
         from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
+        from ouroboros.orchestrator.runner import OrchestratorRunner
 
         payload.update(
             {
@@ -85,6 +101,10 @@ class CodexCommandDispatcher:
                 "external:worker_cwd_failure_message": self._callable_implementation_digest(
                     worker_cwd_failure_message
                 ),
+                "external:OrchestratorRunner": self._class_implementation_digest(
+                    OrchestratorRunner
+                ),
+                "package_build_sha256": _ouroboros_package_build_digest(),
             }
         )
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -108,6 +128,30 @@ class CodexCommandDispatcher:
                 getattr(function, "__kwdefaults__", None)
             ),
         }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _class_implementation_digest(class_obj: type[object]) -> str:
+        """Hash every callable declared by a behavior-owning class."""
+        payload: dict[str, object] = {}
+        for name, member in sorted(vars(class_obj).items()):
+            if isinstance(member, staticmethod | classmethod):
+                member = member.__func__
+            if isinstance(member, property):
+                payload[name] = {
+                    accessor: CodexCommandDispatcher._callable_implementation_digest(function)
+                    for accessor, function in (
+                        ("get", member.fget),
+                        ("set", member.fset),
+                        ("delete", member.fdel),
+                    )
+                    if function is not None
+                }
+                continue
+            callable_digest = CodexCommandDispatcher._callable_implementation_digest(member)
+            if callable_digest is not None:
+                payload[name] = callable_digest
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -141,9 +185,14 @@ class CodexCommandDispatcher:
             }
         if isinstance(value, bytes):
             return {"type": "bytes", "hex": value.hex()}
+        if isinstance(value, Path):
+            return {"type": "path", "value": value.as_posix()}
         if value is None or isinstance(value, str | int | float | bool):
             return value
-        return {"type": type(value).__name__, "repr": repr(value)}
+        value_type = type(value)
+        return {
+            "type": f"{value_type.__module__}.{value_type.__qualname__}",
+        }
 
     @staticmethod
     def _code_object_identity_payload(code: CodeType) -> dict[str, object]:

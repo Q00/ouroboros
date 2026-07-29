@@ -2664,7 +2664,9 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
         return False
     config_path = config_dir / "config.yaml"
     credentials_path = config_dir / "credentials.yaml"
-    fresh_config = not config_path.exists()
+    config_snapshot = _snapshot_path(config_path)
+    credentials_snapshot = _snapshot_path(credentials_path)
+    fresh_config = config_snapshot.kind == "missing"
 
     if not fresh_config:
         try:
@@ -2732,8 +2734,6 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
         print_info("Replace the symlink with a regular Codex config path, then rerun setup.")
         return False
     managed_codex_snapshot = _snapshot_managed_codex_setup_paths(codex_home)
-    config_snapshot = _snapshot_path(config_path)
-    credentials_snapshot = _snapshot_path(credentials_path)
     managed_codex_expected_snapshot: dict[Path, _PathSnapshot] | None = None
     config_expected_snapshot: _PathSnapshot | None = config_snapshot
     credentials_expected_snapshot: _PathSnapshot | None = credentials_snapshot

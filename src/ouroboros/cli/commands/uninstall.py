@@ -79,17 +79,19 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
 def _remove_codex_mcp(dry_run: bool) -> bool:
     """Remove ouroboros MCP section from ~/.codex/config.toml."""
     from ouroboros.cli.commands.setup import (
-        _atomic_write_text,
+        _atomic_write_text_if_current_matches,
         _codex_mcp_entry_from_toml,
         _has_managed_codex_mcp_comment,
         _is_setup_managed_codex_mcp_entry,
         _remove_codex_mcp_section,
+        _snapshot_path,
     )
 
     codex_config = resolve_codex_home() / "config.toml"
     if not codex_config.exists():
         return False
 
+    config_snapshot = _snapshot_path(codex_config)
     try:
         raw = codex_config.read_text()
     except OSError:
@@ -124,7 +126,11 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
         print_warning("Codex MCP removal would create malformed TOML — skipping.")
         return False
     try:
-        _atomic_write_text(codex_config, cleaned)
+        _atomic_write_text_if_current_matches(
+            codex_config,
+            cleaned,
+            config_snapshot,
+        )
     except OSError:
         print_warning("Could not write ~/.codex/config.toml — skipping.")
         return False
