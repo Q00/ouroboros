@@ -1026,6 +1026,40 @@ class TestGitCapabilityProbeCache:
     failure paths are unchanged.
     """
 
+    def test_relative_which_result_is_anchored_to_an_absolute_path(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A relative PATH entry must not reopen the lookup race.
+
+        With POSIX PATH=:/usr/bin the empty entry resolves against the
+        mutable process cwd and shutil.which() can return a bare relative
+        name; passing that to subprocess performs another cwd-dependent
+        lookup. The key must anchor the selection to an absolute path used
+        for both stat and execution.
+        """
+        (tmp_path / "gitx").write_text("#!/bin/sh\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: "gitx")
+
+        invoked: list[str] = []
+
+        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            invoked.append(argv[0])
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
+
+        project_identity._require_supported_git()
+
+        assert invoked == [str(tmp_path / "gitx")], (
+            "the probe executed a relative path, leaving it cwd-dependent"
+        )
+
     def test_probe_targets_the_exact_executable_the_key_resolved(
         self, monkeypatch, tmp_path
     ) -> None:

@@ -293,6 +293,11 @@ def _current_git_key() -> tuple[str, int, int, int, int]:
     executable = shutil.which("git")
     if executable is None:
         raise ProjectIdentityUnavailableError("Git executable is unavailable on PATH")
+    # shutil.which() can return a relative path (an empty or relative PATH
+    # entry resolves against the mutable process cwd); anchor the selection
+    # to an absolute path so stat and execution refer to the same binary
+    # regardless of later cwd changes (review round three).
+    executable = os.path.abspath(executable)
     try:
         status = os.stat(executable)
     except OSError as exc:
