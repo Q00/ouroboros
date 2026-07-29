@@ -417,10 +417,7 @@ def _resolved_stage_model_for_display(
     if stage is Stage.EXECUTE:
         resolved_model = resolve_execution_model(model_backend)
         normalized_model = resolved_model or "backend default"
-        if (
-            _is_automatic_model_value(model_value)
-            and not source_is_env_override
-        ):
+        if _is_automatic_model_value(model_value) and not source_is_env_override:
             normalized_source = f"{model_source} → backend default"
         return _display_stage_model(normalized_model, normalized_source, model_backend)
 
