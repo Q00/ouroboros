@@ -48,20 +48,89 @@ def test_codex_config_fingerprint_ignores_automatic_project_trust(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     config_path = codex_home / "config.toml"
     config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
     original = runtime._codex_config_fingerprint
 
     config_path.write_text(
-        'model = "gpt-test"\n\n[projects."/tmp/project"]\ntrust_level = "trusted"\n',
+        f'model = "gpt-test"\n\n[projects.{json.dumps(project_key)}]\ntrust_level = "trusted"\n',
         encoding="utf-8",
     )
 
     assert runtime._fingerprint_codex_config_files() == original
+
+
+def test_codex_config_fingerprint_tracks_other_project_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    other_dir = tmp_path / "other"
+    project_dir.mkdir()
+    other_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
+    other_project_key = str(other_dir.resolve(strict=False))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
+
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(other_project_key)}]\n'
+        'trust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
+@pytest.mark.parametrize(
+    "updated_trust_level",
+    [
+        None,
+        "untrusted",
+    ],
+)
+def test_codex_config_fingerprint_tracks_existing_current_project_trust_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    updated_trust_level: str | None,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(project_key)}]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
+
+    updated_project_config = (
+        ""
+        if updated_trust_level is None
+        else f"[projects.{json.dumps(project_key)}]\ntrust_level = {json.dumps(updated_trust_level)}\n"
+    )
+    config_path.write_text(
+        f'model = "gpt-test"\n\n{updated_project_config}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
 
 
 def test_codex_config_fingerprint_still_detects_project_runtime_overrides(

@@ -334,6 +334,7 @@ class CodexCliRuntime:
             # checks them again before consulting any role-dependent fallback.
             self._profile_resolution_fingerprint = self._fingerprint_profile_resolution_config()
             self._codex_profile_v2_names = self._codex_profile_v2_names_from_ouroboros_config()
+            self._codex_project_trust_baseline = self._read_codex_project_trust_levels()
             self._codex_config_fingerprint = self._fingerprint_codex_config_files()
             self._skill_dispatch_registry_fingerprint = self._fingerprint_skill_dispatch_registry()
             self._builtin_mcp_handler_registry_fingerprint = (
@@ -351,6 +352,7 @@ class CodexCliRuntime:
             self._profile_resolution_fingerprint = None
             self._codex_config_fingerprint = None
             self._codex_profile_v2_names = set()
+            self._codex_project_trust_baseline = None
             self._skill_dispatch_registry_fingerprint = None
             self._builtin_mcp_handler_registry_fingerprint = None
             self._runtime_handle_profile_fingerprints = {}
@@ -792,6 +794,36 @@ class CodexCliRuntime:
                     names.add(provider.profile.strip())
         return names
 
+    def _read_codex_project_trust_levels(self) -> set[str] | None:
+        """Snapshot project trust state before Codex can mutate it on first use."""
+        config_path = self._codex_home() / "config.toml"
+        try:
+            parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return None
+
+        projects = parsed.get("projects")
+        if not isinstance(projects, dict):
+            return {}
+        return {
+            self._canonical_codex_project_path(str(project_path))
+            for project_path, settings in projects.items()
+            if isinstance(settings, dict) and "trust_level" in settings
+        }
+
+    @staticmethod
+    def _canonical_codex_project_path(project_path: str) -> str:
+        """Match Codex project keys to the canonical cwd without weakening drift."""
+        candidate = Path(project_path).expanduser()
+        if not candidate.is_absolute():
+            return project_path
+        try:
+            return str(candidate.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return project_path
+
     def _fingerprint_codex_config_files(
         self,
         runtime_handle: RuntimeHandle | None = None,
@@ -968,12 +1000,13 @@ class CodexCliRuntime:
         *,
         reachable_profiles: set[str] | None = None,
     ) -> bytes:
-        """Ignore Codex's automatic per-cwd trust bookkeeping in drift checks.
+        """Ignore only Codex's automatic first-use trust entry for this cwd.
 
         ``codex exec`` adds ``projects.<cwd>.trust_level`` on first use. That
         mutation cannot retarget a model/profile and must not invalidate the
-        thread handle created by the same command. Any other project-scoped key
-        remains fingerprinted, as do all non-project settings.
+        thread handle created by the same command. Existing trust entries and
+        trust changes for every other project remain authority-bearing drift,
+        as do all other project-scoped and non-project settings.
         """
         try:
             parsed = tomllib.loads(contents.decode("utf-8"))
@@ -987,11 +1020,22 @@ class CodexCliRuntime:
                 if not isinstance(raw_settings, dict):
                     retained_projects[str(project_path)] = raw_settings
                     continue
+                project_key = str(project_path)
+                canonical_project_key = self._canonical_codex_project_path(project_key)
+                automatic_current_cwd_trust = (
+                    self._codex_project_trust_baseline is not None
+                    and self._cwd is not None
+                    and canonical_project_key == self._cwd
+                    and canonical_project_key not in self._codex_project_trust_baseline
+                    and raw_settings.get("trust_level") == "trusted"
+                )
                 retained_settings = {
-                    str(key): value for key, value in raw_settings.items() if key != "trust_level"
+                    str(key): value
+                    for key, value in raw_settings.items()
+                    if key != "trust_level" or not automatic_current_cwd_trust
                 }
                 if retained_settings:
-                    retained_projects[str(project_path)] = retained_settings
+                    retained_projects[project_key] = retained_settings
             if retained_projects:
                 parsed["projects"] = retained_projects
             else:
