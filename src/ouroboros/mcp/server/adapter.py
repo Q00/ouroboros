@@ -2093,9 +2093,12 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # No shared-adapter injection for interview handlers: the injected stage
+    # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
+    # would bypass the handler's own strict factory (#765, #1768). Injection
+    # remains available for tests and custom wiring only.
     interview = InterviewHandler(
         event_store=event_store,
-        llm_adapter=llm_adapter,
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
@@ -2189,7 +2192,6 @@ def create_ouroboros_server(
         InterviewHandler(
             interview_engine=interview_engine,
             event_store=event_store,
-            llm_adapter=llm_adapter,
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
@@ -2197,7 +2199,6 @@ def create_ouroboros_server(
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
-            llm_adapter=llm_adapter,
             llm_backend=interview_llm_backend,
             event_store=event_store,
             agent_runtime_backend=interview_runtime_backend,
