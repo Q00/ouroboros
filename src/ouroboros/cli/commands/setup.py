@@ -64,29 +64,22 @@ def _build_uvx_mcp_args(package_spec: str) -> list[str]:
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
-    """Build the correct MCP entry based on how ouroboros is installed.
+    """Build an isolated MCP 2 launcher entry.
 
-    Priority: uvx > ouroboros binary > python3 -m ouroboros (verified).
-    Returns None if no working method is found.
+    Direct ``ouroboros`` and ``python -m`` fallbacks are deliberately excluded:
+    their environments may contain the Claude SDK's MCP 1.x dependency or no
+    MCP extra at all. ``uvx`` and ``pipx run`` both create a package-isolated
+    process whose ``[mcp]`` extra is known to contain MCP 2.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
         return {"command": "uvx", "args": _build_uvx_mcp_args(package_spec)}
-    if shutil.which("ouroboros"):
-        return {"command": "ouroboros", "args": ["mcp", "serve"]}
-    # Only use python3 fallback if ouroboros is actually importable
-    import subprocess
-
-    try:
-        subprocess.run(
-            ["python3", "-c", "import ouroboros"],
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+    if shutil.which("pipx"):
+        return {
+            "command": "pipx",
+            "args": ["run", "--spec", package_spec, "ouroboros", "mcp", "serve"],
+        }
+    return None
 
 
 def _ensure_claude_mcp_entry() -> None:
@@ -1413,37 +1406,8 @@ def _setup_hermes(hermes_path: str) -> None:
 
 
 def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
-    """Build an MCP command entry optimized for Kiro CLI.
-
-    Unlike ``_detect_mcp_entry`` (which prefers ``uvx`` for install-method
-    robustness), Kiro needs **fast cold-start** because its MCP init timeout
-    is shorter than ``uvx``'s first-time environment build can take. When the
-    ``ouroboros`` binary is already available (i.e. the user has done
-    ``pip install ouroboros-ai``), spawning it directly skips ``uvx``'s
-    dependency resolution and keeps startup under Kiro's init deadline.
-
-    Priority: ouroboros binary > uvx > python3 -m ouroboros.
-    """
-    if shutil.which("uvx"):
-        return {
-            "command": "uvx",
-            "args": _build_uvx_mcp_args("ouroboros-ai[mcp]"),
-        }
-    if (ouroboros_bin := shutil.which("ouroboros")) is not None:
-        return {"command": ouroboros_bin, "args": ["mcp", "serve"]}
-    # python3 -m fallback: only valid if ouroboros is importable
-    import subprocess
-
-    try:
-        subprocess.run(
-            ["python3", "-c", "import ouroboros"],
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+    """Build Kiro's package-isolated MCP 2 launcher entry."""
+    return _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
 
 
 def _register_kiro_mcp_server() -> None:
@@ -1462,9 +1426,9 @@ def _register_kiro_mcp_server() -> None:
     Ouroboros MCP server pick Claude as default and fail when Claude is
     not configured.
 
-    Uses :func:`_detect_mcp_entry_for_kiro` which prefers the direct
-    ``ouroboros`` binary over ``uvx`` to stay within Kiro's MCP init
-    timeout.
+    Uses :func:`_detect_mcp_entry_for_kiro`, which only returns a package-
+    isolated MCP 2 launcher. Kiro should increase its first-start timeout
+    rather than silently binding a faster but incompatible global binary.
     """
     mcp_config_path = Path.home() / ".kiro" / "settings" / "mcp.json"
     mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1492,9 +1456,8 @@ def _register_kiro_mcp_server() -> None:
         print_warning("Cannot register Kiro MCP server: no working ouroboros installation found.")
         return
 
-    # _KNOWN_COMMANDS also accepts an absolute-path match so that an entry
-    # previously written with the venv-resident ``ouroboros`` binary (detector
-    # priority 1 output) can still be upgraded on later setup runs.
+    # Known legacy direct commands are accepted only so setup can replace them
+    # with the current isolated launcher on the next run.
     target_env = {
         "OUROBOROS_RUNTIME": "kiro",
         "OUROBOROS_LLM_BACKEND": "kiro",
@@ -2325,13 +2288,17 @@ def _setup_claude(claude_path: str) -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    # Register/fix MCP server in ~/.claude/mcp.json
-    _ensure_claude_mcp_entry()
+    # Do not register the isolated MCP 2 server with this Claude SDK profile.
+    # The persisted runtime and LLM backend below both require
+    # ``claude-agent-sdk`` (and therefore MCP 1.x), while the protocol server
+    # runs in an environment that intentionally excludes that SDK. Registering
+    # it here would create a server that boots but fails lazily on authoring and
+    # execution tools. A future CLI-only Claude LLM adapter can make this path
+    # available without weakening the dependency boundary.
     print_warning(
-        "The MCP 2 server runs in an isolated ouroboros-ai[mcp] process. "
-        "That process cannot load the MCP 1.x-based Claude Agent SDK. "
-        "Claude-backed execution inside MCP requires a supported CLI-backed "
-        "runtime/LLM configuration; the standalone Claude SDK profile remains separate."
+        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
+        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
+        "Use a supported CLI-backed runtime setup to register the MCP server."
     )
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
@@ -2500,23 +2467,18 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     """
     if shutil.which("uvx"):
         return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
-    if shutil.which("ouroboros"):
-        return {"command": ["ouroboros", "mcp", "serve"]}
-    # Check if ouroboros is importable via python
-    import subprocess
-
-    python_path = shutil.which("python3") or shutil.which("python")
-    if python_path:
-        try:
-            subprocess.run(
-                [python_path, "-c", "import ouroboros"],
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-            return {"command": [python_path, "-m", "ouroboros", "mcp", "serve"]}
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+    if shutil.which("pipx"):
+        return {
+            "command": [
+                "pipx",
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ]
+        }
     return None
 
 

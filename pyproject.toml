@@ -133,7 +133,7 @@ litellm-test = [
     "ouroboros-ai[litellm]",
 ]
 mcp-test = [
-    "ouroboros-ai[mcp]",
+    "mcp==2.0.0",
 ]
 claude-test = [
     "ouroboros-ai[claude]",
@@ -149,6 +149,8 @@ litellm-test = { requires-python = ">=3.12,<3.14" }
 conflicts = [
     [{ extra = "claude" }, { extra = "mcp" }],
     [{ extra = "all" }, { extra = "mcp" }],
+    [{ extra = "claude" }, { group = "mcp-test" }],
+    [{ extra = "all" }, { group = "mcp-test" }],
 ]
 
 [tool.mypy]

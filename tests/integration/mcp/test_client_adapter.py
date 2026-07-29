@@ -437,3 +437,46 @@ class TestMCPClientAdapterCapabilities:
             assert info.capabilities.tools is False
             assert info.capabilities.resources is False
             assert info.capabilities.prompts is False
+
+    @pytest.mark.asyncio
+    async def test_capability_snapshot_is_complete_and_deeply_immutable(
+        self,
+        mock_server_state: MockMCPServerState,
+        stdio_server_config: MCPServerConfig,
+    ) -> None:
+        """Negotiated v2 capability metadata survives beyond convenience flags."""
+        from mcp import types as sdk_types
+
+        from ouroboros.mcp.client.sdk_factory import SDKClientResources
+
+        client = MockMCPClient(mock_server_state)
+        client.server_capabilities = sdk_types.ServerCapabilities(
+            tools=sdk_types.ToolsCapability(list_changed=True),
+            completions=sdk_types.CompletionsCapability(),
+            tasks=sdk_types.ServerTasksCapability(cancel=sdk_types.TasksCancelCapability()),
+            experimental={"com.example/jobs": {"version": 2, "modes": ["shared"]}},
+        )
+
+        with patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            return_value=SDKClientResources(client=client),
+        ):
+            adapter = MCPClientAdapter()
+            async with adapter:
+                result = await adapter.connect(stdio_server_config)
+                assert result.is_ok
+                snapshot = adapter.server_snapshot
+
+        assert snapshot is not None
+        capabilities = snapshot.capabilities
+        assert capabilities.tools is True
+        assert capabilities.completions is True
+        assert capabilities.tasks is True
+        assert capabilities.experimental is True
+        assert capabilities.details["tools"]["listChanged"] is True
+        assert capabilities.details["experimental"]["com.example/jobs"]["version"] == 2
+        assert capabilities.details["experimental"]["com.example/jobs"]["modes"] == (
+            "shared",
+        )
+        with pytest.raises(TypeError):
+            capabilities.details["tools"]["listChanged"] = False

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import re
@@ -171,21 +170,8 @@ def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
     _assert_calls_include_pyproject_pins(calls, "claude")
     assert "--with mcp==" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
-    mcp_config = json.loads(
-        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
-    )
-    assert mcp_config["mcpServers"]["ouroboros"] == {
-        "command": "uvx",
-        "args": [
-            "--python",
-            ">=3.12",
-            "--from",
-            "ouroboros-ai[mcp]",
-            "ouroboros",
-            "mcp",
-            "serve",
-        ],
-    }
+    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
+    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
 
 
 def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
@@ -325,13 +311,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    mcp_config = json.loads(
-        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
-    )
-    assert mcp_config["mcpServers"]["ouroboros"]["args"][:2] == [
-        "--python",
-        ">=3.12,<3.14",
-    ]
+    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
+    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:

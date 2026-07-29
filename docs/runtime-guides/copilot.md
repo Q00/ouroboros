@@ -171,9 +171,10 @@ install method the wizard detected:
 }
 ```
 
-Pipx and direct binary installs are written as `command: ouroboros` with
-matching args. The wizard is idempotent and will rewrite the entry on
-re-runs to match your current install method.
+When `uvx` is unavailable, setup uses `pipx run --spec ouroboros-ai[mcp]`.
+It never registers a direct global binary or `python -m` fallback because
+those environments cannot guarantee MCP 2. The wizard is idempotent and
+updates setup-managed entries to the current isolated launcher.
 
 > **Restart required**: Copilot CLI binds MCP children at session start.
 > After the first registration (or any change to the entry), close and

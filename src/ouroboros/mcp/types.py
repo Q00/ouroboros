@@ -555,12 +555,20 @@ class MCPCapabilities:
         resources: Whether the server supports resources.
         prompts: Whether the server supports prompts.
         logging: Whether the server supports logging.
+        completions: Whether the server supports argument completion.
+        tasks: Whether the server supports protocol-level tasks.
+        experimental: Whether the server declared experimental capabilities.
+        details: Complete deeply immutable SDK capability model.
     """
 
     tools: bool = False
     resources: bool = False
     prompts: bool = False
     logging: bool = False
+    completions: bool = False
+    tasks: bool = False
+    experimental: bool = False
+    details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)

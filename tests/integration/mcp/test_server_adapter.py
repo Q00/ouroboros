@@ -26,6 +26,8 @@ from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfi
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
+    MCPPromptArgument,
+    MCPPromptDefinition,
     MCPResourceContent,
     MCPResourceDefinition,
     MCPToolDefinition,
@@ -390,6 +392,40 @@ class TestMCPServerAdapterPromptGeneration:
 
         assert len(prompts) == 1
         assert prompts[0].name == "greeting"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_preserves_wire_argument_names(self) -> None:
+        """Prompt arguments are MCP wire names, not Python identifiers."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class FilePromptHandler:
+            @property
+            def definition(self) -> MCPPromptDefinition:
+                return MCPPromptDefinition(
+                    name="review-file",
+                    arguments=(MCPPromptArgument(name="file-path", required=True),),
+                )
+
+            async def handle(self, arguments: dict[str, str]):
+                return Result.ok(f"Review {arguments['file-path']}")
+
+        adapter = MCPServerAdapter()
+        adapter.register_prompt(FilePromptHandler())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            listed = (await client.list_prompts()).prompts[0]
+            rendered = await client.get_prompt(
+                "review-file",
+                {"file-path": "docs/seed.yaml"},
+            )
+
+        assert listed.arguments is not None
+        assert listed.arguments[0].name == "file-path"
+        assert rendered.messages[0].content.text == "Review docs/seed.yaml"
 
 
 class TestMCPServerAdapterIntegration:

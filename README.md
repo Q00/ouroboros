@@ -170,7 +170,7 @@ ouroboros setup                         # configure runtime
 
 Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--all-extras`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
-`[mcp]` and `[claude]` are intentionally separate profiles: MCP 2 and the current Claude Agent SDK require incompatible major versions of the `mcp` package. MCP host registrations launch `uvx --from 'ouroboros-ai[mcp]' ...` in a separate process. The standalone Claude SDK profile is not available inside that server; configure a supported CLI-backed runtime and LLM backend for MCP execution.
+`[mcp]` and `[claude]` are intentionally separate profiles: MCP 2 and the current Claude Agent SDK require incompatible major versions of the `mcp` package. Supported MCP host setups launch `uvx --from 'ouroboros-ai[mcp]' ...` in a separate process. Standalone Claude SDK setup does not register that server because its configured Claude backend is unavailable inside the isolated process; use a supported CLI-backed runtime and LLM backend for MCP execution.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 

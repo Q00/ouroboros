@@ -58,11 +58,10 @@ This will:
    ```
 
 Setup is idempotent — re-running preserves any peer MCP entries and
-custom `env` keys. The `ouroboros` binary is resolved to an absolute
-path on purpose: Kiro's MCP initialisation has a short timeout, and
-spawning the installed binary directly keeps cold start well below
-`uvx --from ouroboros-ai[...]` which can exceed that timeout on the
-first invocation.
+custom `env` keys. The entry always uses `uvx` or `pipx run` so the
+server receives the MCP 2 dependency profile in an isolated package
+environment. Kiro may need a longer timeout on the first `uvx` launch;
+setup never substitutes a faster global binary with an unknown MCP major.
 
 ## Usage
 

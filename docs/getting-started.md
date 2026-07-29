@@ -119,7 +119,7 @@ pip install 'ouroboros-ai[all]'         # Claude + LiteLLM + TUI; excludes MCP 2
 ouroboros --version                   # verify CLI
 ```
 
-> **Which extra do I need?** Use `ouroboros-ai[claude]` for standalone Claude SDK workflows and `ouroboros-ai[mcp]` for the modern protocol server. Do not combine them: the current Claude Agent SDK embeds MCP 1.x, while the server uses MCP 2. Host registration launches the `[mcp]` profile in a separate `uvx` process.
+> **Which extra do I need?** Use `ouroboros-ai[claude]` for standalone Claude SDK workflows and `ouroboros-ai[mcp]` for the modern protocol server. Do not combine them: the current Claude Agent SDK embeds MCP 1.x, while the server uses MCP 2. Supported host setups launch the `[mcp]` profile in a separate `uvx` process; standalone Claude SDK setup deliberately skips MCP registration.
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.

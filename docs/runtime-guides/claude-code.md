@@ -21,7 +21,7 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
-> Install `ouroboros-ai[claude]` for standalone Claude SDK workflows. The modern protocol server is a separate `uvx --from 'ouroboros-ai[mcp]' ...` process because the current Claude Agent SDK embeds MCP 1.x while Ouroboros MCP uses MCP 2. Do not install both extras into one environment. Claude-backed execution is not available inside the isolated MCP process until a supported CLI-backed Claude runtime and LLM adapter are configured.
+> Install `ouroboros-ai[claude]` for standalone Claude SDK workflows. The current Claude Agent SDK embeds MCP 1.x while Ouroboros MCP uses MCP 2, so do not install both extras into one environment. Claude setup deliberately skips MCP registration: an isolated `[mcp]` process cannot load the configured standalone Claude backend. Use a supported CLI-backed runtime and LLM adapter before registering the modern protocol server with a host.
 
 ## Configuration
 

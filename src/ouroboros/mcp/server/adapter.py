@@ -123,6 +123,31 @@ if _SDKMCPServer is not None:
                 for definition in await self._ouroboros_adapter.list_resources()
             ]
 
+        async def read_resource(self, uri: Any, context: Any = None) -> list[Any]:
+            """Read through the typed adapter without losing content metadata."""
+            del context
+            from mcp.server.lowlevel.helper_types import ReadResourceContents
+
+            result = await self._ouroboros_adapter.read_resource(str(uri))
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            content = result.value
+            if content.text is not None and content.blob is not None:
+                raise ValueError("Resource content cannot contain both text and blob")
+            if content.blob is not None:
+                payload: str | bytes = base64.b64decode(content.blob, validate=True)
+            elif content.text is not None:
+                payload = content.text
+            else:
+                raise ValueError("Resource content requires text or blob")
+            return [
+                ReadResourceContents(
+                    content=payload,
+                    mime_type=content.mime_type,
+                    meta=content.meta or None,
+                )
+            ]
+
         async def list_prompts(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import prompt_to_sdk
 
@@ -130,6 +155,48 @@ if _SDKMCPServer is not None:
                 prompt_to_sdk(definition)
                 for definition in await self._ouroboros_adapter.list_prompts()
             ]
+
+        async def get_prompt(
+            self,
+            name: str,
+            arguments: dict[str, Any] | None = None,
+            context: Any = None,
+        ) -> Any:
+            """Render original wire argument names without Python identifier aliases."""
+            del context
+            from mcp.types import GetPromptResult, PromptMessage, TextContent
+
+            definitions = await self._ouroboros_adapter.list_prompts()
+            definition = next((item for item in definitions if item.name == name), None)
+            if definition is None:
+                raise RuntimeError(f"Prompt not found: {name}")
+            wire_arguments = arguments or {}
+            declared_names = {argument.name for argument in definition.arguments}
+            unknown_names = set(wire_arguments) - declared_names
+            if unknown_names:
+                raise ValueError(
+                    f"Unknown prompt arguments for {name}: {', '.join(sorted(unknown_names))}"
+                )
+            missing_names = {
+                argument.name
+                for argument in definition.arguments
+                if argument.required and argument.name not in wire_arguments
+            }
+            if missing_names:
+                raise ValueError(
+                    f"Missing required prompt arguments for {name}: "
+                    f"{', '.join(sorted(missing_names))}"
+                )
+            result = await self._ouroboros_adapter.get_prompt(
+                name,
+                {key: str(value) for key, value in wire_arguments.items()},
+            )
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            return GetPromptResult(
+                description=definition.description or None,
+                messages=[PromptMessage(role="user", content=TextContent(text=result.value))],
+            )
 
 else:  # pragma: no cover - construction is rejected before this sentinel is used.
     _OuroborosSDKServer = None  # type: ignore[assignment,misc]

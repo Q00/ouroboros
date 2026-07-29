@@ -47,6 +47,28 @@ def _freeze_json(value: Any) -> Any:
     return value
 
 
+def _capabilities_from_sdk(capabilities: Any) -> MCPCapabilities:
+    """Build convenience flags plus the complete immutable capability model."""
+    if capabilities is None:
+        return MCPCapabilities()
+    model_dump = getattr(capabilities, "model_dump", None)
+    details = (
+        _freeze_json(model_dump(by_alias=True, mode="json", exclude_none=True))
+        if callable(model_dump)
+        else MappingProxyType({})
+    )
+    return MCPCapabilities(
+        tools=getattr(capabilities, "tools", None) is not None,
+        resources=getattr(capabilities, "resources", None) is not None,
+        prompts=getattr(capabilities, "prompts", None) is not None,
+        logging=getattr(capabilities, "logging", None) is not None,
+        completions=getattr(capabilities, "completions", None) is not None,
+        tasks=getattr(capabilities, "tasks", None) is not None,
+        experimental=getattr(capabilities, "experimental", None) is not None,
+        details=details,
+    )
+
+
 class MCPClientAdapter:
     """Connect to an MCP server through the official auto-negotiating client."""
 
@@ -191,12 +213,7 @@ class MCPClientAdapter:
             name=identity.name if identity is not None else configured_name,
             version=identity.version if identity is not None else "unknown",
             protocol_version=client.protocol_version,
-            capabilities=MCPCapabilities(
-                tools=getattr(capabilities, "tools", None) is not None,
-                resources=getattr(capabilities, "resources", None) is not None,
-                prompts=getattr(capabilities, "prompts", None) is not None,
-                logging=getattr(capabilities, "logging", None) is not None,
-            ),
+            capabilities=_capabilities_from_sdk(capabilities),
         )
 
     @staticmethod
@@ -219,12 +236,7 @@ class MCPClientAdapter:
             identity=app_identity,
             protocol_version=protocol_version,
             supported_protocol_versions=supported_versions,
-            capabilities=MCPCapabilities(
-                tools=getattr(capabilities, "tools", None) is not None,
-                resources=getattr(capabilities, "resources", None) is not None,
-                prompts=getattr(capabilities, "prompts", None) is not None,
-                logging=getattr(capabilities, "logging", None) is not None,
-            ),
+            capabilities=_capabilities_from_sdk(capabilities),
             extensions=_freeze_json(getattr(capabilities, "extensions", None) or {}),
             instructions=client.instructions,
         )

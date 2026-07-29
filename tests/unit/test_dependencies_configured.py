@@ -152,13 +152,15 @@ def test_mcp_and_claude_profiles_are_isolated():
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     assert "mcp" not in optional_deps["all"][0]
-    assert groups["mcp-test"] == ["ouroboros-ai[mcp]"]
+    assert groups["mcp-test"] == ["mcp==2.0.0"]
     assert groups["claude-test"] == ["ouroboros-ai[claude]"]
     assert not any("mcp" in dep or "claude" in dep for dep in groups["dev"])
     assert [
         {"extra": "claude"},
         {"extra": "mcp"},
     ] in conflicts
+    assert [{"extra": "claude"}, {"group": "mcp-test"}] in conflicts
+    assert [{"extra": "all"}, {"group": "mcp-test"}] in conflicts
 
 
 def test_python_version_constraint():

@@ -2,26 +2,32 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform != 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.14' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
-    "python_full_version < '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp'",
+    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform != 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform == 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.14' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra == 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version >= '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
+    "python_full_version < '3.15' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp' and extra != 'group-12-ouroboros-ai-mcp-test'",
 ]
 conflicts = [[
     { package = "ouroboros-ai", extra = "claude" },
@@ -29,6 +35,12 @@ conflicts = [[
 ], [
     { package = "ouroboros-ai", extra = "all" },
     { package = "ouroboros-ai", extra = "mcp" },
+], [
+    { package = "ouroboros-ai", extra = "claude" },
+    { package = "ouroboros-ai", group = "mcp-test" },
+], [
+    { package = "ouroboros-ai", extra = "all" },
+    { package = "ouroboros-ai", group = "mcp-test" },
 ]]
 
 [[package]]
@@ -144,7 +156,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -203,7 +215,7 @@ version = "4.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
@@ -431,7 +443,7 @@ name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/d4/81420972a676e8ffea40450d8c8c92943e7218a78fe9b64359836cc9876b/click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6", size = 338000, upload-time = "2026-06-24T17:45:15.148Z" }
 wheels = [
@@ -857,8 +869,8 @@ name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
-    { name = "h11", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
+    { name = "certifi" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/06/94/82699a10bca87a5556c9c59b5963f2d039dbd239f25bc2a63907a05a14cb/httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8", size = 85484, upload-time = "2025-04-24T22:06:22.219Z" }
 wheels = [
@@ -883,10 +895,10 @@ name = "httpx"
 version = "0.28.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
-    { name = "certifi", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
-    { name = "httpcore", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
-    { name = "idna", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude')" },
+    { name = "anyio" },
+    { name = "certifi" },
+    { name = "httpcore" },
+    { name = "idna" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
@@ -923,15 +935,15 @@ name = "huggingface-hub"
 version = "1.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "fsspec", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "hf-xet", marker = "(python_full_version < '3.14' and platform_machine == 'AMD64') or (python_full_version < '3.14' and platform_machine == 'aarch64') or (python_full_version < '3.14' and platform_machine == 'amd64') or (python_full_version < '3.14' and platform_machine == 'arm64') or (python_full_version < '3.14' and platform_machine == 'x86_64') or (python_full_version == '3.14.*' and platform_machine == 'AMD64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'AMD64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'AMD64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'AMD64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'aarch64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'aarch64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'aarch64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'aarch64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'amd64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'amd64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'amd64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'amd64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'arm64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'arm64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'arm64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'arm64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'x86_64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'x86_64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'x86_64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and platform_machine == 'x86_64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'AMD64' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'aarch64' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'amd64' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'arm64' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and platform_machine == 'x86_64' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (platform_machine != 'AMD64' and platform_machine != 'aarch64' and platform_machine != 'amd64' and platform_machine != 'arm64' and platform_machine != 'x86_64' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (platform_machine != 'AMD64' and platform_machine != 'aarch64' and platform_machine != 'amd64' and platform_machine != 'arm64' and platform_machine != 'x86_64' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
-    { name = "httpx", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "packaging", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "pyyaml", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "tqdm", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "typer", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "typing-extensions", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "tqdm" },
+    { name = "typer" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/15/eafc1c57bf0f8afffb243dcd4c0cceb785e956acc17bba4d9bf2ae21fc9c/huggingface_hub-1.7.2.tar.gz", hash = "sha256:7f7e294e9bbb822e025bdb2ada025fa4344d978175a7f78e824d86e35f7ab43b", size = 724684, upload-time = "2026-03-20T10:36:08.767Z" }
 wheels = [
@@ -961,7 +973,7 @@ name = "importlib-metadata"
 version = "8.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/72/c600ae4f68c28fc19f9c31b9403053e5dbb8cace2e6842c7b7c3e4d42fe9/importlib_metadata-8.9.0.tar.gz", hash = "sha256:58850626cef4bd2df100378b0f2aea9724a7b92f10770d547725b047078f99ee", size = 56140, upload-time = "2026-03-20T16:56:26.362Z" }
 wheels = [
@@ -1163,18 +1175,18 @@ name = "litellm"
 version = "1.91.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "click", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "fastuuid", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "httpx", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "importlib-metadata", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "jinja2", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "jsonschema", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "openai", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "pydantic", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "python-dotenv", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "tiktoken", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "tokenizers", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "aiohttp" },
+    { name = "click" },
+    { name = "fastuuid" },
+    { name = "httpx" },
+    { name = "importlib-metadata" },
+    { name = "jinja2" },
+    { name = "jsonschema" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "tiktoken" },
+    { name = "tokenizers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/86/1e/90cfeada42170986a290feebaca0a90923b3c310cddeb0f8690abd239ad4/litellm-1.91.0.tar.gz", hash = "sha256:4fd469fe7356ba8fcc86f4efdf332e3426b760962ab12331fdaf1a01aeec065f", size = 14872290, upload-time = "2026-07-04T19:18:28.466Z" }
 wheels = [
@@ -1309,7 +1321,7 @@ dependencies = [
     { name = "mcp-types" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
-    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-12-ouroboros-ai-mcp'" },
+    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-12-ouroboros-ai-mcp' or extra == 'group-12-ouroboros-ai-mcp-test'" },
     { name = "python-multipart" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "sse-starlette" },
@@ -1462,7 +1474,7 @@ version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ast-serialize" },
-    { name = "librt", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
     { name = "mypy-extensions" },
     { name = "pathspec" },
     { name = "typing-extensions" },
@@ -1524,14 +1536,14 @@ name = "openai"
 version = "2.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "distro", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "httpx", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "jiter", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "pydantic", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "sniffio", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "tqdm", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "typing-extensions", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b4/15/203d537e58986b5673e7f232453a2a2f110f22757b15921cbdeea392e520/openai-2.29.0.tar.gz", hash = "sha256:32d09eb2f661b38d3edd7d7e1a2943d1633f572596febe64c0cd370c86d52bec", size = 671128, upload-time = "2026-03-17T17:53:49.599Z" }
 wheels = [
@@ -1581,7 +1593,7 @@ claude = [
     { name = "claude-agent-sdk" },
 ]
 litellm = [
-    { name = "litellm", marker = "python_full_version < '3.14' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "litellm", marker = "python_full_version < '3.14' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 mcp = [
     { name = "mcp", version = "2.0.0", source = { registry = "https://pypi.org/simple" } },
@@ -1594,7 +1606,7 @@ tui = [
 [package.dev-dependencies]
 claude-test = [
     { name = "ouroboros-ai" },
-    { name = "ouroboros-ai", extra = ["claude"], marker = "extra == 'extra-12-ouroboros-ai-claude' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "ouroboros-ai", extra = ["claude"], marker = "extra == 'extra-12-ouroboros-ai-claude' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 dev = [
     { name = "mypy" },
@@ -1608,11 +1620,10 @@ dev = [
     { name = "types-pyyaml" },
 ]
 litellm-test = [
-    { name = "ouroboros-ai", extra = ["litellm"], marker = "python_full_version < '3.14' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "ouroboros-ai", extra = ["litellm"], marker = "python_full_version < '3.14' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 mcp-test = [
-    { name = "ouroboros-ai" },
-    { name = "ouroboros-ai", extra = ["mcp"], marker = "extra == 'extra-12-ouroboros-ai-mcp'" },
+    { name = "mcp", version = "2.0.0", source = { registry = "https://pypi.org/simple" } },
 ]
 
 [package.metadata]
@@ -1657,7 +1668,7 @@ dev = [
     { name = "types-pyyaml", specifier = ">=6.0.12.20250915" },
 ]
 litellm-test = [{ name = "ouroboros-ai", extras = ["litellm"], marker = "python_full_version >= '3.12' and python_full_version < '3.14'" }]
-mcp-test = [{ name = "ouroboros-ai", extras = ["mcp"] }]
+mcp-test = [{ name = "mcp", specifier = "==2.0.0" }]
 
 [[package]]
 name = "packaging"
@@ -1948,7 +1959,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -1965,7 +1976,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pytest" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42", size = 58514, upload-time = "2026-05-26T09:56:04.083Z" }
 wheels = [
@@ -2099,7 +2110,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -2199,10 +2210,10 @@ name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "charset-normalizer", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "idna", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "urllib3", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "certifi" },
+    { name = "charset-normalizer" },
+    { name = "idna" },
+    { name = "urllib3" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
@@ -2351,7 +2362,7 @@ name = "sqlalchemy"
 version = "2.0.48"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "greenlet", marker = "platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1f/73/b4a9737255583b5fa858e0bb8e116eb94b88c910164ed2ed719147bde3de/sqlalchemy-2.0.48.tar.gz", hash = "sha256:5ca74f37f3369b45e1f6b7b06afb182af1fd5dde009e4ffd831830d98cbe5fe7", size = 9886075, upload-time = "2026-03-02T15:28:51.474Z" }
@@ -2470,8 +2481,8 @@ name = "tiktoken"
 version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "regex", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
-    { name = "requests", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "regex" },
+    { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/ab/4d017d0f76ec3171d469d80fc03dfbb4e48a4bcaddaa831b31d526f05edc/tiktoken-0.12.0.tar.gz", hash = "sha256:b18ba7ee2b093863978fcb14f74b3707cdc8d4d4d3836853ce7ec60772139931", size = 37806, upload-time = "2025-10-06T20:22:45.419Z" }
 wheels = [
@@ -2517,7 +2528,7 @@ name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp')" },
+    { name = "huggingface-hub" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/73/6f/f80cfef4a312e1fb34baf7d85c72d4411afde10978d4657f8cdd811d3ccc/tokenizers-0.22.2.tar.gz", hash = "sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917", size = 372115, upload-time = "2026-01-05T10:45:15.988Z" }
 wheels = [
@@ -2543,7 +2554,7 @@ name = "tqdm"
 version = "4.67.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "(python_full_version < '3.14' and sys_platform == 'win32') or (python_full_version == '3.14.*' and sys_platform == 'win32' and extra != 'extra-12-ouroboros-ai-all' and extra != 'extra-12-ouroboros-ai-claude' and extra != 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version == '3.14.*' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (python_full_version >= '3.15' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (sys_platform != 'win32' and extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
 wheels = [
@@ -2565,7 +2576,7 @@ version = "0.27.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
     { name = "rich" },
     { name = "shellingham" },
 ]

@@ -1154,8 +1154,8 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
-    def test_setup_claude_removes_legacy_timeout_override(self, tmp_path: Path) -> None:
-        """Claude setup should no longer persist the legacy 600s MCP timeout."""
+    def test_setup_claude_leaves_existing_mcp_entry_untouched(self, tmp_path: Path) -> None:
+        """The standalone Claude SDK profile must not mutate MCP wiring."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -1188,51 +1188,31 @@ class TestClaudeSetup:
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        assert "timeout" not in claude_mcp["mcpServers"]["ouroboros"]
-        # The MCP subprocess stays isolated from the Claude SDK profile.
-        assert claude_mcp["mcpServers"]["ouroboros"]["args"] == [
-            "--from",
-            "ouroboros-ai[mcp]",
-            "ouroboros",
-            "mcp",
-            "serve",
-        ]
+        assert claude_mcp["mcpServers"]["ouroboros"]["timeout"] == 600
+        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
         assert config_dict["orchestrator"]["runtime_backend"] == "claude"
         assert config_dict["llm"]["backend"] == "claude"
 
     @pytest.mark.parametrize(
-        "which_side_effect, expected_cmd, expected_args",
+        "which_side_effect",
         [
             # uvx available → isolated MCP 2 entry
             (
                 lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
-                "uvx",
-                ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
             ),
             # no uvx → pipx provides another isolated package environment
             (
                 lambda cmd: "/usr/local/bin/pipx" if cmd == "pipx" else None,
-                "pipx",
-                [
-                    "run",
-                    "--spec",
-                    "ouroboros-ai[mcp]",
-                    "ouroboros",
-                    "mcp",
-                    "serve",
-                ],
             ),
         ],
         ids=["uvx", "pipx-isolated"],
     )
-    def test_setup_claude_creates_new_entry_per_install_method(
+    def test_setup_claude_does_not_create_mcp_entry(
         self,
         tmp_path: Path,
         which_side_effect,
-        expected_cmd: str,
-        expected_args: list[str],
     ) -> None:
-        """New MCP entry command/args should match the detected install method."""
+        """Even isolated launchers cannot satisfy the Claude SDK backend lazily."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -1251,9 +1231,7 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
-        entry = claude_mcp["mcpServers"]["ouroboros"]
-        assert entry["command"] == expected_cmd
-        assert entry["args"] == expected_args
+        assert "ouroboros" not in claude_mcp["mcpServers"]
 
     def test_setup_claude_does_not_register_unisolated_binary(self, tmp_path: Path) -> None:
         """Without uvx/pipx, setup must not reuse the Claude SDK environment."""
@@ -1310,8 +1288,8 @@ class TestClaudeSetup:
         assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "docker"
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == custom_args
 
-    def test_setup_claude_updates_stale_standard_entry(self, tmp_path: Path) -> None:
-        """Stale standard entry (e.g. python3) should be updated to detected method."""
+    def test_setup_claude_preserves_stale_standard_entry(self, tmp_path: Path) -> None:
+        """Claude setup owns runtime config, not pre-existing MCP registration."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -1346,9 +1324,10 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
-        # Should be updated from python3 to uvx
-        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
-        assert "ouroboros-ai[mcp]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
+        assert claude_mcp["mcpServers"]["ouroboros"] == {
+            "command": "python3",
+            "args": ["-m", "ouroboros", "mcp", "serve"],
+        }
 
     def test_setup_claude_skips_write_when_args_already_current(self, tmp_path: Path) -> None:
         """No file write when args are already up to date."""
@@ -1375,6 +1354,45 @@ class TestClaudeSetup:
 
         # File should not be rewritten when nothing changed
         assert claude_config.stat().st_mtime == mtime_before
+
+
+class TestIsolatedMCPLaunchers:
+    """MCP 2 registrations must never inherit an arbitrary host environment."""
+
+    def test_direct_binary_and_python_fallbacks_are_rejected(self) -> None:
+        def direct_only(command: str) -> str | None:
+            if command in {"ouroboros", "python", "python3"}:
+                return f"/usr/local/bin/{command}"
+            return None
+
+        with patch("ouroboros.cli.commands.setup.shutil.which", side_effect=direct_only):
+            assert setup_cmd._detect_mcp_entry() is None
+            assert setup_cmd._detect_mcp_entry_for_kiro() is None
+            assert setup_cmd._detect_opencode_mcp_command() is None
+
+    def test_pipx_is_the_isolated_fallback_for_all_host_configs(self) -> None:
+        with patch(
+            "ouroboros.cli.commands.setup.shutil.which",
+            side_effect=lambda command: "/usr/local/bin/pipx" if command == "pipx" else None,
+        ):
+            common = setup_cmd._detect_mcp_entry()
+            kiro = setup_cmd._detect_mcp_entry_for_kiro()
+            opencode = setup_cmd._detect_opencode_mcp_command()
+
+        expected_args = [
+            "run",
+            "--spec",
+            "ouroboros-ai[mcp]",
+            "ouroboros",
+            "mcp",
+            "serve",
+        ]
+        assert common == {
+            "command": "pipx",
+            "args": expected_args,
+        }
+        assert kiro == common
+        assert opencode == {"command": ["pipx", *expected_args]}
 
 
 class TestHermesSetup:
