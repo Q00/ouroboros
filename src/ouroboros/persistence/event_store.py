@@ -1286,23 +1286,36 @@ class EventStore:
                 },
             )
 
+        engine = self._engine
+
+        async def _insert_once() -> int:
+            # Shielded by the caller: a transaction, once begun, must commit or
+            # roll back even when the awaiting task is cancelled mid-append.
+            # An abandoned in-flight transaction poisons the pooled connection
+            # and fails the next writer — e.g. a watchdog cancelling a
+            # generation mid-append could then lose its own decision events,
+            # violating the durable-replay contract (#1794).
+            async with engine.begin() as conn:
+                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                rowid = await conn.scalar(
+                    select(text("rowid"))
+                    .select_from(events_table)
+                    .where(events_table.c.id == event.id)
+                )
+                if not isinstance(rowid, int):
+                    raise PersistenceError(
+                        "Inserted event rowid was not returned.",
+                        operation="append_with_rowid",
+                        table="events",
+                        details={"event_id": event.id, "event_type": event.type},
+                    )
+                return rowid
+
         for attempt in range(3):
             try:
-                async with self._engine.begin() as conn:
-                    await conn.execute(events_table.insert().values(**event.to_db_dict()))
-                    rowid = await conn.scalar(
-                        select(text("rowid"))
-                        .select_from(events_table)
-                        .where(events_table.c.id == event.id)
-                    )
-                    if not isinstance(rowid, int):
-                        raise PersistenceError(
-                            "Inserted event rowid was not returned.",
-                            operation="append_with_rowid",
-                            table="events",
-                            details={"event_id": event.id, "event_type": event.type},
-                        )
-                return rowid
+                # shield: cancellation surfaces to the caller immediately, but
+                # the write itself runs to completion in the background.
+                return await asyncio.shield(_insert_once())
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1410,13 +1423,21 @@ class EventStore:
                 details={"count": len(acceptance_events)},
             )
 
+        engine = self._engine
+
+        async def _insert_batch_once() -> None:
+            # Same cancellation-atomicity contract as append_with_rowid: the
+            # batch transaction must complete or roll back even if the caller
+            # is cancelled mid-append (#1794).
+            async with engine.begin() as conn:
+                await conn.execute(
+                    events_table.insert(),
+                    [event.to_db_dict() for event in events],
+                )
+
         for attempt in range(3):
             try:
-                async with self._engine.begin() as conn:
-                    await conn.execute(
-                        events_table.insert(),
-                        [event.to_db_dict() for event in events],
-                    )
+                await asyncio.shield(_insert_batch_once())
                 return
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:

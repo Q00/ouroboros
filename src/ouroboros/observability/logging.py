@@ -609,8 +609,10 @@ def is_configured() -> bool:
 def reset_logging() -> None:
     """Reset logging configuration state.
 
-    This is primarily for testing purposes. It resets the module state
-    but does not reconfigure the loggers.
+    This is primarily for testing purposes. It resets the module state and
+    leaves structlog on a resource-free baseline (INFO-filtered, stderr) so
+    import-time ``get_logger`` proxies stay quiet on stdout until the next
+    ``configure_logging()``.
     """
     global _configured, _current_config
     _configured = False

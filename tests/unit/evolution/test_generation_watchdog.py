@@ -231,13 +231,11 @@ async def test_busy_run_without_material_progress_times_out(
             while True:
                 await asyncio.sleep(0.01)
                 clock.advance(0.02)
-                # Shield the append: watchdog cancellation must not abandon a
-                # store transaction mid-flight, or the poisoned connection
-                # makes the watchdog's own decision batch fail its documented
-                # fail-closed persistence and the decision event never lands.
-                await asyncio.shield(
-                    event_store.append(_workflow_progress(execution_id, completed_count=0))
-                )
+                # Deliberately unshielded: cancellation is allowed to land
+                # mid-append, pinning the store's cancellation-atomicity
+                # contract — the watchdog's decision events must still land
+                # even when the cancelled work was inside a write (#1794).
+                await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             try:
                 await event_store.append(
@@ -325,13 +323,11 @@ async def test_no_progress_timeout_emits_retry_directive(
             while True:
                 await asyncio.sleep(0.01)
                 clock.advance(0.02)
-                # Shield the append: watchdog cancellation must not abandon a
-                # store transaction mid-flight, or the poisoned connection
-                # makes the watchdog's own decision batch fail its documented
-                # fail-closed persistence and the decision event never lands.
-                await asyncio.shield(
-                    event_store.append(_workflow_progress(execution_id, completed_count=0))
-                )
+                # Deliberately unshielded: cancellation is allowed to land
+                # mid-append, pinning the store's cancellation-atomicity
+                # contract — the watchdog's decision events must still land
+                # even when the cancelled work was inside a write (#1794).
+                await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             raise
 
