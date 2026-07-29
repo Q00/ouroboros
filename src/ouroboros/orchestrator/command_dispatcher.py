@@ -69,6 +69,9 @@ class CodexCommandDispatcher:
                 "dispatch",
             )
         }
+        payload["globals"] = {
+            "_INTERVIEW_SESSION_METADATA_KEY": _INTERVIEW_SESSION_METADATA_KEY,
+        }
         from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 
         payload.update(

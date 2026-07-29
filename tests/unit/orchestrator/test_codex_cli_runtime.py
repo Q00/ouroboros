@@ -226,6 +226,39 @@ def test_build_command_rejects_cli_content_drift_before_version_probe(
     assert not side_effect.exists()
 
 
+def test_execution_identity_tracks_launch_symlink_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retargeting an identical CLI symlink must change execution identity."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    target_a = tmp_path / "codex-a"
+    target_b = tmp_path / "codex-b"
+    script = "#!/bin/sh\necho codex 1.0\n"
+    target_a.write_text(script, encoding="utf-8")
+    target_b.write_text(script, encoding="utf-8")
+    target_a.chmod(0o755)
+    target_b.chmod(0o755)
+    link = tmp_path / "codex"
+    link.symlink_to(target_a)
+
+    first = CodexCliRuntime(cli_path=link, cwd="/tmp/project", model="gpt-5")
+    first_identity = first.execution_identity_contract()
+
+    link.unlink()
+    link.symlink_to(target_b)
+    second = CodexCliRuntime(cli_path=link, cwd="/tmp/project", model="gpt-5")
+    second_identity = second.execution_identity_contract()
+
+    assert (
+        first_identity["cli_executable_content_sha256"]
+        == second_identity["cli_executable_content_sha256"]
+    )
+    assert first_identity["cli_executable_version"] != second_identity["cli_executable_version"]
+
+
 def test_build_command_rejects_bare_cli_that_appears_after_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

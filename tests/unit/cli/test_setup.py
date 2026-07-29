@@ -688,6 +688,30 @@ class TestCodexSetup:
         assert "--from" not in contents
         assert contents.count("[mcp_servers.ouroboros]") == 1
 
+    def test_register_codex_mcp_server_rewrites_root_inline_table_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Root inline MCP mappings must be refreshable without losing siblings."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            'mcp_servers = { other = { command = "other" }, ouroboros = { command = "uvx", '
+            'args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"] } }\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+
+        assert parsed["mcp_servers"]["other"]["command"] == "other"
+        assert parsed["mcp_servers"]["ouroboros"]["command"]
+        assert "mcp_servers = {" not in contents
+        assert contents.count("[mcp_servers.ouroboros]") == 1
+
     def test_register_codex_mcp_server_stdio_repairs_endpointless_entry(
         self,
         tmp_path: Path,
@@ -1433,6 +1457,74 @@ class TestCodexSetup:
         assert "gpt-5" in worker_profile
         assert '"""' not in contents
 
+    def test_register_codex_worker_profile_rewrites_root_inline_profiles_table(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Root inline profile mappings must remove only the migrated worker profile."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            'profiles = { other = { model = "keep-me" }, "ouroboros-worker" = { '
+            'model = "o3-mini", sandbox = "workspace-write" } }\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            assert setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+        worker_profile = (codex_dir / "ouroboros-worker.config.toml").read_text(encoding="utf-8")
+
+        assert parsed["profiles"]["other"]["model"] == "keep-me"
+        assert "ouroboros-worker" not in parsed["profiles"]
+        assert 'model = "o3-mini"' in worker_profile
+        assert "profiles = {" not in contents
+
+    def test_register_codex_worker_profile_keeps_header_inside_multiline_string(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Header-looking text inside multiline strings is not a table boundary."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    'instructions = """',
+                    "[launcher]",
+                    '"""',
+                    "",
+                    "[operator]",
+                    'value = "preserved"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            assert setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+        worker_profile = (codex_dir / "ouroboros-worker.config.toml").read_text(encoding="utf-8")
+
+        assert "ouroboros-worker" not in parsed.get("profiles", {})
+        assert parsed["operator"]["value"] == "preserved"
+        assert "[launcher]" in worker_profile
+
     def test_register_codex_worker_profile_migrates_trailing_comment_header_to_profile_v2(
         self,
         tmp_path: Path,
@@ -1872,7 +1964,9 @@ class TestCodexSetup:
         assert config_dict["llm_role_profiles"]["agent_runtime_coordinator"] == "standard"
         assert config_dict["llm_role_profiles"]["agent_runtime_evaluation"] == "deep"
         mock_install.assert_called_once_with()
-        mock_register.assert_called_once_with(mode="auto")
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["mode"] == "auto"
+        assert isinstance(mock_register.call_args.kwargs["expected_snapshots"], dict)
         mock_retire.assert_called_once_with(protected_profile_names=set())
         mock_worker_profile.assert_called_once_with(codex_path="/usr/local/bin/codex")
 
@@ -1976,6 +2070,9 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         with (
@@ -2213,6 +2310,9 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         with (
@@ -2249,6 +2349,9 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         def _install_artifacts() -> bool:
@@ -2295,6 +2398,9 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         with (
@@ -2330,6 +2436,9 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_config.write_text('[mcp_servers.ouroboros]\ncommand = "new"\n', encoding="utf-8")
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         def _retire(**_kwargs: object) -> None:
@@ -2355,6 +2464,103 @@ class TestCodexSetup:
         assert config_path.read_text(encoding="utf-8") == original_config
         assert codex_config.read_text(encoding="utf-8") == original_toml
 
+    def test_setup_codex_preserves_post_mcp_operator_edit_on_late_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Rollback must not treat post-write operator edits as setup-authored generation."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        codex_config = codex_home / "config.toml"
+        original_toml = 'model = "before"\n'
+        operator_toml = 'model = "operator-edit"\n'
+        codex_config.write_text(original_toml, encoding="utf-8")
+        original_write = setup_cmd._atomic_write_text
+
+        def _write(path: Path, text: str, *, mode: int | None = None) -> object:
+            snapshot = original_write(path, text, mode=mode)
+            if path == codex_config and "[mcp_servers.ouroboros]" in text:
+                codex_config.write_text(operator_toml, encoding="utf-8")
+            return snapshot
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._atomic_write_text", side_effect=_write),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=False),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == operator_toml
+
+    def test_setup_codex_preserves_operator_edit_when_mcp_reports_no_write(
+        self, tmp_path: Path
+    ) -> None:
+        """A no-op registrar must not claim a concurrent edit as setup-authored."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        codex_config = codex_home / "config.toml"
+        original_toml = 'model = "before"\n'
+        operator_toml = 'model = "operator-edit"\n'
+        codex_config.write_text(original_toml, encoding="utf-8")
+
+        def _register_without_write(**_kwargs: object) -> bool:
+            codex_config.write_text(operator_toml, encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_mcp_server",
+                side_effect=_register_without_write,
+            ),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=False),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == original_config
+        assert codex_config.read_text(encoding="utf-8") == operator_toml
+
+    def test_setup_codex_preserves_post_write_ouroboros_config_edits(self, tmp_path: Path) -> None:
+        """Authored generations cover config and credentials without a snapshot race."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        credentials_path = config_dir / "credentials.yaml"
+        operator_config = "operator: config-edit\n"
+        operator_credentials = "operator: credentials-edit\n"
+        original_write = setup_cmd._atomic_write_text
+
+        def _write(path: Path, text: str, *, mode: int | None = None) -> object:
+            snapshot = original_write(path, text, mode=mode)
+            if path == config_path:
+                config_path.write_text(operator_config, encoding="utf-8")
+            elif path == credentials_path:
+                credentials_path.write_text(operator_credentials, encoding="utf-8")
+            return snapshot
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._atomic_write_text", side_effect=_write),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts", return_value=False),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == operator_config
+        assert credentials_path.read_text(encoding="utf-8") == operator_credentials
+
     def test_setup_codex_removes_fresh_parent_topology_on_late_failure(
         self, tmp_path: Path
     ) -> None:
@@ -2364,10 +2570,14 @@ class TestCodexSetup:
 
         def _register(**_kwargs: object) -> bool:
             codex_home.mkdir(parents=True)
-            (codex_home / "config.toml").write_text(
+            codex_config = codex_home / "config.toml"
+            codex_config.write_text(
                 '[mcp_servers.ouroboros]\ncommand = "new"\n',
                 encoding="utf-8",
             )
+            expected = _kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
             return True
 
         with (

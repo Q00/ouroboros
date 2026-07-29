@@ -511,6 +511,7 @@ class CodexCliRuntime:
         content_digest = self._cli_executable_content_identity()
         if content_digest is None:
             return None
+        symlink_identity = self._cli_executable_symlink_identity()
         try:
             result = subprocess.run(
                 [executable_path, "--version"],
@@ -527,9 +528,30 @@ class CodexCliRuntime:
         return self._hash_json_payload(
             {
                 "content_sha256": content_digest,
+                "symlink": symlink_identity,
                 "version_output": version_output,
             }
         )
+
+    def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
+        """Return launch-path symlink target identity without dereferencing it away."""
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        path = Path(executable_path)
+        try:
+            if not path.is_symlink():
+                return None
+            raw_target = os.readlink(path)
+        except OSError:
+            return None
+        target_path = Path(raw_target)
+        if not target_path.is_absolute():
+            target_path = path.parent / target_path
+        return {
+            "raw_target": raw_target,
+            "resolved_target": str(target_path.expanduser().absolute()),
+        }
 
     def _cli_executable_content_identity(self) -> str | None:
         """Return the selected CLI byte digest without executing it."""

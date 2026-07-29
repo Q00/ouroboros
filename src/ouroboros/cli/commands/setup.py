@@ -903,8 +903,6 @@ def _toml_assignment_span_end(
     if parent_path:
         table_header = "[" + ".".join(_render_toml_key(part) for part in parent_path) + "]\n"
     for end_index in range(start_index + 1, len(lines) + 1):
-        if end_index > start_index + 1 and _is_toml_table_header(lines[end_index - 1].strip()):
-            return end_index - 1
         snippet = "\n".join(lines[start_index:end_index]).strip()
         if not snippet:
             continue
@@ -914,6 +912,52 @@ def _toml_assignment_span_end(
             continue
         return end_index
     return start_index + 1
+
+
+def _toml_fragment_is_complete(lines: list[str]) -> bool:
+    """Return whether a TOML fragment is parseable as a complete document."""
+    snippet = "\n".join(lines).strip()
+    if not snippet:
+        return True
+    try:
+        tomllib.loads(f"{snippet}\n")
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
+
+
+def _toml_table_boundary_is_real(lines: list[str], section_start: int, boundary_index: int) -> bool:
+    """Return whether a header-looking line is outside multiline TOML values."""
+    return _toml_fragment_is_complete(lines[section_start:boundary_index])
+
+
+def _remove_key_from_root_inline_table_assignment(
+    lines: list[str],
+    start_index: int,
+    *,
+    table_name: str,
+    remove_keys: set[str],
+) -> tuple[list[str], int] | None:
+    """Remove keys from a root inline table assignment while preserving siblings."""
+    end_index = _toml_assignment_span_end(lines, start_index)
+    snippet = "\n".join(lines[start_index:end_index]).strip()
+    try:
+        parsed = tomllib.loads(f"{snippet}\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    table = parsed.get(table_name)
+    if not isinstance(table, dict) or not any(key in table for key in remove_keys):
+        return None
+
+    remaining = {str(key): value for key, value in table.items() if str(key) not in remove_keys}
+    replacement: list[str] = []
+    if remaining:
+        replacement.append(f"[{table_name}]")
+        replacement.extend(
+            f"{_render_toml_key(key)} = {_render_toml_value(value)}"
+            for key, value in remaining.items()
+        )
+    return replacement, end_index
 
 
 def _toml_table_path_from_body(body: str) -> tuple[str, ...] | None:
@@ -959,12 +1003,17 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
             existed_before = True
             preserved_comments: list[str] = []
             _trim_managed_codex_comments(output_lines)
+            section_start = index
             index += 1
             while index < len(input_lines):
                 next_stripped = input_lines[index].strip()
                 is_table_header = _is_toml_table_header(next_stripped)
-                if is_table_header and not _is_codex_ouroboros_table_header(next_stripped):
-                    break
+                if is_table_header:
+                    if not _toml_table_boundary_is_real(input_lines, section_start, index):
+                        index += 1
+                        continue
+                    if not _is_codex_ouroboros_table_header(next_stripped):
+                        break
                 if next_stripped.startswith("#"):
                     preserved_comments.append(input_lines[index])
                 index += 1
@@ -975,6 +1024,18 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
             continue
 
         assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        if assignment_path == ("mcp_servers",):
+            rewritten = _remove_key_from_root_inline_table_assignment(
+                input_lines,
+                index,
+                table_name="mcp_servers",
+                remove_keys={"ouroboros"},
+            )
+            if rewritten is not None:
+                existed_before = True
+                replacement, index = rewritten
+                output_lines.extend(replacement)
+                continue
         if assignment_path is not None and assignment_path[:2] == ("mcp_servers", "ouroboros"):
             existed_before = True
             index = _toml_assignment_span_end(
@@ -1048,7 +1109,11 @@ def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     return False
 
 
-def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> bool:
+def _register_codex_mcp_server(
+    *,
+    mode: CodexMcpMode = "auto",
+    expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+) -> bool:
     """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
     import tomllib
 
@@ -1117,13 +1182,19 @@ def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> bool:
             print_info(str(exc))
             return False
 
-        _atomic_write_text(codex_config, updated_raw)
+        written_snapshot = _atomic_write_text(codex_config, updated_raw)
+        if expected_snapshots is not None:
+            expected_snapshots[codex_config] = written_snapshot
         if existed_before:
             print_success(f"Updated Ouroboros MCP server in {codex_config}")
         else:
             print_success(f"Registered Ouroboros MCP server in {codex_config}")
     else:
-        _atomic_write_text(codex_config, _render_codex_mcp_section().lstrip("\n"))
+        written_snapshot = _atomic_write_text(
+            codex_config, _render_codex_mcp_section().lstrip("\n")
+        )
+        if expected_snapshots is not None:
+            expected_snapshots[codex_config] = written_snapshot
         print_success(f"Registered Ouroboros MCP server in {codex_config}")
     return True
 
@@ -1307,18 +1378,35 @@ def _remove_codex_legacy_profile_sections(
             while output_lines and not output_lines[-1].strip():
                 output_lines.pop()
 
+            section_start = index
             index += 1
             while index < len(input_lines):
                 next_stripped = input_lines[index].strip()
                 is_table_header = _is_toml_table_header(next_stripped)
-                if is_table_header and not _is_codex_ouroboros_profile_header(
-                    next_stripped, profile_names
-                ):
-                    break
+                if is_table_header:
+                    if not _toml_table_boundary_is_real(input_lines, section_start, index):
+                        index += 1
+                        continue
+                    if not _is_codex_ouroboros_profile_header(next_stripped, profile_names):
+                        break
                 index += 1
             continue
 
         assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        if assignment_path == ("profiles",):
+            rewritten = _remove_key_from_root_inline_table_assignment(
+                input_lines,
+                index,
+                table_name="profiles",
+                remove_keys=profile_names,
+            )
+            if rewritten is not None:
+                _trim_managed_codex_worker_profile_comments(output_lines)
+                while output_lines and output_lines[-1] == _CODEX_PROFILE_COMMENT:
+                    output_lines.pop()
+                replacement, index = rewritten
+                output_lines.extend(replacement)
+                continue
         if (
             assignment_path is not None
             and len(assignment_path) >= 2
@@ -2498,7 +2586,11 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
     config_expected_snapshot: _PathSnapshot | None = None
     credentials_expected_snapshot: _PathSnapshot | None = credentials_snapshot
     try:
-        mcp_registered = _register_codex_mcp_server(mode=mcp_mode)
+        mcp_expected_snapshot: dict[Path, _PathSnapshot] = {}
+        mcp_registered = _register_codex_mcp_server(
+            mode=mcp_mode,
+            expected_snapshots=mcp_expected_snapshot,
+        )
     except OSError as exc:
         _restore_managed_codex_setup_paths(
             managed_codex_snapshot,
@@ -2516,21 +2608,26 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
         _restore_created_directory_topology(setup_directory_topology_snapshot)
         print_info("Aborting Codex setup without rewriting config.yaml.")
         return False
-    managed_codex_expected_snapshot = _snapshot_managed_codex_setup_paths(codex_home)
+    if mcp_expected_snapshot:
+        managed_codex_expected_snapshot = dict(managed_codex_snapshot)
+        managed_codex_expected_snapshot.update(mcp_expected_snapshot)
+    else:
+        # A successful registrar that authored no managed path (for example a
+        # test double or a future no-op fast path) must not absorb concurrent
+        # operator edits into setup's rollback generation.
+        managed_codex_expected_snapshot = dict(managed_codex_snapshot)
 
     try:
-        _atomic_write_text(
+        config_expected_snapshot = _atomic_write_text(
             config_path, yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
         )
-        config_expected_snapshot = _snapshot_path(config_path)
         if fresh_config and not credentials_path.exists():
             credentials_dict = get_default_credentials().model_dump(mode="json")
-            _atomic_write_text(
+            credentials_expected_snapshot = _atomic_write_text(
                 credentials_path,
                 yaml.dump(credentials_dict, default_flow_style=False, sort_keys=False),
                 mode=0o600,
             )
-            credentials_expected_snapshot = _snapshot_path(credentials_path)
     except OSError as exc:
         if fresh_config and credentials_snapshot.kind == "missing" and credentials_path.exists():
             credentials_expected_snapshot = _snapshot_path(credentials_path)
@@ -3883,7 +3980,7 @@ def _bridge_plugin_source_text() -> str | None:
         return None
 
 
-def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> None:
+def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> _PathSnapshot:
     """Write *content* to *path* atomically — temp file + ``os.replace``.
 
     Readers always see either the pre-existing file or the final content —
@@ -3915,6 +4012,7 @@ def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> 
             os.chmod(write_path, mode)
         except OSError:
             pass  # e.g. Windows FAT — not fatal
+        return _PathSnapshot(kind="file", mode=mode, contents=content.encode("utf-8"))
     except OSError:
         try:
             os.close(fd)

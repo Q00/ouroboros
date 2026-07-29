@@ -101,6 +101,26 @@ class TestCodexCommandDispatcher:
         assert json.loads(first)["implementation_sha256"]
         assert first == second
 
+    def test_stable_identity_tracks_dispatcher_global_semantics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Behavior-affecting globals must be part of portable dispatcher identity."""
+        from ouroboros.orchestrator import command_dispatcher
+
+        dispatcher = CodexCommandDispatcher(cwd="/tmp/project")
+        original = dispatcher.stable_identity_contract()
+
+        monkeypatch.setattr(
+            command_dispatcher,
+            "_INTERVIEW_SESSION_METADATA_KEY",
+            "changed_session_metadata_key",
+        )
+
+        changed = dispatcher.stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
     @staticmethod
     def _write_skill(
         skills_dir: Path,
