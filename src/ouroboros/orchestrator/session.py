@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -72,6 +73,25 @@ def _normalize_acceptance_root_indices(value: object) -> list[int] | None:
     return sorted(roots)
 
 
+def _resolve_managed_publication_identity(
+    project_workspace: str,
+    task_workspace: TaskWorkspace,
+) -> ProjectIdentity:
+    """Prove the provider and frozen task workspace name the same managed directory."""
+    try:
+        same_directory = Path(project_workspace).samefile(task_workspace.effective_cwd)
+    except OSError as exc:
+        raise ValueError("managed execution workspace changed before publication") from exc
+    if not same_directory:
+        raise ValueError("managed execution workspace changed before publication")
+    return resolve_managed_project_identity(
+        project_workspace,
+        source_root=task_workspace.repo_root,
+        source_workspace=task_workspace.original_cwd,
+        worktree_root=task_workspace.worktree_path,
+    )
+
+
 async def _validate_project_identity_publication(
     execution_contract: Mapping[str, Any] | None,
     project_identity: ProjectIdentity | None,
@@ -107,14 +127,10 @@ async def _validate_project_identity_publication(
                 project_workspace,
             )
         else:
-            if project_workspace != project_task_workspace.effective_cwd:
-                raise ValueError("managed execution workspace changed before publication")
             revalidated_identity = await asyncio.to_thread(
-                resolve_managed_project_identity,
-                project_task_workspace.effective_cwd,
-                source_root=project_task_workspace.repo_root,
-                source_workspace=project_task_workspace.original_cwd,
-                worktree_root=project_task_workspace.worktree_path,
+                _resolve_managed_publication_identity,
+                project_workspace,
+                project_task_workspace,
             )
         if revalidated_identity != project_identity:
             raise ValueError("project workspace identity changed before publication")

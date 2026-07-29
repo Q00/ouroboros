@@ -11,12 +11,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
+    resolve_managed_project_identity,
     resolve_project_identity,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
@@ -240,6 +243,113 @@ class TestSessionRepository:
             key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
         } == identity.to_event_data()
         assert event.data["execution_contract"] == execution_contract
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_workspace_deleted_after_topology_resolution(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        project_root = tmp_path / "project-map"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        identity = resolve_project_identity(workspace)
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
+        original_resolver = project_identity_module._resolve_canonical_project_identity
+
+        def resolve_then_delete(effective: Path):
+            resolved = original_resolver(effective)
+            workspace.rmdir()
+            return resolved
+
+        with (
+            patch(
+                "ouroboros.core.project_identity._resolve_canonical_project_identity",
+                side_effect=resolve_then_delete,
+            ),
+            pytest.raises(ProjectIdentityError, match="directory"),
+        ):
+            await repository.create_session(
+                execution_id="exec_123",
+                seed_id="seed_456",
+                execution_contract=execution_contract,
+                project_identity=identity,
+                project_workspace=str(workspace),
+            )
+
+        mock_event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_accepts_canonical_equivalent_managed_workspace(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "source"
+        worktree = tmp_path / "worktree"
+        worktree_alias = tmp_path / "worktree-alias"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Project Identity Test",
+                "-c",
+                "user.email=project-identity@example.com",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+            cwd=source,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "managed-alias", str(worktree), "HEAD"],
+            cwd=source,
+            check=True,
+        )
+        source_workspace = source / "packages" / "app"
+        provider_workspace = worktree / "packages" / "app"
+        source_workspace.mkdir(parents=True)
+        provider_workspace.mkdir(parents=True)
+        worktree_alias.symlink_to(worktree, target_is_directory=True)
+        task_workspace = TaskWorkspace(
+            durable_id="managed-alias",
+            repo_root=str(source),
+            repo_name="source",
+            original_cwd=str(source_workspace),
+            effective_cwd=str(worktree_alias / "packages" / "app"),
+            worktree_path=str(worktree_alias),
+            branch="managed-alias",
+            lock_path=str(tmp_path / ".locks" / "managed-alias.json"),
+        )
+        identity = resolve_managed_project_identity(
+            provider_workspace,
+            source_root=source,
+            source_workspace=source_workspace,
+            worktree_root=worktree_alias,
+        )
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
+
+        result = await repository.create_session(
+            execution_id="exec_123",
+            seed_id="seed_456",
+            execution_contract=execution_contract,
+            project_identity=identity,
+            project_workspace=str(provider_workspace.resolve()),
+            project_task_workspace=task_workspace,
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert {
+            key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
+        } == identity.to_event_data()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
