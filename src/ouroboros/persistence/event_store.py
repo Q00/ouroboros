@@ -92,7 +92,9 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
 )
 
 
-async def _run_to_settlement[T](coro: Coroutine[Any, Any, T]) -> T:
+async def _run_to_settlement[T](
+    coro: Coroutine[Any, Any, T], *, registry: set[asyncio.Task[Any]] | None = None
+) -> T:
     """Run a transactional coroutine, settling it before cancellation surfaces.
 
     A write, once begun, must commit or roll back inside the caller's
@@ -104,6 +106,11 @@ async def _run_to_settlement[T](coro: Coroutine[Any, Any, T]) -> T:
     lifecycle (#1794 review rounds one and two).
     """
     inner: asyncio.Task[T] = asyncio.ensure_future(coro)
+    if registry is not None:
+        # close() drains this registry so no settling write can escape the
+        # store lifecycle (review round four).
+        registry.add(inner)
+        inner.add_done_callback(registry.discard)
     try:
         return await asyncio.shield(inner)
     except asyncio.CancelledError as caller_cancellation:
@@ -515,6 +522,8 @@ class EventStore:
         await store.close()
     """
 
+    _settling_writes: set[asyncio.Task[Any]]
+
     def __init__(
         self,
         database_url: str | None = None,
@@ -545,6 +554,7 @@ class EventStore:
             database_url = f"sqlite+aiosqlite:///{db_path}"
 
         self._read_only = read_only
+        self._settling_writes = set()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
@@ -1353,7 +1363,7 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                return await _run_to_settlement(_insert_once())
+                return await _run_to_settlement(_insert_once(), registry=self._settling_writes)
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1475,7 +1485,7 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                await _run_to_settlement(_insert_batch_once())
+                await _run_to_settlement(_insert_batch_once(), registry=self._settling_writes)
                 return
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
@@ -2729,7 +2739,20 @@ class EventStore:
         return True
 
     async def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection.
+
+        Drains settling writes first: a transaction that outlived a cancelled
+        caller must land before the WAL checkpoint and engine disposal, or
+        durable history could change after shutdown (review round four).
+        """
+        while self._settling_writes:
+            done, _ = await asyncio.wait(tuple(self._settling_writes))
+            for task in done:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.debug(
+                        "event_store.close.drained_failed_write",
+                        exc_info=task.exception(),
+                    )
         if self._engine is not None:
             # Collapse the WAL before disposing so the -wal file does not
             # survive shutdown. Best effort — see checkpoint_wal().

@@ -490,6 +490,37 @@ class TestResetLogging:
         assert "debug-should-be-filtered" not in captured.err
         assert "info-should-go-to-stderr" in captured.err
 
+    def test_reset_baseline_survives_capture_teardown(self) -> None:
+        """The baseline must resolve stderr at call time, not at reset time.
+
+        Capturing the concrete stream during reset keeps a capsys/redirect
+        buffer past its teardown; the next raw structlog call then raises on
+        the closed file.
+        """
+        import contextlib
+        import io
+
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            reset_logging()
+        buffer.close()
+
+        proxy = structlog.get_logger("post-capture-proxy")
+        proxy.info("logged-after-capture-teardown")
+
+    def test_reset_baseline_honors_console_logging_toggle(self, capsys: Any) -> None:
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+        set_console_logging(False)
+        try:
+            structlog.get_logger("muted-proxy").info("should-be-suppressed")
+            captured = capsys.readouterr()
+            assert "should-be-suppressed" not in captured.err
+            assert captured.out == ""
+        finally:
+            set_console_logging(True)
+
     def test_reset_clears_configured_state(self) -> None:
         """reset_logging clears configured state."""
         configure_logging()

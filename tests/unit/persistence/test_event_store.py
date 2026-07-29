@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -2350,6 +2351,103 @@ class TestCancellationSettlement:
         events = await store.replay("test", "settle-append")
         assert len(events) == 1
         await store.close()
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_settling_append(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """close() must drain in-flight writes so history is durable at close.
+
+        A gated-commit probe showed close() returning while a cancelled
+        append's transaction was still settling — the event then committed
+        after close and appeared on reopen, mutating durable history after
+        shutdown.
+        """
+        import aiosqlite
+
+        db_path = tmp_path / "settle-close.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        append_task = asyncio.create_task(store.append(_make_event(aggregate_id="race-close")))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        append_task.cancel()
+
+        close_task = asyncio.create_task(store.close())
+        # Outlast checkpoint_wal's 2s busy timeout: without an explicit drain,
+        # close() gives up on the checkpoint and disposes while the write is
+        # still settling — the drain contract must hold beyond that window.
+        await asyncio.sleep(2.5)
+        assert not close_task.done(), "close() returned while a settling write was still in flight"
+
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(append_task, timeout=5)
+        await asyncio.wait_for(close_task, timeout=5)
+        monkeypatch.setattr(aiosqlite.Connection, "commit", orig_commit)
+
+        reopened = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await reopened.initialize()
+        events = await reopened.replay("test", "race-close")
+        assert len(events) == 1
+        await reopened.close()
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_settling_batch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import aiosqlite
+
+        db_path = tmp_path / "settle-close-batch.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        orig_commit = aiosqlite.Connection.commit
+
+        async def gated_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            return await orig_commit(self)
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", gated_commit)
+
+        batch_task = asyncio.create_task(
+            store.append_batch([_make_event(aggregate_id="race-close-batch")])
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        batch_task.cancel()
+
+        close_task = asyncio.create_task(store.close())
+        # Outlast checkpoint_wal's 2s busy timeout: without an explicit drain,
+        # close() gives up on the checkpoint and disposes while the write is
+        # still settling — the drain contract must hold beyond that window.
+        await asyncio.sleep(2.5)
+        assert not close_task.done(), "close() returned while a settling batch was still in flight"
+
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(batch_task, timeout=5)
+        await asyncio.wait_for(close_task, timeout=5)
+        monkeypatch.setattr(aiosqlite.Connection, "commit", orig_commit)
+
+        reopened = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await reopened.initialize()
+        events = await reopened.replay("test", "race-close-batch")
+        assert len(events) == 1
+        await reopened.close()
 
     @pytest.mark.asyncio
     async def test_cancelled_append_with_failing_commit_still_raises_cancellation(

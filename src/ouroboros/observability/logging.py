@@ -367,7 +367,6 @@ class _FileWritingPrintLogger:
             message: The message to log.
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
-        import sys
 
         # Print to stderr only if console logging is enabled
         if _console_logging_enabled:
@@ -631,5 +630,8 @@ def reset_logging() -> None:
     # test's captured stdout (#1794).
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-        logger_factory=structlog.PrintLoggerFactory(sys.stderr),
+        # The project factory resolves sys.stderr at call time and honors
+        # set_console_logging(); capturing the stream object here would keep a
+        # capsys/redirect buffer alive past its teardown and raise on write.
+        logger_factory=_FileWritingPrintLoggerFactory(None),
     )
