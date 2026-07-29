@@ -1026,6 +1026,95 @@ class TestGitCapabilityProbeCache:
     failure paths are unchanged.
     """
 
+    def test_shim_scripts_are_probed_every_time(self, monkeypatch, tmp_path) -> None:
+        """A version-manager shim must not be capability-cached.
+
+        A shim keeps a stable path/inode/mtime while switching the underlying
+        Git, so file metadata does not pin its capability — scripts are
+        re-probed on every gate call, and a downgrade behind an unchanged
+        shim is rejected.
+        """
+        shim = tmp_path / "git"
+        shim.write_text('#!/bin/sh\nexec real-git "$@"\n')
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(shim))
+
+        versions = [b"git version 2.44.0\n", b"git version 2.20.0\n"]
+        probes = {"n": 0}
+
+        def switching_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            probes["n"] += 1
+            kwargs["stdout"].write(versions.pop(0))
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", switching_run)
+
+        project_identity._require_supported_git()
+        assert probes["n"] == 1
+
+        with pytest.raises(project_identity.ProjectIdentityGitVersionError):
+            project_identity._require_supported_git()
+        assert probes["n"] == 2
+
+    def test_native_binaries_stay_cached(self, monkeypatch, tmp_path) -> None:
+        """A native executable's capability is pinned by its content metadata."""
+        native = tmp_path / "git"
+        native.write_bytes(b"\x7fELF" + b"\x00" * 8)
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(native))
+
+        probes = {"n": 0}
+
+        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            probes["n"] += 1
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
+
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        project_identity._require_supported_git()
+        assert probes["n"] == 1
+
+    def test_concurrent_cold_probes_single_flight(self, monkeypatch, tmp_path) -> None:
+        """Two cold threads must not spawn duplicate probes."""
+        import threading
+        import time
+
+        native = tmp_path / "git"
+        native.write_bytes(b"\x7fELF" + b"\x00" * 8)
+        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(native))
+
+        probes = {"n": 0}
+
+        def slow_run(argv, **kwargs):  # noqa: ANN001, ANN202
+            probes["n"] += 1
+            time.sleep(0.05)
+            kwargs["stdout"].write(b"git version 2.44.0\n")
+
+            class _Done:
+                returncode = 0
+
+            return _Done()
+
+        monkeypatch.setattr(project_identity.subprocess, "run", slow_run)
+
+        threads = [
+            threading.Thread(target=project_identity._require_supported_git) for _ in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert probes["n"] == 1
+
     def test_relative_which_result_is_anchored_to_an_absolute_path(
         self, monkeypatch, tmp_path
     ) -> None:
@@ -1104,7 +1193,7 @@ class TestGitCapabilityProbeCache:
     def test_same_path_replacement_invalidates_the_cache(self, monkeypatch, tmp_path) -> None:
         """Replacing the binary at the SAME path must re-probe (inode/mtime)."""
         git_path = tmp_path / "git"
-        git_path.write_text("#!/bin/sh\n")
+        git_path.write_bytes(b"\x7fELF" + b"\x00" * 8)
         monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
 
         probes = {"n": 0}
@@ -1125,14 +1214,14 @@ class TestGitCapabilityProbeCache:
         assert probes["n"] == 1
 
         git_path.unlink()
-        git_path.write_text("#!/bin/sh\necho replaced\n")
+        git_path.write_bytes(b"\x7fELF" + b"\x02" * 16)
         project_identity._require_supported_git()
         assert probes["n"] == 2
 
     def test_forked_child_reverifies(self, monkeypatch, tmp_path) -> None:
         """The PID key field makes a forked child re-probe."""
         git_path = tmp_path / "git"
-        git_path.write_text("#!/bin/sh\n")
+        git_path.write_bytes(b"\x7fELF" + b"\x00" * 8)
         monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
 
         probes = {"n": 0}
@@ -1179,9 +1268,9 @@ class TestGitCapabilityProbeCache:
     def test_warm_cache_reprobes_when_git_is_replaced(self, monkeypatch, tmp_path) -> None:
         """A different executable identity must invalidate the cache."""
         git_a = tmp_path / "git-a"
-        git_a.write_text("#!/bin/sh\n")
+        git_a.write_bytes(b"\x7fELF" + b"\x00" * 8)
         git_b = tmp_path / "git-b"
-        git_b.write_text("#!/bin/sh\necho\n")
+        git_b.write_bytes(b"\x7fELF" + b"\x01" * 8)
 
         probes = {"n": 0}
 

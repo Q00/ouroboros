@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
@@ -274,12 +275,28 @@ def _run_git(start: Path, *arguments: str) -> bytes:
 
 
 _verified_git_key: tuple[str, int, int, int, int] | None = None
+_git_probe_lock = threading.Lock()
 
 
 def _reset_git_capability_cache_for_tests() -> None:
     """Clear the capability cache (test isolation only)."""
     global _verified_git_key
     _verified_git_key = None
+
+
+def _is_capability_cacheable(executable: str) -> bool:
+    """Only a native binary's capability is pinned by its file metadata.
+
+    A version-manager shim keeps a stable path/device/inode/mtime while
+    delegating to whatever Git its external configuration currently selects,
+    so a script's metadata proves nothing about capability — scripts
+    (shebang-led files) are probed on every gate call (review round four).
+    """
+    try:
+        with open(executable, "rb") as handle:
+            return handle.read(2) != b"#!"
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError("Git executable is unavailable") from exc
 
 
 def _current_git_key() -> tuple[str, int, int, int, int]:
@@ -319,26 +336,32 @@ def _require_supported_git() -> None:
     """
     global _verified_git_key
     current_key = _current_git_key()
-    if _verified_git_key == current_key:
+    cacheable = _is_capability_cacheable(current_key[0])
+    if cacheable and _verified_git_key == current_key:
         return
-    # Probe the exact executable the key resolved: PATH is process-global and
-    # mutable, so a second lookup inside the probe could verify a different
-    # binary than the one this key represents.
-    output = _run_git_command("--version", executable=current_key[0])
-    match = _GIT_VERSION_PATTERN.fullmatch(output)
-    if match is None:
-        raise ProjectIdentityGitVersionError(
-            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
-        )
-    major, minor, patch = match.groups()
-    version = (int(major), int(minor), int(patch or b"0"))
-    if version < _MINIMUM_GIT_VERSION:
-        found = ".".join(str(part) for part in version)
-        raise ProjectIdentityGitVersionError(
-            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
-            f"found {found}"
-        )
-    _verified_git_key = current_key
+    # Single-flight: concurrent cold callers must not spawn duplicate probes.
+    with _git_probe_lock:
+        if cacheable and _verified_git_key == current_key:
+            return
+        # Probe the exact executable the key resolved: PATH is process-global
+        # and mutable, so a second lookup inside the probe could verify a
+        # different binary than the one this key represents.
+        output = _run_git_command("--version", executable=current_key[0])
+        match = _GIT_VERSION_PATTERN.fullmatch(output)
+        if match is None:
+            raise ProjectIdentityGitVersionError(
+                f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
+            )
+        major, minor, patch = match.groups()
+        version = (int(major), int(minor), int(patch or b"0"))
+        if version < _MINIMUM_GIT_VERSION:
+            found = ".".join(str(part) for part in version)
+            raise ProjectIdentityGitVersionError(
+                f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project "
+                f"identity; found {found}"
+            )
+        if cacheable:
+            _verified_git_key = current_key
 
 
 def _git_path(output: bytes) -> Path:
