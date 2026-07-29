@@ -1154,6 +1154,13 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
+        """Older plugin callers cannot reactivate the incompatible MCP path."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert not (tmp_path / ".claude" / "mcp.json").exists()
+
     def test_setup_claude_leaves_existing_mcp_entry_untouched(self, tmp_path: Path) -> None:
         """The standalone Claude SDK profile must not mutate MCP wiring."""
         config_dir = tmp_path / ".ouroboros"

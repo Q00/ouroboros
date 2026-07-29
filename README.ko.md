@@ -150,7 +150,7 @@ ouroboros setup                         # 런타임 설정
 
 기본 및 비-LiteLLM 설치는 Python 3.12-3.14를 지원합니다. LiteLLM 포함 설치(`[litellm]`, `[all]`, source `--all-extras`)는 Python 3.12-3.13을 지원하며, 현재 예시는 Python 3.13을 권장합니다. 자세한 내용은 [Platform Support](./docs/platform-support.md#python-profile-matrix)를 참고하세요.
 
-`[mcp]`와 `[claude]`는 의도적으로 분리된 프로필입니다. MCP 2와 현재 Claude Agent SDK가 서로 다른 `mcp` 메이저 버전을 요구하기 때문입니다. MCP 호스트 등록은 별도 프로세스에서 `uvx --from 'ouroboros-ai[mcp]' ...`를 실행합니다. 이 서버 안에서는 독립 Claude SDK 프로필을 사용할 수 없으므로, MCP 실행에는 지원되는 CLI 기반 runtime과 LLM backend를 설정해야 합니다.
+`[mcp]`와 `[claude]`는 의도적으로 분리된 프로필입니다. MCP 2와 현재 Claude Agent SDK가 서로 다른 `mcp` 메이저 버전을 요구하기 때문입니다. 지원되는 MCP 호스트 설정은 별도 프로세스에서 `uvx --from 'ouroboros-ai[mcp]' ...`를 실행합니다. 독립 Claude SDK 설정은 격리 프로세스 안에서 구성된 Claude backend를 사용할 수 없으므로 MCP를 등록하지 않습니다. MCP 실행에는 지원되는 CLI 기반 runtime과 LLM backend를 설정해야 합니다.
 
 호환성 참고: extras 전환 기간 동안 `ouroboros-ai[dashboard]`도 no-op alias로 계속 허용됩니다.
 

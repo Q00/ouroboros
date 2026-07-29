@@ -3,6 +3,8 @@
 from pathlib import Path
 import tomllib
 
+import pytest
+
 
 def test_runtime_dependencies_configured():
     """Test that all required runtime dependencies are in pyproject.toml."""
@@ -161,6 +163,35 @@ def test_mcp_and_claude_profiles_are_isolated():
     ] in conflicts
     assert [{"extra": "claude"}, {"group": "mcp-test"}] in conflicts
     assert [{"extra": "all"}, {"group": "mcp-test"}] in conflicts
+
+
+@pytest.mark.parametrize(
+    "skill_path",
+    [
+        "skills/setup/SKILL.md",
+        "skills/update/SKILL.md",
+        "skills/welcome/SKILL.md",
+        "skills/pm/SKILL.md",
+    ],
+)
+def test_claude_skills_never_recommend_combined_mcp_profile(skill_path: str) -> None:
+    """Shipped Claude guidance must preserve the MCP 1.x / MCP 2 boundary."""
+    content = Path(skill_path).read_text(encoding="utf-8")
+
+    assert "ouroboros-ai[mcp,claude]" not in content
+    assert "ouroboros-ai[claude,mcp]" not in content
+
+
+@pytest.mark.parametrize(
+    "skill_path",
+    ["skills/setup/SKILL.md", "skills/welcome/SKILL.md", "skills/pm/SKILL.md"],
+)
+def test_claude_skills_do_not_use_mcp_json_as_setup_health(skill_path: str) -> None:
+    """Standalone Claude onboarding cannot treat a legacy MCP file as activation."""
+    content = Path(skill_path).read_text(encoding="utf-8")
+
+    assert "grep -q ouroboros" not in content
+    assert "grep -q '\"ouroboros\"' ~/.claude/mcp.json" not in content
 
 
 def test_python_version_constraint():

@@ -991,9 +991,11 @@ def serve(
     except ImportError as e:
         _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
         _stderr_console.print(
-            "[blue]Fix for uv tool installs: uv tool install 'ouroboros-ai\\[mcp,claude]'\n"
-            "For pip/pipx installs: install 'ouroboros-ai\\[mcp,claude]' into the "
-            "environment that runs this server.[/blue]"
+            "[blue]Run MCP 2 in an isolated profile:\n"
+            "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "or:\n"
+            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:

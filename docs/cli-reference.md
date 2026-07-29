@@ -1061,10 +1061,12 @@ MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The str
 
 On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or `PAUSED` state for more than 1 hour. These are treated as orphaned from a previous crash. Cancelled sessions are reported on stderr for `stdio` and on the console for network transports (`sse`, `streamable-http`). This cleanup is best-effort and does not prevent the server from starting if it fails.
 
-**Claude Desktop / Claude Code CLI Integration:**
+**MCP host integration:**
 
-`ouroboros setup --runtime claude` writes this automatically to `~/.claude/mcp.json`.
-To register manually, add to `~/.claude/mcp.json`:
+`ouroboros setup --runtime claude` configures the standalone Claude SDK profile
+and deliberately leaves `~/.claude/mcp.json` untouched. Its MCP 1.x dependency
+cannot share the Ouroboros MCP 2 process. Supported CLI-backed host setup writes
+an isolated launcher equivalent to:
 
 ```json
 {
@@ -1077,14 +1079,14 @@ To register manually, add to `~/.claude/mcp.json`:
 }
 ```
 
-If Ouroboros is installed directly (not via `uvx`), use:
+If `uvx` is unavailable, use the package-isolated pipx runner:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "ouroboros",
-      "args": ["mcp", "serve"]
+      "command": "pipx",
+      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
     }
   }
 }

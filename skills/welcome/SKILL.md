@@ -164,28 +164,29 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ---
 
-### Step 3: MCP Check
+### Step 3: Advanced Runtime Check
 
-```bash
-cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
-```
+Standalone Claude SDK setup intentionally does not register MCP 2. Do not
+inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
 
-**If MCP_MISSING**, **AskUserQuestion**:
+If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json
 {
   "questions": [{
-    "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
-    "header": "MCP Setup",
+    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "header": "Runtime",
     "options": [
-      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python >= 3.12)" },
-      { "label": "Skip for now", "description": "Use basic features first (interview, seed, unstuck)" }
+      { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
+      { "label": "Show MCP setup", "description": "See supported Codex, OpenCode, Kiro, Copilot, or Hermes setup commands" }
     ],
     "multiSelect": false
   }]
 }
 ```
-- **Set up now**: Read and execute `skills/setup/SKILL.md`, then return to Step 4
-- **Skip for now**: Continue to Step 4
+- **Continue native**: Continue to Step 4
+- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
+  supported CLI-backed runtime. Do not register MCP in the standalone Claude
+  SDK profile. Then continue to Step 4.
 
 ---
 

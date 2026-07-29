@@ -83,80 +83,17 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
+    """Fail closed for the standalone Claude SDK profile.
 
-    The Claude Agent SDK embeds MCP 1.x, so the modern MCP server must always
-    run in a separate package environment containing only the ``mcp`` extra.
-    Creates or repairs that isolated entry and removes the legacy timeout key.
+    Kept as a compatibility shim for callers from older plugin artifacts. The
+    current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
+    server requires MCP 2 and cannot load that configured backend from its
+    isolated process. Never mutate user-owned Claude MCP configuration here.
     """
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
-
-    mcp_data.setdefault("mcpServers", {})
-
-    existing = mcp_data["mcpServers"].get("ouroboros")
-    if shutil.which("uvx"):
-        detected: dict[str, object] | None = {
-            "command": "uvx",
-            "args": _build_uvx_mcp_args("ouroboros-ai[mcp]"),
-        }
-    elif shutil.which("pipx"):
-        detected = {
-            "command": "pipx",
-            "args": [
-                "run",
-                "--spec",
-                "ouroboros-ai[mcp]",
-                "ouroboros",
-                "mcp",
-                "serve",
-            ],
-        }
-    else:
-        detected = None
-    needs_write = False
-
-    if existing is None:
-        if detected is None:
-            print_warning(
-                "Cannot register MCP server: no working ouroboros installation found.\n"
-                "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
-            )
-            return
-        mcp_data["mcpServers"]["ouroboros"] = detected
-        needs_write = True
-        print_success("Registered MCP server in ~/.claude/mcp.json")
-    else:
-        # Remove legacy timeout key
-        if "timeout" in existing:
-            del existing["timeout"]
-            needs_write = True
-            print_info("Removed legacy MCP timeout override.")
-
-        # Update entry to match currently detected install method, but only
-        # for known standard commands. Custom entries (docker, nix, etc.) are
-        # left untouched so we don't break user-managed configurations.
-        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python"}
-        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
-            if (
-                existing.get("command") != detected["command"]
-                or existing.get("args") != detected["args"]
-            ):
-                existing["command"] = detected["command"]
-                existing["args"] = detected["args"]
-                needs_write = True
-                print_info("Updated MCP server entry to match current install method.")
-
-        if not needs_write:
-            print_info("MCP server already registered.")
-
-    if needs_write:
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
+    print_warning(
+        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile. "
+        "Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+    )
 
 
 app = typer.Typer(
@@ -1486,7 +1423,7 @@ def _register_kiro_mcp_server() -> None:
         # setup-managed — the binary-first detector (_detect_mcp_entry_for_kiro)
         # writes absolute paths from venvs, and we want re-runs of setup to
         # be able to upgrade those entries.
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
         existing_cmd = existing.get("command")
         is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
             isinstance(existing_cmd, str)
@@ -1630,7 +1567,7 @@ def _register_copilot_mcp_server() -> None:
         needs_write = True
         print_success(f"Registered MCP server in {mcp_path}")
     else:
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
         existing_cmd = existing.get("command")
         is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
             isinstance(existing_cmd, str)
@@ -2375,7 +2312,7 @@ def _ensure_opencode_mcp_entry() -> bool:
     if detected is None:
         print_warning(
             "Cannot register MCP server: no working ouroboros installation found.\n"
-            "Install with: pip install ouroboros-ai[all]"
+            "Install uv/uvx or pipx so setup can launch isolated ouroboros-ai[mcp]."
         )
         return False
 
@@ -2397,7 +2334,7 @@ def _ensure_opencode_mcp_entry() -> bool:
         # Update command only for known standard launchers. Custom entries
         # (docker, nix wrappers, etc.) are left untouched so we don't break
         # user-managed configurations — mirrors the Claude setup path.
-        _KNOWN_COMMANDS = {"ouroboros", "python3", "python", "uvx", "uv"}
+        _KNOWN_COMMANDS = {"ouroboros", "python3", "python", "uvx", "pipx", "uv"}
         existing_cmd = existing.get("command")
         # OpenCode expects command: string[]. If it's a bare string (hand-edited
         # or legacy), replace it unconditionally since it can't launch.

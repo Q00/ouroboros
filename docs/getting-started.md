@@ -355,7 +355,7 @@ Ouroboros delegates code execution to a pluggable runtime backend. Three ship ou
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Multi-provider flexibility; open-source tooling |
-| **Install** | `pip install 'ouroboros-ai[claude]'` (standalone SDK); MCP registration uses isolated `[mcp]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
+| **Install** | `pip install 'ouroboros-ai[claude]'` (standalone SDK; no MCP registration) | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
 | **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime opencode` |
 | **Config value** | `claude` | `codex` | `opencode` |
 
