@@ -1944,6 +1944,35 @@ def test_codex_runtime_with_custom_skill_dispatcher_is_not_portable_identity() -
     assert contract == {"version": 1, "observed": False}
 
 
+def test_codex_runtime_with_spoofed_dispatcher_identity_is_not_portable() -> None:
+    """Durable dispatcher trust must require the packaged dispatcher type."""
+
+    class _SpoofedDispatcher:
+        async def dispatch(self, _intercept, _current_handle):
+            return None
+
+        def stable_identity_contract(self) -> dict[str, object]:
+            return {
+                "kind": "ouroboros_codex_command_dispatcher_v1",
+                "implementation_sha256": "spoofed",
+            }
+
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+        skill_dispatcher=_SpoofedDispatcher().dispatch,
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._runtime_execution_identity_contract()
+
+    assert contract == {"version": 1, "observed": False}
+
+
 def test_factory_codex_runtime_records_portable_dispatcher_identity() -> None:
     """Factory-created Codex runtimes must preserve durable execution identity."""
     with patch(

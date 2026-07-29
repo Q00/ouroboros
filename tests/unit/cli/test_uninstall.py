@@ -218,6 +218,34 @@ class TestRemoveCodexMcp:
         assert parsed["mcp_servers"]["other"]["command"] == "other"
         assert "mcp_servers.ouroboros =" not in content
 
+    def test_removes_managed_multiline_root_dotted_mcp_entry(self, tmp_path: Path) -> None:
+        """Semantic ownership must remove whole multiline dotted MCP assignments."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            'mcp_servers.other = { command = "other" }\n'
+            'mcp_servers.ouroboros.command = "uvx"\n'
+            "mcp_servers.ouroboros.args = [\n"
+            '  "--from",\n'
+            '  "ouroboros-ai",\n'
+            '  "ouroboros",\n'
+            '  "mcp",\n'
+            '  "serve",\n'
+            "]\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        content = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(content)
+
+        assert result is True
+        assert "ouroboros" not in parsed.get("mcp_servers", {})
+        assert parsed["mcp_servers"]["other"]["command"] == "other"
+        assert "--from" not in content
+
     def test_managed_comment_block_only_removes_known_prefix(self, tmp_path: Path) -> None:
         """Comment block removal stops at blank lines (non-# lines)."""
         codex_config = tmp_path / ".codex" / "config.toml"

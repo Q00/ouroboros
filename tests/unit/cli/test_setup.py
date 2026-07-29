@@ -652,6 +652,42 @@ class TestCodexSetup:
         assert "mcp_servers.ouroboros =" not in contents
         assert contents.count("[mcp_servers.ouroboros]") == 1
 
+    def test_register_codex_mcp_server_removes_multiline_root_dotted_entry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Root dotted MCP assignments must be removed as whole TOML spans."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    'mcp_servers.other = { command = "other" }',
+                    'mcp_servers.ouroboros.command = "uvx"',
+                    "mcp_servers.ouroboros.args = [",
+                    '  "--from",',
+                    '  "ouroboros-ai",',
+                    '  "ouroboros",',
+                    '  "mcp",',
+                    '  "serve",',
+                    "]",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+
+        assert parsed["mcp_servers"]["other"]["command"] == "other"
+        assert parsed["mcp_servers"]["ouroboros"]["command"]
+        assert "--from" not in contents
+        assert contents.count("[mcp_servers.ouroboros]") == 1
+
     def test_register_codex_mcp_server_stdio_repairs_endpointless_entry(
         self,
         tmp_path: Path,
@@ -1359,6 +1395,44 @@ class TestCodexSetup:
         assert 'model = "o3-mini"' in worker_profile
         assert 'sandbox = "workspace-write"' in worker_profile
 
+    def test_register_codex_worker_profile_removes_multiline_dotted_assignment_to_profile_v2(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Multiline dotted legacy assignments must not leave orphaned values."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles]",
+                    'other = { model = "keep-me" }',
+                    '"ouroboros-worker".model = """',
+                    "gpt-5",
+                    '"""',
+                    '"ouroboros-worker".sandbox = "workspace-write"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+        ):
+            assert setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+        parsed = tomllib.loads(contents)
+        worker_profile = (codex_dir / "ouroboros-worker.config.toml").read_text(encoding="utf-8")
+
+        assert parsed["profiles"]["other"]["model"] == "keep-me"
+        assert "ouroboros-worker" not in parsed["profiles"]
+        assert "gpt-5" in worker_profile
+        assert '"""' not in contents
+
     def test_register_codex_worker_profile_migrates_trailing_comment_header_to_profile_v2(
         self,
         tmp_path: Path,
@@ -1585,10 +1659,10 @@ class TestCodexSetup:
         assert profile["tools"][0]["enabled"] is True
         assert profile["tools"][1]["limits"] == [1, 2]
 
-    def test_register_codex_worker_profile_recovers_interrupted_profile_v2_migration(
+    def test_register_codex_worker_profile_recovers_exact_profile_v2_migration(
         self, tmp_path: Path
     ) -> None:
-        """Retry must remove legacy table when the v2 file is our interrupted write."""
+        """Retry may remove legacy table only when the v2 file exactly matches setup output."""
         codex_dir = tmp_path / ".codex"
         codex_config = codex_dir / "config.toml"
         codex_dir.mkdir(parents=True)
@@ -1616,9 +1690,8 @@ class TestCodexSetup:
                 "shell_environment_policy": {"inherit": "core"},
             }
         )
-        interrupted_profile = expected_profile[: len(expected_profile) // 2]
         (codex_dir / "ouroboros-worker.config.toml").write_text(
-            interrupted_profile,
+            expected_profile,
             encoding="utf-8",
         )
 
@@ -1637,6 +1710,42 @@ class TestCodexSetup:
         assert "[profiles.ouroboros-worker]" not in contents
         assert worker_profile == expected_profile
         mock_warning.assert_not_called()
+
+    def test_register_codex_worker_profile_preserves_generated_prefix_profile_v2(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Generated-prefix profile-v2 content is still user-owned without exact evidence."""
+        codex_dir = tmp_path / ".codex"
+        codex_config = codex_dir / "config.toml"
+        profile_path = codex_dir / "ouroboros-worker.config.toml"
+        codex_dir.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    'sandbox = "workspace-write"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        prefix_profile = "\n".join([setup_cmd._CODEX_PROFILE_V2_COMMENT, 'model = "o3-mini"', ""])
+        profile_path.write_text(prefix_profile, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup._codex_uses_profile_v2", return_value=True),
+            patch("ouroboros.cli.commands.setup.print_warning") as mock_warning,
+        ):
+            setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert "[profiles.ouroboros-worker]" in contents
+        assert profile_path.read_text(encoding="utf-8") == prefix_profile
+        mock_warning.assert_called_once()
 
     def test_register_codex_worker_profile_keeps_legacy_table_when_v2_file_exists(
         self, tmp_path: Path
@@ -2039,8 +2148,7 @@ class TestCodexSetup:
         expected_profile = setup_cmd._render_codex_worker_profile_v2_file(
             {"model": "o3-mini", "sandbox": "workspace-write"}
         )
-        partial_profile = expected_profile[: len(expected_profile) // 2]
-        profile_path.write_text(partial_profile, encoding="utf-8")
+        profile_path.write_text(expected_profile, encoding="utf-8")
 
         original_write = setup_cmd._atomic_write_text
 
@@ -2058,7 +2166,7 @@ class TestCodexSetup:
             setup_cmd._register_codex_worker_profile(codex_path="/usr/local/bin/codex")
 
         assert codex_config.read_text(encoding="utf-8") == raw
-        assert profile_path.read_text(encoding="utf-8") == partial_profile
+        assert profile_path.read_text(encoding="utf-8") == expected_profile
 
     def test_register_codex_worker_profile_preserves_concurrent_config_edit_between_writes(
         self,

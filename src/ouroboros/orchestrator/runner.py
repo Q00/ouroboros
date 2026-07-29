@@ -4153,7 +4153,14 @@ class OrchestratorRunner:
     @staticmethod
     def _runtime_skill_dispatcher_is_portable(dispatcher: object) -> bool:
         """Return True for packaged dispatchers that expose stable identity."""
+        from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher
+
         owner = getattr(dispatcher, "__self__", None)
+        if (
+            type(owner) is not CodexCommandDispatcher
+            or getattr(dispatcher, "__func__", None) is not CodexCommandDispatcher.dispatch
+        ):
+            return False
         stable_identity = getattr(owner, "stable_identity_contract", None)
         if not callable(stable_identity):
             return False

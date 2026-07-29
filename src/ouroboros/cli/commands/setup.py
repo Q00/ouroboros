@@ -892,6 +892,30 @@ def _toml_assignment_path(
     return parent_path + path
 
 
+def _toml_assignment_span_end(
+    lines: list[str],
+    start_index: int,
+    *,
+    parent_path: tuple[str, ...] = (),
+) -> int:
+    """Return the exclusive end index for a valid TOML assignment span."""
+    table_header = ""
+    if parent_path:
+        table_header = "[" + ".".join(_render_toml_key(part) for part in parent_path) + "]\n"
+    for end_index in range(start_index + 1, len(lines) + 1):
+        if end_index > start_index + 1 and _is_toml_table_header(lines[end_index - 1].strip()):
+            return end_index - 1
+        snippet = "\n".join(lines[start_index:end_index]).strip()
+        if not snippet:
+            continue
+        try:
+            tomllib.loads(f"{table_header}{snippet}\n")
+        except tomllib.TOMLDecodeError:
+            continue
+        return end_index
+    return start_index + 1
+
+
 def _toml_table_path_from_body(body: str) -> tuple[str, ...] | None:
     """Parse a TOML dotted key/table body into a path tuple."""
     marker = "__ouroboros_table_header_marker__"
@@ -953,7 +977,11 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
         assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
         if assignment_path is not None and assignment_path[:2] == ("mcp_servers", "ouroboros"):
             existed_before = True
-            index += 1
+            index = _toml_assignment_span_end(
+                input_lines,
+                index,
+                parent_path=current_table_path or (),
+            )
             continue
 
         output_lines.append(line)
@@ -1300,7 +1328,11 @@ def _remove_codex_legacy_profile_sections(
             _trim_managed_codex_worker_profile_comments(output_lines)
             while output_lines and output_lines[-1] == _CODEX_PROFILE_COMMENT:
                 output_lines.pop()
-            index += 1
+            index = _toml_assignment_span_end(
+                input_lines,
+                index,
+                parent_path=current_table_path or (),
+            )
             continue
 
         output_lines.append(input_lines[index])
@@ -1373,7 +1405,7 @@ def _codex_worker_profile_v2_is_recoverable_migration(
         contents = profile_path.read_text(encoding="utf-8")
     except OSError:
         return False
-    return contents == expected or expected.startswith(contents)
+    return contents == expected
 
 
 def _codex_profile_v2_file_exists(codex_dir: Path, profile_name: str) -> bool:
