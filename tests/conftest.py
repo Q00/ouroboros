@@ -231,15 +231,3 @@ async def close_test_owned_stores(monkeypatch):
                     await close_result
                 except Exception:
                     pass
-
-
-@pytest.fixture(autouse=True)
-def _fresh_git_capability_cache():
-    """#1796: the process-lifetime git probe cache must not leak between
-    tests — suites that simulate git failure would otherwise pass or fail
-    depending on whether an earlier test warmed the cache."""
-    from ouroboros.core import project_identity
-
-    project_identity._reset_git_capability_cache_for_tests()
-    yield
-    project_identity._reset_git_capability_cache_for_tests()

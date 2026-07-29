@@ -8,15 +8,16 @@ repository while retaining a repository-relative workspace filter.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
-import threading
 from uuid import NAMESPACE_URL, uuid5
 
 PROJECT_ID_PREFIX = "project_"
@@ -234,19 +235,17 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _run_git_command(*arguments: str, executable: str = "git") -> bytes:
+def _run_git_command(*arguments: str) -> bytes:
     """Run one bounded, non-interactive Git command and return complete stdout.
 
     A nonzero exit is unavailable because Git does not expose a portable
     exit-code distinction between malformed topology and transient repository
-    I/O. ``executable`` lets the capability gate probe the exact binary its
-    cache key resolved instead of racing a second mutable-PATH lookup
-    (#1796 review round two).
+    I/O.
     """
     try:
         with tempfile.TemporaryFile() as output:
             completed = subprocess.run(
-                [executable, *arguments],
+                ["git", *arguments],
                 check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=output,
@@ -274,94 +273,56 @@ def _run_git(start: Path, *arguments: str) -> bytes:
     return _run_git_command("-C", str(start), *arguments)
 
 
-_verified_git_key: tuple[str, int, int, int, int] | None = None
-_git_probe_lock = threading.Lock()
+# ``None`` = no scope: every call probes, exactly as before #1796. An open
+# scope carries a single-element mutable cell — resolutions inside the scope
+# frequently run under ``asyncio.to_thread``, whose copied context shares the
+# cell object, so a verification recorded in a worker thread is visible to
+# the scope's later resolutions while still evaporating with the scope.
+# Concurrent tasks get their own cells, so they cannot observe each other.
+_PROBE_SCOPE: ContextVar[list[bool] | None] = ContextVar("git_capability_probe_scope", default=None)
 
 
-def _reset_git_capability_cache_for_tests() -> None:
-    """Clear the capability cache (test isolation only)."""
-    global _verified_git_key
-    _verified_git_key = None
+@contextmanager
+def git_capability_probe_scope() -> Iterator[None]:
+    """Share one Git capability probe across the resolutions in this scope.
 
-
-def _is_capability_cacheable(executable: str) -> bool:
-    """Only a native binary's capability is pinned by its file metadata.
-
-    A version-manager shim keeps a stable path/device/inode/mtime while
-    delegating to whatever Git its external configuration currently selects,
-    so a script's metadata proves nothing about capability — scripts
-    (shebang-led files) are probed on every gate call (review round four).
+    A session start resolves project identity at least twice — once while the
+    execution contract is built and again at the publication boundary — and
+    each resolution re-ran ``git --version`` (#1796). Within one scope the
+    probe runs once; the reuse window is the same class the per-resolution
+    design already accepts between its own probe and topology queries, so no
+    cross-time cache (and none of its integrity obligations: executable
+    binding, shim detection, fork-safe locking) is introduced. Outside any
+    scope, behavior is unchanged: every resolution probes.
     """
+    token = _PROBE_SCOPE.set([False])
     try:
-        with open(executable, "rb") as handle:
-            return handle.read(2) != b"#!"
-    except OSError as exc:
-        raise ProjectIdentityUnavailableError("Git executable is unavailable") from exc
-
-
-def _current_git_key() -> tuple[str, int, int, int, int]:
-    """Identify the Git executable the next command would run.
-
-    The key binds the cached verification to the concrete binary selected by
-    the (mutable) ``PATH`` — resolved path plus its device, inode, and mtime —
-    and to the current PID so forked children re-verify. Resolving it is a
-    filesystem metadata lookup — no subprocess is spawned.
-    """
-    executable = shutil.which("git")
-    if executable is None:
-        raise ProjectIdentityUnavailableError("Git executable is unavailable on PATH")
-    # shutil.which() can return a relative path (an empty or relative PATH
-    # entry resolves against the mutable process cwd); anchor the selection
-    # to an absolute path so stat and execution refer to the same binary
-    # regardless of later cwd changes (review round three).
-    executable = os.path.abspath(executable)
-    try:
-        status = os.stat(executable)
-    except OSError as exc:
-        raise ProjectIdentityUnavailableError("Git executable is unavailable") from exc
-    return (executable, status.st_dev, status.st_ino, status.st_mtime_ns, os.getpid())
+        yield
+    finally:
+        _PROBE_SCOPE.reset(token)
 
 
 def _require_supported_git() -> None:
-    """Reject Git versions that lack the unambiguous topology query grammar.
-
-    A successful probe is cached per executable identity (#1796): the gate
-    runs on every identity resolution — at least twice per session start —
-    and re-spawning ``git --version`` for an unchanged binary is pure waste.
-    The cache is bound to the concrete executable (path/device/inode/mtime)
-    and the PID, so a Git that disappears from ``PATH`` fails closed
-    immediately, a replaced binary is re-probed, and failures themselves are
-    never cached — a transient spawn failure keeps re-probing and a version
-    rejection retains its original per-call semantics.
-    """
-    global _verified_git_key
-    current_key = _current_git_key()
-    cacheable = _is_capability_cacheable(current_key[0])
-    if cacheable and _verified_git_key == current_key:
+    """Reject Git versions that lack the unambiguous topology query grammar."""
+    scope_cell = _PROBE_SCOPE.get()
+    if scope_cell is not None and scope_cell[0]:
         return
-    # Single-flight: concurrent cold callers must not spawn duplicate probes.
-    with _git_probe_lock:
-        if cacheable and _verified_git_key == current_key:
-            return
-        # Probe the exact executable the key resolved: PATH is process-global
-        # and mutable, so a second lookup inside the probe could verify a
-        # different binary than the one this key represents.
-        output = _run_git_command("--version", executable=current_key[0])
-        match = _GIT_VERSION_PATTERN.fullmatch(output)
-        if match is None:
-            raise ProjectIdentityGitVersionError(
-                f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
-            )
-        major, minor, patch = match.groups()
-        version = (int(major), int(minor), int(patch or b"0"))
-        if version < _MINIMUM_GIT_VERSION:
-            found = ".".join(str(part) for part in version)
-            raise ProjectIdentityGitVersionError(
-                f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project "
-                f"identity; found {found}"
-            )
-        if cacheable:
-            _verified_git_key = current_key
+    output = _run_git_command("--version")
+    match = _GIT_VERSION_PATTERN.fullmatch(output)
+    if match is None:
+        raise ProjectIdentityGitVersionError(
+            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity"
+        )
+    major, minor, patch = match.groups()
+    version = (int(major), int(minor), int(patch or b"0"))
+    if version < _MINIMUM_GIT_VERSION:
+        found = ".".join(str(part) for part in version)
+        raise ProjectIdentityGitVersionError(
+            f"Git {_MINIMUM_GIT_VERSION_TEXT} or newer is required for project identity; "
+            f"found {found}"
+        )
+    if scope_cell is not None:
+        scope_cell[0] = True
 
 
 def _git_path(output: bytes) -> Path:

@@ -692,10 +692,7 @@ def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:
     ) as run_git_command:
         _require_supported_git()
 
-    assert run_git_command.call_count == 1
-    assert run_git_command.call_args.args == ("--version",)
-    # The probe targets the exact executable its cache key resolved (#1796).
-    assert run_git_command.call_args.kwargs.get("executable", "git")
+    run_git_command.assert_called_once_with("--version")
 
 
 def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
@@ -1017,328 +1014,69 @@ def test_project_identity_rejects_noncanonical_fields(
         )
 
 
-class TestGitCapabilityProbeCache:
-    """#1796 L1: cache the git --version capability probe per process.
+class TestGitCapabilityProbeScope:
+    """#1796: one probe per scope; per-call probing everywhere else."""
 
-    Only a SUCCESSFUL probe is cached: the installed binary cannot change
-    within one process, but a transient spawn failure must keep re-probing,
-    and a genuine version rejection stays uncached so the semantics on the
-    failure paths are unchanged.
-    """
+    def _counting_probe(self, monkeypatch):
+        calls = {"n": 0}
 
-    def test_shim_scripts_are_probed_every_time(self, monkeypatch, tmp_path) -> None:
-        """A version-manager shim must not be capability-cached.
-
-        A shim keeps a stable path/inode/mtime while switching the underlying
-        Git, so file metadata does not pin its capability — scripts are
-        re-probed on every gate call, and a downgrade behind an unchanged
-        shim is rejected.
-        """
-        shim = tmp_path / "git"
-        shim.write_text('#!/bin/sh\nexec real-git "$@"\n')
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(shim))
-
-        versions = [b"git version 2.44.0\n", b"git version 2.20.0\n"]
-        probes = {"n": 0}
-
-        def switching_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            probes["n"] += 1
-            kwargs["stdout"].write(versions.pop(0))
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", switching_run)
-
-        project_identity._require_supported_git()
-        assert probes["n"] == 1
-
-        with pytest.raises(project_identity.ProjectIdentityGitVersionError):
-            project_identity._require_supported_git()
-        assert probes["n"] == 2
-
-    def test_native_binaries_stay_cached(self, monkeypatch, tmp_path) -> None:
-        """A native executable's capability is pinned by its content metadata."""
-        native = tmp_path / "git"
-        native.write_bytes(b"\x7fELF" + b"\x00" * 8)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(native))
-
-        probes = {"n": 0}
-
-        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            probes["n"] += 1
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
-
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert probes["n"] == 1
-
-    def test_concurrent_cold_probes_single_flight(self, monkeypatch, tmp_path) -> None:
-        """Two cold threads must not spawn duplicate probes."""
-        import threading
-        import time
-
-        native = tmp_path / "git"
-        native.write_bytes(b"\x7fELF" + b"\x00" * 8)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(native))
-
-        probes = {"n": 0}
-
-        def slow_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            probes["n"] += 1
-            time.sleep(0.05)
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", slow_run)
-
-        threads = [
-            threading.Thread(target=project_identity._require_supported_git) for _ in range(2)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert probes["n"] == 1
-
-    def test_relative_which_result_is_anchored_to_an_absolute_path(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """A relative PATH entry must not reopen the lookup race.
-
-        With POSIX PATH=:/usr/bin the empty entry resolves against the
-        mutable process cwd and shutil.which() can return a bare relative
-        name; passing that to subprocess performs another cwd-dependent
-        lookup. The key must anchor the selection to an absolute path used
-        for both stat and execution.
-        """
-        (tmp_path / "gitx").write_text("#!/bin/sh\n")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: "gitx")
-
-        invoked: list[str] = []
-
-        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            invoked.append(argv[0])
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
-
-        project_identity._require_supported_git()
-
-        assert invoked == [str(tmp_path / "gitx")], (
-            "the probe executed a relative path, leaving it cwd-dependent"
-        )
-
-    def test_probe_targets_the_exact_executable_the_key_resolved(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """Key resolution and the probe must not race a mutable PATH.
-
-        If the probe performs its own PATH lookup, a concurrent switch can
-        verify binary B and cache its success under binary A's key; later
-        calls then accept A without validation.
-        """
-        git_a = tmp_path / "git-a"
-        git_a.write_text("#!/bin/sh\n")
-        git_b = tmp_path / "git-b"
-        git_b.write_text("#!/bin/sh\n")
-
-        lookups = {"n": 0}
-
-        def switching_which(_name: str) -> str:
-            lookups["n"] += 1
-            return str(git_a) if lookups["n"] == 1 else str(git_b)
-
-        monkeypatch.setattr(project_identity.shutil, "which", switching_which)
-
-        invoked: list[str] = []
-
-        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            invoked.append(argv[0])
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
-
-        project_identity._require_supported_git()
-
-        assert invoked == [str(git_a)], (
-            "the probe ran a PATH lookup of its own instead of the key's executable"
-        )
-
-    def test_same_path_replacement_invalidates_the_cache(self, monkeypatch, tmp_path) -> None:
-        """Replacing the binary at the SAME path must re-probe (inode/mtime)."""
-        git_path = tmp_path / "git"
-        git_path.write_bytes(b"\x7fELF" + b"\x00" * 8)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
-
-        probes = {"n": 0}
-
-        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            probes["n"] += 1
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
-
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert probes["n"] == 1
-
-        git_path.unlink()
-        git_path.write_bytes(b"\x7fELF" + b"\x02" * 16)
-        project_identity._require_supported_git()
-        assert probes["n"] == 2
-
-    def test_forked_child_reverifies(self, monkeypatch, tmp_path) -> None:
-        """The PID key field makes a forked child re-probe."""
-        git_path = tmp_path / "git"
-        git_path.write_bytes(b"\x7fELF" + b"\x00" * 8)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_path))
-
-        probes = {"n": 0}
-
-        def probing_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            probes["n"] += 1
-            kwargs["stdout"].write(b"git version 2.44.0\n")
-
-            class _Done:
-                returncode = 0
-
-            return _Done()
-
-        monkeypatch.setattr(project_identity.subprocess, "run", probing_run)
-
-        monkeypatch.setattr(project_identity.os, "getpid", lambda: 11111)
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert probes["n"] == 1
-
-        monkeypatch.setattr(project_identity.os, "getpid", lambda: 22222)
-        project_identity._require_supported_git()
-        assert probes["n"] == 2
-
-    def test_warm_cache_fails_closed_when_git_disappears(self, monkeypatch) -> None:
-        """A warmed cache must not outlive the executable it verified.
-
-        After a successful probe, deleting git from PATH must surface
-        unavailability on the next gate call — without this the local-first
-        resolution of a non-Git directory succeeds with zero git commands
-        while git is gone, violating the fail-closed contract.
-        """
-        monkeypatch.setattr(
-            project_identity,
-            "_run_git_command",
-            lambda *a, **_kw: b"git version 2.44.0\n" if a == ("--version",) else b"",
-        )
-        project_identity._require_supported_git()
-
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _name: None)
-        with pytest.raises(project_identity.ProjectIdentityUnavailableError):
-            project_identity._require_supported_git()
-
-    def test_warm_cache_reprobes_when_git_is_replaced(self, monkeypatch, tmp_path) -> None:
-        """A different executable identity must invalidate the cache."""
-        git_a = tmp_path / "git-a"
-        git_a.write_bytes(b"\x7fELF" + b"\x00" * 8)
-        git_b = tmp_path / "git-b"
-        git_b.write_bytes(b"\x7fELF" + b"\x01" * 8)
-
-        probes = {"n": 0}
-
-        def probing(*arguments: str, executable: str = "git") -> bytes:
+        def fake(*arguments: str) -> bytes:
             assert arguments == ("--version",)
-            probes["n"] += 1
+            calls["n"] += 1
             return b"git version 2.44.0\n"
 
-        monkeypatch.setattr(project_identity, "_run_git_command", probing)
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_a))
+        monkeypatch.setattr(project_identity, "_run_git_command", fake)
+        return calls
+
+    def test_without_scope_every_call_probes(self, monkeypatch) -> None:
+        calls = self._counting_probe(monkeypatch)
         project_identity._require_supported_git()
         project_identity._require_supported_git()
-        assert probes["n"] == 1
+        assert calls["n"] == 2
 
-        monkeypatch.setattr(project_identity.shutil, "which", lambda _n: str(git_b))
+    def test_scope_shares_a_single_probe(self, monkeypatch) -> None:
+        calls = self._counting_probe(monkeypatch)
+        with project_identity.git_capability_probe_scope():
+            project_identity._require_supported_git()
+            project_identity._require_supported_git()
+            project_identity._require_supported_git()
+        assert calls["n"] == 1
+
+    def test_nothing_survives_the_scope(self, monkeypatch) -> None:
+        calls = self._counting_probe(monkeypatch)
+        with project_identity.git_capability_probe_scope():
+            project_identity._require_supported_git()
         project_identity._require_supported_git()
-        assert probes["n"] == 2
+        assert calls["n"] == 2
 
-    def test_successful_probe_runs_git_version_once(self, monkeypatch) -> None:
-        calls: list[tuple[str, ...]] = []
-        real = project_identity._run_git_command
-
-        def counting(*arguments: str, executable: str = "git") -> bytes:
-            calls.append(arguments)
-            if arguments == ("--version",):
-                return b"git version 2.44.0\n"
-            return real(*arguments)
-
-        monkeypatch.setattr(project_identity, "_run_git_command", counting)
-
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-
-        assert calls.count(("--version",)) == 1
-
-    def test_transient_failure_is_not_cached(self, monkeypatch) -> None:
+    def test_scope_failure_is_not_memoized(self, monkeypatch) -> None:
         attempts = {"n": 0}
 
-        def flaky(*arguments: str, executable: str = "git") -> bytes:
-            assert arguments == ("--version",)
+        def flaky(*arguments: str) -> bytes:
             attempts["n"] += 1
             if attempts["n"] == 1:
-                raise project_identity.ProjectIdentityUnavailableError(
-                    "Git query is temporarily unavailable"
-                )
+                raise project_identity.ProjectIdentityUnavailableError("transient")
             return b"git version 2.44.0\n"
 
         monkeypatch.setattr(project_identity, "_run_git_command", flaky)
-
-        with pytest.raises(project_identity.ProjectIdentityUnavailableError):
+        with project_identity.git_capability_probe_scope():
+            with pytest.raises(project_identity.ProjectIdentityUnavailableError):
+                project_identity._require_supported_git()
             project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert attempts["n"] == 2
-        # and now the success is cached
-        project_identity._require_supported_git()
+            project_identity._require_supported_git()
         assert attempts["n"] == 2
 
-    def test_version_rejection_is_not_cached(self, monkeypatch) -> None:
-        outputs = [b"git version 2.20.0\n", b"git version 2.44.0\n"]
+    @pytest.mark.asyncio
+    async def test_concurrent_scopes_are_isolated(self, monkeypatch) -> None:
+        import asyncio
 
-        def upgrading(*arguments: str, executable: str = "git") -> bytes:
-            assert arguments == ("--version",)
-            return outputs.pop(0)
+        calls = self._counting_probe(monkeypatch)
 
-        monkeypatch.setattr(project_identity, "_run_git_command", upgrading)
+        async def one_scope() -> None:
+            with project_identity.git_capability_probe_scope():
+                project_identity._require_supported_git()
+                await asyncio.sleep(0)
+                project_identity._require_supported_git()
 
-        with pytest.raises(project_identity.ProjectIdentityGitVersionError):
-            project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert outputs == []
+        await asyncio.gather(one_scope(), one_scope())
+        assert calls["n"] == 2

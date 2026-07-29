@@ -59,6 +59,7 @@ from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
+    git_capability_probe_scope,
     resolve_managed_project_identity,
     resolve_project_identity,
 )
@@ -8521,7 +8522,23 @@ class OrchestratorRunner:
 
         This allows callers such as MCP handlers to return stable tracking IDs
         immediately and then start the actual runtime work asynchronously.
+
+        Contract construction and the publication-boundary revalidation each
+        resolve project identity, so the whole preparation shares one Git
+        capability probe (#1796); outside this scope every resolution keeps
+        probing on its own.
         """
+        with git_capability_probe_scope():
+            return await self._prepare_session_scoped(
+                seed, execution_id=execution_id, session_id=session_id
+            )
+
+    async def _prepare_session_scoped(
+        self,
+        seed: Seed,
+        execution_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Result[SessionTracker, OrchestratorError]:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None

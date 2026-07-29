@@ -2177,22 +2177,8 @@ async def test_resume_identity_unavailable_stays_paused_and_releases_claim_for_r
             unavailable = patch(patch_target, new=selective_stat)
         else:
             unavailable = patch(patch_target, side_effect=failure)
-        # #1796 binds the capability cache to the resolved executable
-        # identity, so simulating a vanished git means the PATH lookup fails
-        # too — the warm cache then invalidates itself and the production
-        # sequence (prepare verified git, git disappears, resume blocks)
-        # runs without any manual cache manipulation.
-        if case == "git-unavailable":
-            from ouroboros.core import project_identity as project_identity_module
-
-            with (
-                unavailable,
-                patch.object(project_identity_module.shutil, "which", lambda _n: None),
-            ):
-                result = await runner.resume_session(tracker.session_id, _seed())
-        else:
-            with unavailable:
-                result = await runner.resume_session(tracker.session_id, _seed())
+        with unavailable:
+            result = await runner.resume_session(tracker.session_id, _seed())
 
         assert result.is_err
         assert result.error.details.get("resume_blocked") == "project_identity_unavailable", (
@@ -7006,3 +6992,38 @@ def test_diagnostic_contract_builds_do_not_leak_registry_issuances() -> None:
         assert contract["foundation_a_authority"]["scope"] == "process_local"
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+
+
+@pytest.mark.asyncio
+async def test_prepare_session_shares_one_capability_probe(tmp_path: Path) -> None:
+    """#1796: contract build + publication revalidation share one git probe."""
+    from unittest.mock import patch as _patch
+
+    from ouroboros.core import project_identity as project_identity_module
+
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'probe-scope.db'}")
+    await event_store.initialize()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = _CountingRuntime()
+    runtime.working_directory = str(workspace)
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+
+    probes = {"n": 0}
+    real = project_identity_module._run_git_command
+
+    def counting(*arguments: str) -> bytes:
+        if arguments == ("--version",):
+            probes["n"] += 1
+        return real(*arguments)
+
+    with _patch.object(project_identity_module, "_run_git_command", counting):
+        prepared = await runner.prepare_session(
+            _seed(), execution_id="exec-probe-scope", session_id="session-probe-scope"
+        )
+
+    assert prepared.is_ok
+    assert probes["n"] == 1, (
+        f"expected one shared capability probe per session start, got {probes['n']}"
+    )
+    await event_store.close()
