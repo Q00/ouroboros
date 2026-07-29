@@ -475,8 +475,6 @@ class TestMCPClientAdapterCapabilities:
         assert capabilities.experimental is True
         assert capabilities.details["tools"]["listChanged"] is True
         assert capabilities.details["experimental"]["com.example/jobs"]["version"] == 2
-        assert capabilities.details["experimental"]["com.example/jobs"]["modes"] == (
-            "shared",
-        )
+        assert capabilities.details["experimental"]["com.example/jobs"]["modes"] == ("shared",)
         with pytest.raises(TypeError):
             capabilities.details["tools"]["listChanged"] = False

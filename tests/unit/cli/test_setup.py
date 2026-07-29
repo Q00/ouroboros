@@ -1197,13 +1197,9 @@ class TestClaudeSetup:
         "which_side_effect",
         [
             # uvx available → isolated MCP 2 entry
-            (
-                lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
-            ),
+            (lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,),
             # no uvx → pipx provides another isolated package environment
-            (
-                lambda cmd: "/usr/local/bin/pipx" if cmd == "pipx" else None,
-            ),
+            (lambda cmd: "/usr/local/bin/pipx" if cmd == "pipx" else None,),
         ],
         ids=["uvx", "pipx-isolated"],
     )
