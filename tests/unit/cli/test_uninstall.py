@@ -267,6 +267,30 @@ class TestRemoveCodexMcp:
         assert parsed["mcp_servers"]["other"]["command"] == "other"
         assert "mcp_servers = {" not in content
 
+    def test_removal_preserves_mcp_like_multiline_text(self, tmp_path: Path) -> None:
+        """Uninstall removes the real entry without rewriting string contents."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        instructions = (
+            'operator notes\n[mcp_servers]\nouroboros = { command = "do-not-remove", args = [] }'
+        )
+        codex_config.write_text(
+            'instructions = """operator notes\n[mcp_servers]\n'
+            'ouroboros = { command = "do-not-remove", args = [] }"""\n\n'
+            '[mcp_servers.ouroboros]\ncommand = "uvx"\n'
+            'args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        parsed = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+
+        assert result is True
+        assert parsed["instructions"] == instructions
+        assert "ouroboros" not in parsed.get("mcp_servers", {})
+
     def test_managed_comment_block_only_removes_known_prefix(self, tmp_path: Path) -> None:
         """Comment block removal stops at blank lines (non-# lines)."""
         codex_config = tmp_path / ".codex" / "config.toml"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib.resources
@@ -62,6 +62,19 @@ class CodexArtifactInstallResult:
 
     rules_path: Path
     skill_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CodexArtifactGeneration:
+    """Exact target generation authored by one artifact mutation."""
+
+    target_path: Path
+    source_path: Path | None = None
+    contents: bytes | None = None
+    missing: bool = False
+
+
+CodexArtifactGenerationCallback = Callable[[CodexArtifactGeneration], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +394,7 @@ def install_codex_rules(
     rules_path: str | Path | None = None,
     rules_dir: str | Path | None = None,
     prune: bool = False,
+    on_generation: CodexArtifactGenerationCallback | None = None,
 ) -> Path:
     """Install or refresh packaged Ouroboros rules into ``~/.codex/rules``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "rules")
@@ -399,15 +413,26 @@ def install_codex_rules(
             target_path = target_root / source_path.name
             if _installed_artifact_exists(target_path):
                 _remove_installed_artifact(target_path)
+                if on_generation is not None:
+                    on_generation(CodexArtifactGeneration(target_path, missing=True))
 
             if source_path == primary_source_path:
-                target_path.write_text(
-                    _render_codex_rules(source_path.read_text(encoding="utf-8")),
-                    encoding="utf-8",
-                )
+                rendered = _render_codex_rules(source_path.read_text(encoding="utf-8"))
+                target_path.write_text(rendered, encoding="utf-8")
+                target_path.chmod(source_path.stat().st_mode & 0o7777)
+                if on_generation is not None:
+                    on_generation(
+                        CodexArtifactGeneration(
+                            target_path,
+                            source_path=source_path,
+                            contents=rendered.encode("utf-8"),
+                        )
+                    )
                 primary_target_path = target_path
             else:
                 shutil.copy2(source_path, target_path)
+                if on_generation is not None:
+                    on_generation(CodexArtifactGeneration(target_path, source_path=source_path))
             installed_names.add(target_path.name)
 
     if prune:
@@ -416,6 +441,8 @@ def install_codex_rules(
                 continue
             if _is_namespaced_rule_artifact(installed_path):
                 _remove_installed_artifact(installed_path)
+                if on_generation is not None:
+                    on_generation(CodexArtifactGeneration(installed_path, missing=True))
 
     if primary_target_path is None:
         msg = "Packaged Ouroboros rules file could not be located"
@@ -429,6 +456,7 @@ def install_codex_skills(
     codex_dir: str | Path | None = None,
     skills_dir: str | Path | None = None,
     prune: bool = False,
+    on_generation: CodexArtifactGenerationCallback | None = None,
 ) -> tuple[Path, ...]:
     """Install or refresh packaged Ouroboros skills into ``~/.codex/skills/ouroboros-*``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "skills")
@@ -445,8 +473,24 @@ def install_codex_skills(
             target_path = target_root / packaged_skill.install_dir_name
             if _installed_artifact_exists(target_path):
                 _remove_installed_artifact(target_path)
+                if on_generation is not None:
+                    on_generation(CodexArtifactGeneration(target_path, missing=True))
 
-            shutil.copytree(packaged_skill.source_dir, target_path)
+            try:
+                shutil.copytree(packaged_skill.source_dir, target_path)
+            except Exception:
+                if _installed_artifact_exists(target_path):
+                    _remove_installed_artifact(target_path)
+                if on_generation is not None:
+                    on_generation(CodexArtifactGeneration(target_path, missing=True))
+                raise
+            if on_generation is not None:
+                on_generation(
+                    CodexArtifactGeneration(
+                        target_path,
+                        source_path=packaged_skill.source_dir,
+                    )
+                )
             installed_paths.append(target_path)
 
         if prune:
@@ -456,6 +500,8 @@ def install_codex_skills(
                     and installed_path.name not in installed_names
                 ):
                     _remove_installed_artifact(installed_path)
+                    if on_generation is not None:
+                        on_generation(CodexArtifactGeneration(installed_path, missing=True))
 
     return tuple(installed_paths)
 
@@ -464,19 +510,30 @@ def install_codex_artifacts(
     *,
     codex_dir: str | Path | None = None,
     prune: bool = True,
+    on_generation: CodexArtifactGenerationCallback | None = None,
 ) -> CodexArtifactInstallResult:
     """Install or refresh all packaged Ouroboros Codex artifacts.
 
     This intentionally only touches managed Codex rules and skills. It does
     not read or write ``~/.codex/config.toml`` or ``~/.ouroboros/config.yaml``.
     """
-    rules_path = install_codex_rules(codex_dir=codex_dir, prune=prune)
-    skill_paths = install_codex_skills(codex_dir=codex_dir, prune=prune)
+    rules_path = install_codex_rules(
+        codex_dir=codex_dir,
+        prune=prune,
+        on_generation=on_generation,
+    )
+    skill_paths = install_codex_skills(
+        codex_dir=codex_dir,
+        prune=prune,
+        on_generation=on_generation,
+    )
     return CodexArtifactInstallResult(rules_path=rules_path, skill_paths=skill_paths)
 
 
 __all__ = [
     "CodexArtifactInstallResult",
+    "CodexArtifactGeneration",
+    "CodexArtifactGenerationCallback",
     "CodexManagedArtifact",
     "CodexPackagedAssets",
     "CodexPackagedSkill",

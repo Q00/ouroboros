@@ -599,6 +599,8 @@ def _has_managed_codex_mcp_comment(raw: str) -> bool:
     lines = raw.splitlines()
     expected = list(_CODEX_MCP_COMMENT_LINES)
     for index, line in enumerate(lines):
+        if not _toml_line_starts_structure(lines, index):
+            continue
         if not _is_codex_ouroboros_table_header(line.strip()):
             continue
         comment_end = index
@@ -710,7 +712,8 @@ def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:
     while index < len(input_lines):
         line = input_lines[index]
         stripped = line.strip()
-        path = _toml_table_header_path(stripped)
+        starts_structure = _toml_line_starts_structure(input_lines, index)
+        path = _toml_table_header_path(stripped) if starts_structure else None
         is_worker_root = path == ("profiles", _CODEX_WORKER_PROFILE_NAME)
         if is_worker_root and not refreshed:
             existed_before = True
@@ -721,7 +724,7 @@ def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:
             output_lines.extend(section_lines)
             index += 1
             continue
-        if _is_codex_ouroboros_worker_profile_header(stripped):
+        if starts_structure and _is_codex_ouroboros_worker_profile_header(stripped):
             existed_before = True
             output_lines.append(line)
             index += 1
@@ -926,6 +929,11 @@ def _toml_fragment_is_complete(lines: list[str]) -> bool:
     return True
 
 
+def _toml_line_starts_structure(lines: list[str], index: int) -> bool:
+    """Return whether *index* begins outside any multiline TOML value."""
+    return _toml_fragment_is_complete(lines[:index])
+
+
 def _toml_table_boundary_is_real(lines: list[str], section_start: int, boundary_index: int) -> bool:
     """Return whether a header-looking line is outside multiline TOML values."""
     return _toml_fragment_is_complete(lines[section_start:boundary_index])
@@ -995,11 +1003,12 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
     while index < len(input_lines):
         line = input_lines[index]
         stripped = line.strip()
-        path = _toml_table_header_path(stripped)
+        starts_structure = _toml_line_starts_structure(input_lines, index)
+        path = _toml_table_header_path(stripped) if starts_structure else None
         if path is not None:
             current_table_path = path
 
-        if _is_codex_ouroboros_table_header(stripped):
+        if starts_structure and _is_codex_ouroboros_table_header(stripped):
             existed_before = True
             preserved_comments: list[str] = []
             _trim_managed_codex_comments(output_lines)
@@ -1023,7 +1032,11 @@ def _remove_codex_mcp_section(raw: str) -> tuple[str, bool]:
                 output_lines.extend(preserved_comments)
             continue
 
-        assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        assignment_path = (
+            _toml_assignment_path(stripped, parent_path=current_table_path or ())
+            if starts_structure
+            else None
+        )
         if assignment_path == ("mcp_servers",):
             rewritten = _remove_key_from_root_inline_table_assignment(
                 input_lines,
@@ -1325,6 +1338,8 @@ def _legacy_codex_profile_section_is_generated(
     """Return whether a legacy profile section is byte-equivalent to setup output."""
     input_lines = raw.splitlines()
     for index, line in enumerate(input_lines):
+        if not _toml_line_starts_structure(input_lines, index):
+            continue
         path = _toml_table_header_path(line)
         if path != ("profiles", profile_name):
             continue
@@ -1334,7 +1349,9 @@ def _legacy_codex_profile_section_is_generated(
         end = index + 1
         while end < len(input_lines):
             stripped = input_lines[end].strip()
-            is_table_header = _is_toml_table_header(stripped)
+            is_table_header = _toml_line_starts_structure(
+                input_lines, end
+            ) and _is_toml_table_header(stripped)
             if is_table_header and not _is_codex_ouroboros_profile_header(stripped, {profile_name}):
                 break
             end += 1
@@ -1368,10 +1385,11 @@ def _remove_codex_legacy_profile_sections(
     current_table_path: tuple[str, ...] | None = None
     while index < len(input_lines):
         stripped = input_lines[index].strip()
-        path = _toml_table_header_path(stripped)
+        starts_structure = _toml_line_starts_structure(input_lines, index)
+        path = _toml_table_header_path(stripped) if starts_structure else None
         if path is not None:
             current_table_path = path
-        if _is_codex_ouroboros_profile_header(stripped, profile_names):
+        if starts_structure and _is_codex_ouroboros_profile_header(stripped, profile_names):
             _trim_managed_codex_worker_profile_comments(output_lines)
             while output_lines and output_lines[-1] == _CODEX_PROFILE_COMMENT:
                 output_lines.pop()
@@ -1392,7 +1410,11 @@ def _remove_codex_legacy_profile_sections(
                 index += 1
             continue
 
-        assignment_path = _toml_assignment_path(stripped, parent_path=current_table_path or ())
+        assignment_path = (
+            _toml_assignment_path(stripped, parent_path=current_table_path or ())
+            if starts_structure
+            else None
+        )
         if assignment_path == ("profiles",):
             rewritten = _remove_key_from_root_inline_table_assignment(
                 input_lines,
@@ -1516,7 +1538,11 @@ def _warn_preserved_legacy_codex_profiles(codex_config: Path, profile_names: set
     )
 
 
-def _retire_codex_default_profiles(*, protected_profile_names: set[str] | None = None) -> None:
+def _retire_codex_default_profiles(
+    *,
+    protected_profile_names: set[str] | None = None,
+    expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+) -> None:
     """Remove only untouched task-profile anchors superseded by per-run effort.
 
     The task profiles used to contain nothing but a reasoning-effort setting.
@@ -1543,7 +1569,9 @@ def _retire_codex_default_profiles(*, protected_profile_names: set[str] | None =
             }
             if removable:
                 updated_raw, _ = _remove_codex_legacy_profile_sections(raw, removable)
-                _atomic_write_text(codex_config, updated_raw)
+                written_snapshot = _atomic_write_text(codex_config, updated_raw)
+                if expected_snapshots is not None:
+                    expected_snapshots[codex_config] = written_snapshot
                 removed.extend(sorted(removable))
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"Could not parse {codex_config}: {exc}") from exc
@@ -1555,6 +1583,8 @@ def _retire_codex_default_profiles(*, protected_profile_names: set[str] | None =
         try:
             if profile_path.read_text(encoding="utf-8") == _render_codex_profile_v2_file(settings):
                 profile_path.unlink()
+                if expected_snapshots is not None:
+                    expected_snapshots[profile_path] = _PathSnapshot(kind="missing")
                 removed.append(name)
         except OSError:
             continue
@@ -1818,8 +1848,7 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
                 return False
             if profile_exists:
                 profile_snapshot = _snapshot_path(profile_path)
-            _atomic_write_text(profile_path, profile_content)
-            profile_expected_snapshot = _snapshot_path(profile_path)
+            profile_expected_snapshot = _atomic_write_text(profile_path, profile_content)
             created_profile = True
         if updated_raw != raw:
             try:
@@ -2071,15 +2100,40 @@ def _codex_home_candidate_for_setup() -> Path:
     return Path.home() / ".codex"
 
 
-def _install_codex_artifacts(codex_dir: str | Path | None = None) -> bool:
+def _install_codex_artifacts(
+    codex_dir: str | Path | None = None,
+    *,
+    expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+) -> bool:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
-    from ouroboros.codex import install_codex_artifacts
+    from ouroboros.codex import CodexArtifactGeneration, install_codex_artifacts
 
     install_target = _codex_home_candidate_for_setup() if codex_dir is None else codex_dir
     display_dir = Path(install_target).expanduser()
 
+    def _record_generation(generation: CodexArtifactGeneration) -> None:
+        if expected_snapshots is None:
+            return
+        if generation.missing:
+            expected_snapshots[generation.target_path] = _PathSnapshot(kind="missing")
+            return
+        if generation.source_path is None:
+            raise ValueError("Artifact generation is missing its source path")
+        source_snapshot = _snapshot_path(generation.source_path)
+        if generation.contents is not None:
+            source_snapshot = _PathSnapshot(
+                kind="file",
+                mode=source_snapshot.mode,
+                contents=generation.contents,
+            )
+        expected_snapshots[generation.target_path] = source_snapshot
+
     try:
-        result = install_codex_artifacts(codex_dir=install_target, prune=True)
+        result = install_codex_artifacts(
+            codex_dir=install_target,
+            prune=True,
+            on_generation=_record_generation,
+        )
         print_success(f"Installed Codex rules → {result.rules_path}")
         print_success(
             f"Installed {len(result.skill_paths)} Codex skills → {display_dir / 'skills'}"
@@ -2326,35 +2380,6 @@ def _restore_managed_codex_setup_paths(
             None if expected_current is None else expected_current.get(path),
             restore_link_targets=False,
         )
-
-
-def _snapshot_codex_artifact_setup_paths(codex_home: Path) -> dict[Path, _PathSnapshot]:
-    """Snapshot only managed Codex instruction artifact paths."""
-    artifact_roots = (codex_home / "rules", codex_home / "skills")
-    return {
-        path: _snapshot_path(path)
-        for path in _managed_codex_setup_paths(codex_home)
-        if any(path == root or root in path.parents for root in artifact_roots)
-    }
-
-
-def _snapshot_codex_profile_setup_paths(
-    codex_home: Path,
-    *,
-    config_baseline: _PathSnapshot | None = None,
-) -> dict[Path, _PathSnapshot]:
-    """Snapshot managed Codex profile paths after setup-owned profile retirement."""
-    snapshots: dict[Path, _PathSnapshot] = {}
-    for path in _managed_codex_setup_paths(codex_home):
-        if path.name.endswith(".config.toml"):
-            snapshots[path] = _snapshot_path(path)
-            continue
-        if path.name != "config.toml":
-            continue
-        current_snapshot = _snapshot_path(path)
-        if config_baseline is None or current_snapshot != config_baseline:
-            snapshots[path] = current_snapshot
-    return snapshots
 
 
 def _snapshot_created_directory_topology(paths: tuple[Path, ...]) -> dict[Path, bool]:
@@ -2652,23 +2677,17 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
     try:
         # Install Codex-native rules and skills into the active Codex home.
-        if not _install_codex_artifacts():
+        artifact_expected_snapshots: dict[Path, _PathSnapshot] = {}
+        if not _install_codex_artifacts(expected_snapshots=artifact_expected_snapshots):
             if managed_codex_expected_snapshot is not None:
-                managed_codex_expected_snapshot.update(
-                    _snapshot_codex_artifact_setup_paths(codex_home)
-                )
+                managed_codex_expected_snapshot.update(artifact_expected_snapshots)
             raise OSError("Codex artifact installation failed")
         if managed_codex_expected_snapshot is not None:
-            managed_codex_expected_snapshot.update(_snapshot_codex_artifact_setup_paths(codex_home))
-        codex_config_before_profile_retirement = _snapshot_path(codex_home / "config.toml")
-        _retire_codex_default_profiles(protected_profile_names=protected_legacy_profiles)
-        if managed_codex_expected_snapshot is not None:
-            managed_codex_expected_snapshot.update(
-                _snapshot_codex_profile_setup_paths(
-                    codex_home,
-                    config_baseline=codex_config_before_profile_retirement,
-                )
-            )
+            managed_codex_expected_snapshot.update(artifact_expected_snapshots)
+        _retire_codex_default_profiles(
+            protected_profile_names=protected_legacy_profiles,
+            expected_snapshots=managed_codex_expected_snapshot,
+        )
         if not _register_codex_worker_profile(codex_path=codex_path):
             raise OSError("Codex worker profile registration failed")
     except (OSError, TypeError, ValueError) as exc:
