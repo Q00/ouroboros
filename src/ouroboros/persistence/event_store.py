@@ -106,19 +106,29 @@ async def _run_to_settlement[T](coro: Coroutine[Any, Any, T]) -> T:
     inner: asyncio.Task[T] = asyncio.ensure_future(coro)
     try:
         return await asyncio.shield(inner)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as caller_cancellation:
         while not inner.done():
             try:
                 await asyncio.shield(inner)
             except asyncio.CancelledError:
+                # A further caller cancellation — keep settling.
                 continue
-        if not inner.cancelled() and inner.exception() is not None:
-            # Cancellation outranks the write's own failure; consume it so the
-            # loop does not warn about an unretrieved task exception.
+            except Exception:
+                # The transaction settled by failing; the loop exits below.
+                break
+        settlement_error: BaseException | None = None
+        if not inner.cancelled():
+            settlement_error = inner.exception()
+        if settlement_error is not None:
+            # Cancellation outranks the write's own failure: lifecycle code
+            # awaiting a cancelled task must still observe CancelledError
+            # (e.g. the watchdog's decision batch depends on it). The
+            # transaction failure is preserved as the cause.
             logger.debug(
                 "event_store.append.settled_with_error",
-                exc_info=inner.exception(),
+                exc_info=settlement_error,
             )
+            raise caller_cancellation from settlement_error
         raise
 
 

@@ -2352,6 +2352,66 @@ class TestCancellationSettlement:
         await store.close()
 
     @pytest.mark.asyncio
+    async def test_cancelled_append_with_failing_commit_still_raises_cancellation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A settling transaction that fails must not replace the cancellation.
+
+        The caller was cancelled; the write's own failure is secondary and is
+        chained as the cause, so lifecycle code awaiting a cancelled task
+        (e.g. the watchdog) still sees CancelledError and proceeds to its
+        durable decision batch.
+        """
+        import aiosqlite
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def failing_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            raise RuntimeError("commit blew up mid-settlement")
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", failing_commit)
+
+        task = asyncio.create_task(store.append(_make_event(aggregate_id="fail-append")))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await asyncio.wait_for(task, timeout=5)
+        assert exc_info.value.__cause__ is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_batch_with_failing_commit_still_raises_cancellation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import aiosqlite
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def failing_commit(self):  # noqa: ANN001, ANN202
+            entered.set()
+            await gate.wait()
+            raise RuntimeError("batch commit blew up mid-settlement")
+
+        monkeypatch.setattr(aiosqlite.Connection, "commit", failing_commit)
+
+        task = asyncio.create_task(store.append_batch([_make_event(aggregate_id="fail-batch")]))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+    @pytest.mark.asyncio
     async def test_cancelled_append_batch_settles_before_cancellation_surfaces(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
