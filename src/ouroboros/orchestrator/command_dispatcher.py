@@ -82,6 +82,9 @@ class CodexCommandDispatcher:
                 "external:MCPServerAdapter.call_tool": self._callable_implementation_digest(
                     MCPServerAdapter.call_tool
                 ),
+                "external:worker_cwd_failure_message": self._callable_implementation_digest(
+                    worker_cwd_failure_message
+                ),
             }
         )
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -98,9 +101,49 @@ class CodexCommandDispatcher:
             "module": getattr(function, "__module__", None),
             "qualname": getattr(function, "__qualname__", None),
             "code": CodexCommandDispatcher._code_object_identity_payload(code),
+            "defaults": CodexCommandDispatcher._identity_value_payload(
+                getattr(function, "__defaults__", None)
+            ),
+            "kwdefaults": CodexCommandDispatcher._identity_value_payload(
+                getattr(function, "__kwdefaults__", None)
+            ),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _identity_value_payload(value: object) -> object:
+        """Serialize implementation values without process-local addresses."""
+        if isinstance(value, CodeType):
+            return {
+                "type": "code",
+                "payload": CodexCommandDispatcher._code_object_identity_payload(value),
+            }
+        if isinstance(value, tuple):
+            return {
+                "type": "tuple",
+                "items": [CodexCommandDispatcher._identity_value_payload(item) for item in value],
+            }
+        if isinstance(value, list):
+            return [CodexCommandDispatcher._identity_value_payload(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): CodexCommandDispatcher._identity_value_payload(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, frozenset):
+            return {
+                "type": "frozenset",
+                "items": sorted(
+                    (CodexCommandDispatcher._identity_value_payload(item) for item in value),
+                    key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+                ),
+            }
+        if isinstance(value, bytes):
+            return {"type": "bytes", "hex": value.hex()}
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+        return {"type": type(value).__name__, "repr": repr(value)}
 
     @staticmethod
     def _code_object_identity_payload(code: CodeType) -> dict[str, object]:
@@ -112,28 +155,6 @@ class CodexCommandDispatcher:
         changes.
         """
 
-        def _const_payload(value: object) -> object:
-            if isinstance(value, CodeType):
-                return {
-                    "type": "code",
-                    "payload": CodexCommandDispatcher._code_object_identity_payload(value),
-                }
-            if isinstance(value, tuple):
-                return {"type": "tuple", "items": [_const_payload(item) for item in value]}
-            if isinstance(value, frozenset):
-                return {
-                    "type": "frozenset",
-                    "items": sorted(
-                        (_const_payload(item) for item in value),
-                        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
-                    ),
-                }
-            if isinstance(value, bytes):
-                return {"type": "bytes", "hex": value.hex()}
-            if value is None or isinstance(value, str | int | float | bool):
-                return value
-            return {"type": type(value).__name__, "repr": repr(value)}
-
         return {
             "argcount": code.co_argcount,
             "posonlyargcount": code.co_posonlyargcount,
@@ -142,7 +163,9 @@ class CodexCommandDispatcher:
             "stacksize": code.co_stacksize,
             "flags": code.co_flags,
             "bytecode": code.co_code.hex(),
-            "consts": [_const_payload(const) for const in code.co_consts],
+            "consts": [
+                CodexCommandDispatcher._identity_value_payload(const) for const in code.co_consts
+            ],
             "names": list(code.co_names),
             "varnames": list(code.co_varnames),
             "freevars": list(code.co_freevars),

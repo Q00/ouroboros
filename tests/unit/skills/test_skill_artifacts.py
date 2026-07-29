@@ -816,6 +816,18 @@ def test_active_conductor_skill_copies_cover_start_and_progress_briefing() -> No
             assert "runtime" in normalized and "harness" in normalized
 
 
+def test_run_skill_copies_preserve_automatic_model_tier_omission() -> None:
+    """Normal run guidance must not silently turn omission into a medium-tier pin."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        text = (root / "run" / "SKILL.md").read_text(encoding="utf-8")
+        compact = " ".join(text.lower().split())
+        assert 'model_tier: "medium"' not in text
+        assert "omit `model_tier` by default" in compact
+        assert "only when the user explicitly requested a tier" in compact
+
+
 def test_active_conductor_skill_copies_cover_synapse_and_audited_action_order() -> None:
     repo_root = Path(__file__).resolve().parents[3]
 

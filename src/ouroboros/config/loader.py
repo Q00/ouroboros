@@ -999,6 +999,16 @@ def get_execution_model() -> str | None:
     return None if not stripped or stripped.lower() in {"default", "current"} else stripped
 
 
+def resolve_execution_model(runtime_backend: str | None) -> str | None:
+    """Resolve the exact Execute-stage model pin shared by CLI, MCP, and config views."""
+    execution_model = get_execution_model()
+    if execution_model is not None:
+        return execution_model
+    if (runtime_backend or "").strip().lower() in {"claude", "claude_code"}:
+        return DEFAULT_SONNET_MODEL
+    return None
+
+
 def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
     """Parse a worker-cap setting without validating unrelated config keys."""
     if isinstance(value, bool):

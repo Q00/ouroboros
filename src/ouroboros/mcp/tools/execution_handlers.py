@@ -18,11 +18,10 @@ from rich.console import Console
 import structlog
 import yaml
 
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import (
     get_auto_evaluate_enabled,
-    get_execution_model,
     get_max_parallel_workers,
+    resolve_execution_model,
 )
 from ouroboros.core.conductor import (
     ConductorDirective,
@@ -177,22 +176,6 @@ def _process_local_resume_block_error(
             "resume_blocked": resume_blocked,
         },
     )
-
-
-def _resolve_execution_model(runtime_backend: str | None) -> str | None:
-    """Resolve the model pin for agent-runtime execution tasks.
-
-    The one-off ``OUROBOROS_EXECUTION_MODEL`` override and persisted
-    ``execution.default_model`` setting use the same resolver across execute-
-    seed, auto handoff, and evolution. This keeps a deliberate model pin
-    consistent without changing a runtime's global default when unset.
-    """
-    execution_model = get_execution_model()
-    if execution_model is not None:
-        return execution_model
-    if runtime_backend == "claude":
-        return DEFAULT_SONNET_MODEL
-    return None
 
 
 def _resolve_model_tier_request(
@@ -1603,7 +1586,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     )
                     agent_adapter = create_agent_runtime(
                         backend=self.agent_runtime_backend,
-                        model=_resolve_execution_model(self.agent_runtime_backend),
+                        model=resolve_execution_model(self.agent_runtime_backend),
                         cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
                         llm_backend=self.llm_backend,
                         startup_output_timeout_seconds=0,

@@ -21,12 +21,11 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import (
     get_config_dir,
-    get_execution_model,
     get_max_parallel_workers,
     load_config,
+    resolve_execution_model,
 )
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
@@ -44,15 +43,6 @@ from ouroboros.orchestrator.decomposition_limits import (
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
 )
-
-
-def _resolve_execution_model(runtime_backend: str | None) -> str | None:
-    execution_model = get_execution_model()
-    if execution_model is not None:
-        return execution_model
-    if runtime_backend == "claude":
-        return DEFAULT_SONNET_MODEL
-    return None
 
 
 def _execution_model_status(runtime_backend: str | None, model: str | None) -> str:
@@ -730,7 +720,7 @@ async def _run_orchestrator(
     if debug:
         print_info(f"Execution runtime: {resolved_runtime_backend}")
 
-    execution_model = _resolve_execution_model(resolved_runtime_backend)
+    execution_model = resolve_execution_model(resolved_runtime_backend)
     print_info(_execution_model_status(resolved_runtime_backend, execution_model))
     adapter = create_agent_runtime(
         backend=resolved_runtime_backend,

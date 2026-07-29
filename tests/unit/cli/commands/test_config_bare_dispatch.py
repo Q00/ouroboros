@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.config import app
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner()
 
@@ -428,7 +429,7 @@ def test_show_json_normalizes_execute_current_sentinel_through_loader(
 
     assert result.exit_code == 0, result.output
     execute = json.loads(result.output)["stages"]["execute"]
-    assert execute["model"] == "backend default"
+    assert execute["model"] == DEFAULT_SONNET_MODEL
     assert execute["model_source"] == "config → backend default"
 
 

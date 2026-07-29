@@ -406,20 +406,19 @@ def _resolved_stage_model_for_display(
     """Render the model value using the same stage-specific loader semantics."""
     from ouroboros.config.loader import (
         get_clarification_model,
-        get_execution_model,
         get_reflect_model,
         get_semantic_model,
+        resolve_execution_model,
     )
     from ouroboros.orchestrator_stage import Stage
 
     source_is_env_override = model_source.startswith("env ")
     normalized_source = model_source
     if stage is Stage.EXECUTE:
-        resolved_model = get_execution_model()
+        resolved_model = resolve_execution_model(model_backend)
         normalized_model = resolved_model or "backend default"
         if (
-            resolved_model is None
-            and _is_automatic_model_value(model_value)
+            _is_automatic_model_value(model_value)
             and not source_is_env_override
         ):
             normalized_source = f"{model_source} → backend default"

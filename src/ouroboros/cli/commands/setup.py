@@ -1202,6 +1202,7 @@ def _register_codex_mcp_server(
 
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
+    codex_config_snapshot = _snapshot_path(codex_config)
 
     if codex_config.exists():
         raw = codex_config.read_text(encoding="utf-8")
@@ -1245,7 +1246,11 @@ def _register_codex_mcp_server(
             print_info(str(exc))
             return False
 
-        written_snapshot = _atomic_write_text(codex_config, updated_raw)
+        written_snapshot = _atomic_write_text_if_current_matches(
+            codex_config,
+            updated_raw,
+            codex_config_snapshot,
+        )
         if expected_snapshots is not None:
             expected_snapshots[codex_config] = written_snapshot
         if existed_before:
@@ -1253,7 +1258,11 @@ def _register_codex_mcp_server(
         else:
             print_success(f"Registered Ouroboros MCP server in {codex_config}")
     else:
-        written_snapshot = _atomic_write_text(codex_config, rendered_section.lstrip("\n"))
+        written_snapshot = _atomic_write_text_if_current_matches(
+            codex_config,
+            rendered_section.lstrip("\n"),
+            codex_config_snapshot,
+        )
         if expected_snapshots is not None:
             expected_snapshots[codex_config] = written_snapshot
         print_success(f"Registered Ouroboros MCP server in {codex_config}")
@@ -1605,6 +1614,12 @@ def _retire_codex_default_profiles(
     removed: list[str] = []
     if codex_config.exists():
         try:
+            expected_config = (
+                expected_snapshots[codex_config]
+                if expected_snapshots is not None and codex_config in expected_snapshots
+                else _snapshot_path(codex_config)
+            )
+            config_read_snapshot = _require_path_snapshot(codex_config, expected_config)
             raw = codex_config.read_text(encoding="utf-8")
             parsed = tomllib.loads(raw)
             profiles = parsed.get("profiles")
@@ -1617,7 +1632,11 @@ def _retire_codex_default_profiles(
             }
             if removable:
                 updated_raw, _ = _remove_codex_legacy_profile_sections(raw, removable)
-                written_snapshot = _atomic_write_text(codex_config, updated_raw)
+                written_snapshot = _atomic_write_text_if_current_matches(
+                    codex_config,
+                    updated_raw,
+                    config_read_snapshot,
+                )
                 if expected_snapshots is not None:
                     expected_snapshots[codex_config] = written_snapshot
                 removed.extend(sorted(removable))
@@ -1629,11 +1648,20 @@ def _retire_codex_default_profiles(
             continue
         profile_path = codex_dir / f"{name}.config.toml"
         try:
+            expected_profile = (
+                expected_snapshots[profile_path]
+                if expected_snapshots is not None and profile_path in expected_snapshots
+                else _snapshot_path(profile_path)
+            )
+            profile_read_snapshot = _require_path_snapshot(profile_path, expected_profile)
             if profile_path.read_text(encoding="utf-8") == _render_codex_profile_v2_file(settings):
+                _require_path_snapshot(profile_path, profile_read_snapshot)
                 profile_path.unlink()
                 if expected_snapshots is not None:
                     expected_snapshots[profile_path] = _PathSnapshot(kind="missing")
                 removed.append(name)
+        except _ConcurrentSetupMutationError:
+            raise
         except OSError:
             continue
 
@@ -1814,12 +1842,22 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     print_success(f"Registered Codex task profiles in {codex_config}: {', '.join(added_profiles)}")
 
 
-def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
+def _register_codex_worker_profile(
+    *,
+    codex_path: str | None = None,
+    expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+) -> bool:
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
+    expected_config = (
+        expected_snapshots[codex_config]
+        if expected_snapshots is not None and codex_config in expected_snapshots
+        else _snapshot_path(codex_config)
+    )
+    config_read_snapshot = _require_path_snapshot(codex_config, expected_config)
 
     if codex_config.exists():
         raw = codex_config.read_text(encoding="utf-8")
@@ -1894,9 +1932,17 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
                 )
                 print_info(str(exc))
                 return False
-            if profile_exists:
-                profile_snapshot = _snapshot_path(profile_path)
-            profile_expected_snapshot = _atomic_write_text(profile_path, profile_content)
+            expected_profile = (
+                expected_snapshots[profile_path]
+                if expected_snapshots is not None and profile_path in expected_snapshots
+                else _snapshot_path(profile_path)
+            )
+            profile_snapshot = _require_path_snapshot(profile_path, expected_profile)
+            profile_expected_snapshot = _atomic_write_text_if_current_matches(
+                profile_path,
+                profile_content,
+                profile_snapshot,
+            )
             created_profile = True
         if updated_raw != raw:
             try:
@@ -1909,25 +1955,20 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
                 _rollback_profile_write()
                 return False
             try:
-                current_raw = (
-                    codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
+                written_config_snapshot = _atomic_write_text_if_current_matches(
+                    codex_config,
+                    updated_raw,
+                    config_read_snapshot,
                 )
-            except OSError as exc:
-                print_error(f"Could not read {codex_config} before worker-profile migration.")
-                print_info(str(exc))
+            except _ConcurrentSetupMutationError as exc:
+                print_error(str(exc))
                 _rollback_profile_write()
                 return False
-            if current_raw != raw:
-                print_error(
-                    f"Could not update {codex_config} — it changed during worker-profile migration."
-                )
-                _rollback_profile_write()
-                return False
-            try:
-                _atomic_write_text(codex_config, updated_raw)
             except OSError:
                 _rollback_profile_write()
                 raise
+            if expected_snapshots is not None:
+                expected_snapshots[codex_config] = written_config_snapshot
             _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_success(f"Migrated legacy Codex worker profile out of {codex_config}")
         elif created_profile:
@@ -1936,6 +1977,9 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
         else:
             _warn_preserved_legacy_codex_profiles(codex_config, preserved_legacy_profiles)
             print_info("Codex worker profile-v2 file already present.")
+        if expected_snapshots is not None and created_profile:
+            assert profile_expected_snapshot is not None
+            expected_snapshots[profile_path] = profile_expected_snapshot
         return True
 
     updated_raw, existed_before = _upsert_codex_worker_profile_section(raw)
@@ -1951,7 +1995,13 @@ def _register_codex_worker_profile(*, codex_path: str | None = None) -> bool:
         print_info("Codex worker profile already up to date.")
         return True
 
-    _atomic_write_text(codex_config, updated_raw)
+    written_config_snapshot = _atomic_write_text_if_current_matches(
+        codex_config,
+        updated_raw,
+        config_read_snapshot,
+    )
+    if expected_snapshots is not None:
+        expected_snapshots[codex_config] = written_config_snapshot
     if existed_before:
         print_success(f"Updated Codex worker profile in {codex_config}")
     else:
@@ -2227,6 +2277,10 @@ class _PathSnapshot:
     children: tuple[tuple[str, _PathSnapshot], ...] = ()
 
 
+class _ConcurrentSetupMutationError(OSError):
+    """A managed path no longer matches the generation setup read."""
+
+
 def _snapshot_path(path: Path, *, _seen: frozenset[Path] = frozenset()) -> _PathSnapshot:
     """Snapshot a managed file or directory without following symlinks."""
     try:
@@ -2364,6 +2418,31 @@ def _restore_path_snapshot_if_current_matches(
         restore_link_targets=restore_link_targets,
     )
     return True
+
+
+def _require_path_snapshot(path: Path, expected: _PathSnapshot) -> _PathSnapshot:
+    """Fail closed when a managed path changed since the caller last read it."""
+    current = _snapshot_path(path)
+    if current != expected:
+        raise _ConcurrentSetupMutationError(f"Managed setup path changed concurrently: {path}")
+    return current
+
+
+def _atomic_write_text_if_current_matches(
+    path: Path,
+    content: str,
+    expected_current: _PathSnapshot,
+    *,
+    mode: int | None = None,
+) -> _PathSnapshot:
+    """Atomically replace text only while the caller still owns the read generation."""
+    _require_path_snapshot(path, expected_current)
+    return _atomic_write_text(
+        path,
+        content,
+        mode=mode,
+        expected_current=expected_current,
+    )
 
 
 def _managed_codex_setup_paths(codex_home: Path) -> tuple[Path, ...]:
@@ -2656,7 +2735,7 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
     config_snapshot = _snapshot_path(config_path)
     credentials_snapshot = _snapshot_path(credentials_path)
     managed_codex_expected_snapshot: dict[Path, _PathSnapshot] | None = None
-    config_expected_snapshot: _PathSnapshot | None = None
+    config_expected_snapshot: _PathSnapshot | None = config_snapshot
     credentials_expected_snapshot: _PathSnapshot | None = credentials_snapshot
     try:
         mcp_expected_snapshot: dict[Path, _PathSnapshot] = {}
@@ -2691,14 +2770,17 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
         managed_codex_expected_snapshot = dict(managed_codex_snapshot)
 
     try:
-        config_expected_snapshot = _atomic_write_text(
-            config_path, yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+        config_expected_snapshot = _atomic_write_text_if_current_matches(
+            config_path,
+            yaml.dump(config_dict, default_flow_style=False, sort_keys=False),
+            config_snapshot,
         )
         if fresh_config and not credentials_path.exists():
             credentials_dict = get_default_credentials().model_dump(mode="json")
-            credentials_expected_snapshot = _atomic_write_text(
+            credentials_expected_snapshot = _atomic_write_text_if_current_matches(
                 credentials_path,
                 yaml.dump(credentials_dict, default_flow_style=False, sort_keys=False),
+                credentials_snapshot,
                 mode=0o600,
             )
     except OSError as exc:
@@ -2736,7 +2818,10 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
             protected_profile_names=protected_legacy_profiles,
             expected_snapshots=managed_codex_expected_snapshot,
         )
-        if not _register_codex_worker_profile(codex_path=codex_path):
+        if not _register_codex_worker_profile(
+            codex_path=codex_path,
+            expected_snapshots=managed_codex_expected_snapshot,
+        ):
             raise OSError("Codex worker profile registration failed")
     except (OSError, TypeError, ValueError) as exc:
         _restore_managed_codex_setup_paths(
@@ -4047,7 +4132,13 @@ def _bridge_plugin_source_text() -> str | None:
         return None
 
 
-def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> _PathSnapshot:
+def _atomic_write_text(
+    path: Path,
+    content: str,
+    *,
+    mode: int | None = None,
+    expected_current: _PathSnapshot | None = None,
+) -> _PathSnapshot:
     """Write *content* to *path* atomically — temp file + ``os.replace``.
 
     Readers always see either the pre-existing file or the final content —
@@ -4074,6 +4165,8 @@ def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> 
         os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
+        if expected_current is not None:
+            _require_path_snapshot(path, expected_current)
         os.replace(tmp_name, write_path)
         try:
             os.chmod(write_path, mode)

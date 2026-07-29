@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.config import app
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -152,8 +153,20 @@ class TestConfigShow:
 
         assert result.exit_code == 0
         execute = json.loads(result.output)["stages"]["execute"]
-        assert execute["model"] == "backend default"
+        assert execute["model"] == DEFAULT_SONNET_MODEL
         assert execute["model_source"] == "env OUROBOROS_EXECUTION_MODEL (cleared) ⚠"
+
+    def test_show_json_reports_unpinned_claude_execution_model_truthfully(
+        self, config_dir: Path
+    ) -> None:
+        """The effective view must show the same Claude fallback the executors use."""
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show", "--json"])
+
+        assert result.exit_code == 0
+        execute = json.loads(result.output)["stages"]["execute"]
+        assert execute["model"] == DEFAULT_SONNET_MODEL
+        assert execute["model_source"] == "default → backend default"
 
     def test_show_codex_automatic_model_is_not_presented_as_a_runtime_fact(
         self, codex_config_dir: Path, monkeypatch: pytest.MonkeyPatch

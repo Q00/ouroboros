@@ -87,6 +87,43 @@ class TestCodexCommandDispatcher:
         assert original["implementation_sha256"]
         assert original["implementation_sha256"] != changed["implementation_sha256"]
 
+    def test_stable_identity_tracks_mcp_server_factory_default_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind behavior-affecting factory defaults."""
+        from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+        assert create_ouroboros_server.__kwdefaults__ is not None
+        monkeypatch.setitem(create_ouroboros_server.__kwdefaults__, "durable_jobs", False)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_worker_cwd_failure_helper_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind the dispatcher's fail-closed helper."""
+        from ouroboros.orchestrator import command_dispatcher
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        def replacement_worker_cwd_failure_message(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+            return None
+
+        monkeypatch.setattr(
+            command_dispatcher,
+            "worker_cwd_failure_message",
+            replacement_worker_cwd_failure_message,
+        )
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
     def test_stable_identity_is_stable_across_fresh_interpreters(self) -> None:
         """Portable dispatcher identity must not include process-local code repr addresses."""
         script = (

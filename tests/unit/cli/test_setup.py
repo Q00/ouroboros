@@ -2049,7 +2049,9 @@ class TestCodexSetup:
         mock_retire.assert_called_once()
         assert mock_retire.call_args.kwargs["protected_profile_names"] == set()
         assert isinstance(mock_retire.call_args.kwargs["expected_snapshots"], dict)
-        mock_worker_profile.assert_called_once_with(codex_path="/usr/local/bin/codex")
+        mock_worker_profile.assert_called_once()
+        assert mock_worker_profile.call_args.kwargs["codex_path"] == "/usr/local/bin/codex"
+        assert isinstance(mock_worker_profile.call_args.kwargs["expected_snapshots"], dict)
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
@@ -2087,7 +2089,15 @@ class TestCodexSetup:
         config_dir.mkdir()
         credentials_path = config_dir / "credentials.yaml"
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> None:
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> None:
+            if expected_current is not None:
+                setup_cmd._require_path_snapshot(path, expected_current)
             if path == credentials_path:
                 assert mode == 0o600
                 raise OSError("credentials disk full")
@@ -2281,13 +2291,19 @@ class TestCodexSetup:
 
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> None:
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> None:
             if path == credentials_path:
                 assert mode == 0o600
                 path.write_text(text, encoding="utf-8")
                 path.chmod(0o644)
                 raise OSError("chmod failed")
-            original_write(path, text, mode=mode)
+            original_write(path, text, mode=mode, expected_current=expected_current)
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -2316,10 +2332,16 @@ class TestCodexSetup:
 
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> None:
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> None:
             if path == codex_config and text != raw:
                 raise OSError("config write failed")
-            original_write(path, text, mode=mode)
+            original_write(path, text, mode=mode, expected_current=expected_current)
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -2350,10 +2372,16 @@ class TestCodexSetup:
 
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> None:
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> None:
             if path == codex_config and text != raw:
                 raise OSError("config write failed")
-            original_write(path, text, mode=mode)
+            original_write(path, text, mode=mode, expected_current=expected_current)
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -2381,8 +2409,14 @@ class TestCodexSetup:
 
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> None:
-            original_write(path, text, mode=mode)
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> None:
+            original_write(path, text, mode=mode, expected_current=expected_current)
             if path == profile_path:
                 codex_config.write_text(operator_raw, encoding="utf-8")
 
@@ -2589,8 +2623,19 @@ class TestCodexSetup:
         codex_config.write_text(original_toml, encoding="utf-8")
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> object:
-            snapshot = original_write(path, text, mode=mode)
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> object:
+            snapshot = original_write(
+                path,
+                text,
+                mode=mode,
+                expected_current=expected_current,
+            )
             if path == codex_config and "[mcp_servers.ouroboros]" in text:
                 codex_config.write_text(operator_toml, encoding="utf-8")
             return snapshot
@@ -2640,6 +2685,112 @@ class TestCodexSetup:
         assert config_path.read_text(encoding="utf-8") == original_config
         assert codex_config.read_text(encoding="utf-8") == operator_toml
 
+    def test_setup_codex_refuses_concurrent_config_edit_before_runtime_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """MCP registration must not authorize overwriting a later operator edit."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        operator_config = "operator: config-edit\n"
+
+        def _register(**_kwargs: object) -> bool:
+            config_path.write_text(operator_config, encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_mcp_server",
+                side_effect=_register,
+            ),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert config_path.read_text(encoding="utf-8") == operator_config
+        mock_install.assert_not_called()
+
+    def test_atomic_setup_write_rechecks_generation_immediately_before_replace(
+        self, tmp_path: Path
+    ) -> None:
+        """An edit arriving while the temp file is written must win over setup."""
+        target = tmp_path / "config.yaml"
+        target.write_text("before\n", encoding="utf-8")
+        expected = setup_cmd._snapshot_path(target)
+        original_require = setup_cmd._require_path_snapshot
+        checks = 0
+
+        def _require(path: Path, snapshot: setup_cmd._PathSnapshot) -> setup_cmd._PathSnapshot:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                path.write_text("operator edit\n", encoding="utf-8")
+            return original_require(path, snapshot)
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._require_path_snapshot",
+                side_effect=_require,
+            ),
+            pytest.raises(setup_cmd._ConcurrentSetupMutationError),
+        ):
+            setup_cmd._atomic_write_text_if_current_matches(target, "setup edit\n", expected)
+
+        assert target.read_text(encoding="utf-8") == "operator edit\n"
+        assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+
+    def test_setup_codex_refuses_concurrent_codex_edit_before_profile_retirement(
+        self, tmp_path: Path
+    ) -> None:
+        """A later TOML rewrite must not absorb an edit outside setup's generation."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+            encoding="utf-8",
+        )
+        codex_home = tmp_path / ".codex"
+        codex_home.mkdir()
+        codex_config = codex_home / "config.toml"
+        codex_config.write_text('model = "before"\n', encoding="utf-8")
+        operator_toml = 'model = "operator-edit"\n'
+
+        def _register(**kwargs: object) -> bool:
+            codex_config.write_text('model = "setup-authored"\n', encoding="utf-8")
+            expected = kwargs["expected_snapshots"]
+            assert isinstance(expected, dict)
+            expected[codex_config] = setup_cmd._snapshot_path(codex_config)
+            return True
+
+        def _install(**_kwargs: object) -> bool:
+            codex_config.write_text(operator_toml, encoding="utf-8")
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_mcp_server",
+                side_effect=_register,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_codex_artifacts",
+                side_effect=_install,
+            ),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile") as mock_worker,
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert codex_config.read_text(encoding="utf-8") == operator_toml
+        mock_worker.assert_not_called()
+
     def test_setup_codex_preserves_post_write_ouroboros_config_edits(self, tmp_path: Path) -> None:
         """Authored generations cover config and credentials without a snapshot race."""
         config_dir = tmp_path / ".ouroboros"
@@ -2650,8 +2801,19 @@ class TestCodexSetup:
         operator_credentials = "operator: credentials-edit\n"
         original_write = setup_cmd._atomic_write_text
 
-        def _write(path: Path, text: str, *, mode: int | None = None) -> object:
-            snapshot = original_write(path, text, mode=mode)
+        def _write(
+            path: Path,
+            text: str,
+            *,
+            mode: int | None = None,
+            expected_current: setup_cmd._PathSnapshot | None = None,
+        ) -> object:
+            snapshot = original_write(
+                path,
+                text,
+                mode=mode,
+                expected_current=expected_current,
+            )
             if path == config_path:
                 config_path.write_text(operator_config, encoding="utf-8")
             elif path == credentials_path:
