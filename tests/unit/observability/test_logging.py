@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 from pathlib import Path
+import sys
 import tempfile
 from typing import Any
 from unittest.mock import patch
@@ -558,6 +560,45 @@ class TestResetLogging:
         captured = capsys.readouterr()
         assert "reset.info.must.stay.silent" not in captured.out
         assert "reset.info.must.stay.silent" not in captured.err
+
+    def test_reset_resolves_the_stream_at_emit_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The reset must not pin whatever ``sys.stderr`` happened to be.
+
+        A reset that runs under a capture fixture (``capsys``, or any
+        ``redirect_stderr``) would otherwise bind that fixture's buffer into
+        the global configuration and keep writing to it after teardown --
+        raising on a closed buffer, or silently swallowing later output.
+        Rebinding ``sys.stderr`` after the reset and asserting the new stream
+        receives the record is the direct proof that the lookup is late.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="INFO"))
+        reset_logging()
+
+        replacement = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", replacement)
+        structlog.get_logger("reset.stream.probe").info("reset.late.bound.stream")
+
+        assert "reset.late.bound.stream" in replacement.getvalue()
+
+    def test_reset_keeps_console_suppression(self, capsys: Any) -> None:
+        """``set_console_logging(False)`` must survive the reset.
+
+        Only ``_FileWritingPrintLogger`` consults ``_console_logging_enabled``.
+        Reconfiguring onto a plain ``structlog.PrintLoggerFactory`` would route
+        around that gate and silently re-enable console output for a process
+        that had asked for silence.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="INFO"))
+        set_console_logging(False)
+        try:
+            reset_logging()
+            structlog.get_logger("reset.console.probe").info("reset.console.must.stay.off")
+
+            captured = capsys.readouterr()
+            assert "reset.console.must.stay.off" not in captured.out
+            assert "reset.console.must.stay.off" not in captured.err
+        finally:
+            set_console_logging(True)
 
 
 class TestIsConfigured:

@@ -45,7 +45,6 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
-import sys
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -637,6 +636,17 @@ def reset_logging() -> None:
     regression. ``_configured`` stays false and ``_current_config`` stays
     ``None``, so the next :func:`get_logger` still performs a full
     reconfiguration.
+
+    The stream is carried by reusing the project's own factory with no file
+    handler, not by handing ``sys.stderr`` to ``structlog.PrintLoggerFactory``.
+    Two reasons, both of which a captured stream gets wrong.
+    ``_FileWritingPrintLogger._log`` resolves ``sys.stderr`` at emit time, so a
+    reset that runs while pytest's ``capsys`` is active cannot pin that
+    fixture's buffer into the global configuration and raise on a write after
+    its teardown. And that logger is the only one that consults
+    ``_console_logging_enabled``, so routing through it keeps
+    :func:`set_console_logging` honored across a reset instead of silently
+    re-enabling console output.
     """
     global _configured, _current_config
     # Read before clearing: the reset must not be louder than what it replaces.
@@ -650,5 +660,7 @@ def reset_logging() -> None:
     structlog.reset_defaults()
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(outgoing_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        # No file handler: the outgoing one was just closed by
+        # _close_root_handlers(), and a reset must not hold a resource.
+        logger_factory=_FileWritingPrintLoggerFactory(None),
     )
