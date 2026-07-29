@@ -324,6 +324,7 @@ def _get_file_processors() -> list[Any]:
 
 # Global flag to control console log output
 _console_logging_enabled: bool = True
+_reset_baseline_active: bool = False
 
 
 def set_console_logging(enabled: bool) -> None:
@@ -367,6 +368,16 @@ class _FileWritingPrintLogger:
             message: The message to log.
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
+
+        if _reset_baseline_active:
+            # Post-reset baseline: cached bound loggers materialized under the
+            # previous configuration (cache_logger_on_first_use) still route
+            # through this instance, so enforce the resource-free INFO/stderr
+            # contract here — never below INFO, never the old file handler
+            # (#1794 round five).
+            if level >= logging.INFO and _console_logging_enabled:
+                print(message, file=sys.stderr)
+            return
 
         # Print to stderr only if console logging is enabled
         if _console_logging_enabled:
@@ -468,6 +479,8 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # Or specify config explicitly
         configure_logging(LoggingConfig(mode=LogMode.PROD, max_log_days=14))
     """
+    global _reset_baseline_active
+    _reset_baseline_active = False
     global _configured, _current_config
 
     if config is None:
@@ -613,9 +626,10 @@ def reset_logging() -> None:
     import-time ``get_logger`` proxies stay quiet on stdout until the next
     ``configure_logging()``.
     """
-    global _configured, _current_config
+    global _configured, _current_config, _reset_baseline_active
     _configured = False
     _current_config = None
+    _reset_baseline_active = True
     _close_root_handlers()
     # Clear any bound context
     structlog.contextvars.clear_contextvars()

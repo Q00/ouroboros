@@ -7,7 +7,7 @@ with aiosqlite backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -93,7 +93,10 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
 
 
 async def _run_to_settlement[T](
-    coro: Coroutine[Any, Any, T], *, registry: set[asyncio.Task[Any]] | None = None
+    coro: Coroutine[Any, Any, T],
+    *,
+    registry: set[asyncio.Task[Any]] | None = None,
+    refuse_when: Callable[[], bool] | None = None,
 ) -> T:
     """Run a transactional coroutine, settling it before cancellation surfaces.
 
@@ -105,6 +108,16 @@ async def _run_to_settlement[T](
     cancellation-atomicity contract and keeps every write within the store
     lifecycle (#1794 review rounds one and two).
     """
+    if refuse_when is not None and refuse_when():
+        # Admission is synchronized with close(): this check and the registry
+        # add below run in one synchronous block on the event loop, so a
+        # write either registers before close() snapshots the registry or is
+        # refused outright — it can never slip past the drain (round five).
+        coro.close()
+        raise PersistenceError(
+            "EventStore is closing; write refused.",
+            operation="append",
+        )
     inner: asyncio.Task[T] = asyncio.ensure_future(coro)
     if registry is not None:
         # close() drains this registry so no settling write can escape the
@@ -555,6 +568,7 @@ class EventStore:
 
         self._read_only = read_only
         self._settling_writes = set()
+        self._closing = False
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
@@ -683,6 +697,7 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
+        self._closing = False
         if create_schema is None:
             create_schema = not self._read_only
 
@@ -1363,7 +1378,11 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                return await _run_to_settlement(_insert_once(), registry=self._settling_writes)
+                return await _run_to_settlement(
+                    _insert_once(),
+                    registry=self._settling_writes,
+                    refuse_when=lambda: self._closing,
+                )
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1485,7 +1504,11 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                await _run_to_settlement(_insert_batch_once(), registry=self._settling_writes)
+                await _run_to_settlement(
+                    _insert_batch_once(),
+                    registry=self._settling_writes,
+                    refuse_when=lambda: self._closing,
+                )
                 return
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
@@ -2745,6 +2768,7 @@ class EventStore:
         caller must land before the WAL checkpoint and engine disposal, or
         durable history could change after shutdown (review round four).
         """
+        self._closing = True
         while self._settling_writes:
             done, _ = await asyncio.wait(tuple(self._settling_writes))
             for task in done:

@@ -490,6 +490,40 @@ class TestResetLogging:
         assert "debug-should-be-filtered" not in captured.err
         assert "info-should-go-to-stderr" in captured.err
 
+    def test_reset_baseline_governs_cached_pre_used_proxies(
+        self, capsys: Any, tmp_path: Any
+    ) -> None:
+        """#1794 round five: proxies cached before reset must obey the baseline.
+
+        With cache_logger_on_first_use, a proxy used under DEBUG/file logging
+        keeps its bound logger across reset; the baseline contract (never
+        below INFO, never the old file handler) must hold for it too.
+        """
+        configure_logging(
+            LoggingConfig(
+                log_level="DEBUG",
+                enable_file_logging=True,
+                log_dir=str(tmp_path),
+            )
+        )
+        proxy = structlog.get_logger("pre-used-proxy")
+        proxy.debug("materialize-cache")
+        log_files = list(tmp_path.glob("*.log*"))
+        sizes_before = {f: f.stat().st_size for f in log_files}
+        capsys.readouterr()
+
+        reset_logging()
+
+        proxy.debug("post-reset-debug-must-vanish")
+        proxy.info("post-reset-info-stderr-only")
+        captured = capsys.readouterr()
+        assert "post-reset-debug-must-vanish" not in captured.err
+        assert "post-reset-debug-must-vanish" not in captured.out
+        assert "post-reset-info-stderr-only" in captured.err
+        assert captured.out == ""
+        for f, size in sizes_before.items():
+            assert f.stat().st_size == size, "the old file handler was reopened"
+
     def test_reset_baseline_survives_capture_teardown(self) -> None:
         """The baseline must resolve stderr at call time, not at reset time.
 
