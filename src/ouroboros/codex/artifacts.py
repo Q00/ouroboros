@@ -769,7 +769,7 @@ def _commit_staged_artifact(
         if on_generation is not None:
             on_generation(generation)
             prepared_generation = True
-        os.replace(staging_path, target_path)
+        _rename_noreplace(staging_path, target_path)
         staged_generation_active = True
 
         if transaction is not None:

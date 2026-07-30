@@ -2991,6 +2991,58 @@ class TestCodexSetup:
             for call in mock_print_error.call_args_list
         )
 
+    def test_install_codex_artifacts_preserves_rule_recreated_before_activation(
+        self, tmp_path: Path
+    ) -> None:
+        """Setup must not replace a rule recreated after generation bookkeeping."""
+        codex_home = tmp_path / ".codex"
+        rule_path = codex_home / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("previous operator rule\n", encoding="utf-8")
+        required_snapshots = setup_cmd._snapshot_managed_codex_setup_paths(codex_home)
+        written_snapshots: dict[Path, setup_cmd._PathSnapshot] = {}
+        original_snapshot = setup_cmd._snapshot_path
+        injected = False
+
+        def _recreate_rule_after_packaged_snapshot(
+            path: Path,
+            *,
+            _seen: frozenset[Path] = frozenset(),
+        ) -> setup_cmd._PathSnapshot:
+            nonlocal injected
+            snapshot = original_snapshot(path, _seen=_seen)
+            if path.name == "ouroboros.md" and path != rule_path and not injected:
+                injected = True
+                rule_path.write_text("concurrent operator rule\n", encoding="utf-8")
+            return snapshot
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._snapshot_path",
+                side_effect=_recreate_rule_after_packaged_snapshot,
+            ),
+            patch("ouroboros.cli.commands.setup.print_error") as mock_print_error,
+        ):
+            assert (
+                setup_cmd._install_codex_artifacts(
+                    codex_dir=codex_home,
+                    expected_snapshots=written_snapshots,
+                    required_snapshots=required_snapshots,
+                )
+                is False
+            )
+
+        assert injected is True
+        assert rule_path.read_text(encoding="utf-8") == "concurrent operator rule\n"
+        backups = tuple(rule_path.parent.glob(f".{rule_path.name}.*.backup"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "previous operator rule\n"
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.tmp"))
+        assert any(
+            "Managed Codex artifact changed during rollback" in str(call.args[0])
+            for call in mock_print_error.call_args_list
+        )
+
     def test_setup_codex_rejects_rule_changed_after_read_before_install(
         self, tmp_path: Path
     ) -> None:

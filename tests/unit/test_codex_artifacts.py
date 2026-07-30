@@ -530,15 +530,14 @@ class TestInstallCodexSkills:
         target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
         target_path.mkdir(parents=True)
         target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
-        original_replace = os.replace
+        original_rename_noreplace = codex_artifacts._rename_noreplace
 
-        def _fail_staging_swap(source: str | Path, destination: str | Path) -> None:
-            source_path = Path(source)
-            if Path(destination) == target_path and source_path.name.endswith(".tmp"):
+        def _fail_staging_swap(source: Path, destination: Path) -> None:
+            if destination == target_path and source.name.endswith(".tmp"):
                 raise OSError("synthetic final swap failure")
-            original_replace(source, destination)
+            original_rename_noreplace(source, destination)
 
-        monkeypatch.setattr(os, "replace", _fail_staging_swap)
+        monkeypatch.setattr(codex_artifacts, "_rename_noreplace", _fail_staging_swap)
 
         with pytest.raises(OSError, match="synthetic final swap failure"):
             install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)

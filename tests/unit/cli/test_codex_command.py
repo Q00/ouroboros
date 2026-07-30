@@ -71,16 +71,15 @@ class TestCodexRefresh:
         target_path = codex_dir / "skills" / "ouroboros-run"
         target_path.mkdir(parents=True)
         target_path.joinpath("SKILL.md").write_text("installed run skill", encoding="utf-8")
-        original_replace = os.replace
+        original_rename_noreplace = codex_artifacts._rename_noreplace
 
-        def _fail_run_swap(source: str | Path, destination: str | Path) -> None:
-            source_path = Path(source)
-            if Path(destination) == target_path and source_path.name.endswith(".tmp"):
+        def _fail_run_swap(source: Path, destination: Path) -> None:
+            if destination == target_path and source.name.endswith(".tmp"):
                 raise OSError("synthetic refresh swap failure")
-            original_replace(source, destination)
+            original_rename_noreplace(source, destination)
 
         monkeypatch.setenv("CODEX_HOME", str(codex_dir))
-        monkeypatch.setattr(os, "replace", _fail_run_swap)
+        monkeypatch.setattr(codex_artifacts, "_rename_noreplace", _fail_run_swap)
 
         cli_result = runner.invoke(app, ["refresh"])
 
@@ -305,6 +304,40 @@ class TestCodexRefresh:
         assert len(backup_paths) == 1
         assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
         assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.rollback"))
+
+    def test_refresh_preserves_rule_recreated_before_forward_activation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The final staged activation must not replace a concurrently recreated rule."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("old rule generation\n", encoding="utf-8")
+        original_rename_noreplace = codex_artifacts._rename_noreplace
+        injected = False
+
+        def _recreate_before_activation(source: Path, target: Path) -> None:
+            nonlocal injected
+            if target == rule_path and source.name.endswith(".tmp") and not injected:
+                injected = True
+                rule_path.write_text("concurrent operator rule\n", encoding="utf-8")
+            original_rename_noreplace(source, target)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(codex_artifacts, "_rename_noreplace", _recreate_before_activation)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "changed during rollback" in cli_result.output
+        assert injected is True
+        assert rule_path.read_text(encoding="utf-8") == "concurrent operator rule\n"
+        backup_paths = tuple(rule_path.parent.glob(f".{rule_path.name}.*.backup"))
+        assert len(backup_paths) == 1
+        assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.tmp"))
 
     def test_refresh_preserves_removed_target_recreated_at_rollback_commit(
         self,
