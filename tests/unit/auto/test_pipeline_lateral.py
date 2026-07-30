@@ -182,7 +182,12 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
         ),
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=1)
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        attempt=1,
+    )
     constraints = "\n".join(repaired.constraints)
 
     assert "[seed qa repair attempt" not in constraints
@@ -205,6 +210,33 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
     assert spec_pollution.status is IntentGuardStatus.PASS
 
 
+def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair() -> None:
+    seed = _build_seed().model_copy(
+        update={"metadata": SeedMetadata(seed_id="seed_ambiguous", ambiguity_score=0.206)}
+    )
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=("metadata.ambiguity_score must be at most 0.20",),
+        suggestions=(),
+    )
+    lateral_result = LateralResult(
+        persona="hacker",
+        approach_summary="Choose one binding parsing contract.",
+        text="Treat every CSV cell as a string.",
+    )
+
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        qa_result=qa_result,
+        attempt=1,
+    )
+
+    assert repaired.metadata.ambiguity_score == 0.20
+
+
 def test_seed_qa_lateral_feedback_discards_persona_transcripts() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_persona_transcript", ambiguity_score=0.12)}
@@ -219,7 +251,12 @@ def test_seed_qa_lateral_feedback_discards_persona_transcripts() -> None:
         ),
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=1)
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        attempt=1,
+    )
     constraints = "\n".join(repaired.constraints)
 
     assert "## Persona" not in constraints
@@ -242,7 +279,12 @@ def test_seed_qa_lateral_feedback_preserves_clean_summary_with_dirty_body() -> N
         ),
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=1)
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        attempt=1,
+    )
     constraints = "\n".join(repaired.constraints)
 
     assert "Rewrite ACs as exact command scenarios" in constraints
@@ -265,7 +307,12 @@ def test_seed_qa_lateral_feedback_discards_problem_context_body() -> None:
         ),
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=1)
+    repaired = _seed_with_seed_qa_lateral_feedback(
+        seed,
+        lateral_result,
+        qa_result=EvaluateResult(passed=False, score=0.61, verdict="revise"),
+        attempt=1,
+    )
     constraints = "\n".join(repaired.constraints)
 
     assert "Use the existing measurement command consistently" in constraints

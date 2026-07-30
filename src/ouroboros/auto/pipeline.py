@@ -3037,7 +3037,12 @@ class AutoPipeline:
             f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
             tool_name="seed_qa",
         )
-        return _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=attempt)
+        return _seed_with_seed_qa_lateral_feedback(
+            seed,
+            lateral_result,
+            qa_result=qa_result,
+            attempt=attempt,
+        )
 
     def _seed_review_gate_blocker(
         self, state: AutoPipelineState, review: SeedReview | None
@@ -4895,14 +4900,15 @@ def _seed_with_seed_qa_lateral_feedback(
     seed: Seed,
     lateral_result: LateralResult,
     *,
+    qa_result: EvaluateResult,
     attempt: int,
 ) -> Seed:
     """Return a Seed revised with a lateral persona's concrete QA resolution.
 
-    Unlike :func:`_seed_with_seed_qa_feedback` (which echoes the QA differences
-    back verbatim), this folds the lateral persona's *decision* into the Seed so
-    the re-judged Seed carries an actionable resolution of the gap (e.g. a
-    chosen binding contract) rather than a restatement of the gap. The text is
+    Unlike :func:`_seed_with_seed_qa_feedback` (which encodes mapped QA
+    feedback), this folds the lateral persona's *decision* into the Seed so the
+    re-judged Seed carries an actionable resolution of the gap (e.g. a chosen
+    binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
     del attempt
@@ -4912,16 +4918,20 @@ def _seed_with_seed_qa_lateral_feedback(
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    metadata_updates: dict[str, Any] = {
+        "seed_id": f"seed_{uuid4().hex[:12]}",
+        "created_at": datetime.now(UTC),
+        "parent_seed_id": seed.metadata.seed_id,
+    }
+    if any(
+        "ambiguity_score" in item.casefold()
+        for item in (*qa_result.differences, *qa_result.suggestions)
+    ):
+        metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
-            "metadata": seed.metadata.model_copy(
-                update={
-                    "seed_id": f"seed_{uuid4().hex[:12]}",
-                    "created_at": datetime.now(UTC),
-                    "parent_seed_id": seed.metadata.seed_id,
-                }
-            ),
+            "metadata": seed.metadata.model_copy(update=metadata_updates),
         }
     )
 
