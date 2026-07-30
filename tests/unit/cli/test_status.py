@@ -196,10 +196,10 @@ def test_executions_ignores_child_aggregates_and_subtask_status(
                 data={"status": "complete"},
             ),
             BaseEvent(
-                type="execution.coordinator.completed",
+                type="execution.session.completed",
                 timestamp=now,
                 aggregate_type="execution",
-                aggregate_id="exec_running:l0:coord",
+                aggregate_id="exec_running:ac:child",
                 data={"execution_id": "exec_running", "status": "complete"},
             ),
         ),
@@ -207,14 +207,79 @@ def test_executions_ignores_child_aggregates_and_subtask_status(
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 
     result = runner.invoke(app, ["executions"])
-    child_result = runner.invoke(app, ["execution", "exec_running:l0:coord"])
+    child_result = runner.invoke(app, ["execution", "exec_running:ac:child"])
 
     assert result.exit_code == 0
     assert "exec_running" in result.output
     assert "running" in result.output
-    assert "exec_running:l0:coord" not in result.output
+    assert "exec_running:ac:child" not in result.output
     assert child_result.exit_code == 2
     assert "no persisted execution found" in child_result.output
+
+
+def test_executions_normalizes_untrusted_terminal_status_markup(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_untrusted_status",
+                data={"status": "[bold red]complete[/]"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions"])
+
+    assert result.exit_code == 0
+    assert "exec_untrusted_status" in result.output
+    assert "unknown" in result.output
+
+
+def test_executions_keeps_terminal_status_after_late_progress(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_terminal",
+                data={"status": "failed"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_terminal",
+                data={},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_terminal"])
+
+    assert list_result.exit_code == 0
+    assert "failed" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "failed" in detail_result.output
 
 
 def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:

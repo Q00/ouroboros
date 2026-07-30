@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, case, event, func, or_, select, text
@@ -534,7 +534,8 @@ class EventStore:
         if path_part in (":memory:", ""):
             return database_url
 
-        return f"{prefix}file:{path_part}?mode=ro&uri=true"
+        encoded_path = quote(path_part, safe="/:")
+        return f"{prefix}file:{encoded_path}?mode=ro&uri=true"
 
     @staticmethod
     def _sqlite_path_from_url(database_url: str) -> str | None:
@@ -1939,7 +1940,10 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = select(events_table).order_by(events_table.c.timestamp.desc())
+                query = select(events_table).order_by(
+                    events_table.c.timestamp.desc(),
+                    events_table.c.id.desc(),
+                )
 
                 if aggregate_id:
                     query = query.where(events_table.c.aggregate_id == aggregate_id)

@@ -287,20 +287,11 @@ class TestFormatReattachGuidance:
         output = _format_reattach_guidance(tracker)
         assert "ouroboros run workflow --orchestrator --resume sess-abc123 seed-001" in output
 
-    def test_inspect_command_points_at_tui_monitor(self) -> None:
-        """Inspect guidance must point at a *functional* command.
-
-        ``ouroboros status execution <id>`` is registered but its handler is
-        still a placeholder (src/ouroboros/cli/commands/status.py) — it would
-        print "Would show details for execution: ..." instead of doing
-        anything useful. ``ouroboros tui monitor`` is the real working
-        inspection path today, so the guidance points there until
-        ``status execution`` is implemented.
-        """
+    def test_inspect_command_points_at_status_and_tui(self) -> None:
         tracker = _make_tracker()
         output = _format_reattach_guidance(tracker)
         assert "ouroboros tui monitor" in output
-        assert "ouroboros status execution" not in output
+        assert "ouroboros status execution exec-xyz789 --events" in output
 
     def test_surfaces_both_identifiers(self) -> None:
         tracker = _make_tracker()
@@ -503,15 +494,10 @@ class TestResumeCLIWithSessions:
         result = self._invoke_with_sessions("99\n")
         assert result.exit_code == 1
 
-    def test_inspect_hint_points_at_functional_command(self) -> None:
-        """Inspect hint must be a *working* command (``tui monitor``).
-
-        Pinned contract: the resume output must not direct users at the
-        placeholder ``status execution`` handler (Finding #2).
-        """
+    def test_inspect_hint_points_at_functional_commands(self) -> None:
         result = self._invoke_with_sessions("1\n")
         assert "ouroboros tui monitor" in result.output
-        assert "ouroboros status execution" not in result.output
+        assert "ouroboros status execution exec-xyz789 --events" in result.output
 
     def test_resume_hint_matches_run_workflow_contract(self) -> None:
         """The output surfaces `ouroboros run workflow --orchestrator --resume <session_id>`."""
@@ -649,12 +635,6 @@ class TestResumeGuidanceIsCallable:
         assert "--resume" in result.output
         assert "--orchestrator" in result.output
 
-    def test_status_execution_is_not_surfaced_as_guidance(self) -> None:
-        """``status execution`` is a placeholder — guidance must not point there.
-
-        This pins Finding #2 (the printed re-attach hint used to claim
-        ``ouroboros status execution <id>`` but that handler is still
-        unimplemented — see src/ouroboros/cli/commands/status.py).
-        """
+    def test_status_execution_is_surfaced_as_guidance(self) -> None:
         tracker = _make_tracker()
-        assert "status execution" not in _format_reattach_guidance(tracker)
+        assert "status execution exec-xyz789 --events" in _format_reattach_guidance(tracker)

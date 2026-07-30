@@ -125,7 +125,8 @@ def create_status_table(
         name = str(item.get(name_key, ""))
         status = str(item.get(status_key, ""))
         status_style = _get_status_style(status)
-        table.add_row(name, f"[{status_style}]{status}[/]")
+        rendered_status = f"[{status_style}]{status}[/]" if status_style else status
+        table.add_row(name, rendered_status)
 
     return table
 

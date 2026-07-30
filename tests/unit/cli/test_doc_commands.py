@@ -21,8 +21,8 @@ Scope:
 
 If you add a new documented command string, add it here too. The test is
 deliberately strict: it ignores nothing, because the whole point is to catch
-the kind of drift flagged in PR #433's bot review (the ``ooo`` skill
-surfaces pointing at a placeholder ``status execution`` handler).
+the kind of drift flagged in PR #433's bot review, when user-facing guidance
+pointed at an incomplete command surface.
 """
 
 from __future__ import annotations
@@ -83,12 +83,13 @@ class TestReattachGuidanceCommandsAreReal:
     """Every command string emitted by the re-attach panel must be real."""
 
     def test_inspect_command_parses(self) -> None:
-        """``ouroboros tui monitor`` must be a real subcommand chain."""
         tracker = _make_tracker()
         output = _format_reattach_guidance(tracker)
+        assert "ouroboros status execution exec-xyz789 --events" in output
         assert "ouroboros tui monitor" in output, (
             "inspect guidance must surface `ouroboros tui monitor`"
         )
+        _assert_command_parses(["status", "execution", "exec-xyz789", "--events"])
         _assert_command_parses(["tui", "monitor"])
 
     def test_resume_command_parses(self) -> None:
@@ -102,16 +103,10 @@ class TestReattachGuidanceCommandsAreReal:
         assert "--orchestrator" in result.output
         assert "--resume" in result.output
 
-    def test_guidance_does_not_point_at_placeholder(self) -> None:
-        """Must NOT surface ``ouroboros status execution`` (placeholder handler).
-
-        ``src/ouroboros/cli/commands/status.py:execution`` only prints
-        "Would show details for execution: …". Surfacing it misleads users
-        into thinking they can inspect an execution when they can't.
-        """
+    def test_guidance_points_at_persisted_execution_status(self) -> None:
         tracker = _make_tracker()
         output = _format_reattach_guidance(tracker)
-        assert "ouroboros status execution" not in output
+        assert "ouroboros status execution exec-xyz789 --events" in output
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +121,7 @@ class TestReattachGuidanceCommandsAreReal:
 SKILL_RESUME_COMMANDS: list[list[str]] = [
     # Primary command the skill tells users to run.
     ["resume"],
+    ["status", "execution", "exec-xyz789", "--events"],
     # Inspect (read-only) path printed after session selection.
     ["tui", "monitor"],
     # Resume execution path printed after session selection.

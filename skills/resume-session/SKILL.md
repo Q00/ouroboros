@@ -50,17 +50,21 @@ When the user invokes this skill:
 
 3. Pick the right re-attach path:
 
-   - **Inspect only** (read-only interactive monitor):
+   - **Inspect persisted events** (read-only):
+
+     ```
+     ouroboros status execution <exec_id> --events
+     ```
+
+     Reads the configured EventStore without starting an MCP server.
+
+   - **Inspect interactively** (read-only monitor):
 
      ```
      ouroboros tui monitor
      ```
 
-     Launches the TUI and lets you pick the session to inspect. The
-     `ouroboros status execution <exec_id>` command is *registered* but its
-     handler is still a placeholder in `src/ouroboros/cli/commands/status.py`
-     (it only prints "Would show details for execution: …"), so it is
-     intentionally not surfaced here. Follow-up tracked as a separate issue.
+     Launches the TUI and lets you pick the session to inspect.
 
    - **Resume execution** (requires the original seed file):
 

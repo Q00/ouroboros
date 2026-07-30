@@ -153,17 +153,30 @@ _STATUS_RUN_EXIT_GENERIC_ERROR = 1
 _STATUS_RUN_EXIT_UNKNOWN_RUN = 2
 _STATUS_RUN_EXIT_MALFORMED_INPUT = 64
 _STATUS_EXECUTION_EVENT_PAGE_SIZE = 500
-_STATUS_EXECUTION_DETAIL_LIMIT = 10_000
+_STATUS_EXECUTION_DEFAULT_EVENT_LIMIT = 10_000
 _ROOT_EXECUTION_EVENT_STATUS = {
     "execution.completed": "complete",
     "execution.failed": "failed",
     "execution.plan.created": "running",
     "execution.run.configuration_resolved": "running",
-    "execution.session.completed": "complete",
-    "execution.session.failed": "failed",
-    "execution.session.recovered": "running",
     "execution.started": "running",
     "workflow.progress.updated": "running",
+}
+_TERMINAL_STATUS_ALIASES = {
+    "active": "running",
+    "blocked": "blocked",
+    "cancelled": "cancelled",
+    "complete": "complete",
+    "completed": "complete",
+    "error": "failed",
+    "failed": "failed",
+    "failure": "failed",
+    "paused": "paused",
+    "pending": "pending",
+    "running": "running",
+    "success": "complete",
+    "succeeded": "complete",
+    "waiting": "waiting",
 }
 
 
@@ -186,6 +199,7 @@ async def _recent_execution_events(
     db_path: Path,
     *,
     execution_limit: int | None,
+    max_events: int | None,
 ) -> list[BaseEvent]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
@@ -194,8 +208,14 @@ async def _recent_execution_events(
     offset = 0
     try:
         while True:
+            page_limit = _STATUS_EXECUTION_EVENT_PAGE_SIZE
+            if max_events is not None:
+                remaining = max_events - offset
+                if remaining <= 0:
+                    break
+                page_limit = min(page_limit, remaining)
             page = await store.query_events(
-                limit=_STATUS_EXECUTION_EVENT_PAGE_SIZE,
+                limit=page_limit,
                 offset=offset,
                 aggregate_type="execution",
             )
@@ -204,7 +224,7 @@ async def _recent_execution_events(
                     continue
                 lifecycle_events.append(event)
                 seen_execution_ids.add(event.aggregate_id)
-            if len(page) < _STATUS_EXECUTION_EVENT_PAGE_SIZE:
+            if len(page) < page_limit:
                 break
             if execution_limit is not None and len(seen_execution_ids) >= execution_limit:
                 break
@@ -214,15 +234,38 @@ async def _recent_execution_events(
     return lifecycle_events
 
 
-async def _execution_events(db_path: Path, execution_id: str) -> list[BaseEvent]:
+async def _execution_events(
+    db_path: Path,
+    execution_id: str,
+    *,
+    include_all: bool,
+) -> list[BaseEvent]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
+    persisted: list[BaseEvent] = []
+    offset = 0
     try:
-        persisted = await store.query_events(
-            aggregate_id=execution_id,
-            limit=_STATUS_EXECUTION_DETAIL_LIMIT,
-            aggregate_type="execution",
-        )
+        while True:
+            page_limit = _STATUS_EXECUTION_EVENT_PAGE_SIZE
+            if not include_all:
+                remaining = _STATUS_EXECUTION_DEFAULT_EVENT_LIMIT - offset
+                if remaining <= 0:
+                    break
+                page_limit = min(page_limit, remaining)
+            page = await store.query_events(
+                aggregate_id=execution_id,
+                limit=page_limit,
+                offset=offset,
+                aggregate_type="execution",
+            )
+            persisted.extend(page)
+            if len(page) < page_limit:
+                break
+            if not include_all and any(
+                _root_execution_status(event) is not None for event in persisted
+            ):
+                break
+            offset += len(page)
     finally:
         await store.close()
     return persisted
@@ -232,7 +275,7 @@ def _root_execution_status(event: BaseEvent) -> str | None:
     if event.type == "execution.terminal":
         explicit = event.data.get("status")
         if isinstance(explicit, str) and explicit.strip():
-            return explicit.strip()
+            return _TERMINAL_STATUS_ALIASES.get(explicit.strip().casefold(), "unknown")
         return "unknown"
     return _ROOT_EXECUTION_EVENT_STATUS.get(event.type)
 
@@ -351,6 +394,7 @@ def executions(
             _recent_execution_events(
                 _configured_event_store_path(),
                 execution_limit=None if all_ else limit,
+                max_events=None if all_ else _STATUS_EXECUTION_DEFAULT_EVENT_LIMIT,
             )
         )
     except Exception as exc:
@@ -359,7 +403,11 @@ def executions(
 
     latest_by_id: dict[str, BaseEvent] = {}
     for event in persisted:
-        latest_by_id.setdefault(event.aggregate_id, event)
+        current = latest_by_id.get(event.aggregate_id)
+        if current is None or (
+            event.type == "execution.terminal" and current.type != "execution.terminal"
+        ):
+            latest_by_id[event.aggregate_id] = event
     rows = [
         {"name": execution_id, "status": _root_execution_status(event) or "unknown"}
         for execution_id, event in latest_by_id.items()
@@ -390,12 +438,19 @@ def execution(
     """
     try:
         persisted = asyncio.run(
-            _execution_events(_configured_event_store_path(), execution_id)
+            _execution_events(
+                _configured_event_store_path(),
+                execution_id,
+                include_all=events,
+            )
         )
     except Exception as exc:
         print_error(f"Execution status failed: {exc}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
     latest_lifecycle = next(
+        (event for event in persisted if event.type == "execution.terminal"),
+        None,
+    ) or next(
         (event for event in persisted if _root_execution_status(event) is not None),
         None,
     )

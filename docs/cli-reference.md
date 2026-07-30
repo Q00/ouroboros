@@ -810,7 +810,7 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** `status auto`, `status run`, and `status health` are live read-only status surfaces. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
+> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read persisted root execution events from the configured EventStore; `status run` provides the richer Run/Stage/Step projection.
 
 ### `status auto`
 

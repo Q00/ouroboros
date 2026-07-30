@@ -184,31 +184,32 @@ def _display_sessions(sessions: list) -> None:
 def _format_reattach_guidance(tracker) -> str:
     """Build the post-selection guidance block.
 
-    Prints two commands, matching the real CLI contracts:
+    Prints three commands, matching the real CLI contracts:
 
-    - Inspect:   ``ouroboros tui monitor`` (functional TUI; select the session)
+    - Inspect:   ``ouroboros status execution <exec_id> --events``
+    - Monitor:   ``ouroboros tui monitor``
     - Resume:    ``ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>``
 
     ``run workflow --resume`` takes a *session_id* (not an execution_id) and
     also requires the seed file, so both identifiers are surfaced explicitly.
 
-    Note: ``ouroboros status execution <exec_id>`` is *registered* but its
-    implementation is still a placeholder (see src/ouroboros/cli/commands/status.py),
-    so we deliberately do not surface it as an inspection path — it would
-    print misleading "Would show details" output.
     """
     exec_id = tracker.execution_id or "<unknown>"
     seed_hint = tracker.seed_id or "<seed.yaml>"
 
-    inspect_line = "ouroboros tui monitor"
+    inspect_line = f"ouroboros status execution {exec_id} --events"
+    monitor_line = "ouroboros tui monitor"
     resume_line = f"ouroboros run workflow --orchestrator --resume {tracker.session_id} {seed_hint}"
 
     lines = [
         f"Session ID:   [bold cyan]{tracker.session_id}[/]",
         f"Execution ID: [bold cyan]{exec_id}[/]",
         "",
-        "[bold]Inspect[/] (read-only interactive monitor):",
+        "[bold]Inspect persisted execution[/] (read-only):",
         f"    {inspect_line}",
+        "",
+        "[bold]Monitor interactively[/] (read-only):",
+        f"    {monitor_line}",
         "",
         "[bold]Resume execution[/] (requires the original seed file):",
         f"    {resume_line}",
@@ -308,8 +309,8 @@ def resume(
 
     Re-attach paths surfaced after selection:
 
-        # Inspect (interactive monitor — the `status execution` placeholder is
-        # not wired up yet)
+        ouroboros status execution <execution_id> --events
+
         ouroboros tui monitor
 
         # Resume execution (requires the original seed file)
