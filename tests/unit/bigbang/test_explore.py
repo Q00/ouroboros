@@ -74,3 +74,8 @@ class TestDetectBrownfield:
         )
 
         assert detect_brownfield(tmp_path) is False
+
+    def test_detect_brownfield_rejects_nul_git_pointer(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_bytes(b"gitdir: bad\x00path\n")
+
+        assert detect_brownfield(tmp_path) is False

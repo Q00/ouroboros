@@ -514,7 +514,7 @@ def _has_git_metadata(root: Path) -> bool:
         target = root / target
     try:
         git_dir = target.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False
     return git_dir.is_dir() and (git_dir / "HEAD").is_file()
 
