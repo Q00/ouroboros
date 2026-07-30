@@ -137,18 +137,18 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
     malformed. Never raises.
     """
     config_path = working_dir / ".ouroboros" / "mechanical.toml"
-    if not config_path.exists():
-        return None
 
     import tomllib
 
     try:
         with open(config_path, "rb") as f:
             return tomllib.load(f)
+    except FileNotFoundError:
+        return None
     except OSError as e:
-        # ``exists()`` above does not guarantee the file is readable: an unreadable
-        # mode, a directory in its place, or a delete between the two calls all raise
-        # here. Fall back to built-in defaults so the docstring's contract holds.
+        # Probe and read through one guarded operation. A separate ``exists()``
+        # preflight can itself raise for an inaccessible parent and introduces a
+        # race before ``open()``.
         log.warning("mechanical.toml_read_error", path=str(config_path), error=str(e))
         return None
     except Exception as e:

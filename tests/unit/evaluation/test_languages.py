@@ -7,6 +7,8 @@ parser, and the merge layering (TOML + explicit overrides).
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.evaluation.languages import (
     _parse_command,
     build_mechanical_config,
@@ -228,5 +230,26 @@ class TestBuildMechanicalConfigFromToml:
         ouroboros_dir.mkdir(exist_ok=True)
         (ouroboros_dir / "mechanical.toml").mkdir()
         config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+        assert config.test_command is None
+
+    def test_toml_exists_probe_failure_is_avoided(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An inaccessible parent must not escape through a preflight stat."""
+        config_path = tmp_path / ".ouroboros" / "mechanical.toml"
+        original_exists = Path.exists
+
+        def _raise_for_config(path: Path) -> bool:
+            if path == config_path:
+                raise PermissionError("stat denied")
+            return original_exists(path)
+
+        monkeypatch.setattr(Path, "exists", _raise_for_config)
+
+        config = build_mechanical_config(tmp_path)
+
         assert config.lint_command is None
         assert config.test_command is None

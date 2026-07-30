@@ -34,11 +34,17 @@ def resolve_zcode_electron_node_path(cli_path: str | Path | None) -> str | None:
 
     metadata_path = path.with_name(ZCODE_NODE_BUNDLE_METADATA)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata_text = metadata_path.read_text(encoding="utf-8")
     except OSError as exc:
         msg = f"ZCode app-bundle CLI metadata is missing or unreadable: {metadata_path}: {exc}"
         raise RuntimeError(msg) from exc
-    except json.JSONDecodeError as exc:
+    except Exception as exc:
+        msg = f"ZCode app-bundle CLI metadata is invalid JSON: {metadata_path}: {exc}"
+        raise RuntimeError(msg) from exc
+
+    try:
+        metadata = json.loads(metadata_text)
+    except Exception as exc:
         msg = f"ZCode app-bundle CLI metadata is invalid JSON: {metadata_path}: {exc}"
         raise RuntimeError(msg) from exc
 

@@ -112,6 +112,29 @@ def test_app_bundle_unreadable_node_metadata_fails_closed(
         resolve_zcode_electron_node_path(cli_path)
 
 
+def test_app_bundle_non_utf8_node_metadata_fails_closed(tmp_path: Path) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    cli_path.with_name(".node-bundle-meta.json").write_bytes(b'{"runtime":"\xff"}')
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
+def test_app_bundle_json_recursion_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+
+    def _raise_recursion(_payload: str) -> Any:
+        raise RecursionError("maximum JSON nesting exceeded")
+
+    monkeypatch.setattr(json, "loads", _raise_recursion)
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
 def test_app_bundle_non_dictionary_plist_fails_closed(tmp_path: Path) -> None:
     cli_path, _ = _fake_electron_node_bundle(tmp_path)
     info_plist = cli_path.parents[2] / "Info.plist"
