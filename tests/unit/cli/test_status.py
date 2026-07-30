@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,8 @@ import yaml
 
 from ouroboros.cli.commands.status import app
 from ouroboros.cli.formatters import console
+from ouroboros.events.base import BaseEvent
+from ouroboros.persistence.event_store import EventStore
 
 runner = CliRunner(env={"COLUMNS": "240"})
 
@@ -89,11 +93,132 @@ def _write_credentials(config_dir: Path, api_key: str = "sk-present") -> None:
     )
 
 
+def _write_execution_events(db_path: Path, events: tuple[BaseEvent, ...]) -> None:
+    async def write() -> None:
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        try:
+            for event in events:
+                await store.append(event)
+        finally:
+            await store.close()
+
+    asyncio.run(write())
+
+
 def test_status_auto_invalid_session_id_exits_nonzero() -> None:
     result = runner.invoke(app, ["auto", "missing"])
 
     assert result.exit_code == 1
     assert "auto_session_id must start with auto_" in result.output
+
+
+def test_executions_lists_recent_persisted_execution_statuses(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.started",
+                timestamp=now - timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_real",
+                data={"status": "running"},
+            ),
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_real",
+                data={"status": "complete"},
+            ),
+            BaseEvent(
+                type="execution.failed",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_failed",
+                data={},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions", "--limit", "2"])
+
+    assert result.exit_code == 0
+    assert "exec_real" in result.output
+    assert "complete" in result.output
+    assert "exec_failed" in result.output
+    assert "failed" in result.output
+    assert "exec-001" not in result.output
+
+
+def test_executions_fails_when_configured_database_is_missing(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_config(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions"])
+
+    assert result.exit_code == 1
+    assert "database does not exist" in result.output
+    assert "exec-001" not in result.output
+
+
+def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.started",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_detail",
+                data={"status": "running"},
+            ),
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_detail",
+                data={"status": "complete"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["execution", "exec_detail", "--events"])
+
+    assert result.exit_code == 0
+    assert "exec_detail" in result.output
+    assert "complete" in result.output
+    assert "execution.started" in result.output
+    assert "execution.terminal" in result.output
+    assert "Would show" not in result.output
+
+
+def test_execution_unknown_id_exits_two(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    _write_execution_events(db_path, ())
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["execution", "exec_missing"])
+
+    assert result.exit_code == 2
+    assert "no persisted execution found" in result.output
 
 
 def test_health_reports_all_ok(monkeypatch, tmp_path: Path) -> None:

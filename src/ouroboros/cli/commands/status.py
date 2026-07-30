@@ -24,9 +24,16 @@ from ouroboros.backends import (
 )
 from ouroboros.cli.commands.config import _load_config, _resolve_db_path
 from ouroboros.cli.formatters.panels import print_error, print_info
-from ouroboros.cli.formatters.tables import create_status_table, print_table
+from ouroboros.cli.formatters.tables import (
+    create_key_value_table,
+    create_status_table,
+    create_table,
+    print_table,
+)
 from ouroboros.config.loader import load_config
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
+from ouroboros.persistence.event_store import EventStore
 
 app = typer.Typer(
     name="status",
@@ -145,11 +152,62 @@ _STATUS_RUN_EXIT_OK = 0
 _STATUS_RUN_EXIT_GENERIC_ERROR = 1
 _STATUS_RUN_EXIT_UNKNOWN_RUN = 2
 _STATUS_RUN_EXIT_MALFORMED_INPUT = 64
+_STATUS_EXECUTION_EVENT_LIMIT = 10_000
 
 
 def _is_unknown_run_error(message: str) -> bool:
     lowered = message.lower()
     return "no events found" in lowered
+
+
+def _configured_event_store_path() -> Path:
+    data, config_path = _load_config()
+    db_path = _database_file_path(data, config_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"configured database does not exist: {db_path}")
+    if not db_path.is_file():
+        raise OSError(f"configured database is not a file: {db_path}")
+    return db_path
+
+
+async def _recent_execution_events(db_path: Path) -> list[BaseEvent]:
+    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        persisted = await store.get_recent_events(limit=_STATUS_EXECUTION_EVENT_LIMIT)
+    finally:
+        await store.close()
+    return [event for event in persisted if event.aggregate_type == "execution"]
+
+
+async def _execution_events(db_path: Path, execution_id: str) -> list[BaseEvent]:
+    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        persisted = await store.query_events(
+            aggregate_id=execution_id,
+            limit=_STATUS_EXECUTION_EVENT_LIMIT,
+        )
+    finally:
+        await store.close()
+    return [event for event in persisted if event.aggregate_type == "execution"]
+
+
+def _execution_status(event: BaseEvent) -> str:
+    explicit = event.data.get("status")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    suffix = event.type.rsplit(".", 1)[-1].casefold()
+    return {
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+        "completed": "complete",
+        "failed": "failed",
+        "failure": "failed",
+        "paused": "paused",
+        "started": "running",
+        "terminal": "complete",
+    }.get(suffix, "unknown")
 
 
 @app.command(name="run")
@@ -258,13 +316,25 @@ def executions(
 
     Shows execution history with status information.
     """
-    # Placeholder implementation with example data
-    example_data = [
-        {"name": "exec-001", "status": "complete"},
-        {"name": "exec-002", "status": "running"},
-        {"name": "exec-003", "status": "failed"},
+    if limit <= 0:
+        print_error("Execution status failed: limit must be a positive integer")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+    try:
+        persisted = asyncio.run(_recent_execution_events(_configured_event_store_path()))
+    except Exception as exc:
+        print_error(f"Execution status failed: {exc}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
+
+    latest_by_id: dict[str, BaseEvent] = {}
+    for event in persisted:
+        latest_by_id.setdefault(event.aggregate_id, event)
+    rows = [
+        {"name": execution_id, "status": _execution_status(event)}
+        for execution_id, event in latest_by_id.items()
     ]
-    table = create_status_table(example_data, "Recent Executions")
+    if not all_:
+        rows = rows[:limit]
+    table = create_status_table(rows, "Recent Executions")
     print_table(table)
 
     if not all_:
@@ -286,10 +356,41 @@ def execution(
 
     Displays execution metadata, progress, and optionally events.
     """
-    # Placeholder implementation
-    print_info(f"Would show details for execution: {execution_id}")
+    try:
+        persisted = asyncio.run(
+            _execution_events(_configured_event_store_path(), execution_id)
+        )
+    except Exception as exc:
+        print_error(f"Execution status failed: {exc}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
+    if not persisted:
+        print_error(f"Execution status failed: no persisted execution found: {execution_id}")
+        raise typer.Exit(_STATUS_RUN_EXIT_UNKNOWN_RUN)
+
+    latest = persisted[0]
+    print_table(
+        create_key_value_table(
+            {
+                "Execution ID": execution_id,
+                "Status": _execution_status(latest),
+                "Latest event": latest.type,
+                "Updated": latest.timestamp.isoformat(),
+            },
+            "Execution Details",
+        )
+    )
     if events:
-        print_info("Would include event history")
+        table = create_table("Execution Events")
+        table.add_column("Timestamp", no_wrap=True)
+        table.add_column("Event", style="cyan")
+        table.add_column("Status")
+        for event in reversed(persisted):
+            table.add_row(
+                event.timestamp.isoformat(),
+                event.type,
+                _execution_status(event),
+            )
+        print_table(table)
 
 
 _CREDENTIAL_PROVIDER_BY_LLM_BACKEND = {
