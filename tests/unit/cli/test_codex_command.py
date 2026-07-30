@@ -132,6 +132,109 @@ class TestCodexRefresh:
             "old companion"
         )
 
+    def test_refresh_restores_complete_artifact_bundle_after_late_skill_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A late skill failure must roll rules and already-swapped skills back together."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        skill_path = codex_dir / "skills" / "ouroboros-run"
+        rule_path.parent.mkdir(parents=True)
+        skill_path.mkdir(parents=True)
+        rule_path.write_text("operator rule generation\n", encoding="utf-8")
+        skill_path.joinpath("SKILL.md").write_text("operator skill generation\n", encoding="utf-8")
+        skill_path.joinpath("operator.txt").write_text("keep together", encoding="utf-8")
+
+        packaged_skills_dir = tmp_path / "packaged-skills"
+        packaged_run = packaged_skills_dir / "run"
+        packaged_run.mkdir(parents=True)
+        packaged_run.joinpath("SKILL.md").write_text(
+            "replacement skill generation\n", encoding="utf-8"
+        )
+        packaged_fresh = packaged_skills_dir / "fresh"
+        packaged_fresh.mkdir(parents=True)
+        packaged_fresh.joinpath("SKILL.md").write_text("new skill generation\n", encoding="utf-8")
+        fresh_skill_path = codex_dir / "skills" / "ouroboros-fresh"
+        original_install_skills = codex_artifacts.install_codex_skills
+
+        def _install_skill_then_fail(**kwargs: object) -> tuple[Path, ...]:
+            original_install_skills(
+                skills_dir=packaged_skills_dir,
+                **kwargs,
+            )
+            assert skill_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+                "replacement skill generation\n"
+            )
+            assert fresh_skill_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+                "new skill generation\n"
+            )
+            raise OSError("synthetic late skill failure")
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(
+            codex_artifacts,
+            "install_codex_skills",
+            _install_skill_then_fail,
+        )
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "synthetic late skill failure" in cli_result.output
+        assert rule_path.read_text(encoding="utf-8") == "operator rule generation\n"
+        assert skill_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "operator skill generation\n"
+        )
+        assert skill_path.joinpath("operator.txt").read_text(encoding="utf-8") == ("keep together")
+        assert not fresh_skill_path.exists()
+        assert not tuple(codex_dir.rglob("*.backup"))
+        assert not tuple(codex_dir.rglob("*.rollback"))
+        assert not tuple(codex_dir.rglob("*.discard"))
+
+    def test_refresh_restores_bundle_when_batch_commit_detach_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A commit-boundary failure must restore every still-intact prior generation."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        skill_path = codex_dir / "skills" / "ouroboros-run"
+        rule_path.parent.mkdir(parents=True)
+        skill_path.mkdir(parents=True)
+        rule_path.write_text("operator rule generation\n", encoding="utf-8")
+        skill_path.joinpath("SKILL.md").write_text("operator skill generation\n", encoding="utf-8")
+        original_replace = os.replace
+        detach_count = 0
+
+        def _fail_second_backup_detach(source: str | Path, destination: str | Path) -> None:
+            nonlocal detach_count
+            if Path(source).name.endswith(".backup") and Path(destination).name.endswith(
+                ".discard"
+            ):
+                detach_count += 1
+                if detach_count == 2:
+                    raise OSError("synthetic batch commit failure")
+            original_replace(source, destination)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(os, "replace", _fail_second_backup_detach)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "synthetic batch commit failure" in cli_result.output
+        assert detach_count == 2
+        assert rule_path.read_text(encoding="utf-8") == "operator rule generation\n"
+        assert skill_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "operator skill generation\n"
+        )
+        assert not tuple(codex_dir.rglob("*.backup"))
+        assert not tuple(codex_dir.rglob("*.rollback"))
+        assert not tuple(codex_dir.rglob("*.discard"))
+
     def test_refresh_preserves_directory_shaped_rule_when_staging_fails(
         self,
         tmp_path: Path,

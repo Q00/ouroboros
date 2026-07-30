@@ -389,6 +389,7 @@ def _atomic_install_file(
     contents: bytes | None = None,
     before_mutation: CodexArtifactPreMutationCallback | None = None,
     on_generation: CodexArtifactGenerationCallback | None = None,
+    transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> None:
     """Atomically replace one managed file with complete packaged bytes."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,6 +423,7 @@ def _atomic_install_file(
         ),
         before_mutation=before_mutation,
         on_generation=on_generation,
+        transaction=transaction,
     )
 
 
@@ -483,6 +485,136 @@ def _dispose_committed_backup(backup_path: Path) -> None:
         pass
 
 
+@dataclass(slots=True)
+class _CodexArtifactBatchEntry:
+    """One committed artifact mutation retained for batch rollback."""
+
+    target_path: Path
+    rollback_path: Path | None
+    target_is_active: bool
+    before_mutation: CodexArtifactPreMutationCallback | None
+    on_generation: CodexArtifactGenerationCallback | None
+
+
+class _CodexArtifactBatchTransaction:
+    """Keep prior artifact generations until an entire rules/skills batch commits."""
+
+    def __init__(self) -> None:
+        self._entries: list[_CodexArtifactBatchEntry] = []
+
+    def record_install(
+        self,
+        *,
+        target_path: Path,
+        rollback_path: Path | None,
+        before_mutation: CodexArtifactPreMutationCallback | None,
+        on_generation: CodexArtifactGenerationCallback | None,
+    ) -> None:
+        self._entries.append(
+            _CodexArtifactBatchEntry(
+                target_path=target_path,
+                rollback_path=rollback_path,
+                target_is_active=True,
+                before_mutation=before_mutation,
+                on_generation=on_generation,
+            )
+        )
+
+    def record_removal(
+        self,
+        *,
+        target_path: Path,
+        rollback_path: Path,
+        before_mutation: CodexArtifactPreMutationCallback | None,
+        on_generation: CodexArtifactGenerationCallback | None,
+    ) -> None:
+        self._entries.append(
+            _CodexArtifactBatchEntry(
+                target_path=target_path,
+                rollback_path=rollback_path,
+                target_is_active=False,
+                before_mutation=before_mutation,
+                on_generation=on_generation,
+            )
+        )
+
+    def commit(self) -> None:
+        """Atomically detach every rollback generation, then clean it best-effort."""
+        for entry in self._entries:
+            if entry.rollback_path is None:
+                continue
+            disposal_path = _vacant_sibling_path(entry.target_path, suffix=".discard")
+            os.replace(entry.rollback_path, disposal_path)
+            entry.rollback_path = disposal_path
+
+        cleanup_paths = tuple(
+            entry.rollback_path for entry in self._entries if entry.rollback_path is not None
+        )
+        self._entries.clear()
+        for cleanup_path in cleanup_paths:
+            try:
+                _remove_installed_artifact(cleanup_path)
+            except BaseException:
+                pass
+
+    def rollback(self) -> None:
+        """Restore every pre-batch generation in reverse mutation order."""
+        rollback_error: BaseException | None = None
+        for entry in reversed(self._entries):
+            try:
+                self._rollback_entry(entry)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+        self._entries.clear()
+        if rollback_error is not None:
+            raise rollback_error
+
+    @staticmethod
+    def _rollback_entry(entry: _CodexArtifactBatchEntry) -> None:
+        if entry.before_mutation is not None:
+            entry.before_mutation(entry.target_path)
+
+        if not entry.target_is_active:
+            if _installed_artifact_exists(entry.target_path):
+                msg = f"Managed Codex artifact changed during batch rollback: {entry.target_path}"
+                raise OSError(msg)
+            if entry.rollback_path is None:
+                msg = f"Managed Codex artifact rollback is missing its prior generation: {entry.target_path}"
+                raise OSError(msg)
+            os.replace(entry.rollback_path, entry.target_path)
+            _record_current_generation(entry.target_path, entry.on_generation)
+            return
+
+        displaced_path: Path | None = None
+        if _installed_artifact_exists(entry.target_path):
+            displaced_path = _vacant_sibling_path(entry.target_path, suffix=".rollback")
+            os.replace(entry.target_path, displaced_path)
+
+        try:
+            if entry.rollback_path is None:
+                if entry.on_generation is not None:
+                    entry.on_generation(CodexArtifactGeneration(entry.target_path, missing=True))
+            else:
+                os.replace(entry.rollback_path, entry.target_path)
+                _record_current_generation(entry.target_path, entry.on_generation)
+        except BaseException:
+            if (
+                displaced_path is not None
+                and _installed_artifact_exists(displaced_path)
+                and not _installed_artifact_exists(entry.target_path)
+            ):
+                os.replace(displaced_path, entry.target_path)
+                _record_current_generation(entry.target_path, entry.on_generation)
+            raise
+
+        if displaced_path is not None and _installed_artifact_exists(displaced_path):
+            try:
+                _remove_installed_artifact(displaced_path)
+            except BaseException:
+                pass
+
+
 def _commit_staged_artifact(
     *,
     staging_path: Path,
@@ -490,6 +622,7 @@ def _commit_staged_artifact(
     generation: CodexArtifactGeneration,
     before_mutation: CodexArtifactPreMutationCallback | None,
     on_generation: CodexArtifactGenerationCallback | None,
+    transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> None:
     """Commit one staged artifact while retaining the previous generation until success."""
     backup_path: Path | None = None
@@ -512,7 +645,15 @@ def _commit_staged_artifact(
         os.replace(staging_path, target_path)
         staged_generation_active = True
 
-        if backup_path is not None and _installed_artifact_exists(backup_path):
+        if transaction is not None:
+            transaction.record_install(
+                target_path=target_path,
+                rollback_path=backup_path,
+                before_mutation=before_mutation,
+                on_generation=on_generation,
+            )
+            backup_path = None
+        elif backup_path is not None and _installed_artifact_exists(backup_path):
             _dispose_committed_backup(backup_path)
             backup_path = None
     except BaseException:
@@ -545,6 +686,7 @@ def _remove_artifact_transactionally(
     *,
     before_mutation: CodexArtifactPreMutationCallback | None,
     on_generation: CodexArtifactGenerationCallback | None,
+    transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> None:
     """Remove one managed artifact, retaining rollback data until commit."""
     if before_mutation is not None:
@@ -554,7 +696,15 @@ def _remove_artifact_transactionally(
     try:
         if on_generation is not None:
             on_generation(CodexArtifactGeneration(target_path, missing=True))
-        _dispose_committed_backup(backup_path)
+        if transaction is not None:
+            transaction.record_removal(
+                target_path=target_path,
+                rollback_path=backup_path,
+                before_mutation=before_mutation,
+                on_generation=on_generation,
+            )
+        else:
+            _dispose_committed_backup(backup_path)
         backup_path = None
     except BaseException:
         if _installed_artifact_exists(backup_path) and not _installed_artifact_exists(target_path):
@@ -579,6 +729,7 @@ def install_codex_rules(
     prune: bool = False,
     on_generation: CodexArtifactGenerationCallback | None = None,
     before_mutation: CodexArtifactPreMutationCallback | None = None,
+    _transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> Path:
     """Install or refresh packaged Ouroboros rules into ``~/.codex/rules``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "rules")
@@ -603,6 +754,7 @@ def install_codex_rules(
                     contents=rendered.encode("utf-8"),
                     before_mutation=before_mutation,
                     on_generation=on_generation,
+                    transaction=_transaction,
                 )
                 primary_target_path = target_path
             else:
@@ -611,6 +763,7 @@ def install_codex_rules(
                     source_path=source_path,
                     before_mutation=before_mutation,
                     on_generation=on_generation,
+                    transaction=_transaction,
                 )
             installed_names.add(target_path.name)
 
@@ -623,6 +776,7 @@ def install_codex_rules(
                     installed_path,
                     before_mutation=before_mutation,
                     on_generation=on_generation,
+                    transaction=_transaction,
                 )
 
     if primary_target_path is None:
@@ -639,6 +793,7 @@ def install_codex_skills(
     prune: bool = False,
     on_generation: CodexArtifactGenerationCallback | None = None,
     before_mutation: CodexArtifactPreMutationCallback | None = None,
+    _transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> tuple[Path, ...]:
     """Install or refresh packaged Ouroboros skills into ``~/.codex/skills/ouroboros-*``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "skills")
@@ -663,6 +818,7 @@ def install_codex_skills(
                 ),
                 before_mutation=before_mutation,
                 on_generation=on_generation,
+                transaction=_transaction,
             )
             installed_paths.append(target_path)
 
@@ -676,6 +832,7 @@ def install_codex_skills(
                         installed_path,
                         before_mutation=before_mutation,
                         on_generation=on_generation,
+                        transaction=_transaction,
                     )
 
     return tuple(installed_paths)
@@ -693,18 +850,43 @@ def install_codex_artifacts(
     This intentionally only touches managed Codex rules and skills. It does
     not read or write ``~/.codex/config.toml`` or ``~/.ouroboros/config.yaml``.
     """
-    rules_path = install_codex_rules(
-        codex_dir=codex_dir,
-        prune=prune,
-        on_generation=on_generation,
-        before_mutation=before_mutation,
+    resolved_codex_dir = resolve_codex_home(codex_dir)
+    install_roots = (
+        resolved_codex_dir,
+        resolved_codex_dir / "rules",
+        resolved_codex_dir / "skills",
     )
-    skill_paths = install_codex_skills(
-        codex_dir=codex_dir,
-        prune=prune,
-        on_generation=on_generation,
-        before_mutation=before_mutation,
-    )
+    root_topology = {path: _installed_artifact_exists(path) for path in install_roots}
+    transaction = _CodexArtifactBatchTransaction()
+    try:
+        rules_path = install_codex_rules(
+            codex_dir=codex_dir,
+            prune=prune,
+            on_generation=on_generation,
+            before_mutation=before_mutation,
+            _transaction=transaction,
+        )
+        skill_paths = install_codex_skills(
+            codex_dir=codex_dir,
+            prune=prune,
+            on_generation=on_generation,
+            before_mutation=before_mutation,
+            _transaction=transaction,
+        )
+        transaction.commit()
+    except BaseException as install_error:
+        try:
+            transaction.rollback()
+        except BaseException as rollback_error:
+            raise rollback_error from install_error
+        for install_root in reversed(install_roots):
+            if root_topology[install_root]:
+                continue
+            try:
+                install_root.rmdir()
+            except (FileNotFoundError, NotADirectoryError, OSError):
+                pass
+        raise
     return CodexArtifactInstallResult(rules_path=rules_path, skill_paths=skill_paths)
 
 
