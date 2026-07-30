@@ -137,6 +137,22 @@ def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     )
 
 
+def test_seed_qa_feedback_rejects_unrepairable_exit_condition_feedback() -> None:
+    seed = _build_seed()
+    qa_result = EvaluateResult(
+        passed=False,
+        score=0.61,
+        verdict="revise",
+        differences=(
+            "exit_conditions are noncanonical because they use indirect templated checks",
+        ),
+        suggestions=("replace them with direct executable exit conditions",),
+    )
+
+    with pytest.raises(SeedQaRepairMappingError):
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+
+
 def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:
     seed = _build_seed().model_copy(
         update={

@@ -5086,6 +5086,8 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         if item.strip()
     )
     lowered = "\n".join(feedback).casefold()
+    if "exit_conditions" in lowered or "exit conditions" in lowered:
+        raise SeedQaRepairMappingError(feedback)
     repairs: list[str] = []
     if "ambiguity_score" in lowered:
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
