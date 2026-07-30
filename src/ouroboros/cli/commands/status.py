@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from rich.table import Table
 from rich.text import Text
@@ -24,7 +26,12 @@ from ouroboros.backends import (
 )
 from ouroboros.cli.commands.config import _load_config, _resolve_db_path
 from ouroboros.cli.formatters.panels import print_error, print_info
-from ouroboros.cli.formatters.tables import create_status_table, print_table
+from ouroboros.cli.formatters.tables import (
+    create_key_value_table,
+    create_status_table,
+    create_table,
+    print_table,
+)
 from ouroboros.config.loader import load_config
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 
@@ -258,13 +265,17 @@ def executions(
 
     Shows execution history with status information.
     """
-    # Placeholder implementation with example data
-    example_data = [
-        {"name": "exec-001", "status": "complete"},
-        {"name": "exec-002", "status": "running"},
-        {"name": "exec-003", "status": "failed"},
-    ]
-    table = create_status_table(example_data, "Recent Executions")
+    if limit <= 0:
+        print_error("Execution limit must be a positive integer")
+        raise typer.Exit(1)
+    data, config_path = _load_config()
+    db_path = _database_file_path(data, config_path)
+    try:
+        rows = _execution_summaries(db_path, None if all_ else limit)
+    except (OSError, sqlite3.Error) as exc:
+        print_error(f"Database unavailable: {db_path} ({exc})")
+        raise typer.Exit(1) from None
+    table = create_status_table(rows, "Recent Executions")
     print_table(table)
 
     if not all_:
@@ -286,10 +297,34 @@ def execution(
 
     Displays execution metadata, progress, and optionally events.
     """
-    # Placeholder implementation
-    print_info(f"Would show details for execution: {execution_id}")
+    data, config_path = _load_config()
+    db_path = _database_file_path(data, config_path)
+    try:
+        rows = _execution_events(db_path, execution_id)
+    except (OSError, sqlite3.Error) as exc:
+        print_error(f"Database unavailable: {db_path} ({exc})")
+        raise typer.Exit(1) from None
+    if not rows:
+        print_error(f"Execution not found: {execution_id}")
+        raise typer.Exit(1)
+    terminal = next((row for row in rows if row["event_type"] == "execution.terminal"), None)
+    status = _event_status(terminal) if terminal is not None else "running"
+    details = {
+        "Execution": execution_id,
+        "Status": status,
+        "Events": len(rows),
+        "Last update": rows[0]["timestamp"],
+        "Database": str(db_path),
+    }
+    print_table(create_key_value_table(details, "Execution Details"))
     if events:
-        print_info("Would include event history")
+        table = create_table("Execution Events")
+        table.add_column("Timestamp", no_wrap=True)
+        table.add_column("Event")
+        table.add_column("Aggregate", no_wrap=True)
+        for row in rows:
+            table.add_row(str(row["timestamp"]), row["event_type"], row["aggregate_id"])
+        print_table(table)
 
 
 _CREDENTIAL_PROVIDER_BY_LLM_BACKEND = {
@@ -371,6 +406,71 @@ def _database_file_path(data: dict, config_path: Path) -> Path:
             return path
         return config_path.parent / path
     return config_path.parent / "ouroboros.db"
+
+
+def _readonly_connection(db_path: Path) -> sqlite3.Connection:
+    encoded = quote(str(db_path.expanduser().resolve()), safe="/")
+    connection = sqlite3.connect(f"file:{encoded}?mode=ro", uri=True, timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _event_count(db_path: Path) -> int:
+    with _readonly_connection(db_path) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+        ).fetchone()
+        if table is None:
+            return 0
+        row = connection.execute("SELECT COUNT(*) AS count FROM events").fetchone()
+    return int(row["count"])
+
+
+def _event_status(row: sqlite3.Row) -> str:
+    payload = json.loads(row["payload"])
+    value = payload.get("status")
+    return str(value) if value else "unknown"
+
+
+def _execution_summaries(db_path: Path, limit: int | None) -> list[dict[str, str]]:
+    sql = (
+        "SELECT json_extract(payload, '$.execution_id') AS execution_id, "
+        "MAX(timestamp) AS started_at FROM events "
+        "WHERE event_type = 'orchestrator.session.started' "
+        "AND json_extract(payload, '$.execution_id') IS NOT NULL "
+        "GROUP BY execution_id ORDER BY started_at DESC"
+    )
+    parameters: list[int] = []
+    if limit is not None:
+        sql += " LIMIT ?"
+        parameters.append(limit)
+    with _readonly_connection(db_path) as connection:
+        executions = connection.execute(sql, parameters).fetchall()
+        summaries: list[dict[str, str]] = []
+        for row in executions:
+            execution_id = str(row["execution_id"])
+            terminal = connection.execute(
+                "SELECT payload FROM events WHERE aggregate_id = ? "
+                "AND event_type = 'execution.terminal' ORDER BY timestamp DESC LIMIT 1",
+                [execution_id],
+            ).fetchone()
+            summaries.append(
+                {
+                    "name": execution_id,
+                    "status": _event_status(terminal) if terminal is not None else "running",
+                }
+            )
+    return summaries
+
+
+def _execution_events(db_path: Path, execution_id: str) -> list[sqlite3.Row]:
+    with _readonly_connection(db_path) as connection:
+        return connection.execute(
+            "SELECT aggregate_id, event_type, payload, timestamp FROM events "
+            "WHERE aggregate_id = ? OR json_extract(payload, '$.execution_id') = ? "
+            "ORDER BY timestamp DESC",
+            [execution_id, execution_id],
+        ).fetchall()
 
 
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
@@ -578,7 +678,14 @@ def health() -> None:
                 except OSError as exc:
                     checks.append(_health_row("Database", "error", f"not readable: {exc}"))
                 else:
-                    checks.append(_health_row("Database", "ok", db_detail))
+                    try:
+                        event_count = _event_count(db_path)
+                    except (OSError, sqlite3.DatabaseError) as exc:
+                        checks.append(_health_row("Database", "error", f"invalid: {exc}"))
+                    else:
+                        checks.append(
+                            _health_row("Database", "ok", f"{db_detail}; events={event_count}")
+                        )
         except Exception as exc:
             checks.append(_health_row("Database", "error", str(exc)))
 
