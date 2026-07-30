@@ -21,6 +21,7 @@ from ouroboros.cli.commands.codex import (
     app,
 )
 from ouroboros.codex import CodexArtifactInstallResult, install_codex_artifacts
+from ouroboros.codex import artifacts as codex_artifacts
 
 runner = CliRunner()
 _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
@@ -90,6 +91,46 @@ class TestCodexRefresh:
         )
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+
+    def test_refresh_keeps_new_skill_when_old_generation_cleanup_partially_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Standalone refresh must not roll back from a damaged disposal generation."""
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / "ouroboros-run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed run skill", encoding="utf-8")
+        target_path.joinpath("operator.txt").write_text("old companion", encoding="utf-8")
+        original_remove = codex_artifacts._remove_installed_artifact
+
+        def _partially_remove_disposal(path: Path) -> None:
+            if path.name.endswith(".discard"):
+                path.joinpath("SKILL.md").unlink()
+                raise OSError("synthetic partial refresh disposal failure")
+            original_remove(path)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(
+            codex_artifacts,
+            "_remove_installed_artifact",
+            _partially_remove_disposal,
+        )
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 0
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") != (
+            "installed run skill"
+        )
+        assert not target_path.joinpath("operator.txt").exists()
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+        disposal_paths = tuple(target_path.parent.glob(".*.discard"))
+        assert len(disposal_paths) == 1
+        assert disposal_paths[0].joinpath("operator.txt").read_text(encoding="utf-8") == (
+            "old companion"
+        )
 
     def test_refresh_preserves_directory_shaped_rule_when_staging_fails(
         self,

@@ -464,6 +464,25 @@ def _record_current_generation(
         on_generation(CodexArtifactGeneration(target_path, source_path=target_path))
 
 
+def _dispose_committed_backup(backup_path: Path) -> None:
+    """Detach a superseded generation before best-effort recursive cleanup.
+
+    Renaming the backup is the commit boundary: failures before that point leave
+    the complete prior generation available for rollback. Once detached, cleanup
+    cannot affect either the active target or the rollback source, so a partial
+    filesystem deletion is intentionally treated as post-commit housekeeping.
+    """
+    disposal_path = _vacant_sibling_path(backup_path, suffix=".discard")
+    os.replace(backup_path, disposal_path)
+    try:
+        _remove_installed_artifact(disposal_path)
+    except BaseException:
+        # The active artifact transaction is already committed. A partially
+        # removed setup-owned sibling is safer than rolling back from damaged
+        # data or reporting failure after the managed target has changed.
+        pass
+
+
 def _commit_staged_artifact(
     *,
     staging_path: Path,
@@ -475,6 +494,7 @@ def _commit_staged_artifact(
     """Commit one staged artifact while retaining the previous generation until success."""
     backup_path: Path | None = None
     prepared_generation = False
+    staged_generation_active = False
     try:
         if _installed_artifact_exists(target_path):
             if before_mutation is not None:
@@ -490,24 +510,26 @@ def _commit_staged_artifact(
             on_generation(generation)
             prepared_generation = True
         os.replace(staging_path, target_path)
+        staged_generation_active = True
 
         if backup_path is not None and _installed_artifact_exists(backup_path):
-            try:
-                _remove_installed_artifact(backup_path)
-            except BaseException as cleanup_error:
+            _dispose_committed_backup(backup_path)
+            backup_path = None
+    except BaseException:
+        if _installed_artifact_exists(staging_path):
+            _remove_installed_artifact(staging_path)
+        if backup_path is not None and _installed_artifact_exists(backup_path):
+            if staged_generation_active and _installed_artifact_exists(target_path):
                 if before_mutation is not None:
                     before_mutation(target_path)
                 os.replace(target_path, staging_path)
                 os.replace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
-                if _installed_artifact_exists(staging_path):
+                try:
                     _remove_installed_artifact(staging_path)
-                raise cleanup_error
-    except BaseException:
-        if _installed_artifact_exists(staging_path):
-            _remove_installed_artifact(staging_path)
-        if backup_path is not None and _installed_artifact_exists(backup_path):
-            if _installed_artifact_exists(target_path):
+                except BaseException:
+                    pass
+            elif _installed_artifact_exists(target_path):
                 _remove_installed_artifact(backup_path)
             else:
                 os.replace(backup_path, target_path)
@@ -524,7 +546,7 @@ def _remove_artifact_transactionally(
     before_mutation: CodexArtifactPreMutationCallback | None,
     on_generation: CodexArtifactGenerationCallback | None,
 ) -> None:
-    """Remove one managed artifact, restoring it if bookkeeping or cleanup fails."""
+    """Remove one managed artifact, retaining rollback data until commit."""
     if before_mutation is not None:
         before_mutation(target_path)
     backup_path = _vacant_sibling_path(target_path, suffix=".backup")
@@ -532,7 +554,8 @@ def _remove_artifact_transactionally(
     try:
         if on_generation is not None:
             on_generation(CodexArtifactGeneration(target_path, missing=True))
-        _remove_installed_artifact(backup_path)
+        _dispose_committed_backup(backup_path)
+        backup_path = None
     except BaseException:
         if _installed_artifact_exists(backup_path) and not _installed_artifact_exists(target_path):
             os.replace(backup_path, target_path)

@@ -575,37 +575,77 @@ class TestInstallCodexSkills:
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
 
-    def test_backup_cleanup_failure_restores_previous_skill_generation(
+    def test_partial_backup_cleanup_keeps_committed_skill_generation(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Backup cleanup failure must roll the committed replacement back."""
+        """Partial disposal cannot corrupt the active or prior skill generation."""
         source_skills_dir = tmp_path / "packaged-skills"
         self._write_skill(source_skills_dir, "run", body="fresh skill")
         codex_dir = tmp_path / ".codex"
         target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
         target_path.mkdir(parents=True)
         target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
+        target_path.joinpath("operator.txt").write_text(
+            "preserve as one generation", encoding="utf-8"
+        )
         original_remove = codex_artifacts._remove_installed_artifact
 
-        def _fail_backup_cleanup(path: Path) -> None:
-            if path.name.endswith(".backup"):
-                raise OSError("synthetic backup cleanup failure")
+        def _partially_remove_disposal(path: Path) -> None:
+            if path.name.endswith(".discard"):
+                path.joinpath("SKILL.md").unlink()
+                raise OSError("synthetic partial disposal failure")
             original_remove(path)
 
         monkeypatch.setattr(
             codex_artifacts,
             "_remove_installed_artifact",
-            _fail_backup_cleanup,
+            _partially_remove_disposal,
         )
 
-        with pytest.raises(OSError, match="synthetic backup cleanup failure"):
+        install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "fresh skill"
+        assert not target_path.joinpath("operator.txt").exists()
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+        disposal_paths = tuple(target_path.parent.glob(".*.discard"))
+        assert len(disposal_paths) == 1
+        assert disposal_paths[0].joinpath("operator.txt").read_text(encoding="utf-8") == (
+            "preserve as one generation"
+        )
+
+    def test_backup_detach_failure_restores_previous_skill_generation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Failure before the cleanup commit boundary must restore the intact backup."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill")
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
+        original_replace = os.replace
+
+        def _fail_backup_detach(source: str | Path, destination: str | Path) -> None:
+            if Path(source).name.endswith(".backup") and Path(destination).name.endswith(
+                ".discard"
+            ):
+                raise OSError("synthetic backup detach failure")
+            original_replace(source, destination)
+
+        monkeypatch.setattr(os, "replace", _fail_backup_detach)
+
+        with pytest.raises(OSError, match="synthetic backup detach failure"):
             install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
 
         assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "installed skill"
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+        assert not tuple(target_path.parent.glob(".*.discard"))
 
     def test_prune_bookkeeping_failure_restores_removed_skill(
         self,
@@ -635,6 +675,47 @@ class TestInstallCodexSkills:
 
         assert stale_path.joinpath("SKILL.md").read_text(encoding="utf-8") == ("installed legacy")
         assert not tuple(stale_path.parent.glob(f".{stale_path.name}.*.backup"))
+
+    def test_partial_prune_cleanup_keeps_removal_committed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Partial post-commit cleanup cannot restore a damaged pruned generation."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh status")
+        codex_dir = tmp_path / ".codex"
+        stale_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}legacy"
+        stale_path.mkdir(parents=True)
+        stale_path.joinpath("SKILL.md").write_text("installed legacy", encoding="utf-8")
+        stale_path.joinpath("operator.txt").write_text("old companion", encoding="utf-8")
+        original_remove = codex_artifacts._remove_installed_artifact
+
+        def _partially_remove_disposal(path: Path) -> None:
+            if path.name.endswith(".discard"):
+                path.joinpath("SKILL.md").unlink()
+                raise OSError("synthetic partial prune disposal failure")
+            original_remove(path)
+
+        monkeypatch.setattr(
+            codex_artifacts,
+            "_remove_installed_artifact",
+            _partially_remove_disposal,
+        )
+
+        install_codex_skills(
+            codex_dir=codex_dir,
+            skills_dir=source_skills_dir,
+            prune=True,
+        )
+
+        assert not stale_path.exists()
+        assert not tuple(stale_path.parent.glob(f".{stale_path.name}.*.backup"))
+        disposal_paths = tuple(stale_path.parent.glob(".*.discard"))
+        assert len(disposal_paths) == 1
+        assert disposal_paths[0].joinpath("operator.txt").read_text(encoding="utf-8") == (
+            "old companion"
+        )
 
     def test_refreshes_existing_namespaced_skills_from_updated_packaged_bundle(
         self,
