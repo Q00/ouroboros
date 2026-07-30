@@ -320,6 +320,8 @@ class TestFormatReattachGuidance:
         tracker = _make_tracker(execution_id=None)
         output = _format_reattach_guidance(tracker)
         assert "<unknown>" in output
+        assert "ouroboros status execution" not in output
+        assert "ouroboros tui monitor" in output
         assert "ouroboros run workflow --orchestrator --resume sess-abc123" in output
 
     def test_missing_seed_id_surfaces_placeholder(self) -> None:

@@ -531,7 +531,8 @@ def detect_brownfield(cwd: str | Path) -> bool:
         cwd: Directory to inspect.
 
     Returns:
-        ``True`` if at least one config file is found, ``False`` otherwise.
+        ``True`` if valid Git metadata or at least one config file is found,
+        ``False`` otherwise.
     """
     try:
         root = Path(cwd)

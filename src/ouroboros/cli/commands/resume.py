@@ -190,7 +190,7 @@ def _display_sessions(sessions: list) -> None:
 def _format_reattach_guidance(tracker) -> str:
     """Build the post-selection guidance block.
 
-    Prints three commands, matching the real CLI contracts:
+    Prints up to three commands, matching the real CLI contracts:
 
     - Inspect:   ``ouroboros status execution <exec_id> --events``
     - Monitor:   ``ouroboros tui monitor``
@@ -203,7 +203,6 @@ def _format_reattach_guidance(tracker) -> str:
     exec_id = tracker.execution_id or "<unknown>"
     seed_hint = tracker.seed_id or "<seed.yaml>"
 
-    inspect_line = f"ouroboros status execution {exec_id} --events"
     monitor_line = "ouroboros tui monitor"
     resume_line = f"ouroboros run workflow --orchestrator --resume {tracker.session_id} {seed_hint}"
 
@@ -211,15 +210,24 @@ def _format_reattach_guidance(tracker) -> str:
         f"Session ID:   [bold cyan]{tracker.session_id}[/]",
         f"Execution ID: [bold cyan]{exec_id}[/]",
         "",
-        "[bold]Inspect persisted execution[/] (read-only):",
-        f"    {inspect_line}",
-        "",
-        "[bold]Monitor interactively[/] (read-only):",
-        f"    {monitor_line}",
-        "",
-        "[bold]Resume execution[/] (requires the original seed file):",
-        f"    {resume_line}",
     ]
+    if tracker.execution_id:
+        lines.extend(
+            [
+                "[bold]Inspect persisted execution[/] (read-only):",
+                f"    ouroboros status execution {tracker.execution_id} --events",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[bold]Monitor interactively[/] (read-only):",
+            f"    {monitor_line}",
+            "",
+            "[bold]Resume execution[/] (requires the original seed file):",
+            f"    {resume_line}",
+        ]
+    )
     if not tracker.seed_id:
         lines.append(
             "[dim]Seed ID was not recorded for this session — replace "

@@ -46,7 +46,7 @@ When the user invokes this skill:
 
 2. If sessions are listed, enter the number of the session you want to work
    with. The command prints both the `session_id` and the `exec_id`, along
-   with the two re-attach paths.
+   with the available re-attach paths.
 
 3. Pick the right re-attach path:
 
