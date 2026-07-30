@@ -99,7 +99,6 @@ class TestDetectBrownfield:
             "gitdir: {git_dir} \n",
             " gitdir: {git_dir}\n",
             "\ngitdir: {git_dir}\n",
-            "gitdir: {git_dir}\r\n",
         ),
     )
     def test_detect_brownfield_rejects_noncanonical_git_pointer_spacing(
@@ -116,3 +115,16 @@ class TestDetectBrownfield:
         )
 
         assert detect_brownfield(tmp_path) is False
+
+    @pytest.mark.parametrize("line_ending", ("", "\n", "\r\n", "\r"))
+    def test_detect_brownfield_accepts_single_git_pointer_line_ending(
+        self,
+        tmp_path: Path,
+        line_ending: str,
+    ) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".git").write_bytes(f"gitdir: {git_dir}".encode() + line_ending.encode())
+
+        assert detect_brownfield(tmp_path) is True

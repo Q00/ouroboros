@@ -501,7 +501,9 @@ def _has_git_metadata(root: Path) -> bool:
         pointer = marker.read_bytes().decode("utf-8")
     except (OSError, UnicodeError):
         return False
-    if pointer.endswith("\n"):
+    if pointer.endswith("\r\n"):
+        pointer = pointer[:-2]
+    elif pointer.endswith(("\n", "\r")):
         pointer = pointer[:-1]
     if "\n" in pointer or "\r" in pointer:
         return False
