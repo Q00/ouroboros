@@ -197,6 +197,34 @@ def test_executions_falls_back_to_default_runtime_database(monkeypatch, tmp_path
     assert "exec_runtime_default" in result.output
 
 
+def test_execution_commands_use_default_database_without_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_execution_events(
+        config_dir / "ouroboros.db",
+        (
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_no_config",
+                data={"status": "complete"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_no_config", "--events"])
+
+    assert list_result.exit_code == 0
+    assert detail_result.exit_code == 0
+    assert "exec_no_config" in list_result.output
+    assert "execution.terminal" in detail_result.output
+
+
 def test_executions_ignores_child_aggregates_and_subtask_status(
     monkeypatch, tmp_path: Path
 ) -> None:

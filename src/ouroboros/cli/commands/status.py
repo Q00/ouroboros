@@ -23,7 +23,11 @@ from ouroboros.backends import (
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
 )
-from ouroboros.cli.commands.config import _database_file_path, _load_config
+from ouroboros.cli.commands.config import (
+    _database_file_path,
+    _load_config,
+    _resolved_database_file_path,
+)
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import (
     create_key_value_table,
@@ -186,8 +190,7 @@ def _is_unknown_run_error(message: str) -> bool:
 
 
 def _configured_event_store_path() -> Path:
-    data, config_path = _load_config()
-    db_path = _database_file_path(data, config_path)
+    db_path = _resolved_database_file_path()
     if not db_path.exists():
         raise FileNotFoundError(f"configured database does not exist: {db_path}")
     if not db_path.is_file():

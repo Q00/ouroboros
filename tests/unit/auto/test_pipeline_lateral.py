@@ -112,7 +112,7 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "QA differences:" not in constraints
     assert "[seed qa lateral repair attempt" not in constraints
     assert "omit QA or lateral diagnostic prose" in constraints
-    assert repaired.metadata.ambiguity_score == 0.20
+    assert repaired.metadata.ambiguity_score == 0.19
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
@@ -217,6 +217,7 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
         "metadata.ambiguity_score <= 0.20",
         "metadata.ambiguity_score must be <= 0.20",
         "metadata.ambiguity_score must remain <= 0.20",
+        "metadata.ambiguity_score < 0.20",
         "metadata.ambiguity_score should be reduced to 0.20",
         "metadata.ambiguity_score must not exceed 0.20",
         "metadata.ambiguity_score should not be greater than 0.20",
@@ -247,7 +248,7 @@ def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair(difference: str
         attempt=1,
     )
 
-    assert repaired.metadata.ambiguity_score == 0.20
+    assert repaired.metadata.ambiguity_score == 0.19
 
 
 @pytest.mark.parametrize(

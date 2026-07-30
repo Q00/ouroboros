@@ -144,6 +144,17 @@ def _database_file_path(data: dict, config_path: Path) -> Path:
     return runtime_path
 
 
+def _resolved_database_file_path() -> Path:
+    """Resolve the active EventStore path with or without ``config.yaml``."""
+    from ouroboros.config.models import get_config_dir
+
+    config_path = get_config_dir() / "config.yaml"
+    if not config_path.exists():
+        return config_path.parent / "ouroboros.db"
+    data, loaded_config_path = _load_config()
+    return _database_file_path(data, loaded_config_path)
+
+
 def _save_config(data: dict, path: Path) -> None:
     """Write config dict back to YAML."""
     path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))

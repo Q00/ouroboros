@@ -18,7 +18,7 @@ from typing import Annotated
 
 import typer
 
-from ouroboros.cli.commands.config import _database_file_path, _load_config
+from ouroboros.cli.commands.config import _resolved_database_file_path
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.cli.formatters.tables import create_table, print_table
@@ -42,13 +42,7 @@ EXIT_CORRUPTED_DB = 2
 
 def _default_db_path() -> str:
     """Return the canonical SQLite path used by the running CLI."""
-    from ouroboros.config.models import get_config_dir
-
-    config_path = get_config_dir() / "config.yaml"
-    if not config_path.exists():
-        return str(config_path.parent / "ouroboros.db")
-    data, loaded_config_path = _load_config()
-    return str(_database_file_path(data, loaded_config_path))
+    return str(_resolved_database_file_path())
 
 
 async def _get_event_store(db_path: str | None = None):

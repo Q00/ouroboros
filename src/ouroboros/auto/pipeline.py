@@ -4924,7 +4924,9 @@ def _seed_with_seed_qa_lateral_feedback(
         "parent_seed_id": seed.metadata.seed_id,
     }
     if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
+        metadata_updates["ambiguity_score"] = min(
+            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
+        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4948,7 +4950,9 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "parent_seed_id": seed.metadata.seed_id,
     }
     if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
+        metadata_updates["ambiguity_score"] = min(
+            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
+        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4969,6 +4973,7 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
+_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,
