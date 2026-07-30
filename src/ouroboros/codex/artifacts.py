@@ -784,7 +784,7 @@ def _commit_staged_artifact(
         elif backup_path is not None and _installed_artifact_exists(backup_path):
             _dispose_committed_backup(backup_path)
             backup_path = None
-    except BaseException:
+    except BaseException as commit_error:
         if _installed_artifact_exists(staging_path):
             _remove_installed_artifact(staging_path)
         if backup_path is not None and _installed_artifact_exists(backup_path):
@@ -803,7 +803,8 @@ def _commit_staged_artifact(
                 except BaseException:
                     pass
             elif _installed_artifact_exists(target_path):
-                _remove_installed_artifact(backup_path)
+                msg = f"Managed Codex artifact changed during rollback: {target_path}"
+                raise OSError(msg) from commit_error
             else:
                 _rename_noreplace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
