@@ -276,9 +276,7 @@ async def _execution_events(
     try:
         snapshots = await store.get_session_activity_snapshots()
         session_ids = [
-            snapshot.session_id
-            for snapshot in snapshots
-            if snapshot.execution_id == execution_id
+            snapshot.session_id for snapshot in snapshots if snapshot.execution_id == execution_id
         ]
         if session_ids:
             related_pages = await asyncio.gather(
@@ -291,13 +289,7 @@ async def _execution_events(
                     for session_id in session_ids
                 )
             )
-            persisted = list(
-                {
-                    event.id: event
-                    for page in related_pages
-                    for event in page
-                }.values()
-            )
+            persisted = list({event.id: event for page in related_pages for event in page}.values())
         else:
             persisted = []
             offset = 0
