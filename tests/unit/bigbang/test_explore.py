@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.bigbang.explore import detect_brownfield
 
 
@@ -85,5 +87,31 @@ class TestDetectBrownfield:
         git_dir.mkdir()
         (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         (tmp_path / ".git").write_text(f"GITDIR: {git_dir}\n", encoding="utf-8")
+
+        assert detect_brownfield(tmp_path) is False
+
+    @pytest.mark.parametrize(
+        "pointer_template",
+        (
+            "gitdir:{git_dir}\n",
+            "gitdir:  {git_dir}\n",
+            "gitdir:\t{git_dir}\n",
+            "gitdir: {git_dir} \n",
+            " gitdir: {git_dir}\n",
+            "\ngitdir: {git_dir}\n",
+        ),
+    )
+    def test_detect_brownfield_rejects_noncanonical_git_pointer_spacing(
+        self,
+        tmp_path: Path,
+        pointer_template: str,
+    ) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".git").write_text(
+            pointer_template.format(git_dir=git_dir),
+            encoding="utf-8",
+        )
 
         assert detect_brownfield(tmp_path) is False

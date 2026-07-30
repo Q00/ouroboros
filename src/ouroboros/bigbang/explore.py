@@ -45,7 +45,7 @@ _CONFIG_FILES: dict[str, str] = {
     "CMakeLists.txt": "C/C++",
     "Makefile": "Make-based",
 }
-_GITDIR_PREFIX = "gitdir:"
+_GITDIR_PREFIX = "gitdir: "
 _MAX_GIT_POINTER_BYTES = 4096
 
 # File extensions for type discovery
@@ -498,16 +498,17 @@ def _has_git_metadata(root: Path) -> bool:
     try:
         if marker.stat().st_size > _MAX_GIT_POINTER_BYTES:
             return False
-        pointer = marker.read_text(encoding="utf-8").strip()
+        pointer = marker.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False
-    if len(pointer.splitlines()) != 1:
+    if pointer.endswith("\n"):
+        pointer = pointer[:-1]
+    if "\n" in pointer or "\r" in pointer:
         return False
-    prefix, separator, raw_path = pointer.partition(":")
-    if not separator or prefix != _GITDIR_PREFIX.removesuffix(":"):
+    if not pointer.startswith(_GITDIR_PREFIX):
         return False
-    normalized_path = raw_path.strip()
-    if not normalized_path:
+    normalized_path = pointer.removeprefix(_GITDIR_PREFIX)
+    if not normalized_path or normalized_path != normalized_path.strip():
         return False
     target = Path(normalized_path)
     if not target.is_absolute():
