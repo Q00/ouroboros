@@ -339,6 +339,44 @@ class TestCodexRefresh:
         assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
         assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.tmp"))
 
+    def test_refresh_restores_rule_replaced_during_backup_acquisition(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Refresh must verify the exact generation atomically acquired for rollback."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("old rule generation\n", encoding="utf-8")
+        original_replace = os.replace
+        injected = False
+
+        def _replace_rule_before_backup(source: str | Path, destination: str | Path) -> None:
+            nonlocal injected
+            source_path = Path(source)
+            destination_path = Path(destination)
+            if (
+                source_path == rule_path
+                and destination_path.name.endswith(".backup")
+                and not injected
+            ):
+                injected = True
+                rule_path.write_text("concurrent operator rule\n", encoding="utf-8")
+            original_replace(source, destination)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(os, "replace", _replace_rule_before_backup)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "changed before activation" in cli_result.output
+        assert injected is True
+        assert rule_path.read_text(encoding="utf-8") == "concurrent operator rule\n"
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.tmp"))
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.backup"))
+
     def test_refresh_preserves_removed_target_recreated_at_rollback_commit(
         self,
         tmp_path: Path,

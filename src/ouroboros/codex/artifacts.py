@@ -757,10 +757,27 @@ def _commit_staged_artifact(
     staged_generation_active = False
     try:
         if _installed_artifact_exists(target_path):
+            rollback_fingerprint = _artifact_fingerprint(target_path)
             if before_mutation is not None:
                 before_mutation(target_path)
             backup_path = _vacant_sibling_path(target_path, suffix=".backup")
             os.replace(target_path, backup_path)
+            try:
+                acquired_fingerprint = _artifact_fingerprint(backup_path)
+            except OSError as fingerprint_error:
+                try:
+                    _rename_noreplace(backup_path, target_path)
+                except FileExistsError:
+                    pass
+                msg = f"Could not verify managed Codex artifact before activation: {target_path}"
+                raise OSError(msg) from fingerprint_error
+            if acquired_fingerprint != rollback_fingerprint:
+                try:
+                    _rename_noreplace(backup_path, target_path)
+                except FileExistsError:
+                    pass
+                msg = f"Managed Codex artifact changed before activation: {target_path}"
+                raise OSError(msg)
             if on_generation is not None:
                 on_generation(CodexArtifactGeneration(target_path, missing=True))
 
