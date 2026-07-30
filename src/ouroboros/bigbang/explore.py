@@ -498,7 +498,7 @@ def _has_git_metadata(root: Path) -> bool:
     try:
         if marker.stat().st_size > _MAX_GIT_POINTER_BYTES:
             return False
-        pointer = marker.read_text(encoding="utf-8")
+        pointer = marker.read_bytes().decode("utf-8")
     except (OSError, UnicodeError):
         return False
     if pointer.endswith("\n"):

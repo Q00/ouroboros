@@ -99,6 +99,7 @@ class TestDetectBrownfield:
             "gitdir: {git_dir} \n",
             " gitdir: {git_dir}\n",
             "\ngitdir: {git_dir}\n",
+            "gitdir: {git_dir}\r\n",
         ),
     )
     def test_detect_brownfield_rejects_noncanonical_git_pointer_spacing(
