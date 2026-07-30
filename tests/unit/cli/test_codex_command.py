@@ -91,6 +91,33 @@ class TestCodexRefresh:
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
 
+    def test_refresh_preserves_directory_shaped_rule_when_staging_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Standalone refresh must not delete directory-shaped rule topology."""
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "rules" / "ouroboros.md"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("operator.txt").write_text("keep", encoding="utf-8")
+        original_write_bytes = Path.write_bytes
+
+        def _fail_rule_staging(path: Path, data: bytes) -> int:
+            if path.parent == target_path.parent and path.name.endswith(".tmp"):
+                raise OSError("synthetic refresh rule staging failure")
+            return original_write_bytes(path, data)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(Path, "write_bytes", _fail_rule_staging)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "synthetic refresh rule staging failure" in cli_result.output
+        assert target_path.joinpath("operator.txt").read_text(encoding="utf-8") == "keep"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+
 
 class TestCodexDoctor:
     """Tests for `ouroboros codex doctor`."""

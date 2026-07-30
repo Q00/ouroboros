@@ -2904,6 +2904,45 @@ class TestCodexSetup:
 
         assert rule_path.read_text(encoding="utf-8") == operator_rule
 
+    def test_install_codex_artifacts_restores_skill_when_generation_snapshot_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """Setup bookkeeping failure must restore the prior managed skill generation."""
+        codex_home = tmp_path / ".codex"
+        skill_path = codex_home / "skills" / "ouroboros-auto"
+        skill_path.mkdir(parents=True)
+        skill_entrypoint = skill_path / "SKILL.md"
+        skill_entrypoint.write_text("installed auto skill\n", encoding="utf-8")
+        required_snapshots = setup_cmd._snapshot_managed_codex_setup_paths(codex_home)
+        written_snapshots: dict[Path, setup_cmd._PathSnapshot] = {}
+        original_snapshot = setup_cmd._snapshot_path
+
+        def _fail_packaged_skill_snapshot(
+            path: Path,
+            *,
+            _seen: frozenset[Path] = frozenset(),
+        ) -> setup_cmd._PathSnapshot:
+            if path.name == "auto" and path.is_dir() and not path.is_relative_to(tmp_path):
+                raise OSError("synthetic packaged skill snapshot failure")
+            return original_snapshot(path, _seen=_seen)
+
+        with patch(
+            "ouroboros.cli.commands.setup._snapshot_path",
+            side_effect=_fail_packaged_skill_snapshot,
+        ):
+            assert (
+                setup_cmd._install_codex_artifacts(
+                    codex_dir=codex_home,
+                    expected_snapshots=written_snapshots,
+                    required_snapshots=required_snapshots,
+                )
+                is False
+            )
+
+        assert skill_entrypoint.read_text(encoding="utf-8") == "installed auto skill\n"
+        assert not tuple(skill_path.parent.glob(f".{skill_path.name}.*.tmp"))
+        assert not tuple(skill_path.parent.glob(f".{skill_path.name}.*.backup"))
+
     def test_setup_codex_rejects_rule_changed_after_read_before_install(
         self, tmp_path: Path
     ) -> None:

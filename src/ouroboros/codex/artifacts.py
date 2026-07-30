@@ -388,6 +388,7 @@ def _atomic_install_file(
     source_path: Path,
     contents: bytes | None = None,
     before_mutation: CodexArtifactPreMutationCallback | None = None,
+    on_generation: CodexArtifactGenerationCallback | None = None,
 ) -> None:
     """Atomically replace one managed file with complete packaged bytes."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,15 +405,24 @@ def _atomic_install_file(
         else:
             temp_path.write_bytes(contents)
             temp_path.chmod(source_path.stat().st_mode & 0o7777)
-        if before_mutation is not None:
-            before_mutation(target_path)
-        os.replace(temp_path, target_path)
     except BaseException:
         try:
             temp_path.unlink()
         except FileNotFoundError:
             pass
         raise
+
+    _commit_staged_artifact(
+        staging_path=temp_path,
+        target_path=target_path,
+        generation=CodexArtifactGeneration(
+            target_path,
+            source_path=source_path,
+            contents=contents,
+        ),
+        before_mutation=before_mutation,
+        on_generation=on_generation,
+    )
 
 
 def _stage_install_directory(source_path: Path, target_path: Path) -> Path:
@@ -443,6 +453,91 @@ def _vacant_sibling_path(target_path: Path, *, suffix: str) -> Path:
     )
     reserved_path.rmdir()
     return reserved_path
+
+
+def _record_current_generation(
+    target_path: Path,
+    on_generation: CodexArtifactGenerationCallback | None,
+) -> None:
+    """Record a restored generation from the target's current topology."""
+    if on_generation is not None:
+        on_generation(CodexArtifactGeneration(target_path, source_path=target_path))
+
+
+def _commit_staged_artifact(
+    *,
+    staging_path: Path,
+    target_path: Path,
+    generation: CodexArtifactGeneration,
+    before_mutation: CodexArtifactPreMutationCallback | None,
+    on_generation: CodexArtifactGenerationCallback | None,
+) -> None:
+    """Commit one staged artifact while retaining the previous generation until success."""
+    backup_path: Path | None = None
+    prepared_generation = False
+    try:
+        if _installed_artifact_exists(target_path):
+            if before_mutation is not None:
+                before_mutation(target_path)
+            backup_path = _vacant_sibling_path(target_path, suffix=".backup")
+            os.replace(target_path, backup_path)
+            if on_generation is not None:
+                on_generation(CodexArtifactGeneration(target_path, missing=True))
+
+        if before_mutation is not None:
+            before_mutation(target_path)
+        if on_generation is not None:
+            on_generation(generation)
+            prepared_generation = True
+        os.replace(staging_path, target_path)
+
+        if backup_path is not None and _installed_artifact_exists(backup_path):
+            try:
+                _remove_installed_artifact(backup_path)
+            except BaseException as cleanup_error:
+                if before_mutation is not None:
+                    before_mutation(target_path)
+                os.replace(target_path, staging_path)
+                os.replace(backup_path, target_path)
+                _record_current_generation(target_path, on_generation)
+                if _installed_artifact_exists(staging_path):
+                    _remove_installed_artifact(staging_path)
+                raise cleanup_error
+    except BaseException:
+        if _installed_artifact_exists(staging_path):
+            _remove_installed_artifact(staging_path)
+        if backup_path is not None and _installed_artifact_exists(backup_path):
+            if _installed_artifact_exists(target_path):
+                _remove_installed_artifact(backup_path)
+            else:
+                os.replace(backup_path, target_path)
+                _record_current_generation(target_path, on_generation)
+        elif prepared_generation and not _installed_artifact_exists(target_path):
+            if on_generation is not None:
+                on_generation(CodexArtifactGeneration(target_path, missing=True))
+        raise
+
+
+def _remove_artifact_transactionally(
+    target_path: Path,
+    *,
+    before_mutation: CodexArtifactPreMutationCallback | None,
+    on_generation: CodexArtifactGenerationCallback | None,
+) -> None:
+    """Remove one managed artifact, restoring it if bookkeeping or cleanup fails."""
+    if before_mutation is not None:
+        before_mutation(target_path)
+    backup_path = _vacant_sibling_path(target_path, suffix=".backup")
+    os.replace(target_path, backup_path)
+    try:
+        if on_generation is not None:
+            on_generation(CodexArtifactGeneration(target_path, missing=True))
+        _remove_installed_artifact(backup_path)
+    except BaseException:
+        if _installed_artifact_exists(backup_path) and not _installed_artifact_exists(target_path):
+            os.replace(backup_path, target_path)
+            _record_current_generation(target_path, on_generation)
+        raise
 
 
 def _is_namespaced_rule_artifact(path: Path) -> bool:
@@ -477,13 +572,6 @@ def install_codex_rules(
         primary_source_path = _select_primary_packaged_codex_rule(packaged_rules)
         for source_path in packaged_rules:
             target_path = target_root / source_path.name
-            if target_path.is_dir() and not target_path.is_symlink():
-                if before_mutation is not None:
-                    before_mutation(target_path)
-                _remove_installed_artifact(target_path)
-                if on_generation is not None:
-                    on_generation(CodexArtifactGeneration(target_path, missing=True))
-
             if source_path == primary_source_path:
                 rendered = _render_codex_rules(source_path.read_text(encoding="utf-8"))
                 _atomic_install_file(
@@ -491,24 +579,16 @@ def install_codex_rules(
                     source_path=source_path,
                     contents=rendered.encode("utf-8"),
                     before_mutation=before_mutation,
+                    on_generation=on_generation,
                 )
-                if on_generation is not None:
-                    on_generation(
-                        CodexArtifactGeneration(
-                            target_path,
-                            source_path=source_path,
-                            contents=rendered.encode("utf-8"),
-                        )
-                    )
                 primary_target_path = target_path
             else:
                 _atomic_install_file(
                     target_path,
                     source_path=source_path,
                     before_mutation=before_mutation,
+                    on_generation=on_generation,
                 )
-                if on_generation is not None:
-                    on_generation(CodexArtifactGeneration(target_path, source_path=source_path))
             installed_names.add(target_path.name)
 
     if prune:
@@ -516,11 +596,11 @@ def install_codex_rules(
             if installed_path.name in installed_names:
                 continue
             if _is_namespaced_rule_artifact(installed_path):
-                if before_mutation is not None:
-                    before_mutation(installed_path)
-                _remove_installed_artifact(installed_path)
-                if on_generation is not None:
-                    on_generation(CodexArtifactGeneration(installed_path, missing=True))
+                _remove_artifact_transactionally(
+                    installed_path,
+                    before_mutation=before_mutation,
+                    on_generation=on_generation,
+                )
 
     if primary_target_path is None:
         msg = "Packaged Ouroboros rules file could not be located"
@@ -551,43 +631,16 @@ def install_codex_skills(
         for packaged_skill in packaged_skills:
             target_path = target_root / packaged_skill.install_dir_name
             staging_path = _stage_install_directory(packaged_skill.source_dir, target_path)
-            backup_path: Path | None = None
-            try:
-                if _installed_artifact_exists(target_path):
-                    if before_mutation is not None:
-                        before_mutation(target_path)
-                    backup_path = _vacant_sibling_path(target_path, suffix=".backup")
-                    os.replace(target_path, backup_path)
-                    if on_generation is not None:
-                        on_generation(CodexArtifactGeneration(target_path, missing=True))
-                if before_mutation is not None:
-                    before_mutation(target_path)
-                os.replace(staging_path, target_path)
-            except BaseException:
-                if _installed_artifact_exists(staging_path):
-                    _remove_installed_artifact(staging_path)
-                if backup_path is not None and _installed_artifact_exists(backup_path):
-                    if _installed_artifact_exists(target_path):
-                        _remove_installed_artifact(backup_path)
-                    else:
-                        os.replace(backup_path, target_path)
-                        if on_generation is not None:
-                            on_generation(
-                                CodexArtifactGeneration(
-                                    target_path,
-                                    source_path=target_path,
-                                )
-                            )
-                raise
-            if on_generation is not None:
-                on_generation(
-                    CodexArtifactGeneration(
-                        target_path,
-                        source_path=packaged_skill.source_dir,
-                    )
-                )
-            if backup_path is not None and _installed_artifact_exists(backup_path):
-                _remove_installed_artifact(backup_path)
+            _commit_staged_artifact(
+                staging_path=staging_path,
+                target_path=target_path,
+                generation=CodexArtifactGeneration(
+                    target_path,
+                    source_path=packaged_skill.source_dir,
+                ),
+                before_mutation=before_mutation,
+                on_generation=on_generation,
+            )
             installed_paths.append(target_path)
 
         if prune:
@@ -596,11 +649,11 @@ def install_codex_skills(
                     installed_path.name.startswith(CODEX_SKILL_NAMESPACE)
                     and installed_path.name not in installed_names
                 ):
-                    if before_mutation is not None:
-                        before_mutation(installed_path)
-                    _remove_installed_artifact(installed_path)
-                    if on_generation is not None:
-                        on_generation(CodexArtifactGeneration(installed_path, missing=True))
+                    _remove_artifact_transactionally(
+                        installed_path,
+                        before_mutation=before_mutation,
+                        on_generation=on_generation,
+                    )
 
     return tuple(installed_paths)
 
