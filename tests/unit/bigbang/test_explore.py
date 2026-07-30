@@ -79,3 +79,11 @@ class TestDetectBrownfield:
         (tmp_path / ".git").write_bytes(b"gitdir: bad\x00path\n")
 
         assert detect_brownfield(tmp_path) is False
+
+    def test_detect_brownfield_rejects_wrong_case_git_pointer(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".git").write_text(f"GITDIR: {git_dir}\n", encoding="utf-8")
+
+        assert detect_brownfield(tmp_path) is False

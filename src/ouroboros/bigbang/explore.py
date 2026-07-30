@@ -504,7 +504,7 @@ def _has_git_metadata(root: Path) -> bool:
     if len(pointer.splitlines()) != 1:
         return False
     prefix, separator, raw_path = pointer.partition(":")
-    if not separator or prefix.casefold() != _GITDIR_PREFIX.removesuffix(":"):
+    if not separator or prefix != _GITDIR_PREFIX.removesuffix(":"):
         return False
     normalized_path = raw_path.strip()
     if not normalized_path:

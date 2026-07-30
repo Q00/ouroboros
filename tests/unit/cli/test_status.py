@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sqlite3
 
 import pytest
 from typer.testing import CliRunner
@@ -337,11 +338,14 @@ def test_executions_prefers_newer_session_for_shared_execution_id(
 
     list_result = runner.invoke(app, ["executions"])
     detail_result = runner.invoke(app, ["execution", "exec_shared"])
+    events_result = runner.invoke(app, ["execution", "exec_shared", "--events"])
 
     assert list_result.exit_code == 0
     assert "running" in list_result.output
     assert detail_result.exit_code == 0
     assert "running" in detail_result.output
+    assert events_result.exit_code == 0
+    assert "running" in events_result.output.split("Execution Events", maxsplit=1)[0]
 
 
 def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path: Path) -> None:
@@ -495,6 +499,24 @@ def test_health_rejects_zero_byte_database(monkeypatch, tmp_path: Path) -> None:
     cli = _make_cli(tmp_path / "bin" / "claude")
     _write_config(config_dir, cli_path=cli)
     (data_dir / "ouroboros.db").write_text("")
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "invalid event store" in result.output
+
+
+def test_health_rejects_incompatible_event_store_schema(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    data_dir = config_dir / "data"
+    data_dir.mkdir(parents=True)
+    _clear_auth_env(monkeypatch)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    with sqlite3.connect(data_dir / "ouroboros.db") as connection:
+        connection.execute("CREATE TABLE events(foo TEXT)")
     _write_credentials(config_dir)
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 

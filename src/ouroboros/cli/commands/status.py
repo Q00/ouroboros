@@ -253,7 +253,7 @@ async def _validate_event_store(db_path: Path) -> None:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
     try:
-        await store.get_current_rowid()
+        await store.query_events(limit=1)
     finally:
         await store.close()
 
@@ -423,21 +423,30 @@ def execution(
     Displays execution metadata, progress, and optionally events.
     """
     try:
-        persisted = asyncio.run(
+        lifecycle = asyncio.run(
             _execution_events(
                 _configured_event_store_path(),
                 execution_id,
-                include_all=events,
+                include_all=False,
             )
         )
+        persisted = lifecycle
+        if events:
+            persisted = asyncio.run(
+                _execution_events(
+                    _configured_event_store_path(),
+                    execution_id,
+                    include_all=True,
+                )
+            )
     except Exception as exc:
         print_error(f"Execution status failed: {escape(str(exc))}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
     latest_lifecycle = next(
-        (event for event in persisted if event.type == "execution.terminal"),
+        (event for event in lifecycle if event.type == "execution.terminal"),
         None,
     ) or next(
-        (event for event in persisted if _root_execution_status(event) is not None),
+        (event for event in lifecycle if _root_execution_status(event) is not None),
         None,
     )
     if latest_lifecycle is None:
