@@ -112,6 +112,15 @@ _RECOVERY_BLOCKED_CHOICES: str = (
 )
 
 
+class SeedQaRepairMappingError(RuntimeError):
+    def __init__(self, feedback: tuple[str, ...]) -> None:
+        self.feedback = feedback
+        super().__init__(
+            "Seed QA feedback could not be mapped to a bounded repair; "
+            "manual Seed revision is required"
+        )
+
+
 class SeedGenerator(Protocol):
     """Protocol for seed-generator callables.
 
@@ -2865,11 +2874,41 @@ class AutoPipeline:
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
-                current_seed = normalize_execution_acceptance(
-                    await self._repair_seed_after_qa(
-                        state, current_seed, qa_result, attempt=attempt
+                try:
+                    current_seed = normalize_execution_acceptance(
+                        await self._repair_seed_after_qa(
+                            state, current_seed, qa_result, attempt=attempt
+                        )
                     )
-                )
+                except SeedQaRepairMappingError as exc:
+                    await self._emit_runtime_event(
+                        "auto.seed_qa.blocked",
+                        state.auto_session_id,
+                        {
+                            "schema_version": 1,
+                            "auto_session_id": state.auto_session_id,
+                            "seed_id": current_seed.metadata.seed_id,
+                            "attempts": attempt,
+                            "verdict": str(qa_result.verdict)[:80],
+                            "score": float(qa_result.score),
+                            "differences": [str(item)[:320] for item in exc.feedback[:5]],
+                            "suggestions": [],
+                            "reason": "seed_qa_feedback_unmapped",
+                        },
+                    )
+                    state.mark_blocked(
+                        str(exc),
+                        tool_name="seed_qa",
+                        error_code="seed_qa_feedback_unmapped",
+                    )
+                    self._save(state)
+                    return (
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
+                        current_seed,
+                        current_review,
+                    )
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
                     ledger=ledger,
@@ -5067,18 +5106,7 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     ):
         repairs.append("Failure paths must leave no partial output artifacts.")
     if not repairs:
-        repairs.extend(_actionable_seed_qa_feedback_constraints(feedback))
-    if not repairs:
-        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
-    return tuple(dict.fromkeys(repairs))
-
-
-def _actionable_seed_qa_feedback_constraints(feedback: tuple[str, ...]) -> tuple[str, ...]:
-    repairs: list[str] = []
-    for item in feedback[:5]:
-        cleaned = _clean_seed_qa_repair_text(item, limit=420)
-        if cleaned and not _is_seed_qa_diagnostic_constraint(cleaned):
-            repairs.append(f"Address this Seed QA finding before execution: {cleaned}")
+        raise SeedQaRepairMappingError(feedback)
     return tuple(dict.fromkeys(repairs))
 
 

@@ -1751,8 +1751,9 @@ async def test_pipeline_blocks_run_when_seed_qa_does_not_pass(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert result.blocker is not None
-    assert "Seed QA did not pass" in result.blocker
+    assert "manual Seed revision is required" in result.blocker
     assert state.last_tool_name == "seed_qa"
+    assert state.last_error_code == "seed_qa_feedback_unmapped"
     assert state.last_qa_score == 0.58
 
 
@@ -1879,6 +1880,77 @@ async def test_pipeline_repairs_seed_qa_feedback_before_run(tmp_path) -> None:
     assert qa_calls == 2
     assert captured_run_seed is not None
     assert any("Define explicit no-op scope" in item for item in captured_run_seed.constraints)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_unmapped_seed_qa_feedback_without_retrying(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            "interview_seed_qa_unmapped",
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "done",
+            session_id,
+            seed_ready=True,
+            completed=True,
+            ambiguity_score=0.12,
+        )
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    qa_calls = 0
+    run_called = False
+
+    async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
+        nonlocal qa_calls
+        qa_calls += 1
+        return EvaluateResult(
+            passed=False,
+            score=0.61,
+            verdict="revise",
+            differences=("missing audit-log retention policy",),
+            suggestions=("add a 30-day retention constraint",),
+        )
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
+        nonlocal run_called
+        run_called = True
+        return {"job_id": "job_must_not_run"}
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.max_repair_rounds = 3
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        run_starter=run_seed,
+        store=AutoStore(tmp_path),
+        seed_qa_evaluator=seed_qa,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_error_code == "seed_qa_feedback_unmapped"
+    assert "could not be mapped" in (result.blocker or "")
+    assert qa_calls == 1
+    assert run_called is False
+    persisted_seed = Seed.from_dict(state.seed_artifact)
+    assert not any("audit-log retention" in item for item in persisted_seed.constraints)
 
 
 @pytest.mark.asyncio

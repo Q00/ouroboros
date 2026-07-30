@@ -27,6 +27,7 @@ from ouroboros.auto.lateral_routing import (
 )
 from ouroboros.auto.pipeline import (
     AutoPipeline,
+    SeedQaRepairMappingError,
     _seed_with_recovery_constraint,
     _seed_with_seed_qa_feedback,
     _seed_with_seed_qa_lateral_feedback,
@@ -115,7 +116,7 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
-def test_seed_qa_feedback_preserves_generic_actionable_feedback() -> None:
+def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_generic_feedback", ambiguity_score=0.12)}
     )
@@ -127,13 +128,13 @@ def test_seed_qa_feedback_preserves_generic_actionable_feedback() -> None:
         suggestions=("add a 30-day retention constraint",),
     )
 
-    repaired = _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
-    constraints = "\n".join(repaired.constraints)
+    with pytest.raises(SeedQaRepairMappingError) as exc_info:
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
 
-    assert "missing audit-log retention policy" in constraints
-    assert "add a 30-day retention constraint" in constraints
-    assert "QA differences:" not in constraints
-    assert "[seed qa repair attempt" not in constraints
+    assert exc_info.value.feedback == (
+        "missing audit-log retention policy",
+        "add a 30-day retention constraint",
+    )
 
 
 def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None:
