@@ -93,6 +93,21 @@ def test_single_match_web_service() -> None:
     assert result.single is TaskClass.WEB_SERVICE
 
 
+def test_browser_ui_with_package_json_is_a_web_app() -> None:
+    ledger = _bare_ledger("Build a local browser web UI with package.json")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Interactive browser form, result panel, and validation message",
+    )
+    _seed_section(ledger, "runtime_context", value="Node.js browser application")
+
+    result = derive_domain_from_ledger(ledger)
+
+    assert result.single is not None
+    assert result.single.value == "web_app"
+
+
 def test_single_match_data_pipeline() -> None:
     ledger = _bare_ledger("Aggregate daily logs into Parquet")
     _seed_section(ledger, "inputs", value="Dataset of log files split per day")

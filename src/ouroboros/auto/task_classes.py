@@ -78,7 +78,7 @@ class CompletionMode(StrEnum):
 class TaskClass(StrEnum):
     """Canonical task classes for L1-a.
 
-    Frozen at this PR. Additional classes (``game_3d``, ``desktop_app``,
+    Additional classes (``game_3d``, ``desktop_app``,
     ``notebook_analysis``, ...) land as their own follow-up PRs of
     ~10 LoC plus a unit test once a canonical scenario demonstrates
     real need.
@@ -87,6 +87,7 @@ class TaskClass(StrEnum):
     LIBRARY = "library"
     CLI = "cli"
     WEB_SERVICE = "web_service"
+    WEB_APP = "web_app"
     WEBHOOK = "webhook"
     DATA_PIPELINE = "data_pipeline"
     GAME_2D = "game_2d"
@@ -169,6 +170,16 @@ _CATALOG: dict[TaskClass, TaskClassProfile] = {
             "The service starts and shuts down cleanly via the documented launch command.",
         ),
         probes=("headless_run", "api_smoke"),
+    ),
+    TaskClass.WEB_APP: _profile(
+        name=TaskClass.WEB_APP,
+        completion=CompletionMode.PRODUCT_COMPLETE,
+        ac_template=(
+            "The documented browser launch command serves the application without console or missing-asset errors.",
+            "Representative primary and invalid user flows produce the contracted DOM state in a real browser.",
+            "Browser verification emits durable evidence such as a Playwright report or screenshots.",
+        ),
+        probes=("headless_run", "browser_smoke"),
     ),
     TaskClass.WEBHOOK: _profile(
         name=TaskClass.WEBHOOK,
