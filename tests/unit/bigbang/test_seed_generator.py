@@ -1372,7 +1372,21 @@ class TestGeneratedSeedImmutability:
 
 class TestAcceptanceCriteriaGranularityContract:
     """Guard the seed-generation prompt against silent loss of the AC granularity
-    contract (the fix for Fable-5-style over-atomization at seed-gen time)."""
+    contract (the fix for Fable-5-style over-atomization at seed-gen time).
+
+    The contract hands the model a distinction to reason with — a criterion is a
+    state of the finished work, an implementation step is a means of reaching it
+    — rather than a quantity to comply with. These tests hold that shape: the
+    distinction must be stated, and the rule must carry no number, because a
+    number is satisfiable without making the judgment the rule exists to elicit.
+    """
+
+    @staticmethod
+    def _granularity_rule(prompt: str) -> str:
+        for line in prompt.splitlines():
+            if line.startswith("ACCEPTANCE_CRITERIA rule:"):
+                return line
+        raise AssertionError("prompt carries no ACCEPTANCE_CRITERIA granularity rule")
 
     def test_extraction_user_prompt_carries_granularity_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1382,8 +1396,12 @@ class TestAcceptanceCriteriaGranularityContract:
             )
             prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
 
-        assert "3-7" in prompt
-        assert "implementation step" in prompt.lower()
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        # A criterion is weighed against its siblings, never against a quantity,
+        # so the rule states no count of any kind.
+        assert not any(char.isdigit() for char in rule)
 
     def test_extraction_user_prompt_requests_structured_ac_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1404,8 +1422,12 @@ class TestAcceptanceCriteriaGranularityContract:
         from ouroboros.agents.loader import load_agent_prompt
 
         system_prompt = load_agent_prompt("seed-architect")
-        assert "3-7" in system_prompt
-        assert "sub-step of a sibling" in system_prompt.lower()
+        assert "**Granularity contract (read carefully):**" in system_prompt
+        contract = system_prompt.split("**Granularity contract (read carefully):**", 1)[1]
+        contract = contract.split("### ", 1)[0].lower()
+        assert "acceptance criterion" in contract
+        assert "implementation step" in contract
+        assert not any(char.isdigit() for char in contract)
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
 
