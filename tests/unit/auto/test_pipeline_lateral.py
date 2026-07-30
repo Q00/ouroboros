@@ -112,7 +112,7 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "QA differences:" not in constraints
     assert "[seed qa lateral repair attempt" not in constraints
     assert "omit QA or lateral diagnostic prose" in constraints
-    assert repaired.metadata.ambiguity_score == 0.206
+    assert repaired.metadata.ambiguity_score == 0.20
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 

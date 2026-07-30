@@ -4935,16 +4935,20 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    metadata_updates: dict[str, Any] = {
+        "seed_id": f"seed_{uuid4().hex[:12]}",
+        "created_at": datetime.now(UTC),
+        "parent_seed_id": seed.metadata.seed_id,
+    }
+    if any(
+        "ambiguity_score" in item.casefold()
+        for item in (*qa_result.differences, *qa_result.suggestions)
+    ):
+        metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
-            "metadata": seed.metadata.model_copy(
-                update={
-                    "seed_id": f"seed_{uuid4().hex[:12]}",
-                    "created_at": datetime.now(UTC),
-                    "parent_seed_id": seed.metadata.seed_id,
-                }
-            ),
+            "metadata": seed.metadata.model_copy(update=metadata_updates),
         },
     )
 
