@@ -105,11 +105,18 @@ class _ImmutableSnapshotAdapter:
 
     def __init__(self) -> None:
         self.server_snapshot = MCPServerSnapshot(
-            identity=MCPPeerIdentity(name="fixture", application_version="1"),
+            identity=MCPPeerIdentity(
+                name="fixture",
+                application_version="1",
+                icons=({"src": "fixture.svg", "sizes": ["any"]},),
+                details={"icons": [{"src": "fixture.svg", "sizes": ["any"]}]},
+            ),
             protocol_version="2026-07-28",
             supported_protocol_versions=("2026-07-28",),
             capabilities=MCPCapabilities(tools=True, details={"tools": {"listChanged": True}}),
             extensions={"vendor": {"flag": True}},
+            meta={"trace": {"id": "fixture"}},
+            discovery_details={"capabilities": {"tools": {"listChanged": True}}},
         )
 
     async def connect(self, config):
@@ -215,6 +222,15 @@ class TestMCPClientManager:
         assert snapshot.server_snapshot is not None
         with pytest.raises(TypeError):
             snapshot.server_snapshot.extensions["vendor"]["flag"] = False
+        assert snapshot.server_snapshot.identity is not None
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.identity.icons[0]["sizes"] = ()
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.identity.details["icons"][0]["src"] = "mutated.svg"
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.meta["trace"]["id"] = "mutated"
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.discovery_details["capabilities"]["tools"] = {}
 
         internal = manager._connections[config.name]
         assert internal.config.env["TOKEN"] == "safe"

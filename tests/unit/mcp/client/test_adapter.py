@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mcp import types as sdk_types
+import pytest
 
 from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.client.sdk_factory import SDKClientResources
@@ -23,7 +24,21 @@ def _client() -> MagicMock:
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=None)
     client.protocol_version = "2026-07-28"
-    client.server_info = sdk_types.Implementation(name="peer", version="2.3.4")
+    client.server_info = sdk_types.Implementation(
+        name="peer",
+        title="Peer Server",
+        version="2.3.4",
+        description="A complete SDK v2 identity",
+        websiteUrl="https://example.test/mcp",
+        icons=[
+            sdk_types.Icon(
+                src="https://example.test/icon.svg",
+                mimeType="image/svg+xml",
+                sizes=["any"],
+                theme="dark",
+            )
+        ],
+    )
     client.server_capabilities = sdk_types.ServerCapabilities(
         tools=sdk_types.ToolsCapability(),
         resources=sdk_types.ResourcesCapability(),
@@ -32,7 +47,17 @@ def _client() -> MagicMock:
     )
     client.instructions = "Use carefully"
     client.session = SimpleNamespace(
-        discover_result=SimpleNamespace(supported_versions=["2026-07-28", "2025-11-25"])
+        discover_result=sdk_types.DiscoverResult.model_validate(
+            {
+                "_meta": {"trace": {"id": "discovery-1"}},
+                "ttlMs": 4_500,
+                "cacheScope": "public",
+                "supportedVersions": ["2026-07-28", "2025-11-25"],
+                "capabilities": client.server_capabilities,
+                "instructions": "Use carefully",
+                "resultType": "input_required",
+            }
+        )
     )
     return client
 
@@ -69,19 +94,43 @@ class TestConnection:
         assert adapter.protocol_version == "2026-07-28"
         assert adapter.server_snapshot is not None
         assert adapter.server_snapshot.identity is not None
-        assert adapter.server_snapshot.identity.application_version == "2.3.4"
-        assert adapter.server_snapshot.supported_protocol_versions == (
+        snapshot = adapter.server_snapshot
+        identity = snapshot.identity
+        assert identity.application_version == "2.3.4"
+        assert identity.title == "Peer Server"
+        assert identity.description == "A complete SDK v2 identity"
+        assert identity.website_url == "https://example.test/mcp"
+        assert identity.icons[0]["src"] == "https://example.test/icon.svg"
+        identity_aliases = {
+            field.alias or name for name, field in sdk_types.Implementation.model_fields.items()
+        }
+        assert set(identity.details) == identity_aliases
+        assert snapshot.supported_protocol_versions == (
             "2026-07-28",
             "2025-11-25",
         )
-        assert adapter.server_snapshot.extensions["dev.ouroboros/example"]["enabled"] is True
-        assert adapter.server_snapshot.instructions == "Use carefully"
+        assert snapshot.extensions["dev.ouroboros/example"]["enabled"] is True
+        assert snapshot.instructions == "Use carefully"
+        assert snapshot.meta["trace"]["id"] == "discovery-1"
+        assert snapshot.ttl_ms == 4_500
+        assert snapshot.cache_scope == "public"
+        assert snapshot.result_type == "input_required"
+        discovery_aliases = {
+            field.alias or name for name, field in sdk_types.DiscoverResult.model_fields.items()
+        }
+        assert set(snapshot.discovery_details) == discovery_aliases
         try:
-            adapter.server_snapshot.extensions["new"] = {}  # type: ignore[index]
+            snapshot.extensions["new"] = {}  # type: ignore[index]
         except TypeError:
             pass
         else:  # pragma: no cover - assertion branch
             raise AssertionError("snapshot extensions must be immutable")
+        with pytest.raises(TypeError):
+            identity.icons[0]["theme"] = "light"
+        with pytest.raises(TypeError):
+            snapshot.meta["trace"]["id"] = "mutated"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.discovery_details["capabilities"]["tools"] = None  # type: ignore[index]
 
     async def test_anonymous_modern_server_uses_non_protocol_version_fallback(self) -> None:
         client = _client()

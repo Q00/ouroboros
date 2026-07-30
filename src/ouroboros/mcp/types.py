@@ -578,10 +578,15 @@ class MCPCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class MCPPeerIdentity:
-    """Application identity advertised by an MCP peer, when present."""
+    """Complete immutable application identity advertised by an MCP peer."""
 
     name: str
     application_version: str
+    title: str | None = None
+    description: str | None = None
+    website_url: str | None = None
+    icons: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,6 +599,11 @@ class MCPServerSnapshot:
     capabilities: MCPCapabilities = field(default_factory=MCPCapabilities)
     extensions: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     instructions: str | None = None
+    meta: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    ttl_ms: int = 0
+    cache_scope: Literal["public", "private"] = "private"
+    result_type: str = "complete"
+    discovery_details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)

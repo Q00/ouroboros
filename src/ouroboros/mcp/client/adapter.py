@@ -69,6 +69,16 @@ def _capabilities_from_sdk(capabilities: Any) -> MCPCapabilities:
     )
 
 
+def _sdk_model_details(model: Any) -> Any:
+    """Capture every SDK model field by wire alias as immutable JSON."""
+    if model is None:
+        return MappingProxyType({})
+    model_dump = getattr(model, "model_dump", None)
+    if not callable(model_dump):
+        return MappingProxyType({})
+    return _freeze_json(model_dump(by_alias=True, mode="json"))
+
+
 class MCPClientAdapter:
     """Connect to an MCP server through the official auto-negotiating client."""
 
@@ -220,13 +230,23 @@ class MCPClientAdapter:
     def _parse_server_snapshot(client: Any) -> MCPServerSnapshot:
         capabilities = client.server_capabilities
         identity = client.server_info
+        identity_details = _sdk_model_details(identity)
         app_identity = (
-            MCPPeerIdentity(name=identity.name, application_version=identity.version)
+            MCPPeerIdentity(
+                name=identity.name,
+                application_version=identity.version,
+                title=identity.title,
+                description=identity.description,
+                website_url=identity.website_url,
+                icons=tuple(identity_details.get("icons") or ()),
+                details=identity_details,
+            )
             if identity is not None
             else None
         )
         protocol_version = client.protocol_version
         discover_result = client.session.discover_result
+        discovery_details = _sdk_model_details(discover_result)
         supported_versions = (
             tuple(discover_result.supported_versions)
             if discover_result is not None
@@ -239,6 +259,11 @@ class MCPClientAdapter:
             capabilities=_capabilities_from_sdk(capabilities),
             extensions=_freeze_json(getattr(capabilities, "extensions", None) or {}),
             instructions=client.instructions,
+            meta=_freeze_json(getattr(discover_result, "meta", None) or {}),
+            ttl_ms=getattr(discover_result, "ttl_ms", 0),
+            cache_scope=getattr(discover_result, "cache_scope", "private"),
+            result_type=getattr(discover_result, "result_type", "complete"),
+            discovery_details=discovery_details,
         )
 
     async def disconnect(self) -> Result[None, MCPClientError]:
