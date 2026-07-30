@@ -202,18 +202,67 @@ async def _recent_execution_events(
     db_path: Path,
     *,
     execution_limit: int | None,
-) -> list[BaseEvent]:
+) -> list[tuple[str, BaseEvent]]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
     try:
-        return await store.query_latest_events_per_aggregate(
+        persisted = await store.query_latest_events_per_aggregate(
             aggregate_type="execution",
             event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
             preferred_event_type="execution.terminal",
-            limit=execution_limit,
+            # Session aggregates used by resumed executions must be collapsed
+            # before applying the user-visible execution limit.
+            limit=None,
         )
+        snapshots = await store.get_session_activity_snapshots()
     finally:
         await store.close()
+
+    execution_by_session = {
+        snapshot.session_id: snapshot.execution_id
+        for snapshot in snapshots
+        if snapshot.execution_id
+    }
+    latest_by_execution: dict[str, BaseEvent] = {}
+    for event in persisted:
+        execution_id = execution_by_session.get(event.aggregate_id, event.aggregate_id)
+        current = latest_by_execution.get(execution_id)
+        if current is None or (event.timestamp, event.id) > (current.timestamp, current.id):
+            latest_by_execution[execution_id] = event
+    ordered = sorted(
+        latest_by_execution.items(),
+        key=lambda item: (item[1].timestamp, item[1].id),
+        reverse=True,
+    )
+    return ordered if execution_limit is None else ordered[:execution_limit]
+
+
+def _latest_execution_lifecycle(events: list[BaseEvent]) -> BaseEvent | None:
+    """Select current lifecycle across original and resumed session scopes."""
+    latest_by_session: dict[str, BaseEvent] = {}
+    for event in events:
+        if _root_execution_status(event) is None:
+            continue
+        raw_session_id = event.data.get("session_id")
+        session_id = (
+            raw_session_id.strip()
+            if isinstance(raw_session_id, str) and raw_session_id.strip()
+            else event.aggregate_id
+        )
+        current = latest_by_session.get(session_id)
+        should_replace = current is None
+        if current is not None:
+            should_replace = current.type != "execution.terminal" and (
+                event.type == "execution.terminal"
+                or (event.timestamp, event.id) > (current.timestamp, current.id)
+            )
+        if should_replace:
+            latest_by_session[session_id] = event
+    return max(
+        latest_by_session.values(),
+        key=lambda event: (event.timestamp, event.id),
+        default=None,
+    )
 
 
 async def _execution_events(
@@ -224,32 +273,52 @@ async def _execution_events(
 ) -> list[BaseEvent]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
-    persisted: list[BaseEvent] = []
     try:
-        if not include_all:
-            return await store.query_latest_events_per_aggregate(
-                aggregate_type="execution",
-                event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
-                preferred_event_type="execution.terminal",
-                aggregate_id=execution_id,
-                limit=1,
+        snapshots = await store.get_session_activity_snapshots()
+        session_ids = [
+            snapshot.session_id
+            for snapshot in snapshots
+            if snapshot.execution_id == execution_id
+        ]
+        if session_ids:
+            related_pages = await asyncio.gather(
+                *(
+                    store.query_session_related_events(
+                        session_id,
+                        execution_id=execution_id,
+                        limit=None,
+                    )
+                    for session_id in session_ids
+                )
             )
-
-        offset = 0
-        while True:
-            page = await store.query_events(
-                aggregate_id=execution_id,
-                limit=_STATUS_EXECUTION_EVENT_PAGE_SIZE,
-                offset=offset,
-                aggregate_type="execution",
+            persisted = list(
+                {
+                    event.id: event
+                    for page in related_pages
+                    for event in page
+                }.values()
             )
-            persisted.extend(page)
-            if len(page) < _STATUS_EXECUTION_EVENT_PAGE_SIZE:
-                break
-            offset += len(page)
+        else:
+            persisted = []
+            offset = 0
+            while True:
+                page = await store.query_events(
+                    aggregate_id=execution_id,
+                    limit=_STATUS_EXECUTION_EVENT_PAGE_SIZE,
+                    offset=offset,
+                    aggregate_type="execution",
+                )
+                persisted.extend(page)
+                if len(page) < _STATUS_EXECUTION_EVENT_PAGE_SIZE:
+                    break
+                offset += len(page)
     finally:
         await store.close()
-    return persisted
+    persisted.sort(key=lambda event: (event.timestamp, event.id), reverse=True)
+    if include_all:
+        return persisted
+    latest = _latest_execution_lifecycle(persisted)
+    return [latest] if latest is not None else []
 
 
 async def _validate_event_store(db_path: Path) -> None:
@@ -390,16 +459,9 @@ def executions(
         print_error(f"Execution status failed: {escape(str(exc))}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
 
-    latest_by_id: dict[str, BaseEvent] = {}
-    for event in persisted:
-        current = latest_by_id.get(event.aggregate_id)
-        if current is None or (
-            event.type == "execution.terminal" and current.type != "execution.terminal"
-        ):
-            latest_by_id[event.aggregate_id] = event
     rows = [
         {"name": execution_id, "status": _root_execution_status(event) or "unknown"}
-        for execution_id, event in latest_by_id.items()
+        for execution_id, event in persisted
     ]
     if not all_:
         rows = rows[:limit]

@@ -376,6 +376,64 @@ def test_executions_prefers_newer_session_for_shared_execution_id(
     assert "running" in events_result.output.split("Execution Events", maxsplit=1)[0]
 
 
+def test_execution_status_joins_pause_then_resume_session_cluster(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="orchestrator.session.started",
+                timestamp=now - timedelta(seconds=3),
+                aggregate_type="session",
+                aggregate_id="session_original",
+                data={"execution_id": "exec_original", "seed_id": "seed_resume"},
+            ),
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_original",
+                data={"session_id": "session_original", "status": "paused"},
+            ),
+            BaseEvent(
+                type="orchestrator.session.started",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="session",
+                aggregate_id="orch_resume",
+                data={"execution_id": "exec_original", "seed_id": "seed_resume"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="orch_resume",
+                data={"session_id": "orch_resume", "completed_count": 1},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_original"])
+    events_result = runner.invoke(app, ["execution", "exec_original", "--events"])
+
+    assert list_result.exit_code == 0
+    assert "exec_original" in list_result.output
+    assert "orch_resume" not in list_result.output
+    assert "running" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "running" in detail_result.output
+    assert "workflow.progress.updated" in events_result.output
+    assert "execution.terminal" in events_result.output
+
+
 def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
