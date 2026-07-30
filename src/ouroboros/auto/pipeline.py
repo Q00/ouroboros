@@ -4923,10 +4923,7 @@ def _seed_with_seed_qa_lateral_feedback(
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if any(
-        "ambiguity_score" in item.casefold()
-        for item in (*qa_result.differences, *qa_result.suggestions)
-    ):
+    if _requests_seed_qa_ambiguity_repair(qa_result):
         metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
     return seed.model_copy(
         update={
@@ -4950,10 +4947,7 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if any(
-        "ambiguity_score" in item.casefold()
-        for item in (*qa_result.differences, *qa_result.suggestions)
-    ):
+    if _requests_seed_qa_ambiguity_repair(qa_result):
         metadata_updates["ambiguity_score"] = min(seed.metadata.ambiguity_score, 0.20)
     return seed.model_copy(
         update={
@@ -5099,7 +5093,7 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
         raise SeedQaRepairMappingError(feedback)
     repairs: list[str] = []
-    if "ambiguity_score" in lowered:
+    if _requests_seed_qa_ambiguity_repair(qa_result):
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
         repairs.append(
@@ -5129,6 +5123,33 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if not repairs:
         raise SeedQaRepairMappingError(feedback)
     return tuple(dict.fromkeys(repairs))
+
+
+def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
+    patterns = (
+        r"\b(?:metadata\.)?ambiguity_score\b.{0,120}\b(?:exceed(?:s|ed|ing)?|above|greater than)\b.{0,80}(?:0\.2(?:0)?|readiness gate)",
+        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}\b(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+0\.2(?:0)?\b",
+        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}\bmust\s+not\s+exceed\s+0\.2(?:0)?\b",
+        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}(?:>|>=)\s*0\.2(?:0)?\b",
+    )
+    for item in (*qa_result.differences, *qa_result.suggestions):
+        lowered = item.casefold()
+        if not re.search(r"\b(?:metadata\.)?ambiguity_score\b", lowered):
+            continue
+        if any(
+            marker in lowered
+            for marker in (
+                "do not change",
+                "ignore prior",
+                "remain",
+                "unchanged",
+                "without evaluating readiness",
+            )
+        ):
+            continue
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            return True
+    return False
 
 
 def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
