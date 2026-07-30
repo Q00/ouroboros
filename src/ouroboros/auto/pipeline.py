@@ -5134,6 +5134,7 @@ def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
         rf"{score}\s+(?:must|should|needs? to)\s+be\s+reduced\s+to\s+{target}",
         rf"{score}\s+(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+{target}",
         rf"{score}\s+must\s+not\s+exceed\s+{target}",
+        rf"{score}\s+(?:must|should)\s+not\s+be\s+greater\s+than\s+{target}",
         rf"{score}\s+(?:is|remains)\s+above\s+{target}\s+and\s+exceeds\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+)?gate",
         rf"{score}\s+(?:is|=)\s*(?:0\.\d+|1\.0+)\s*,?\s*(?:which\s+)?(?:exceeds?|exceeding|is above|is greater than)\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+gate(?:\s+of)?\s*)?(?:<=?\s*)?{target}",
     )
