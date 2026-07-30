@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import importlib.resources
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 from typing import Literal
 
@@ -382,6 +384,41 @@ def _installed_artifact_exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _artifact_fingerprint(path: Path) -> str:
+    """Return a content, topology, and mode fingerprint without following symlinks."""
+    digest = hashlib.sha256()
+
+    def _visit(candidate: Path, relative_path: str) -> None:
+        candidate_stat = candidate.lstat()
+        mode = candidate_stat.st_mode
+        digest.update(relative_path.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(str(stat.S_IMODE(mode)).encode("ascii"))
+        digest.update(b"\0")
+
+        if stat.S_ISLNK(mode):
+            digest.update(b"symlink\0")
+            digest.update(os.readlink(candidate).encode("utf-8", errors="surrogateescape"))
+            return
+        if stat.S_ISREG(mode):
+            digest.update(b"file\0")
+            with candidate.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+            return
+        if stat.S_ISDIR(mode):
+            digest.update(b"directory\0")
+            for child in sorted(candidate.iterdir(), key=lambda item: item.name):
+                child_relative = f"{relative_path}/{child.name}" if relative_path else child.name
+                _visit(child, child_relative)
+            return
+
+        digest.update(f"other:{stat.S_IFMT(mode)}".encode("ascii"))
+
+    _visit(path, "")
+    return digest.hexdigest()
+
+
 def _atomic_install_file(
     target_path: Path,
     *,
@@ -492,6 +529,7 @@ class _CodexArtifactBatchEntry:
     target_path: Path
     rollback_path: Path | None
     target_is_active: bool
+    active_fingerprint: str | None
     before_mutation: CodexArtifactPreMutationCallback | None
     on_generation: CodexArtifactGenerationCallback | None
 
@@ -507,6 +545,7 @@ class _CodexArtifactBatchTransaction:
         *,
         target_path: Path,
         rollback_path: Path | None,
+        active_fingerprint: str,
         before_mutation: CodexArtifactPreMutationCallback | None,
         on_generation: CodexArtifactGenerationCallback | None,
     ) -> None:
@@ -515,6 +554,7 @@ class _CodexArtifactBatchTransaction:
                 target_path=target_path,
                 rollback_path=rollback_path,
                 target_is_active=True,
+                active_fingerprint=active_fingerprint,
                 before_mutation=before_mutation,
                 on_generation=on_generation,
             )
@@ -533,6 +573,7 @@ class _CodexArtifactBatchTransaction:
                 target_path=target_path,
                 rollback_path=rollback_path,
                 target_is_active=False,
+                active_fingerprint=None,
                 before_mutation=before_mutation,
                 on_generation=on_generation,
             )
@@ -586,10 +627,22 @@ class _CodexArtifactBatchTransaction:
             _record_current_generation(entry.target_path, entry.on_generation)
             return
 
-        displaced_path: Path | None = None
-        if _installed_artifact_exists(entry.target_path):
-            displaced_path = _vacant_sibling_path(entry.target_path, suffix=".rollback")
-            os.replace(entry.target_path, displaced_path)
+        if not _installed_artifact_exists(entry.target_path):
+            msg = f"Managed Codex artifact changed during batch rollback: {entry.target_path}"
+            raise OSError(msg)
+
+        displaced_path = _vacant_sibling_path(entry.target_path, suffix=".rollback")
+        os.replace(entry.target_path, displaced_path)
+        try:
+            displaced_fingerprint = _artifact_fingerprint(displaced_path)
+        except OSError as fingerprint_error:
+            _restore_displaced_concurrent_generation(entry.target_path, displaced_path)
+            msg = f"Could not verify managed Codex artifact during batch rollback: {entry.target_path}"
+            raise OSError(msg) from fingerprint_error
+        if displaced_fingerprint != entry.active_fingerprint:
+            _restore_displaced_concurrent_generation(entry.target_path, displaced_path)
+            msg = f"Managed Codex artifact changed during batch rollback: {entry.target_path}"
+            raise OSError(msg)
 
         try:
             if entry.rollback_path is None:
@@ -599,20 +652,29 @@ class _CodexArtifactBatchTransaction:
                 os.replace(entry.rollback_path, entry.target_path)
                 _record_current_generation(entry.target_path, entry.on_generation)
         except BaseException:
-            if (
-                displaced_path is not None
-                and _installed_artifact_exists(displaced_path)
-                and not _installed_artifact_exists(entry.target_path)
+            if _installed_artifact_exists(displaced_path) and not _installed_artifact_exists(
+                entry.target_path
             ):
                 os.replace(displaced_path, entry.target_path)
                 _record_current_generation(entry.target_path, entry.on_generation)
             raise
 
-        if displaced_path is not None and _installed_artifact_exists(displaced_path):
+        if _installed_artifact_exists(displaced_path):
             try:
                 _remove_installed_artifact(displaced_path)
             except BaseException:
                 pass
+
+
+def _restore_displaced_concurrent_generation(target_path: Path, displaced_path: Path) -> None:
+    """Put a concurrently changed target back without overwriting another writer."""
+    if _installed_artifact_exists(target_path):
+        msg = (
+            "Managed Codex artifact changed again during batch rollback; "
+            f"preserved the displaced generation at {displaced_path}"
+        )
+        raise OSError(msg)
+    os.replace(displaced_path, target_path)
 
 
 def _commit_staged_artifact(
@@ -625,6 +687,7 @@ def _commit_staged_artifact(
     transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> None:
     """Commit one staged artifact while retaining the previous generation until success."""
+    active_fingerprint = _artifact_fingerprint(staging_path) if transaction is not None else None
     backup_path: Path | None = None
     prepared_generation = False
     staged_generation_active = False
@@ -649,6 +712,7 @@ def _commit_staged_artifact(
             transaction.record_install(
                 target_path=target_path,
                 rollback_path=backup_path,
+                active_fingerprint=active_fingerprint,
                 before_mutation=before_mutation,
                 on_generation=on_generation,
             )

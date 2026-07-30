@@ -235,6 +235,38 @@ class TestCodexRefresh:
         assert not tuple(codex_dir.rglob("*.rollback"))
         assert not tuple(codex_dir.rglob("*.discard"))
 
+    def test_refresh_preserves_concurrent_rule_edit_during_batch_rollback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Standalone rollback must not delete an active generation it did not author."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("old rule generation\n", encoding="utf-8")
+
+        def _edit_rule_then_fail(**_kwargs: object) -> tuple[Path, ...]:
+            rule_path.write_text("operator concurrent edit\n", encoding="utf-8")
+            raise OSError("synthetic late skill failure")
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(
+            codex_artifacts,
+            "install_codex_skills",
+            _edit_rule_then_fail,
+        )
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "changed during batch rollback" in cli_result.output
+        assert rule_path.read_text(encoding="utf-8") == "operator concurrent edit\n"
+        backup_paths = tuple(rule_path.parent.glob(f".{rule_path.name}.*.backup"))
+        assert len(backup_paths) == 1
+        assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.rollback"))
+
     def test_refresh_preserves_directory_shaped_rule_when_staging_fails(
         self,
         tmp_path: Path,
