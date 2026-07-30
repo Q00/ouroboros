@@ -70,6 +70,7 @@ from ouroboros.auto.state import (
 )
 from ouroboros.auto.task_class_application import apply_default_ac_template
 from ouroboros.auto.trace_export import best_effort_export_trace
+from ouroboros.core.security import mask_sensitive_value
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
@@ -2854,8 +2855,8 @@ class AutoPipeline:
             state.last_qa_score = float(qa_result.score)
             state.last_qa_verdict = str(qa_result.verdict)
             state.last_qa_passed = bool(qa_result.passed)
-            state.last_qa_differences = list(qa_result.differences)
-            state.last_qa_suggestions = list(qa_result.suggestions)
+            state.last_qa_differences = _safe_seed_qa_evidence(qa_result.differences)
+            state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
                 review_blocker = self._seed_review_gate_blocker(state, current_review)
                 if review_blocker is not None:
@@ -2891,8 +2892,8 @@ class AutoPipeline:
                             "attempts": attempt,
                             "verdict": str(qa_result.verdict)[:80],
                             "score": float(qa_result.score),
-                            "differences": [str(item)[:320] for item in exc.feedback[:5]],
-                            "suggestions": [],
+                            "differences": state.last_qa_differences[:5],
+                            "suggestions": state.last_qa_suggestions[:5],
                             "reason": "seed_qa_feedback_unmapped",
                         },
                     )
@@ -2957,8 +2958,8 @@ class AutoPipeline:
                     "attempts": attempt,
                     "verdict": str(qa_result.verdict)[:80],
                     "score": float(qa_result.score),
-                    "differences": [str(item)[:320] for item in qa_result.differences[:5]],
-                    "suggestions": [str(item)[:320] for item in qa_result.suggestions[:5]],
+                    "differences": state.last_qa_differences[:5],
+                    "suggestions": state.last_qa_suggestions[:5],
                     "reason": "repair_budget_exhausted",
                 },
             )
@@ -2982,8 +2983,8 @@ class AutoPipeline:
     ) -> Seed:
         """Repair a Seed that failed the QA gate before the next re-judge.
 
-        When a ``lateral_thinker`` is wired, ask a lateral persona to turn the
-        QA differences/suggestions into one *concrete decision* and fold that
+        When a ``lateral_thinker`` is wired, ask a lateral persona to turn only
+        mapped repair constraints into one *concrete decision* and fold that
         decision into the Seed — this resolves substance blockers (e.g. "no
         binding contract chosen; a section is missing") that the mechanical
         feedback echo cannot, because the echo only restates the gap. Falls
@@ -2995,12 +2996,12 @@ class AutoPipeline:
         if self.lateral_thinker is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 
-        _normalized_seed_qa_feedback(qa_result)
+        safe_feedback = _normalized_seed_qa_feedback(qa_result)
 
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
-            qa_result.differences,
-            qa_result.suggestions,
+            safe_feedback,
+            (),
             already_tried_personas=already_tried,
         )
         if persona is None:
@@ -3013,8 +3014,8 @@ class AutoPipeline:
             lateral_result = await asyncio.wait_for(
                 self.lateral_thinker(
                     persona=persona,
-                    qa_differences=qa_result.differences,
-                    qa_suggestions=qa_result.suggestions,
+                    qa_differences=safe_feedback,
+                    qa_suggestions=(),
                     run_artifact=seed_yaml,
                 ),
                 timeout=self._deadline_capped_timeout(
@@ -5112,6 +5113,10 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     if not repairs:
         raise SeedQaRepairMappingError(feedback)
     return tuple(dict.fromkeys(repairs))
+
+
+def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
+    return [mask_sensitive_value(item)[:320] for item in feedback[:5]]
 
 
 def _first_nonempty(*values: str | None) -> str | None:
