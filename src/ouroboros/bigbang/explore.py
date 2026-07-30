@@ -45,6 +45,8 @@ _CONFIG_FILES: dict[str, str] = {
     "CMakeLists.txt": "C/C++",
     "Makefile": "Make-based",
 }
+_GITDIR_PREFIX = "gitdir:"
+_MAX_GIT_POINTER_BYTES = 4096
 
 # File extensions for type discovery
 _TYPE_PATTERNS: dict[str, list[str]] = {
@@ -487,6 +489,31 @@ Output a structured summary with sections: Tech Stack, Key Types, Patterns, Conv
         return result.value.content.strip()
 
 
+def _has_git_metadata(root: Path) -> bool:
+    marker = root / ".git"
+    if marker.is_dir():
+        return (marker / "HEAD").is_file()
+    if not marker.is_file():
+        return False
+    try:
+        if marker.stat().st_size > _MAX_GIT_POINTER_BYTES:
+            return False
+        pointer = marker.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return False
+    prefix, separator, raw_path = pointer.partition(":")
+    if not separator or prefix.casefold() != _GITDIR_PREFIX.removesuffix(":"):
+        return False
+    target = Path(raw_path.strip())
+    if not target.is_absolute():
+        target = root / target
+    try:
+        git_dir = target.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return git_dir.is_dir() and (git_dir / "HEAD").is_file()
+
+
 def detect_brownfield(cwd: str | Path) -> bool:
     """Detect whether a directory is a brownfield project.
 
@@ -500,8 +527,8 @@ def detect_brownfield(cwd: str | Path) -> bool:
     """
     try:
         root = Path(cwd)
-        return any((root / name).exists() for name in _CONFIG_FILES)
-    except Exception:
+        return _has_git_metadata(root) or any((root / name).exists() for name in _CONFIG_FILES)
+    except OSError:
         return False
 
 

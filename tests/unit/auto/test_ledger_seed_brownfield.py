@@ -60,6 +60,17 @@ class TestBrownfieldContextFromCwd:
     def test_none_cwd_is_greenfield(self) -> None:
         assert brownfield_context_from_cwd(None).project_type == "greenfield"
 
+    def test_git_only_worktree_is_brownfield_context(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        ctx = brownfield_context_from_cwd(tmp_path)
+
+        assert ctx.project_type == "brownfield"
+        assert len(ctx.context_references) == 1
+        assert Path(ctx.context_references[0].path).resolve() == tmp_path.resolve()
+
 
 class TestSynthesizePassThrough:
     def test_default_seed_stays_greenfield(self) -> None:

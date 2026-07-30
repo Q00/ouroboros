@@ -35,3 +35,25 @@ class TestDetectBrownfield:
         """Accepts string paths in addition to Path objects."""
         (tmp_path / "Cargo.toml").write_text("[package]\nname = 'demo'\n")
         assert detect_brownfield(str(tmp_path)) is True
+
+    def test_detect_brownfield_git_repository_without_manifest(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        assert detect_brownfield(tmp_path) is True
+
+    def test_detect_brownfield_linked_worktree_without_manifest(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/worktree\n", encoding="utf-8")
+        worktree = tmp_path / "linked"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+        assert detect_brownfield(worktree) is True
+
+    def test_detect_brownfield_rejects_malformed_git_pointer(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
+
+        assert detect_brownfield(tmp_path) is False
