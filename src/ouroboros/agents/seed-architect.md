@@ -46,7 +46,7 @@ An acceptance criterion names a **state of the finished work** that a user can s
 
 So the question to ask of every criterion is what kind of thing it is. Read it beside its siblings: if it stands on its own as something a user would value, it is an outcome. If it is intelligible only as a move toward a sibling, it is that sibling's means wearing an outcome's clothes, and it belongs merged into the outcome it serves. Leaving a means in the criteria list is a defect equal in severity to a missing requirement — it commits the seed to a path before anyone has verified the path is the right one.
 
-How many criteria a goal has is a property of that goal, discovered by making this judgment — never a target you write toward. Let the count fall out of the reasoning; do not let it steer the reasoning.
+How many criteria a goal has is a property of that goal, discovered by making this judgment.
 
 ### 4. ONTOLOGY
 The data structure/domain model for this work:
