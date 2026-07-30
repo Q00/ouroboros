@@ -119,7 +119,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 <summary><strong>Kiro CLI quick start</strong></summary>
 
 ```bash
-pip install 'ouroboros-ai[mcp]'
+pipx install 'ouroboros-ai[mcp]'       # or: uv tool install 'ouroboros-ai[mcp]'
 ouroboros setup            # detects Kiro CLI and registers MCP server
 ```
 
@@ -171,6 +171,8 @@ ouroboros setup                         # configure runtime
 Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--all-extras`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
 `[mcp]` and `[claude]` are intentionally separate profiles: MCP 2 and the current Claude Agent SDK require incompatible major versions of the `mcp` package. Supported MCP host setups launch `uvx --from 'ouroboros-ai[mcp]' ...` in a separate process. Standalone Claude SDK setup does not register that server because its configured Claude backend is unavailable inside the isolated process; use a supported CLI-backed runtime and LLM backend for MCP execution.
+
+`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 

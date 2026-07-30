@@ -207,9 +207,9 @@ Install Copilot CLI per the GitHub docs, then either let setup auto-detect
 it or set `OUROBOROS_COPILOT_CLI_PATH=/abs/path/to/copilot`.
 
 **`MCP dependencies not installed: mcp package not installed.`**
-Ouroboros was installed without the `[mcp]` extra. Reinstall with one of:
-`pipx install 'ouroboros-ai[mcp]'`, `uv tool install 'ouroboros-ai[mcp]'`,
-or `pip install 'ouroboros-ai[mcp]'`. For local dev installs use
+The isolated MCP launcher is unavailable or could not load the `[mcp]` extra.
+Install with `pipx install 'ouroboros-ai[mcp]'` or
+`uv tool install 'ouroboros-ai[mcp]'`. For local dev installs use
 `uv tool install --with mcp --from . ouroboros-ai`.
 
 **`ouroboros-ouroboros_*` tools return `Error: Not connected`.**

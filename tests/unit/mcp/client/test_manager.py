@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from ouroboros.core.types import Result
 from ouroboros.mcp.client.manager import (
     ConnectionState,
@@ -13,9 +15,12 @@ from ouroboros.mcp.types import (
     ContentType,
     MCPCapabilities,
     MCPContentItem,
+    MCPPeerIdentity,
     MCPResourceContent,
+    MCPResourceDefinition,
     MCPServerConfig,
     MCPServerInfo,
+    MCPServerSnapshot,
     MCPToolDefinition,
     MCPToolResult,
     TransportType,
@@ -93,6 +98,50 @@ class _DiscoveryAdapter:
         return Result.ok(None)
 
 
+class _ImmutableSnapshotAdapter:
+    """Adapter returning nested mutable models for manager-freeze coverage."""
+
+    is_connected = True
+
+    def __init__(self) -> None:
+        self.server_snapshot = MCPServerSnapshot(
+            identity=MCPPeerIdentity(name="fixture", application_version="1"),
+            protocol_version="2026-07-28",
+            supported_protocol_versions=("2026-07-28",),
+            capabilities=MCPCapabilities(tools=True, details={"tools": {"listChanged": True}}),
+            extensions={"vendor": {"flag": True}},
+        )
+
+    async def connect(self, config):
+        return Result.ok(MCPServerInfo(name=config.name))
+
+    async def list_tools(self):
+        return Result.ok(
+            (
+                MCPToolDefinition(
+                    name="nested",
+                    description="",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    meta={"vendor": {"stable": True}},
+                ),
+            )
+        )
+
+    async def list_resources(self):
+        return Result.ok(
+            (
+                MCPResourceDefinition(
+                    uri="fixture://resource",
+                    name="resource",
+                    meta={"cache": {"scope": "private"}},
+                ),
+            )
+        )
+
+
 class TestConnectionState:
     """Test ConnectionState enum."""
 
@@ -126,6 +175,50 @@ class TestMCPClientManager:
 
         assert result.is_ok
         assert "test-server" in manager.servers
+
+    async def test_public_snapshot_deeply_freezes_manager_owned_state(self) -> None:
+        """Snapshot mutation cannot alter reconnect config or discovery caches."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="immutable",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+            env={"TOKEN": "safe"},
+            headers={"X-Test": "safe"},
+        )
+        assert (await manager.add_server(config)).is_ok
+
+        # The caller-owned input is detached at registration time.
+        config.env["TOKEN"] = "caller-mutated"
+        registered = manager._connections[config.name]
+        adapter = _ImmutableSnapshotAdapter()
+        manager._connections[config.name] = ServerConnection(
+            config=registered.config,
+            adapter=adapter,  # type: ignore[arg-type]
+        )
+        assert (await manager.connect(config.name)).is_ok
+
+        snapshot = manager.get_connection_snapshot(config.name)
+        assert snapshot is not None
+        assert not hasattr(snapshot, "adapter")
+        assert snapshot.config.env["TOKEN"] == "safe"
+        with pytest.raises(TypeError):
+            snapshot.config.env["TOKEN"] = "snapshot-mutated"
+        with pytest.raises(TypeError):
+            snapshot.config.headers["X-Test"] = "snapshot-mutated"
+        with pytest.raises(TypeError):
+            snapshot.tools[0].input_schema["properties"]["path"]["type"] = "number"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.tools[0].meta["vendor"]["stable"] = False  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.resources[0].meta["cache"]["scope"] = "public"  # type: ignore[index]
+        assert snapshot.server_snapshot is not None
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.extensions["vendor"]["flag"] = False
+
+        internal = manager._connections[config.name]
+        assert internal.config.env["TOKEN"] == "safe"
+        assert internal.tools[0].input_schema["properties"]["path"]["type"] == "string"  # type: ignore[index]
 
     async def test_add_duplicate_server_fails(self) -> None:
         """Adding duplicate server name fails."""
@@ -237,7 +330,10 @@ class TestMCPClientManager:
 
         adapter.release_discovery.set()
         assert (await connect_task).is_err
-        assert manager.get_connection_snapshot(config.name) is disconnected
+        current = manager.get_connection_snapshot(config.name)
+        assert current is not None
+        assert current.generation == disconnected.generation
+        assert current.state == disconnected.state
         assert adapter.disconnect_calls == 2
 
     async def test_remove_and_readd_rejects_old_connection_snapshot(self) -> None:
@@ -259,10 +355,10 @@ class TestMCPClientManager:
 
         adapter.release_discovery.set()
         assert (await connect_task).is_err
-        assert manager.get_connection_snapshot(config.name) is replacement
+        assert manager.get_connection_snapshot(config.name) == replacement
         assert replacement is not None
-        assert replacement.adapter is not adapter
         assert replacement.state == ConnectionState.DISCONNECTED
+        assert manager._connections[config.name].adapter is not adapter
         assert adapter.disconnect_calls == 2
 
     def test_find_tool_server_not_found(self) -> None:

@@ -22,11 +22,15 @@ prompting.
 ## Setup
 
 ```bash
-pip install 'ouroboros-ai[mcp]'          # isolated modern MCP server
+pipx install 'ouroboros-ai[mcp]'         # or: uv tool install 'ouroboros-ai[mcp]'
 ouroboros setup --runtime kiro
 ```
 
 This will:
+
+Setup requires `uvx` or `pipx` so the MCP 2 server cannot inherit an
+incompatible host Python environment. If neither launcher is available, setup
+exits non-zero before changing `~/.ouroboros/config.yaml`.
 
 1. Confirm `kiro-cli` is on `PATH` (or honour `OUROBOROS_KIRO_CLI_PATH` /
    `orchestrator.kiro_cli_path` from your config).

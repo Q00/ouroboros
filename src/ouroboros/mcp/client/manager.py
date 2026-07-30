@@ -6,11 +6,12 @@ timeouts.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 
 import structlog
 
@@ -66,6 +67,37 @@ class ServerConnection:
     tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
     resources: tuple[MCPResourceDefinition, ...] = field(default_factory=tuple)
     server_snapshot: MCPServerSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ServerConnectionSnapshot:
+    """Deeply immutable public view of a managed connection.
+
+    The live adapter is intentionally absent: exposing it would let a caller
+    mutate transport state outside the manager's generation/lock protocol.
+    Every structured value referenced here is recursively frozen before it is
+    stored by the manager.
+    """
+
+    config: MCPServerConfig
+    state: ConnectionState = ConnectionState.DISCONNECTED
+    generation: int = 0
+    last_error: str | None = None
+    tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
+    resources: tuple[MCPResourceDefinition, ...] = field(default_factory=tuple)
+    server_snapshot: MCPServerSnapshot | None = None
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Return a recursively immutable copy of a protocol/config value."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        cls = type(value)
+        return cls(**{item.name: _deep_freeze(getattr(value, item.name)) for item in fields(value)})
+    return value
 
 
 class MCPClientManager:
@@ -137,9 +169,20 @@ class MCPClientManager:
         conn = self._connections.get(server_name)
         return conn.state if conn else None
 
-    def get_connection_snapshot(self, server_name: str) -> ServerConnection | None:
-        """Return the immutable current connection snapshot, if registered."""
-        return self._connections.get(server_name)
+    def get_connection_snapshot(self, server_name: str) -> ServerConnectionSnapshot | None:
+        """Return a deeply immutable, adapter-free connection snapshot."""
+        conn = self._connections.get(server_name)
+        if conn is None:
+            return None
+        return ServerConnectionSnapshot(
+            config=conn.config,
+            state=conn.state,
+            generation=conn.generation,
+            last_error=conn.last_error,
+            tools=conn.tools,
+            resources=conn.resources,
+            server_snapshot=conn.server_snapshot,
+        )
 
     async def add_server(
         self,
@@ -166,8 +209,9 @@ class MCPClientManager:
                 )
 
             adapter = MCPClientAdapter(max_retries=self._max_retries)
+            frozen_config = cast(MCPServerConfig, _deep_freeze(config))
             self._connections[config.name] = ServerConnection(
-                config=config,
+                config=frozen_config,
                 adapter=adapter,
                 state=ConnectionState.DISCONNECTED,
             )
@@ -258,6 +302,10 @@ class MCPClientManager:
                 self._fetch_tools(conn.adapter, server_name),
                 self._fetch_resources(conn.adapter, server_name),
             )
+            tools = tuple(cast(MCPToolDefinition, _deep_freeze(tool)) for tool in tools)
+            resources = tuple(
+                cast(MCPResourceDefinition, _deep_freeze(resource)) for resource in resources
+            )
 
         superseded = False
         orphaned_adapter = False
@@ -283,7 +331,10 @@ class MCPClientManager:
                     generation=generation,
                     tools=tools,
                     resources=resources,
-                    server_snapshot=getattr(conn.adapter, "server_snapshot", None),
+                    server_snapshot=cast(
+                        MCPServerSnapshot | None,
+                        _deep_freeze(getattr(conn.adapter, "server_snapshot", None)),
+                    ),
                 )
                 log.info(
                     "mcp.manager.connected",

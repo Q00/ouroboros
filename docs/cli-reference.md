@@ -296,6 +296,7 @@ ouroboros setup --non-interactive
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
 - For Gemini CLI: installs the runtime skill capability guide into `~/.gemini/GEMINI.md`
 - For Kiro CLI: sets `orchestrator.kiro_cli_path` and `llm.backend: kiro` in `~/.ouroboros/config.yaml`, and registers the Ouroboros MCP server in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked into the entry's `env`. The launcher is always isolated through `uvx` or `pipx run`; direct global binaries are rejected because they cannot guarantee MCP 2
+- Kiro, Copilot, and Hermes setup is transactional at the activation boundary: if no isolated launcher is available or host registration fails, setup exits non-zero without persisting the selected Ouroboros runtime
 - For Kiro CLI: installs the runtime skill capability guide into `~/.kiro/steering/ouroboros-skill-capability-guide.md`
 - For Copilot CLI: installs the runtime skill capability guide into `~/.copilot/ouroboros-instructions/AGENTS.md` and configures Ouroboros-launched Copilot child sessions to read it via `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
 - For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`

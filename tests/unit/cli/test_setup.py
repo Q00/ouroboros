@@ -1397,6 +1397,62 @@ class TestIsolatedMCPLaunchers:
         assert kiro == common
         assert opencode == {"command": ["pipx", *expected_args]}
 
+    @pytest.mark.parametrize(
+        "register",
+        (
+            setup_cmd._register_hermes_mcp_server,
+            setup_cmd._register_kiro_mcp_server,
+            setup_cmd._register_copilot_mcp_server,
+        ),
+    )
+    def test_registration_without_isolated_launcher_is_fail_closed(
+        self,
+        register,
+        tmp_path: Path,
+    ) -> None:
+        """A pip-only PATH cannot create any host registration artifact."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+        ):
+            assert register() is False
+
+        assert not (tmp_path / ".hermes").exists()
+        assert not (tmp_path / ".kiro").exists()
+        assert not (tmp_path / ".copilot").exists()
+
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    def test_setup_without_isolated_launcher_preserves_runtime_config(
+        self,
+        runtime: str,
+        tmp_path: Path,
+    ) -> None:
+        """Activation failure occurs before any Ouroboros config write."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude_code\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+            patch("ouroboros.config.loader.ensure_config_dir") as ensure_config_dir,
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        ensure_config_dir.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == original
+
 
 class TestHermesSetup:
     """Tests for Hermes-specific setup behavior."""
@@ -1462,7 +1518,8 @@ class TestHermesSetup:
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "gpt-5.4"
         mock_install.assert_called_once_with()
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
@@ -3558,7 +3615,8 @@ class TestGjcSetup:
         assert config["llm"]["backend"] == "kiro"
         # Unrelated keys preserved.
         assert config["llm"]["qa_model"] == "x"
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_kiro_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
         """Kiro setup must not clobber malformed existing config.yaml contents."""
@@ -3634,6 +3692,24 @@ class TestGjcSetup:
         assert result.exit_code != 0
         assert "Kiro CLI not found" in result.output
 
+    def test_setup_cli_propagates_kiro_activation_failure(self, tmp_path: Path) -> None:
+        """A host-registration failure must become a non-zero CLI result."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"kiro": "/opt/bin/kiro-cli"},
+            ),
+            patch("ouroboros.cli.commands.setup._setup_kiro", return_value=False),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "kiro", "--non-interactive"],
+            )
+
+        assert result.exit_code == 1
+
 
 class TestCopilotSetup:
     """`_setup_copilot`, `_register_copilot_mcp_server`, and the CLI dispatcher.
@@ -3700,7 +3776,8 @@ class TestCopilotSetup:
         assert "### When a skill requires `run_lateral_review`" in guide_path.read_text(
             encoding="utf-8"
         )
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
         """Fresh/default configs should honor the model selected during setup."""

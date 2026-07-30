@@ -133,6 +133,17 @@ def test_install_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_installer_does_not_report_ready_after_runtime_setup_failure() -> None:
+    """The activation command is a hard gate, not a best-effort side effect."""
+    source = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'setup --runtime "$RUNTIME" --non-interactive || true' not in source
+    assert (
+        'if ! "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive; then' in source
+    )
+    assert "exit 1\n  fi" in source
+
+
 def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None:
     config_dir = tmp_path / "home" / ".ouroboros"
     config_dir.mkdir(parents=True)

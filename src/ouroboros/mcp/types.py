@@ -38,6 +38,15 @@ type JSONSchema = JSONObject | bool
 type MCPCacheScope = Literal["public", "private"]
 
 
+def _mutable_json_copy(value: Any) -> Any:
+    """Return a detached mutable JSON tree from dicts or frozen mappings."""
+    if isinstance(value, Mapping):
+        return {key: _mutable_json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_json_copy(item) for item in value]
+    return value
+
+
 def _is_blocked_transport_ip(ip: ipaddress._BaseAddress) -> bool:
     """Return True when an IP literal should be rejected for MCP transport use."""
     return (
@@ -321,11 +330,9 @@ class MCPToolDefinition:
             A JSON Schema dict describing the tool's input parameters.
         """
         if self.input_schema is not None:
-            # Return a detached tree: callers historically mutate the returned
-            # schema while preparing SDK registrations.
-            from copy import deepcopy
-
-            return deepcopy(self.input_schema)
+            # Return a detached mutable tree even when the definition belongs
+            # to a deeply frozen connection snapshot.
+            return _mutable_json_copy(self.input_schema)
 
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -340,9 +347,7 @@ class MCPToolDefinition:
             if param.enum is not None:
                 prop["enum"] = list(param.enum)
             if param.items is not None:
-                from copy import deepcopy
-
-                prop["items"] = deepcopy(param.items)
+                prop["items"] = _mutable_json_copy(param.items)
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)

@@ -1259,8 +1259,16 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
 
 
-def _register_hermes_mcp_server() -> None:
+def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register the Ouroboros MCP hookup in ~/.hermes/config.yaml."""
+    detected = detected or _detect_mcp_entry()
+    if detected is None:
+        print_error(
+            "Cannot register Hermes MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     hermes_config = Path.home() / ".hermes" / "config.yaml"
     hermes_config.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1270,7 +1278,7 @@ def _register_hermes_mcp_server() -> None:
             loaded_config = yaml.safe_load(hermes_config.read_text(encoding="utf-8"))
         except Exception:
             print_error(f"Could not parse {hermes_config} — skipping MCP registration.")
-            return
+            return False
         if loaded_config is None:
             config_data = {}
         elif isinstance(loaded_config, dict):
@@ -1285,12 +1293,6 @@ def _register_hermes_mcp_server() -> None:
             print_warning(f"{hermes_config} 'mcp_servers' section is not a mapping — resetting.")
         config_data["mcp_servers"] = {}
 
-    # Use UVX install by default for robustness
-    detected = _detect_mcp_entry()
-    if detected is None:
-        print_warning("Cannot register Hermes MCP server: no working Ouroboros installation found.")
-        return
-
     config_data["mcp_servers"]["ouroboros"] = {
         "command": detected["command"],
         "args": detected["args"],
@@ -1301,20 +1303,30 @@ def _register_hermes_mcp_server() -> None:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Registered Ouroboros MCP server in {hermes_config}")
+    return True
 
 
-def _setup_hermes(hermes_path: str) -> None:
+def _setup_hermes(hermes_path: str) -> bool:
     """Configure Ouroboros for the Hermes runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
+
+    detected = _detect_mcp_entry()
+    if detected is None:
+        print_error(
+            "Hermes setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
@@ -1329,6 +1341,13 @@ def _setup_hermes(hermes_path: str) -> None:
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
 
+    if not _register_hermes_mcp_server(detected=detected):
+        print_error("Hermes setup aborted without changing Ouroboros runtime configuration.")
+        return False
+
+    if config_was_missing:
+        create_default_config(config_dir)
+
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
@@ -1337,9 +1356,7 @@ def _setup_hermes(hermes_path: str) -> None:
 
     # Install Ouroboros skills for Hermes
     _install_hermes_artifacts()
-
-    # Register MCP server
-    _register_hermes_mcp_server()
+    return True
 
 
 def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
@@ -1347,7 +1364,7 @@ def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
     return _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
 
 
-def _register_kiro_mcp_server() -> None:
+def _register_kiro_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register the Ouroboros MCP hookup in ``~/.kiro/settings/mcp.json``.
 
     Mirrors ``_ensure_claude_mcp_entry`` (same detection and idempotency
@@ -1367,6 +1384,14 @@ def _register_kiro_mcp_server() -> None:
     isolated MCP 2 launcher. Kiro should increase its first-start timeout
     rather than silently binding a faster but incompatible global binary.
     """
+    detected = detected or _detect_mcp_entry_for_kiro()
+    if detected is None:
+        print_error(
+            "Cannot register Kiro MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     mcp_config_path = Path.home() / ".kiro" / "settings" / "mcp.json"
     mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1376,7 +1401,7 @@ def _register_kiro_mcp_server() -> None:
             mcp_data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             print_error(f"Could not parse {mcp_config_path} — skipping Kiro MCP registration.")
-            return
+            return False
         if not isinstance(mcp_data, dict):
             print_warning(f"{mcp_config_path} top-level is not a mapping — resetting.")
             mcp_data = {}
@@ -1387,11 +1412,6 @@ def _register_kiro_mcp_server() -> None:
             print_warning(f"{mcp_config_path} 'mcpServers' section is not a mapping — resetting.")
         servers = {}
         mcp_data["mcpServers"] = servers
-
-    detected = _detect_mcp_entry_for_kiro()
-    if detected is None:
-        print_warning("Cannot register Kiro MCP server: no working ouroboros installation found.")
-        return
 
     # Known legacy direct commands are accepted only so setup can replace them
     # with the current isolated launcher on the next run.
@@ -1458,9 +1478,10 @@ def _register_kiro_mcp_server() -> None:
     if needs_write:
         with mcp_config_path.open("w", encoding="utf-8") as f:
             json.dump(mcp_data, f, indent=2)
+    return True
 
 
-def _setup_kiro(kiro_path: str) -> None:
+def _setup_kiro(kiro_path: str) -> bool:
     """Configure Ouroboros for the Kiro CLI runtime.
 
     Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
@@ -1470,19 +1491,28 @@ def _setup_kiro(kiro_path: str) -> None:
     hand-editing any config file.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
+
+    detected = _detect_mcp_entry_for_kiro()
+    if detected is None:
+        print_error(
+            "Kiro setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
-        return
+        return False
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
@@ -1497,23 +1527,38 @@ def _setup_kiro(kiro_path: str) -> None:
         config_dict["llm"] = llm
     llm["backend"] = "kiro"
 
+    if not _register_kiro_mcp_server(detected=detected):
+        print_error("Kiro setup aborted without changing Ouroboros runtime configuration.")
+        return False
+
+    if config_was_missing:
+        create_default_config(config_dir)
+
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Kiro runtime (CLI: {kiro_path})")
     print_info(f"Config saved to: {config_path}")
 
-    _register_kiro_mcp_server()
     _install_runtime_instruction_artifact("kiro")
+    return True
 
 
-def _register_copilot_mcp_server() -> None:
+def _register_copilot_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register or refresh the Ouroboros MCP entry in ~/.copilot/mcp-config.json.
 
     Copilot CLI loads MCP servers from ``~/.copilot/mcp-config.json``. We add
     the Ouroboros server (built from whichever package install method we
     detect) and set the env so the MCP child uses the Copilot backend.
     """
+    detected = detected or _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_error(
+            "Cannot register Copilot MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     mcp_path = Path.home() / ".copilot" / "mcp-config.json"
     mcp_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1523,27 +1568,16 @@ def _register_copilot_mcp_server() -> None:
             data = json.loads(mcp_path.read_text(encoding="utf-8")) or {}
         except json.JSONDecodeError:
             print_warning("~/.copilot/mcp-config.json is not valid JSON — leaving it untouched.")
-            return
+            return False
 
     if not isinstance(data, dict):
         print_warning("~/.copilot/mcp-config.json top-level is not an object — skipping.")
-        return
+        return False
 
     servers = data.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}
         data["mcpServers"] = servers
-
-    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
-    if detected is None:
-        print_warning(
-            "Cannot register MCP server: no working ouroboros installation found.\n"
-            "Install with one of:\n"
-            "  pipx install 'ouroboros-ai[mcp]'\n"
-            "  uv tool install 'ouroboros-ai[mcp]'\n"
-            "  pip install 'ouroboros-ai[mcp]'"
-        )
-        return
 
     target_env = {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
@@ -1596,6 +1630,7 @@ def _register_copilot_mcp_server() -> None:
 
     if needs_write:
         mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return True
 
 
 _COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
@@ -1679,7 +1714,7 @@ def _is_shipped_default_roster(
     )
 
 
-def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
+def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     """Configure Ouroboros for the GitHub Copilot CLI runtime.
 
     Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
@@ -1688,23 +1723,32 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     registers the MCP server in ``~/.copilot/mcp-config.json``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
     from ouroboros.copilot.model_discovery import (
         list_copilot_models,
         used_fallback,
     )
 
+    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_error(
+            "Copilot setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
-        return
+        return False
 
     # Live-discover available Copilot models. Falls back silently to a
     # bundled snapshot when the GitHub API is unreachable or unauthenticated.
@@ -1716,7 +1760,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
         )
     if not models:
         print_error("No Copilot models available; cannot pick a default.")
-        return
+        return False
 
     preferred_default = next(
         (m.id for m in models if m.id.startswith("claude-opus-4.6")),
@@ -1761,7 +1805,14 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     except ValueError as exc:
         print_error(f"Invalid config.yaml structure: {exc}")
         print_info("Aborting Copilot setup without rewriting config.yaml.")
-        return
+        return False
+
+    if not _register_copilot_mcp_server(detected=detected):
+        print_error("Copilot setup aborted without changing Ouroboros runtime configuration.")
+        return False
+
+    if config_was_missing:
+        create_default_config(config_dir)
 
     with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
@@ -1770,8 +1821,8 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     print_info(f"Default model: {chosen_model}")
     print_info(f"Config saved to: {config_path}")
 
-    _register_copilot_mcp_server()
     _install_runtime_instruction_artifact("copilot")
+    return True
 
 
 _PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
@@ -3132,7 +3183,8 @@ def setup(
         if not hermes_path:
             print_error("Hermes CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_hermes(hermes_path)
+        if not _setup_hermes(hermes_path):
+            raise typer.Exit(1)
     elif selected in ("gemini", "gemini_cli"):
         gemini_path = available.get("gemini")
         if not gemini_path:
@@ -3152,7 +3204,8 @@ def setup(
                 "OUROBOROS_KIRO_CLI_PATH, or configure orchestrator.kiro_cli_path."
             )
             raise typer.Exit(1)
-        _setup_kiro(kiro_path)
+        if not _setup_kiro(kiro_path):
+            raise typer.Exit(1)
     elif selected in ("copilot", "copilot_cli"):
         copilot_path = available.get("copilot")
         if not copilot_path:
@@ -3162,7 +3215,8 @@ def setup(
                 "OUROBOROS_COPILOT_CLI_PATH, or configure orchestrator.copilot_cli_path."
             )
             raise typer.Exit(1)
-        _setup_copilot(copilot_path, non_interactive=non_interactive)
+        if not _setup_copilot(copilot_path, non_interactive=non_interactive):
+            raise typer.Exit(1)
     elif selected in ("pi", "pi_cli"):
         pi_path = available.get("pi")
         if not pi_path:
