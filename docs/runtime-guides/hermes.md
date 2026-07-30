@@ -42,8 +42,15 @@ mcp_servers:
     enabled: true
 ```
 
-When only `pipx` is available, setup uses `command: pipx` with
-`args: [run, --spec, "ouroboros-ai[mcp]", ouroboros, mcp, serve]`.
+When only `pipx` is available, setup writes:
+
+```yaml
+mcp_servers:
+  ouroboros:
+    command: pipx
+    args: [run, --spec, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
+    enabled: true
+```
 
 ## Usage
 

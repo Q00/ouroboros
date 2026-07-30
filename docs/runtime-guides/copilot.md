@@ -174,7 +174,15 @@ install method the wizard detected:
 }
 ```
 
-When `uvx` is unavailable, setup uses `pipx run --spec ouroboros-ai[mcp]`.
+When `uvx` is unavailable, setup writes the equivalent `pipx` entry:
+
+```json
+{
+  "command": "pipx",
+  "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+}
+```
+
 It never registers a direct global binary or `python -m` fallback because
 those environments cannot guarantee MCP 2. The wizard is idempotent and
 updates setup-managed entries to the current isolated launcher.
