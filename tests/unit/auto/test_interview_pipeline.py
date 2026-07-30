@@ -1906,6 +1906,7 @@ async def test_pipeline_blocks_unmapped_seed_qa_feedback_without_retrying(tmp_pa
         return _seed()
 
     qa_calls = 0
+    lateral_calls = 0
     run_called = False
 
     async def seed_qa(seed: Seed, ledger: SeedDraftLedger) -> EvaluateResult:  # noqa: ARG001
@@ -1917,6 +1918,17 @@ async def test_pipeline_blocks_unmapped_seed_qa_feedback_without_retrying(tmp_pa
             verdict="revise",
             differences=("missing audit-log retention policy",),
             suggestions=("add a 30-day retention constraint",),
+        )
+
+    async def lateral_thinker(
+        *, persona, qa_differences, qa_suggestions, run_artifact
+    ) -> LateralResult:  # noqa: ARG001
+        nonlocal lateral_calls
+        lateral_calls += 1
+        return LateralResult(
+            persona=persona.value,
+            approach_summary="choose a retention policy",
+            text="Retain audit logs for 30 days.",
         )
 
     async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str]:  # noqa: ARG001
@@ -1940,6 +1952,7 @@ async def test_pipeline_blocks_unmapped_seed_qa_feedback_without_retrying(tmp_pa
         run_starter=run_seed,
         store=AutoStore(tmp_path),
         seed_qa_evaluator=seed_qa,
+        lateral_thinker=lateral_thinker,
     )
 
     result = await pipeline.run(state)
@@ -1948,6 +1961,7 @@ async def test_pipeline_blocks_unmapped_seed_qa_feedback_without_retrying(tmp_pa
     assert state.last_error_code == "seed_qa_feedback_unmapped"
     assert "could not be mapped" in (result.blocker or "")
     assert qa_calls == 1
+    assert lateral_calls == 0
     assert run_called is False
     persisted_seed = Seed.from_dict(state.seed_artifact)
     assert not any("audit-log retention" in item for item in persisted_seed.constraints)

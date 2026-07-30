@@ -114,7 +114,7 @@ _RECOVERY_BLOCKED_CHOICES: str = (
 
 class SeedQaRepairMappingError(RuntimeError):
     def __init__(self, feedback: tuple[str, ...]) -> None:
-        self.feedback = feedback
+        self.feedback: tuple[str, ...] = feedback
         super().__init__(
             "Seed QA feedback could not be mapped to a bounded repair; "
             "manual Seed revision is required"
@@ -2995,6 +2995,8 @@ class AutoPipeline:
         if self.lateral_thinker is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 
+        _normalized_seed_qa_feedback(qa_result)
+
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
             qa_result.differences,
@@ -5097,6 +5099,8 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         repairs.append("Define explicit no-op scope for supported command behavior.")
     if "review-blocking" in lowered:
         repairs.append("Introduce the review-blocking post-QA constraint before execution.")
+    if "binding" in lowered and "contract" in lowered:
+        repairs.append("Define one explicit binding contract before execution.")
     if "templated" in lowered or "indirect" in lowered:
         repairs.append(
             "Acceptance criteria must be direct executable checks, not generic templates."
