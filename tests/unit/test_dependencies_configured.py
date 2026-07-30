@@ -192,6 +192,30 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         assert entry["args"] == expected_args
 
 
+def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
+    """Host guides must match setup's fail-closed uvx/pipx contract."""
+    root = Path(__file__).parent.parent.parent
+    guides = {
+        runtime: (root / "docs" / "runtime-guides" / f"{runtime}.md").read_text(encoding="utf-8")
+        for runtime in ("kiro", "copilot", "hermes")
+    }
+
+    for content in guides.values():
+        assert "pipx install 'ouroboros-ai[mcp]'" in content
+        assert "uv tool install 'ouroboros-ai[mcp]'" in content
+        assert "uvx" in content
+        assert "pipx" in content
+
+    assert '"command": "/path/to/ouroboros"' not in guides["kiro"]
+    assert "from the venv that owns" not in guides["kiro"]
+    assert '"command": "uvx"' in guides["kiro"]
+    assert '"command": "pipx"' in guides["kiro"]
+    assert "`uv tool install` / `pip install`" not in guides["copilot"]
+    assert "plain `pip install`" in guides["copilot"]
+    assert "setup fails closed" in guides["copilot"]
+    assert "never falls back to a direct `ouroboros` binary" in guides["hermes"]
+
+
 @pytest.mark.parametrize(
     "skill_path",
     [

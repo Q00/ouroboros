@@ -26,11 +26,11 @@ pipx install 'ouroboros-ai[mcp]'         # or: uv tool install 'ouroboros-ai[mcp
 ouroboros setup --runtime kiro
 ```
 
-This will:
-
 Setup requires `uvx` or `pipx` so the MCP 2 server cannot inherit an
 incompatible host Python environment. If neither launcher is available, setup
 exits non-zero before changing `~/.ouroboros/config.yaml`.
+
+This will:
 
 1. Confirm `kiro-cli` is on `PATH` (or honour `OUROBOROS_KIRO_CLI_PATH` /
    `orchestrator.kiro_cli_path` from your config).
@@ -49,8 +49,8 @@ exits non-zero before changing `~/.ouroboros/config.yaml`.
    {
      "mcpServers": {
        "ouroboros": {
-         "command": "/path/to/ouroboros",
-         "args": ["mcp", "serve"],
+         "command": "uvx",
+         "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
          "disabled": false,
          "env": {
            "OUROBOROS_RUNTIME": "kiro",
@@ -58,6 +58,15 @@ exits non-zero before changing `~/.ouroboros/config.yaml`.
          }
        }
      }
+   }
+   ```
+
+   If `uvx` is unavailable but `pipx` exists, setup writes the equivalent
+   isolated launcher instead:
+   ```json
+   {
+     "command": "pipx",
+     "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
    }
    ```
 
@@ -157,18 +166,20 @@ callers.
 
 ### `connection closed: initialize response` in Kiro logs
 
-Kiro's MCP init timed out before the Ouroboros server responded. Most
-commonly the server was started inside a virtualenv whose Python is
-incompatible with the installed `pydantic` — check
-`~/.kiro/settings/mcp.json` and ensure the `command` points at an
-`ouroboros` binary from a Python 3.12 / 3.13 environment, not a
-Python 3.14 rc venv.
+Kiro's MCP init timed out before the isolated Ouroboros server responded.
+Check `~/.kiro/settings/mcp.json`: the `command` must be `uvx` or `pipx`,
+with the matching `ouroboros-ai[mcp]` arguments shown in Setup above. A first
+`uvx` launch may need a longer Kiro startup timeout while it resolves the
+package. Never replace the entry with a direct `ouroboros` or `python -m`
+command; those environments cannot guarantee MCP 2.
 
 ### `I don't have a tool called ouroboros_*`
 
-MCP server loaded with a different name or did not load at all. Re-run
-`ouroboros setup --runtime kiro` from the venv that owns the installed
-`ouroboros` binary, then restart the Kiro session.
+MCP server loaded with a different name or did not load at all. Ensure `uvx`
+or `pipx` is on `PATH`, re-run `ouroboros setup --runtime kiro` from any
+terminal, then restart the Kiro session. Setup replaces legacy direct-binary
+entries with the supported isolated launcher and exits non-zero without
+persisting runtime changes if no launcher is available.
 
 ### Responses start with `> ` or contain escape sequences
 

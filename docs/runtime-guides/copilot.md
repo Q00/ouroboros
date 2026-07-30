@@ -24,11 +24,14 @@ key to manage.
 | `copilot` CLI    | Provider — install per the [Copilot CLI install guide](https://docs.github.com/copilot/concepts/agents/about-copilot-cli) |
 | `gh` CLI         | Used to discover the live Copilot model catalog (`gh auth token`)  |
 | GitHub auth      | `gh auth login` once before first use                              |
-| Ouroboros (mcp)  | `pipx install 'ouroboros-ai[mcp]'` (or `uv tool install` / `pip install`) |
+| Ouroboros (mcp)  | `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` |
 
 > Copilot runs on the **base** Ouroboros package plus the `[mcp]` extra. It
 > does not require the `[claude]` extra; the MCP entry is registered with
-> `ouroboros-ai[mcp]`.
+> `ouroboros-ai[mcp]`. Host registration requires the package-isolated `uvx`
+> or `pipx run` launcher. A plain `pip install` is suitable for embedding in
+> an already isolated environment, but it does not satisfy this host-launcher
+> requirement by itself; setup fails closed if neither launcher is available.
 
 ## Quick start
 
