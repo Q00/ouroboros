@@ -137,16 +137,25 @@ def test_seed_qa_feedback_rejects_unmapped_reviewer_diagnostics() -> None:
     )
 
 
-def test_seed_qa_feedback_rejects_unrepairable_exit_condition_feedback() -> None:
+@pytest.mark.parametrize(
+    "difference",
+    (
+        "exit_conditions are noncanonical because they use indirect templated checks",
+        "The required exit condition is indirect and templated",
+        "The required exit-condition is indirect and templated",
+        "The exitConditions field is indirect and templated",
+    ),
+)
+def test_seed_qa_feedback_rejects_unrepairable_exit_condition_feedback(
+    difference: str,
+) -> None:
     seed = _build_seed()
     qa_result = EvaluateResult(
         passed=False,
         score=0.61,
         verdict="revise",
-        differences=(
-            "exit_conditions are noncanonical because they use indirect templated checks",
-        ),
-        suggestions=("replace them with direct executable exit conditions",),
+        differences=(difference,),
+        suggestions=("replace the field with direct executable checks",),
     )
 
     with pytest.raises(SeedQaRepairMappingError):

@@ -5086,7 +5086,7 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         if item.strip()
     )
     lowered = "\n".join(feedback).casefold()
-    if "exit_conditions" in lowered or "exit conditions" in lowered:
+    if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
         raise SeedQaRepairMappingError(feedback)
     repairs: list[str] = []
     if "ambiguity_score" in lowered:
