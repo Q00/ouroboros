@@ -5126,28 +5126,18 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
 
 
 def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
+    score = r"(?:metadata\.)?ambiguity_score"
+    target = r"0\.2(?:0)?"
     patterns = (
-        r"\b(?:metadata\.)?ambiguity_score\b.{0,120}\b(?:exceed(?:s|ed|ing)?|above|greater than)\b.{0,80}(?:0\.2(?:0)?|readiness gate)",
-        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}\b(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+0\.2(?:0)?\b",
-        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}\bmust\s+not\s+exceed\s+0\.2(?:0)?\b",
-        r"\b(?:metadata\.)?ambiguity_score\b.{0,80}(?:>|>=)\s*0\.2(?:0)?\b",
+        rf"{score}\s*(?:<=|<)\s*{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+{target}",
+        rf"{score}\s+must\s+not\s+exceed\s+{target}",
+        rf"{score}\s+(?:is|remains)\s+above\s+{target}\s+and\s+exceeds\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+)?gate",
+        rf"{score}\s+(?:is|=)\s*(?:0\.\d+|1\.0+)\s*,?\s*(?:which\s+)?(?:exceeds?|exceeding|is above|is greater than)\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+gate(?:\s+of)?\s*)?(?:<=?\s*)?{target}",
     )
     for item in (*qa_result.differences, *qa_result.suggestions):
-        lowered = item.casefold()
-        if not re.search(r"\b(?:metadata\.)?ambiguity_score\b", lowered):
-            continue
-        if any(
-            marker in lowered
-            for marker in (
-                "do not change",
-                "ignore prior",
-                "remain",
-                "unchanged",
-                "without evaluating readiness",
-            )
-        ):
-            continue
-        if any(re.search(pattern, lowered) for pattern in patterns):
+        lowered = item.strip().casefold()
+        if any(re.fullmatch(rf"{pattern}[.!]?", lowered) for pattern in patterns):
             return True
     return False
 
