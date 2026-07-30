@@ -3091,6 +3091,74 @@ class TestCodexSetup:
             for call in mock_print_error.call_args_list
         )
 
+    @pytest.mark.parametrize("artifact_kind", ["rule", "skill"])
+    def test_install_codex_artifacts_restores_pruned_generation_replaced_during_acquisition(
+        self,
+        tmp_path: Path,
+        artifact_kind: str,
+    ) -> None:
+        """Setup pruning must acquire the exact stale rule or skill it validated."""
+        codex_home = tmp_path / ".codex"
+        if artifact_kind == "rule":
+            target_path = codex_home / "rules" / "ouroboros-stale.md"
+            target_path.parent.mkdir(parents=True)
+            target_path.write_text("previous stale rule\n", encoding="utf-8")
+        else:
+            target_path = codex_home / "skills" / "ouroboros-stale"
+            target_path.mkdir(parents=True)
+            target_path.joinpath("SKILL.md").write_text("previous stale skill\n", encoding="utf-8")
+        required_snapshots = setup_cmd._snapshot_managed_codex_setup_paths(codex_home)
+        written_snapshots: dict[Path, setup_cmd._PathSnapshot] = {}
+        original_replace = os.replace
+        injected = False
+
+        def _replace_artifact_before_backup(source: str | Path, destination: str | Path) -> None:
+            nonlocal injected
+            source_path = Path(source)
+            destination_path = Path(destination)
+            if (
+                source_path == target_path
+                and destination_path.name.endswith(".backup")
+                and not injected
+            ):
+                injected = True
+                if artifact_kind == "rule":
+                    target_path.write_text("concurrent stale rule\n", encoding="utf-8")
+                else:
+                    target_path.joinpath("SKILL.md").write_text(
+                        "concurrent stale skill\n", encoding="utf-8"
+                    )
+            original_replace(source, destination)
+
+        with (
+            patch(
+                "ouroboros.codex.artifacts.os.replace",
+                side_effect=_replace_artifact_before_backup,
+            ),
+            patch("ouroboros.cli.commands.setup.print_error") as mock_print_error,
+        ):
+            assert (
+                setup_cmd._install_codex_artifacts(
+                    codex_dir=codex_home,
+                    expected_snapshots=written_snapshots,
+                    required_snapshots=required_snapshots,
+                )
+                is False
+            )
+
+        assert injected is True
+        if artifact_kind == "rule":
+            assert target_path.read_text(encoding="utf-8") == "concurrent stale rule\n"
+        else:
+            assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+                "concurrent stale skill\n"
+            )
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
+        assert any(
+            "Managed Codex artifact changed before removal" in str(call.args[0])
+            for call in mock_print_error.call_args_list
+        )
+
     def test_setup_codex_rejects_rule_changed_after_read_before_install(
         self, tmp_path: Path
     ) -> None:
