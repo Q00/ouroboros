@@ -526,8 +526,8 @@ class EventStore:
 
         path_part = database_url[len(prefix) :]
         if path_part.startswith("file:"):
-            # Caller already provided a URI form — respect it verbatim.
-            return database_url
+            raw_uri_path = path_part[len("file:") :]
+            path_part = unquote(raw_uri_path.split("?", 1)[0].split("#", 1)[0])
 
         # ``:memory:`` has no filesystem and cannot be opened read-only
         # meaningfully; leave it alone.

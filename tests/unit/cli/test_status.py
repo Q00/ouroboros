@@ -230,7 +230,7 @@ def test_executions_normalizes_untrusted_terminal_status_markup(
             BaseEvent(
                 type="execution.terminal",
                 aggregate_type="execution",
-                aggregate_id="exec_untrusted_status",
+                aggregate_id="[bold]exec[/]",
                 data={"status": "[bold red]complete[/]"},
             ),
         ),
@@ -240,7 +240,7 @@ def test_executions_normalizes_untrusted_terminal_status_markup(
     result = runner.invoke(app, ["executions"])
 
     assert result.exit_code == 0
-    assert "exec_untrusted_status" in result.output
+    assert "[bold]exec[/]" in result.output
     assert "unknown" in result.output
 
 
@@ -280,6 +280,38 @@ def test_executions_keeps_terminal_status_after_late_progress(
     assert "failed" in list_result.output
     assert detail_result.exit_code == 0
     assert "failed" in detail_result.output
+
+
+def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    progress_events = tuple(
+        BaseEvent(
+            type="workflow.progress.updated",
+            timestamp=now + timedelta(microseconds=index),
+            aggregate_type="execution",
+            aggregate_id="exec_paged_terminal",
+            data={},
+        )
+        for index in range(500)
+    )
+    terminal = BaseEvent(
+        type="execution.terminal",
+        timestamp=now - timedelta(seconds=1),
+        aggregate_type="execution",
+        aggregate_id="exec_paged_terminal",
+        data={"status": "failed"},
+    )
+    _write_execution_events(db_path, (terminal, *progress_events))
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["execution", "exec_paged_terminal"])
+
+    assert result.exit_code == 0
+    assert "failed" in result.output
 
 
 def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:

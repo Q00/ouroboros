@@ -261,10 +261,6 @@ async def _execution_events(
             persisted.extend(page)
             if len(page) < page_limit:
                 break
-            if not include_all and any(
-                _root_execution_status(event) is not None for event in persisted
-            ):
-                break
             offset += len(page)
     finally:
         await store.close()

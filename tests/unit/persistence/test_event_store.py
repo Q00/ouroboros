@@ -2095,6 +2095,29 @@ class TestEventStoreClose:
         finally:
             await store.close()
 
+    async def test_read_only_store_overrides_writable_file_uri_mode(self, tmp_path) -> None:
+        db_path = tmp_path / "explicit-uri.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await writer.initialize()
+        await writer.close()
+
+        store = EventStore(
+            f"sqlite+aiosqlite:///file:{db_path}?mode=rw&uri=true",
+            read_only=True,
+        )
+        await store.initialize(create_schema=False)
+        try:
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        aggregate_type="execution",
+                        aggregate_id="exec_must_stay_read_only",
+                    )
+                )
+        finally:
+            await store.close()
+
 
 class TestEventStoreTransactions:
     """Test transaction handling per AC7."""
