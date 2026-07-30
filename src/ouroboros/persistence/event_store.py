@@ -1913,6 +1913,8 @@ class EventStore:
         event_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        *,
+        aggregate_type: str | None = None,
     ) -> list[BaseEvent]:
         """Query events with optional filters.
 
@@ -1921,6 +1923,7 @@ class EventStore:
             event_type: Optional event type to filter by.
             limit: Maximum number of events to return.
             offset: Number of events to skip for pagination.
+            aggregate_type: Optional aggregate family filter.
 
         Returns:
             List of events matching the criteria, ordered by timestamp descending.
@@ -1944,6 +1947,9 @@ class EventStore:
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
 
+                if aggregate_type:
+                    query = query.where(events_table.c.aggregate_type == aggregate_type)
+
                 query = query.limit(limit).offset(offset)
 
                 result = await conn.execute(query)
@@ -1956,6 +1962,7 @@ class EventStore:
                 table="events",
                 details={
                     "aggregate_id": aggregate_id,
+                    "aggregate_type": aggregate_type,
                     "event_type": event_type,
                     "limit": limit,
                     "offset": offset,

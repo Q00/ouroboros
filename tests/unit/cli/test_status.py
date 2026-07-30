@@ -170,6 +170,53 @@ def test_executions_fails_when_configured_database_is_missing(monkeypatch, tmp_p
     assert "exec-001" not in result.output
 
 
+def test_executions_ignores_child_aggregates_and_subtask_status(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now - timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_running",
+                data={},
+            ),
+            BaseEvent(
+                type="execution.subtask.updated",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_running",
+                data={"status": "complete"},
+            ),
+            BaseEvent(
+                type="execution.coordinator.completed",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_running:l0:coord",
+                data={"execution_id": "exec_running", "status": "complete"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions"])
+    child_result = runner.invoke(app, ["execution", "exec_running:l0:coord"])
+
+    assert result.exit_code == 0
+    assert "exec_running" in result.output
+    assert "running" in result.output
+    assert "exec_running:l0:coord" not in result.output
+    assert child_result.exit_code == 2
+    assert "no persisted execution found" in child_result.output
+
+
 def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
