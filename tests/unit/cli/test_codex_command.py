@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 import sys
 import textwrap
@@ -58,6 +59,37 @@ class TestCodexRefresh:
         assert "Installed 2 Codex skills" in cli_result.output
         assert not (tmp_path / ".codex" / "config.toml").exists()
         assert not (tmp_path / ".ouroboros" / "config.yaml").exists()
+
+    def test_refresh_restores_existing_skill_when_final_swap_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Standalone refresh must preserve the installed generation on swap failure."""
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / "ouroboros-run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed run skill", encoding="utf-8")
+        original_replace = os.replace
+
+        def _fail_run_swap(source: str | Path, destination: str | Path) -> None:
+            source_path = Path(source)
+            if Path(destination) == target_path and source_path.name.endswith(".tmp"):
+                raise OSError("synthetic refresh swap failure")
+            original_replace(source, destination)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(os, "replace", _fail_run_swap)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "synthetic refresh swap failure" in cli_result.output
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "installed run skill"
+        )
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
 
 
 class TestCodexDoctor:

@@ -432,6 +432,19 @@ def _stage_install_directory(source_path: Path, target_path: Path) -> Path:
     return staging_path
 
 
+def _vacant_sibling_path(target_path: Path, *, suffix: str) -> Path:
+    """Reserve a collision-resistant sibling name, then leave it vacant for rename."""
+    reserved_path = Path(
+        tempfile.mkdtemp(
+            prefix=f".{target_path.name}.",
+            suffix=suffix,
+            dir=str(target_path.parent),
+        )
+    )
+    reserved_path.rmdir()
+    return reserved_path
+
+
 def _is_namespaced_rule_artifact(path: Path) -> bool:
     """Return whether a rules entry is managed by Ouroboros."""
     if path.name == CODEX_RULE_FILENAME:
@@ -538,11 +551,13 @@ def install_codex_skills(
         for packaged_skill in packaged_skills:
             target_path = target_root / packaged_skill.install_dir_name
             staging_path = _stage_install_directory(packaged_skill.source_dir, target_path)
+            backup_path: Path | None = None
             try:
                 if _installed_artifact_exists(target_path):
                     if before_mutation is not None:
                         before_mutation(target_path)
-                    _remove_installed_artifact(target_path)
+                    backup_path = _vacant_sibling_path(target_path, suffix=".backup")
+                    os.replace(target_path, backup_path)
                     if on_generation is not None:
                         on_generation(CodexArtifactGeneration(target_path, missing=True))
                 if before_mutation is not None:
@@ -551,6 +566,18 @@ def install_codex_skills(
             except BaseException:
                 if _installed_artifact_exists(staging_path):
                     _remove_installed_artifact(staging_path)
+                if backup_path is not None and _installed_artifact_exists(backup_path):
+                    if _installed_artifact_exists(target_path):
+                        _remove_installed_artifact(backup_path)
+                    else:
+                        os.replace(backup_path, target_path)
+                        if on_generation is not None:
+                            on_generation(
+                                CodexArtifactGeneration(
+                                    target_path,
+                                    source_path=target_path,
+                                )
+                            )
                 raise
             if on_generation is not None:
                 on_generation(
@@ -559,6 +586,8 @@ def install_codex_skills(
                         source_path=packaged_skill.source_dir,
                     )
                 )
+            if backup_path is not None and _installed_artifact_exists(backup_path):
+                _remove_installed_artifact(backup_path)
             installed_paths.append(target_path)
 
         if prune:

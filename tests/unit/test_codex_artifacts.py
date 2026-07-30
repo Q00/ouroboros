@@ -1,5 +1,6 @@
 """Unit tests for packaged Codex artifact installation."""
 
+import os
 from pathlib import Path
 import shutil
 
@@ -488,6 +489,35 @@ class TestInstallCodexSkills:
 
         assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "operator skill"
         assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+
+    def test_failed_final_swap_restores_previous_skill_generation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed staged swap must atomically restore the installed skill."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "run", body="fresh skill")
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("installed skill", encoding="utf-8")
+        original_replace = os.replace
+
+        def _fail_staging_swap(source: str | Path, destination: str | Path) -> None:
+            source_path = Path(source)
+            if Path(destination) == target_path and source_path.name.endswith(".tmp"):
+                raise OSError("synthetic final swap failure")
+            original_replace(source, destination)
+
+        monkeypatch.setattr(os, "replace", _fail_staging_swap)
+
+        with pytest.raises(OSError, match="synthetic final swap failure"):
+            install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "installed skill"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.backup"))
 
     def test_refreshes_existing_namespaced_skills_from_updated_packaged_bundle(
         self,
