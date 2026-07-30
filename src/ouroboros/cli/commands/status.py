@@ -224,29 +224,13 @@ async def _execution_events(
     persisted: list[BaseEvent] = []
     try:
         if not include_all:
-            terminal = await store.query_events(
-                aggregate_id=execution_id,
-                event_type="execution.terminal",
-                limit=1,
+            return await store.query_latest_events_per_aggregate(
                 aggregate_type="execution",
+                event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
+                preferred_event_type="execution.terminal",
+                aggregate_id=execution_id,
+                limit=1,
             )
-            if terminal:
-                return terminal
-            candidates: list[BaseEvent] = []
-            for event_type in _ROOT_EXECUTION_EVENT_STATUS:
-                candidates.extend(
-                    await store.query_events(
-                        aggregate_id=execution_id,
-                        event_type=event_type,
-                        limit=1,
-                        aggregate_type="execution",
-                    )
-                )
-            return sorted(
-                candidates,
-                key=lambda event: (event.timestamp, event.id),
-                reverse=True,
-            )[:1]
 
         offset = 0
         while True:
@@ -263,6 +247,15 @@ async def _execution_events(
     finally:
         await store.close()
     return persisted
+
+
+async def _validate_event_store(db_path: Path) -> None:
+    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        await store.get_current_rowid()
+    finally:
+        await store.close()
 
 
 def _root_execution_status(event: BaseEvent) -> str | None:
@@ -550,8 +543,15 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
 
 
 def _database_file_path(data: dict, config_path: Path) -> Path:
-    del data
-    return config_path.parent / "ouroboros.db"
+    configured = data.get("persistence", {}).get("database_path")
+    runtime_path = config_path.parent / "ouroboros.db"
+    if configured:
+        configured_path = Path(str(configured)).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = config_path.parent / configured_path
+        if configured_path.exists() or not runtime_path.exists():
+            return configured_path
+    return runtime_path
 
 
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
@@ -759,7 +759,14 @@ def health() -> None:
                 except OSError as exc:
                     checks.append(_health_row("Database", "error", f"not readable: {exc}"))
                 else:
-                    checks.append(_health_row("Database", "ok", db_detail))
+                    try:
+                        asyncio.run(_validate_event_store(db_path))
+                    except Exception as exc:
+                        checks.append(
+                            _health_row("Database", "error", f"invalid event store: {exc}")
+                        )
+                    else:
+                        checks.append(_health_row("Database", "ok", db_detail))
         except Exception as exc:
             checks.append(_health_row("Database", "error", str(exc)))
 

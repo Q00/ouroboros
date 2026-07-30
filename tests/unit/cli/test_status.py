@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import shutil
 
 import pytest
 from typer.testing import CliRunner
@@ -86,9 +85,8 @@ def _write_config(
     config_path = config_dir / "config.yaml"
     config_path.write_text(yaml.dump(data))
     configured_db = config_dir / "data" / "ouroboros.db"
-    runtime_db = config_dir / "ouroboros.db"
-    if configured_db.exists() and not runtime_db.exists():
-        shutil.copy2(configured_db, runtime_db)
+    if configured_db.is_file() and configured_db.stat().st_size == 0:
+        _write_execution_events(configured_db, ())
     return config_path
 
 
@@ -109,8 +107,6 @@ def _write_execution_events(db_path: Path, events: tuple[BaseEvent, ...]) -> Non
             await store.close()
 
     asyncio.run(write())
-    if db_path.parent.name == "data":
-        shutil.copy2(db_path, db_path.parent.parent / "ouroboros.db")
 
 
 def test_status_auto_invalid_session_id_exits_nonzero() -> None:
@@ -175,6 +171,29 @@ def test_executions_fails_when_configured_database_is_missing(monkeypatch, tmp_p
     assert result.exit_code == 1
     assert "database does not exist" in result.output
     assert "exec-001" not in result.output
+
+
+def test_executions_falls_back_to_default_runtime_database(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_config(config_dir)
+    _write_execution_events(
+        config_dir / "ouroboros.db",
+        (
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_runtime_default",
+                data={"status": "complete"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions"])
+
+    assert result.exit_code == 0
+    assert "exec_runtime_default" in result.output
 
 
 def test_executions_ignores_child_aggregates_and_subtask_status(
@@ -265,14 +284,14 @@ def test_executions_keeps_terminal_status_after_late_progress(monkeypatch, tmp_p
                 timestamp=now - timedelta(seconds=1),
                 aggregate_type="execution",
                 aggregate_id="exec_terminal",
-                data={"status": "failed"},
+                data={"session_id": "session_same", "status": "failed"},
             ),
             BaseEvent(
                 type="workflow.progress.updated",
                 timestamp=now,
                 aggregate_type="execution",
                 aggregate_id="exec_terminal",
-                data={},
+                data={"session_id": "session_same"},
             ),
         ),
     )
@@ -287,6 +306,44 @@ def test_executions_keeps_terminal_status_after_late_progress(monkeypatch, tmp_p
     assert "failed" in detail_result.output
 
 
+def test_executions_prefers_newer_session_for_shared_execution_id(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_shared",
+                data={"session_id": "session_old", "status": "complete"},
+            ),
+            BaseEvent(
+                type="execution.run.configuration_resolved",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_shared",
+                data={"session_id": "session_new"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_shared"])
+
+    assert list_result.exit_code == 0
+    assert "running" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "running" in detail_result.output
+
+
 def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
@@ -299,7 +356,7 @@ def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path:
             timestamp=now + timedelta(microseconds=index),
             aggregate_type="execution",
             aggregate_id="exec_paged_terminal",
-            data={},
+            data={"session_id": "session_paged"},
         )
         for index in range(500)
     )
@@ -308,7 +365,7 @@ def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path:
         timestamp=now - timedelta(seconds=1),
         aggregate_type="execution",
         aggregate_id="exec_paged_terminal",
-        data={"status": "failed"},
+        data={"session_id": "session_paged", "status": "failed"},
     )
     _write_execution_events(db_path, (terminal, *progress_events))
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
@@ -430,6 +487,23 @@ def test_health_reports_all_ok(monkeypatch, tmp_path: Path) -> None:
     assert "key present" in result.output
 
 
+def test_health_rejects_zero_byte_database(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    data_dir = config_dir / "data"
+    data_dir.mkdir(parents=True)
+    _clear_auth_env(monkeypatch)
+    cli = _make_cli(tmp_path / "bin" / "claude")
+    _write_config(config_dir, cli_path=cli)
+    (data_dir / "ouroboros.db").write_text("")
+    _write_credentials(config_dir)
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["health"])
+
+    assert result.exit_code == 1
+    assert "invalid event store" in result.output
+
+
 def test_health_exits_nonzero_on_config_load_failure(monkeypatch, tmp_path: Path) -> None:
     _clear_auth_env(monkeypatch)
     config_dir = tmp_path / "config"
@@ -481,7 +555,7 @@ def test_health_emits_copyable_full_detail_lines_for_long_diagnostics(
 
     assert result.exit_code == 1
     expected_config = config_dir / "config.yaml"
-    expected_database = config_dir / "ouroboros.db"
+    expected_database = config_dir / "data" / "ouroboros.db"
     assert f"Configuration: ok - {expected_config}" in result.output
     assert (
         f"Database: warning - missing; will be created on first run: {expected_database}"
@@ -494,7 +568,7 @@ def test_health_exits_nonzero_when_credentials_file_missing(monkeypatch, tmp_pat
     (config_dir / "data").mkdir(parents=True)
     _clear_auth_env(monkeypatch)
     cli = _make_cli(tmp_path / "bin" / "claude")
-    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_execution_events(config_dir / "data" / "ouroboros.db", ())
     _write_config(config_dir, cli_path=cli)
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 
@@ -672,7 +746,7 @@ def test_health_treats_copilot_as_cli_authenticated_not_openai_key_backend(
     config_dir = tmp_path / "config"
     (config_dir / "data").mkdir(parents=True)
     copilot_cli = _make_cli(tmp_path / "bin" / "copilot")
-    (config_dir / "data" / "ouroboros.db").write_text("")
+    _write_execution_events(config_dir / "data" / "ouroboros.db", ())
     (config_dir / "config.yaml").write_text(
         yaml.dump(
             {

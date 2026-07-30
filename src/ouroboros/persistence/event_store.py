@@ -1979,6 +1979,7 @@ class EventStore:
         aggregate_type: str,
         event_types: set[str],
         preferred_event_type: str | None = None,
+        aggregate_id: str | None = None,
         limit: int | None = None,
     ) -> list[BaseEvent]:
         """Return one deterministic latest event per aggregate."""
@@ -1993,24 +1994,47 @@ class EventStore:
             if preferred_event_type is not None
             else 0
         )
-        rank = (
+        session_key = func.coalesce(
+            func.json_extract(events_table.c.payload, "$.session_id"),
+            events_table.c.aggregate_id,
+        )
+        session_rank = (
             func.row_number()
             .over(
-                partition_by=events_table.c.aggregate_id,
+                partition_by=(events_table.c.aggregate_id, session_key),
                 order_by=(priority, events_table.c.timestamp.desc(), events_table.c.id.desc()),
+            )
+            .label("session_rank")
+        )
+        ranked_sessions_query = (
+            select(*events_table.c, session_rank)
+            .where(events_table.c.aggregate_type == aggregate_type)
+            .where(events_table.c.event_type.in_(sorted(event_types)))
+        )
+        if aggregate_id is not None:
+            ranked_sessions_query = ranked_sessions_query.where(
+                events_table.c.aggregate_id == aggregate_id
+            )
+        ranked_sessions = ranked_sessions_query.subquery()
+        session_events = (
+            select(ranked_sessions).where(ranked_sessions.c.session_rank == 1).subquery()
+        )
+        aggregate_rank = (
+            func.row_number()
+            .over(
+                partition_by=session_events.c.aggregate_id,
+                order_by=(session_events.c.timestamp.desc(), session_events.c.id.desc()),
             )
             .label("aggregate_rank")
         )
-        ranked = (
-            select(*events_table.c, rank)
-            .where(events_table.c.aggregate_type == aggregate_type)
-            .where(events_table.c.event_type.in_(sorted(event_types)))
-            .subquery()
-        )
+        ranked_aggregates = select(session_events, aggregate_rank).subquery()
         query = (
-            select(ranked)
-            .where(ranked.c.aggregate_rank == 1)
-            .order_by(ranked.c.timestamp.desc(), ranked.c.id.desc())
+            select(ranked_aggregates)
+            .where(ranked_aggregates.c.aggregate_rank == 1)
+            .order_by(
+                ranked_aggregates.c.timestamp.desc(),
+                ranked_aggregates.c.id.desc(),
+            )
         )
         if limit is not None:
             query = query.limit(limit)
@@ -2028,6 +2052,7 @@ class EventStore:
                     "aggregate_type": aggregate_type,
                     "event_types": sorted(event_types),
                     "preferred_event_type": preferred_event_type,
+                    "aggregate_id": aggregate_id,
                     "limit": limit,
                 },
             ) from exc
