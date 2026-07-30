@@ -76,6 +76,7 @@ class CodexArtifactGeneration:
 
 
 CodexArtifactGenerationCallback = Callable[[CodexArtifactGeneration], None]
+CodexArtifactPreMutationCallback = Callable[[Path], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +387,7 @@ def _atomic_install_file(
     *,
     source_path: Path,
     contents: bytes | None = None,
+    before_mutation: CodexArtifactPreMutationCallback | None = None,
 ) -> None:
     """Atomically replace one managed file with complete packaged bytes."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,6 +404,8 @@ def _atomic_install_file(
         else:
             temp_path.write_bytes(contents)
             temp_path.chmod(source_path.stat().st_mode & 0o7777)
+        if before_mutation is not None:
+            before_mutation(target_path)
         os.replace(temp_path, target_path)
     except BaseException:
         try:
@@ -426,6 +430,7 @@ def install_codex_rules(
     rules_dir: str | Path | None = None,
     prune: bool = False,
     on_generation: CodexArtifactGenerationCallback | None = None,
+    before_mutation: CodexArtifactPreMutationCallback | None = None,
 ) -> Path:
     """Install or refresh packaged Ouroboros rules into ``~/.codex/rules``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "rules")
@@ -443,6 +448,8 @@ def install_codex_rules(
         for source_path in packaged_rules:
             target_path = target_root / source_path.name
             if target_path.is_dir() and not target_path.is_symlink():
+                if before_mutation is not None:
+                    before_mutation(target_path)
                 _remove_installed_artifact(target_path)
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(target_path, missing=True))
@@ -453,6 +460,7 @@ def install_codex_rules(
                     target_path,
                     source_path=source_path,
                     contents=rendered.encode("utf-8"),
+                    before_mutation=before_mutation,
                 )
                 if on_generation is not None:
                     on_generation(
@@ -464,7 +472,11 @@ def install_codex_rules(
                     )
                 primary_target_path = target_path
             else:
-                _atomic_install_file(target_path, source_path=source_path)
+                _atomic_install_file(
+                    target_path,
+                    source_path=source_path,
+                    before_mutation=before_mutation,
+                )
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(target_path, source_path=source_path))
             installed_names.add(target_path.name)
@@ -474,6 +486,8 @@ def install_codex_rules(
             if installed_path.name in installed_names:
                 continue
             if _is_namespaced_rule_artifact(installed_path):
+                if before_mutation is not None:
+                    before_mutation(installed_path)
                 _remove_installed_artifact(installed_path)
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(installed_path, missing=True))
@@ -491,6 +505,7 @@ def install_codex_skills(
     skills_dir: str | Path | None = None,
     prune: bool = False,
     on_generation: CodexArtifactGenerationCallback | None = None,
+    before_mutation: CodexArtifactPreMutationCallback | None = None,
 ) -> tuple[Path, ...]:
     """Install or refresh packaged Ouroboros skills into ``~/.codex/skills/ouroboros-*``."""
     _refuse_symlinked_path_component(_codex_home_candidate(codex_dir) / "skills")
@@ -506,11 +521,15 @@ def install_codex_skills(
         for packaged_skill in packaged_skills:
             target_path = target_root / packaged_skill.install_dir_name
             if _installed_artifact_exists(target_path):
+                if before_mutation is not None:
+                    before_mutation(target_path)
                 _remove_installed_artifact(target_path)
                 if on_generation is not None:
                     on_generation(CodexArtifactGeneration(target_path, missing=True))
 
             try:
+                if before_mutation is not None:
+                    before_mutation(target_path)
                 shutil.copytree(packaged_skill.source_dir, target_path)
             except Exception:
                 if _installed_artifact_exists(target_path):
@@ -533,6 +552,8 @@ def install_codex_skills(
                     installed_path.name.startswith(CODEX_SKILL_NAMESPACE)
                     and installed_path.name not in installed_names
                 ):
+                    if before_mutation is not None:
+                        before_mutation(installed_path)
                     _remove_installed_artifact(installed_path)
                     if on_generation is not None:
                         on_generation(CodexArtifactGeneration(installed_path, missing=True))
@@ -545,6 +566,7 @@ def install_codex_artifacts(
     codex_dir: str | Path | None = None,
     prune: bool = True,
     on_generation: CodexArtifactGenerationCallback | None = None,
+    before_mutation: CodexArtifactPreMutationCallback | None = None,
 ) -> CodexArtifactInstallResult:
     """Install or refresh all packaged Ouroboros Codex artifacts.
 
@@ -555,11 +577,13 @@ def install_codex_artifacts(
         codex_dir=codex_dir,
         prune=prune,
         on_generation=on_generation,
+        before_mutation=before_mutation,
     )
     skill_paths = install_codex_skills(
         codex_dir=codex_dir,
         prune=prune,
         on_generation=on_generation,
+        before_mutation=before_mutation,
     )
     return CodexArtifactInstallResult(rules_path=rules_path, skill_paths=skill_paths)
 
@@ -568,6 +592,7 @@ __all__ = [
     "CodexArtifactInstallResult",
     "CodexArtifactGeneration",
     "CodexArtifactGenerationCallback",
+    "CodexArtifactPreMutationCallback",
     "CodexManagedArtifact",
     "CodexPackagedAssets",
     "CodexPackagedSkill",

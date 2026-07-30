@@ -2202,18 +2202,32 @@ def _install_codex_artifacts(
     codex_dir: str | Path | None = None,
     *,
     expected_snapshots: dict[Path, _PathSnapshot] | None = None,
+    required_snapshots: dict[Path, _PathSnapshot] | None = None,
 ) -> bool:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
     from ouroboros.codex import CodexArtifactGeneration, install_codex_artifacts
 
     install_target = _codex_home_candidate_for_setup() if codex_dir is None else codex_dir
     display_dir = Path(install_target).expanduser()
+    current_snapshots = dict(required_snapshots or {})
+
+    def _require_read_generation(target_path: Path) -> None:
+        if required_snapshots is None:
+            return
+        try:
+            expected = current_snapshots[target_path]
+        except KeyError as exc:
+            raise _ConcurrentSetupMutationError(
+                f"Managed Codex artifact was not included in the setup snapshot: {target_path}"
+            ) from exc
+        _require_path_snapshot(target_path, expected)
 
     def _record_generation(generation: CodexArtifactGeneration) -> None:
-        if expected_snapshots is None:
-            return
         if generation.missing:
-            expected_snapshots[generation.target_path] = _PathSnapshot(kind="missing")
+            written_snapshot = _PathSnapshot(kind="missing")
+            current_snapshots[generation.target_path] = written_snapshot
+            if expected_snapshots is not None:
+                expected_snapshots[generation.target_path] = written_snapshot
             return
         if generation.source_path is None:
             raise ValueError("Artifact generation is missing its source path")
@@ -2224,13 +2238,16 @@ def _install_codex_artifacts(
                 mode=source_snapshot.mode,
                 contents=generation.contents,
             )
-        expected_snapshots[generation.target_path] = source_snapshot
+        current_snapshots[generation.target_path] = source_snapshot
+        if expected_snapshots is not None:
+            expected_snapshots[generation.target_path] = source_snapshot
 
     try:
         result = install_codex_artifacts(
             codex_dir=install_target,
             prune=True,
             on_generation=_record_generation,
+            before_mutation=_require_read_generation,
         )
         print_success(f"Installed Codex rules → {result.rules_path}")
         print_success(
@@ -2808,7 +2825,10 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
     try:
         # Install Codex-native rules and skills into the active Codex home.
         artifact_expected_snapshots: dict[Path, _PathSnapshot] = {}
-        if not _install_codex_artifacts(expected_snapshots=artifact_expected_snapshots):
+        if not _install_codex_artifacts(
+            expected_snapshots=artifact_expected_snapshots,
+            required_snapshots=managed_codex_expected_snapshot,
+        ):
             if managed_codex_expected_snapshot is not None:
                 managed_codex_expected_snapshot.update(artifact_expected_snapshots)
             raise OSError("Codex artifact installation failed")

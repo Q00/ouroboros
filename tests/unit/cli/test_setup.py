@@ -2904,6 +2904,73 @@ class TestCodexSetup:
 
         assert rule_path.read_text(encoding="utf-8") == operator_rule
 
+    def test_setup_codex_rejects_rule_changed_after_read_before_install(
+        self, tmp_path: Path
+    ) -> None:
+        """Artifact installation must not overwrite a newer pre-install rule generation."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_home = tmp_path / ".codex"
+        rule_path = codex_home / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("pre-setup rule\n", encoding="utf-8")
+        operator_rule = "operator rule written before install\n"
+        original_install = setup_cmd._install_codex_artifacts
+
+        def _edit_then_install(**kwargs: object) -> bool:
+            rule_path.write_text(operator_rule, encoding="utf-8")
+            return original_install(**kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_codex_artifacts",
+                side_effect=_edit_then_install,
+            ),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert rule_path.read_text(encoding="utf-8") == operator_rule
+        assert config_path.read_text(encoding="utf-8") == original_config
+
+    def test_setup_codex_rejects_skill_changed_after_read_before_install(
+        self, tmp_path: Path
+    ) -> None:
+        """Artifact installation must not remove a newer pre-install skill generation."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n"
+        config_path.write_text(original_config, encoding="utf-8")
+        codex_home = tmp_path / ".codex"
+        skill_path = codex_home / "skills" / "ouroboros-welcome"
+        skill_path.mkdir(parents=True)
+        skill_entrypoint = skill_path / "SKILL.md"
+        skill_entrypoint.write_text("pre-setup skill\n", encoding="utf-8")
+        operator_skill = "operator skill written before install\n"
+        original_install = setup_cmd._install_codex_artifacts
+
+        def _edit_then_install(**kwargs: object) -> bool:
+            skill_entrypoint.write_text(operator_skill, encoding="utf-8")
+            return original_install(**kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_codex_artifacts",
+                side_effect=_edit_then_install,
+            ),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is False
+
+        assert skill_entrypoint.read_text(encoding="utf-8") == operator_skill
+        assert config_path.read_text(encoding="utf-8") == original_config
+
     def test_setup_codex_preserves_post_retirement_config_edit(self, tmp_path: Path) -> None:
         """Profile retirement returns its authored generation before operator edits."""
         config_dir = tmp_path / ".ouroboros"

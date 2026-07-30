@@ -65,6 +65,29 @@ class TestInstallCodexRules:
         assert secondary_target_path.read_text(encoding="utf-8") == "# status rules\n"
         assert not rules_dir.joinpath("team.md").exists()
 
+    def test_checks_read_generation_before_replacing_existing_rule(self, tmp_path: Path) -> None:
+        """A setup-owned rule refresh must be rejectable before replacement."""
+        packaged_rules_dir = tmp_path / "packaged-rules"
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "rules" / CODEX_RULE_FILENAME
+        target_path.parent.mkdir(parents=True)
+        target_path.write_text("operator rule\n", encoding="utf-8")
+        self._write_rule(packaged_rules_dir, CODEX_RULE_FILENAME, "# fresh rules\n")
+
+        def _reject(path: Path) -> None:
+            assert path == target_path
+            assert path.read_text(encoding="utf-8") == "operator rule\n"
+            raise OSError("stale rule generation")
+
+        with pytest.raises(OSError, match="stale rule generation"):
+            install_codex_rules(
+                codex_dir=codex_dir,
+                rules_dir=packaged_rules_dir,
+                before_mutation=_reject,
+            )
+
+        assert target_path.read_text(encoding="utf-8") == "operator rule\n"
+
     def test_partial_primary_rule_write_preserves_existing_target(
         self,
         tmp_path: Path,
@@ -410,6 +433,30 @@ class TestInstallCodexSkills:
             '{"fresh": true}'
         )
         assert not stale_skill_dir.joinpath("old.txt").exists()
+
+    def test_checks_read_generation_before_removing_existing_skill(self, tmp_path: Path) -> None:
+        """A setup-owned skill refresh must be rejectable before removal."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh skill")
+
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}status"
+        target_path.mkdir(parents=True)
+        target_path.joinpath("SKILL.md").write_text("operator skill", encoding="utf-8")
+
+        def _reject(path: Path) -> None:
+            assert path == target_path
+            assert path.joinpath("SKILL.md").read_text(encoding="utf-8") == "operator skill"
+            raise OSError("stale skill generation")
+
+        with pytest.raises(OSError, match="stale skill generation"):
+            install_codex_skills(
+                codex_dir=codex_dir,
+                skills_dir=source_skills_dir,
+                before_mutation=_reject,
+            )
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "operator skill"
 
     def test_refreshes_existing_namespaced_skills_from_updated_packaged_bundle(
         self,
