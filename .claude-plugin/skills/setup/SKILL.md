@@ -27,11 +27,14 @@ ooo setup
 /ouroboros:setup --uninstall
 ```
 
-> **Note**: Setup does two things:
-> 1. **MCP server registration** (`~/.claude/mcp.json`) — one-time, global across all projects
+> **Note**: Standalone Claude SDK setup does two things:
+> 1. **Runtime configuration** — selects the Claude SDK profile (MCP 1.x based)
 > 2. **CLAUDE.md integration** (optional) — per-project, adds an Ouroboros command reference block
 >
-> After the first run, you only need to re-run setup in new projects if you want the CLAUDE.md integration.
+> It deliberately leaves `~/.claude/mcp.json` untouched. Ouroboros MCP uses MCP 2
+> and cannot load the standalone Claude SDK backend inside its isolated process.
+> Use `ouroboros setup --runtime <codex|opencode|kiro|copilot|hermes>` for a
+> supported MCP host profile.
 
 ---
 
@@ -130,7 +133,9 @@ which claude 2>/dev/null
 uv python list 2>/dev/null | grep "cpython-3.1[2-9]"
 ```
 
-If `uv python list` shows Python >= 3.12 available, this counts as **Full Mode** because `uvx ouroboros-ai mcp serve` automatically uses uv-managed Python >= 3.12 (not system Python).
+If `uv python list` shows Python >= 3.12 available, CLI workflows are available
+through uv-managed Python even when system Python is older. This does not make
+the standalone Claude SDK and MCP 2 profiles import-compatible.
 
 **Report results with personality:**
 
@@ -150,31 +155,10 @@ Runtime backend            [✓] Detected
 
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
-| uvx + Python >= 3.12 | **Ready** | Proceed to MCP registration (uvx mode — extras always included) |
-| No uvx + `ouroboros` binary in PATH | **Check deps** | Verify `[mcp,claude]` extras, then proceed (binary mode) |
-| No uvx + Python >= 3.12 + `python3 -m ouroboros` works | **Check deps** | Verify `[mcp,claude]` extras, then proceed (pip mode) |
-| uvx + Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
-| No uvx + no ouroboros binary + no pip package | **Install needed** | Install uv first, then proceed |
-
-**For binary/pip modes — verify `[mcp,claude]` extras are installed:**
-
-Check method depends on how ouroboros was installed:
-```bash
-# Detect install method
-pipx list 2>/dev/null | grep -q ouroboros && echo "PIPX" || echo "NOT_PIPX"
-```
-
-- **pipx users** (binary mode, installed via pipx):
-  ```bash
-  pipx runpip ouroboros-ai show claude-agent-sdk 2>/dev/null && pipx runpip ouroboros-ai show mcp 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
-  ```
-  If `DEPS_MISSING`: `pipx install --force 'ouroboros-ai[mcp,claude]'`
-
-- **pip users** (pip mode):
-  ```bash
-  python3 -c "import claude_agent_sdk, mcp" 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
-  ```
-  If `DEPS_MISSING`: `python3 -m pip install 'ouroboros-ai[mcp,claude]'`
+| Python >= 3.12 + Claude CLI | **Ready** | Configure the standalone `[claude]` profile and skills; do not register MCP |
+| uvx + Python >= 3.12 | **MCP-capable elsewhere** | Use a supported CLI-backed runtime setup for isolated `ouroboros-ai[mcp]` |
+| Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
+| No package runner or Ouroboros package | **Install needed** | Install uv first, then proceed |
 
 If deps are missing and the user doesn't want to fix manually, recommend uv. Prefer
 package-manager paths over the vendor pipe-to-shell when the user's environment supports
@@ -188,7 +172,12 @@ Or install uv (recommended — handles deps automatically). Any one of:
 Then re-run: ooo setup
 ```
 
-**IMPORTANT**: The MCP server requires one of: (1) uvx, (2) ouroboros binary in PATH, or (3) ouroboros pip-installed. For options 2 and 3, the `[mcp,claude]` extras must also be installed. If none are available, guide the user to install uv — do NOT write a non-working fallback to mcp.json.
+**IMPORTANT**: Never install `[mcp,claude]` together and never write a direct
+`ouroboros` or `python -m ouroboros` MCP fallback. MCP 2 launchers must use an
+isolated `uvx --from 'ouroboros-ai[mcp]' ...` or
+`pipx run --spec 'ouroboros-ai[mcp]' ...` process. This Claude SDK setup does
+not have a compatible Claude backend inside that process, so do not write any
+Ouroboros entry to `~/.claude/mcp.json`.
 
 **If prerequisites are missing, show:**
 ```
@@ -212,22 +201,16 @@ Great news! You're ready for the full Ouroboros experience.
 
 ---
 
-### Step 2: MCP Server Registration
-
-Check if `~/.claude/mcp.json` exists:
-
-```bash
-ls -la ~/.claude/mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
-```
+### Step 2: MCP Profile Boundary
 
 **Show progress:**
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Registering MCP Server...
+  Verifying Runtime Boundary...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Connecting Ouroboros Python core to your runtime backend.
-This enables:
+The standalone Claude SDK profile remains separate from MCP 2.
+This setup enables:
 
   Visual TUI Dashboard    [Watch execution in real-time]
   3-Stage Evaluation     [Mechanical → Semantic → Consensus]
@@ -235,22 +218,17 @@ This enables:
   Session Replay         [Debug any execution from events]
 ```
 
-**Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
-
-Choose the MCP command based on how ouroboros is installed (check in order):
-1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]}`
-2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"]}`
-3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}`
-4. If none of the above → **do NOT write to mcp.json**. Instead show the prerequisites message from Step 1 and stop.
-
-If `~/.claude/mcp.json` already exists, read it, **always overwrite the `ouroboros` key** with the entry above (to fix stale args from older versions), and preserve all other server entries.
+**Do not create, update, or remove `~/.claude/mcp.json`.** Existing entries may
+be user-managed or belong to another compatible runtime. Explain that advanced
+MCP workflows require a supported CLI-backed runtime setup, which will register
+its own isolated MCP 2 launcher.
 
 **Celebration Checkpoint 2:**
 ```
-MCP Server Registered! You can now:
-- Run ooo run for visual TUI execution
-- Run ooo evaluate for 3-stage verification
-- Run ooo status for drift tracking
+Runtime boundary verified! You can now:
+- Use Claude-native ooo interview, seed, evaluate, and unstuck workflows
+- Configure a supported CLI-backed runtime separately for MCP tools
+- Keep the Claude SDK and MCP 2 dependency graphs conflict-free
 ```
 
 ---
@@ -362,10 +340,8 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Check MCP registration (if enabled):
-```bash
-cat ~/.claude/mcp.json | grep -q ouroboros && echo "MCP: ✓" || echo "MCP: ✗"
-```
+Confirm the saved Ouroboros config selects the standalone Claude runtime while
+`~/.claude/mcp.json` was not mutated by this setup.
 
 ---
 
@@ -378,10 +354,10 @@ Display with celebration:
   Ouroboros Setup Complete!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Mode:                     Full Mode (Python >= 3.12 + MCP)
+Mode:                     Standalone Claude SDK
 Skills Registered:        15 workflow skills
 Agents Available:         9 specialized agents
-MCP Server:               ✓ Registered
+MCP Server:               Not registered (MCP 1.x / 2 boundary)
 CLAUDE.md:                ✓ Integrated
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -470,8 +446,10 @@ the same turn can appear without the repo list the user needs to answer it.
 Option `preview` fields cannot hold the list either — the preview box has a
 fixed height and silently truncates long lists.
 
-Instead, **end the turn with the repo grid as the final message** and collect
-the selection as a plain chat reply. Immediately below the grid, append:
+Instead, **end the turn with the repo grid as the final message** so its
+display is guaranteed, and collect the selection as a plain chat reply.
+
+Immediately below the grid, append the selection prompt:
 
 **If defaults exist:**
 ```
@@ -525,12 +503,6 @@ No default repos set. interviews will run in greenfield mode.
 You can set defaults anytime by running ooo setup again.
 ```
 
-Or if "keep" selected:
-```
-Brownfield defaults unchanged.
-Defaults: <current default names>
-```
-
 ---
 
 ### Step 6: First Project Nudge
@@ -563,7 +535,7 @@ Reveal features gradually to avoid overwhelm:
 - `ooo seed` - Specification generation
 - `ooo unstuck` - Lateral thinking
 
-### After Setup (MCP Mode)
+### After a Supported MCP Host Setup
 - `ooo run` - TUI execution
 - `ooo evaluate` - 3-stage verification
 - `ooo status` - Drift tracking
@@ -586,7 +558,6 @@ When invoked with `--uninstall`:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 This will remove:
-- MCP server registration from ~/.claude/mcp.json
 - Ouroboros block from CLAUDE.md
 
 This will NOT remove:
@@ -598,7 +569,7 @@ Uninstall Ouroboros configuration? [Yes / No]
 ```
 
 If Yes:
-1. Remove `ouroboros` entry from `~/.claude/mcp.json` (if exists)
+1. Leave `~/.claude/mcp.json` untouched
 2. Remove `<!-- ooo:START -->` to `<!-- ooo:END -->` block from CLAUDE.md (if exists)
 3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude plugin uninstall ouroboros"
 
@@ -623,12 +594,11 @@ For Full Mode, install Python >= 3.12:
 ```
 uvx is recommended but not required. Alternative:
 
-Install Ouroboros globally (see docs/getting-started.md for all options):
-  pip install 'ouroboros-ai[mcp,claude]'
+For standalone Claude SDK workflows:
+  pip install 'ouroboros-ai[claude]'
 
-Then update ~/.claude/mcp.json with:
-  "command": "python"
-  "args": ["-m", "ouroboros", "mcp", "serve"]
+For MCP 2, install uv or pipx and configure a supported CLI-backed runtime.
+Do not combine the extras or add a direct Python fallback to mcp.json.
 ```
 
 ### "~/.claude/mcp.json conflicts"
@@ -646,7 +616,7 @@ Track these checkpoints for conversion optimization:
 
 - [ ] Started setup (skill invoked)
 - [ ] Environment detected successfully
-- [ ] MCP server registration accepted
+- [ ] MCP/Claude profile boundary explained
 - [ ] CLAUDE.md integration accepted
 - [ ] Verification passed
 - [ ] Brownfield repos scanned and registered
@@ -656,3 +626,13 @@ Track these checkpoints for conversion optimization:
 - [ ] First execution completed (ooo run)
 
 A fully converted user = all checkpoints passed
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

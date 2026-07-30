@@ -1453,6 +1453,167 @@ class TestIsolatedMCPLaunchers:
         ensure_config_dir.assert_not_called()
         assert config_path.read_text(encoding="utf-8") == original
 
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    @pytest.mark.parametrize("host_existed", (True, False))
+    def test_runtime_setup_rolls_back_host_registration_when_config_commit_fails(
+        self,
+        runtime: str,
+        host_existed: bool,
+        tmp_path: Path,
+    ) -> None:
+        """Host registration and Ouroboros runtime config commit atomically."""
+        host_paths = {
+            "hermes": tmp_path / ".hermes" / "config.yaml",
+            "kiro": tmp_path / ".kiro" / "settings" / "mcp.json",
+            "copilot": tmp_path / ".copilot" / "mcp-config.json",
+        }
+        original_hosts = {
+            "hermes": "mcp_servers:\n  custom:\n    command: custom\n",
+            "kiro": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+            "copilot": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+        }
+        host_path = host_paths[runtime]
+        if host_existed:
+            host_path.parent.mkdir(parents=True)
+            host_path.write_text(original_hosts[runtime], encoding="utf-8")
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude_code\n"
+        config_path.write_text(original_config, encoding="utf-8")
+
+        real_atomic_write = setup_cmd._atomic_write_text
+        config_write_failed = False
+
+        def fail_first_runtime_config_write(
+            path: Path,
+            content: str,
+            *,
+            mode: int = 0o644,
+        ) -> None:
+            nonlocal config_write_failed
+            if path == config_path and not config_write_failed:
+                config_write_failed = True
+                raise OSError("simulated config commit failure")
+            real_atomic_write(path, content, mode=mode)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text",
+                side_effect=fail_first_runtime_config_write,
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=TestCopilotSetup._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        assert config_write_failed is True
+        assert config_path.read_text(encoding="utf-8") == original_config
+        if host_existed:
+            assert host_path.read_text(encoding="utf-8") == original_hosts[runtime]
+        else:
+            assert not host_path.exists()
+
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    def test_runtime_setup_rolls_back_partial_default_config_creation(
+        self,
+        runtime: str,
+        tmp_path: Path,
+    ) -> None:
+        """A failing first-time config bootstrap cannot leave host state behind."""
+        host_paths = {
+            "hermes": tmp_path / ".hermes" / "config.yaml",
+            "kiro": tmp_path / ".kiro" / "settings" / "mcp.json",
+            "copilot": tmp_path / ".copilot" / "mcp-config.json",
+        }
+        original_hosts = {
+            "hermes": "mcp_servers:\n  custom:\n    command: custom\n",
+            "kiro": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+            "copilot": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+        }
+        host_path = host_paths[runtime]
+        host_path.parent.mkdir(parents=True)
+        host_path.write_text(original_hosts[runtime], encoding="utf-8")
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        credentials_path = config_dir / "credentials.yaml"
+
+        def fail_after_partial_default_creation(target_dir: Path) -> None:
+            (target_dir / "config.yaml").write_text("partial config", encoding="utf-8")
+            (target_dir / "credentials.yaml").write_text("partial credentials", encoding="utf-8")
+            raise OSError("simulated default config failure")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.config.loader.create_default_config",
+                side_effect=fail_after_partial_default_creation,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=TestCopilotSetup._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        assert host_path.read_text(encoding="utf-8") == original_hosts[runtime]
+        assert not config_path.exists()
+        assert not credentials_path.exists()
+
 
 class TestHermesSetup:
     """Tests for Hermes-specific setup behavior."""

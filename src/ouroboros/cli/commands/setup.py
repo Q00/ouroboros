@@ -12,6 +12,7 @@ Also provides brownfield repository management subcommands:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
 from importlib import metadata as importlib_metadata
@@ -55,6 +56,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -80,6 +82,72 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
             "args": ["run", "--spec", package_spec, "ouroboros", "mcp", "serve"],
         }
     return None
+
+
+type _PersistentFileState = tuple[bool, str, int]
+
+
+def _capture_persistent_file(path: Path) -> _PersistentFileState:
+    """Capture enough state to restore one setup-managed text file."""
+    if not path.exists():
+        return (False, "", 0o644)
+    return (True, path.read_text(encoding="utf-8"), path.stat().st_mode & 0o777)
+
+
+def _restore_persistent_file(path: Path, state: _PersistentFileState) -> None:
+    """Restore a file snapshot after a multi-file setup transaction fails."""
+    existed, content, mode = state
+    if existed:
+        _atomic_write_text(path, content, mode=mode)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _rollback_persistent_files(
+    snapshots: tuple[tuple[Path, _PersistentFileState], ...],
+) -> None:
+    """Best-effort rollback for files changed during runtime activation."""
+    failures: list[str] = []
+    for path, state in reversed(snapshots):
+        try:
+            _restore_persistent_file(path, state)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        print_warning("Setup rollback was incomplete: " + "; ".join(failures))
+
+
+def _commit_runtime_activation(
+    *,
+    runtime_name: str,
+    host_path: Path,
+    config_path: Path,
+    config_was_missing: bool,
+    runtime_content: str,
+    register_host: Callable[[], bool],
+    create_defaults: Callable[[Path], object],
+) -> bool:
+    """Commit host registration and runtime files as one recoverable unit."""
+    credentials_path = config_path.parent / "credentials.yaml"
+    snapshots: tuple[tuple[Path, _PersistentFileState], ...] = ()
+    try:
+        snapshots = (
+            (host_path, _capture_persistent_file(host_path)),
+            (config_path, _capture_persistent_file(config_path)),
+            (credentials_path, _capture_persistent_file(credentials_path)),
+        )
+        if not register_host():
+            _rollback_persistent_files(snapshots)
+            print_error(f"{runtime_name} setup aborted without changing persistent configuration.")
+            return False
+        if config_was_missing:
+            create_defaults(config_path.parent)
+        _atomic_write_text(config_path, runtime_content)
+    except (OSError, ConfigError) as exc:
+        _rollback_persistent_files(snapshots)
+        print_error(f"{runtime_name} setup could not commit runtime configuration: {exc}")
+        return False
+    return True
 
 
 def _ensure_claude_mcp_entry() -> None:
@@ -1299,8 +1367,10 @@ def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) ->
         "enabled": True,
     }
 
-    with hermes_config.open("w", encoding="utf-8") as f:
-        yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+    _atomic_write_text(
+        hermes_config,
+        yaml.safe_dump(config_data, default_flow_style=False, sort_keys=False),
+    )
 
     print_success(f"Registered Ouroboros MCP server in {hermes_config}")
     return True
@@ -1341,15 +1411,20 @@ def _setup_hermes(hermes_path: str) -> bool:
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
 
-    if not _register_hermes_mcp_server(detected=detected):
-        print_error("Hermes setup aborted without changing Ouroboros runtime configuration.")
+    if not _commit_runtime_activation(
+        runtime_name="Hermes",
+        host_path=Path.home() / ".hermes" / "config.yaml",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_hermes_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
         return False
-
-    if config_was_missing:
-        create_default_config(config_dir)
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
@@ -1476,8 +1551,7 @@ def _register_kiro_mcp_server(*, detected: dict[str, object] | None = None) -> b
             print_info("Kiro MCP entry already registered.")
 
     if needs_write:
-        with mcp_config_path.open("w", encoding="utf-8") as f:
-            json.dump(mcp_data, f, indent=2)
+        _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2) + "\n")
     return True
 
 
@@ -1527,15 +1601,20 @@ def _setup_kiro(kiro_path: str) -> bool:
         config_dict["llm"] = llm
     llm["backend"] = "kiro"
 
-    if not _register_kiro_mcp_server(detected=detected):
-        print_error("Kiro setup aborted without changing Ouroboros runtime configuration.")
+    if not _commit_runtime_activation(
+        runtime_name="Kiro",
+        host_path=Path.home() / ".kiro" / "settings" / "mcp.json",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_kiro_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
         return False
-
-    if config_was_missing:
-        create_default_config(config_dir)
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Kiro runtime (CLI: {kiro_path})")
     print_info(f"Config saved to: {config_path}")
@@ -1629,7 +1708,7 @@ def _register_copilot_mcp_server(*, detected: dict[str, object] | None = None) -
             print_info("MCP server already registered for Copilot CLI.")
 
     if needs_write:
-        mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        _atomic_write_text(mcp_path, json.dumps(data, indent=2) + "\n")
     return True
 
 
@@ -1807,15 +1886,20 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
         print_info("Aborting Copilot setup without rewriting config.yaml.")
         return False
 
-    if not _register_copilot_mcp_server(detected=detected):
-        print_error("Copilot setup aborted without changing Ouroboros runtime configuration.")
+    if not _commit_runtime_activation(
+        runtime_name="Copilot",
+        host_path=Path.home() / ".copilot" / "mcp-config.json",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_copilot_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
         return False
-
-    if config_was_missing:
-        create_default_config(config_dir)
-
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Copilot runtime (CLI: {copilot_path})")
     print_info(f"Default model: {chosen_model}")

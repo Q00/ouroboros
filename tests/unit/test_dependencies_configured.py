@@ -1,5 +1,6 @@
 """Test that dependencies are configured correctly."""
 
+import json
 from pathlib import Path
 import tomllib
 
@@ -165,6 +166,32 @@ def test_mcp_and_claude_profiles_are_isolated():
     assert [{"extra": "all"}, {"group": "mcp-test"}] in conflicts
 
 
+def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
+    """Repository and plugin launchers must never combine MCP 2 with Claude."""
+    root = Path(__file__).parent.parent.parent
+    expected_args = [
+        "--from",
+        "ouroboros-ai[mcp]",
+        "ouroboros",
+        "mcp",
+        "serve",
+    ]
+
+    repository_entry = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"][
+        "ouroboros"
+    ]
+    plugin_entry = json.loads((root / ".claude-plugin" / ".mcp.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]["ouroboros"]
+    codex_entry = tomllib.loads((root / ".codex" / "config.toml").read_text(encoding="utf-8"))[
+        "mcp_servers"
+    ]["ouroboros"]
+
+    for entry in (repository_entry, plugin_entry, codex_entry):
+        assert entry["command"] == "uvx"
+        assert entry["args"] == expected_args
+
+
 @pytest.mark.parametrize(
     "skill_path",
     [
@@ -172,6 +199,10 @@ def test_mcp_and_claude_profiles_are_isolated():
         "skills/update/SKILL.md",
         "skills/welcome/SKILL.md",
         "skills/pm/SKILL.md",
+        ".claude-plugin/skills/setup/SKILL.md",
+        ".claude-plugin/skills/update/SKILL.md",
+        ".claude-plugin/skills/welcome/SKILL.md",
+        ".claude-plugin/skills/pm/SKILL.md",
     ],
 )
 def test_claude_skills_never_recommend_combined_mcp_profile(skill_path: str) -> None:
@@ -180,6 +211,18 @@ def test_claude_skills_never_recommend_combined_mcp_profile(skill_path: str) -> 
 
     assert "ouroboros-ai[mcp,claude]" not in content
     assert "ouroboros-ai[claude,mcp]" not in content
+
+
+@pytest.mark.parametrize("skill_name", ["setup", "update", "welcome", "pm", "unstuck"])
+def test_claude_plugin_skill_mirrors_canonical_skill(skill_name: str) -> None:
+    """The marketplace mirror must ship the same runtime contract as source."""
+    root = Path(__file__).parent.parent.parent
+    canonical = (root / "skills" / skill_name / "SKILL.md").read_text(encoding="utf-8")
+    plugin = (root / ".claude-plugin" / "skills" / skill_name / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert plugin == canonical
 
 
 @pytest.mark.parametrize(

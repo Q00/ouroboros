@@ -94,7 +94,7 @@ The handler picks one of two response shapes based on `should_dispatch_via_plugi
 | Solo (`persona=...`) | single `_subagent` envelope (one object) — `evaluation_handlers.py:1536-1563` | single `# Lateral Thinking: <approach>` block in `content` |
 | Debate (`personas=[...]`) | `_subagents` array (N objects) — `evaluation_handlers.py:1414+` | N blocks joined by `\n\n---\n\n` in `content`, **plus** an appended hidden dispatch block carrying the same canonical N payloads (see "Inline dispatch block" below) |
 
-**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed dispatch block to the end of `content` so that callers can recover the canonical structured payloads even though the FastMCP adapter drops `meta` on the wire (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
+**Inline dispatch block (debate, inline response only).** The handler appends a versioned, sentinel-bracketed dispatch block to the end of `content` as a compatibility fallback for clients and runtimes that consume only textual content. MCP SDK v2 preserves structured metadata, while the inline block lets text-only consumers recover the same canonical payloads (`src/ouroboros/mcp/server/adapter.py:923`, `src/ouroboros/mcp/tools/subagent.py:141-144`). Format:
 
 ```
 <!-- ouroboros-lateral-inline-dispatch-v1 base64
