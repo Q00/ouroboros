@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import shutil
 
 import pytest
 from typer.testing import CliRunner
@@ -84,6 +85,10 @@ def _write_config(
         data["orchestrator"].update(extra_orchestrator)
     config_path = config_dir / "config.yaml"
     config_path.write_text(yaml.dump(data))
+    configured_db = config_dir / "data" / "ouroboros.db"
+    runtime_db = config_dir / "ouroboros.db"
+    if configured_db.exists() and not runtime_db.exists():
+        shutil.copy2(configured_db, runtime_db)
     return config_path
 
 
@@ -104,6 +109,8 @@ def _write_execution_events(db_path: Path, events: tuple[BaseEvent, ...]) -> Non
             await store.close()
 
     asyncio.run(write())
+    if db_path.parent.name == "data":
+        shutil.copy2(db_path, db_path.parent.parent / "ouroboros.db")
 
 
 def test_status_auto_invalid_session_id_exits_nonzero() -> None:
@@ -315,6 +322,39 @@ def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path:
     assert "failed" in list_result.output
 
 
+def test_executions_limit_counts_distinct_root_executions(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    noisy_events = tuple(
+        BaseEvent(
+            type="workflow.progress.updated",
+            timestamp=now + timedelta(microseconds=index),
+            aggregate_type="execution",
+            aggregate_id="exec_noisy",
+            data={},
+        )
+        for index in range(20)
+    )
+    other_event = BaseEvent(
+        type="workflow.progress.updated",
+        timestamp=now - timedelta(seconds=1),
+        aggregate_type="execution",
+        aggregate_id="exec_other",
+        data={},
+    )
+    _write_execution_events(db_path, (*noisy_events, other_event))
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    result = runner.invoke(app, ["executions", "--limit", "2"])
+
+    assert result.exit_code == 0
+    assert "exec_noisy" in result.output
+    assert "exec_other" in result.output
+
+
 def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
@@ -360,10 +400,11 @@ def test_execution_unknown_id_exits_two(monkeypatch, tmp_path: Path) -> None:
     _write_execution_events(db_path, ())
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 
-    result = runner.invoke(app, ["execution", "exec_missing"])
+    result = runner.invoke(app, ["execution", "[bold]exec_missing[/]"])
 
     assert result.exit_code == 2
     assert "no persisted execution found" in result.output
+    assert "[bold]exec_missing[/]" in result.output
 
 
 def test_health_reports_all_ok(monkeypatch, tmp_path: Path) -> None:
@@ -440,11 +481,10 @@ def test_health_emits_copyable_full_detail_lines_for_long_diagnostics(
 
     assert result.exit_code == 1
     expected_config = config_dir / "config.yaml"
-    expected_database = config_dir / "data" / "ouroboros.db"
+    expected_database = config_dir / "ouroboros.db"
     assert f"Configuration: ok - {expected_config}" in result.output
     assert (
-        "Database: warning - missing; will be created on first run: "
-        f"data/ouroboros.db ({expected_database})"
+        f"Database: warning - missing; will be created on first run: {expected_database}"
     ) in result.output
     assert f"Runtime backend: error - claude CLI not found: {missing_cli}" in result.output
 

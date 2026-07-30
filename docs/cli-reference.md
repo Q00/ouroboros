@@ -810,7 +810,7 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read persisted root execution events from the configured EventStore; `status run` provides the richer Run/Stage/Step projection.
+> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read persisted root execution events from the runtime EventStore at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection.
 
 ### `status auto`
 

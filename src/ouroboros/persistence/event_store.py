@@ -517,8 +517,8 @@ class EventStore:
     def _coerce_to_readonly_url(database_url: str) -> str:
         """Rewrite a plain aiosqlite URL into a ``mode=ro`` URI form.
 
-        Leaves non-SQLite URLs untouched. Already-URI forms (starting with
-        ``file:``) are returned as-is so explicit callers keep full control.
+        Leaves non-SQLite URLs untouched. Existing ``file:`` URI forms are
+        rebuilt so caller-supplied query parameters cannot weaken read-only mode.
         """
         prefix = "sqlite+aiosqlite:///"
         if not database_url.startswith(prefix):
@@ -1972,6 +1972,65 @@ class EventStore:
                     "offset": offset,
                 },
             ) from e
+
+    async def query_latest_events_per_aggregate(
+        self,
+        *,
+        aggregate_type: str,
+        event_types: set[str],
+        preferred_event_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[BaseEvent]:
+        """Return one deterministic latest event per aggregate."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_latest_events_per_aggregate",
+            )
+
+        priority = (
+            case((events_table.c.event_type == preferred_event_type, 0), else_=1)
+            if preferred_event_type is not None
+            else 0
+        )
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=events_table.c.aggregate_id,
+                order_by=(priority, events_table.c.timestamp.desc(), events_table.c.id.desc()),
+            )
+            .label("aggregate_rank")
+        )
+        ranked = (
+            select(*events_table.c, rank)
+            .where(events_table.c.aggregate_type == aggregate_type)
+            .where(events_table.c.event_type.in_(sorted(event_types)))
+            .subquery()
+        )
+        query = (
+            select(ranked)
+            .where(ranked.c.aggregate_rank == 1)
+            .order_by(ranked.c.timestamp.desc(), ranked.c.id.desc())
+        )
+        if limit is not None:
+            query = query.limit(limit)
+
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(query)
+                return [BaseEvent.from_db_row(dict(row)) for row in result.mappings().all()]
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to query latest aggregate events: {exc}",
+                operation="select",
+                table="events",
+                details={
+                    "aggregate_type": aggregate_type,
+                    "event_types": sorted(event_types),
+                    "preferred_event_type": preferred_event_type,
+                    "limit": limit,
+                },
+            ) from exc
 
     async def query_session_related_events(
         self,

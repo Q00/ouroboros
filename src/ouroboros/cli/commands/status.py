@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Annotated, Any
 
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 import typer
@@ -22,7 +23,7 @@ from ouroboros.backends import (
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
 )
-from ouroboros.cli.commands.config import _load_config, _resolve_db_path
+from ouroboros.cli.commands.config import _load_config
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import (
     create_key_value_table,
@@ -153,7 +154,6 @@ _STATUS_RUN_EXIT_GENERIC_ERROR = 1
 _STATUS_RUN_EXIT_UNKNOWN_RUN = 2
 _STATUS_RUN_EXIT_MALFORMED_INPUT = 64
 _STATUS_EXECUTION_EVENT_PAGE_SIZE = 500
-_STATUS_EXECUTION_DEFAULT_EVENT_LIMIT = 10_000
 _ROOT_EXECUTION_EVENT_STATUS = {
     "execution.completed": "complete",
     "execution.failed": "failed",
@@ -198,35 +198,19 @@ def _configured_event_store_path() -> Path:
 async def _recent_execution_events(
     db_path: Path,
     *,
-    max_events: int | None,
+    execution_limit: int | None,
 ) -> list[BaseEvent]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
-    lifecycle_events: list[BaseEvent] = []
-    offset = 0
     try:
-        while True:
-            page_limit = _STATUS_EXECUTION_EVENT_PAGE_SIZE
-            if max_events is not None:
-                remaining = max_events - offset
-                if remaining <= 0:
-                    break
-                page_limit = min(page_limit, remaining)
-            page = await store.query_events(
-                limit=page_limit,
-                offset=offset,
-                aggregate_type="execution",
-            )
-            for event in page:
-                if _root_execution_status(event) is None:
-                    continue
-                lifecycle_events.append(event)
-            if len(page) < page_limit:
-                break
-            offset += len(page)
+        return await store.query_latest_events_per_aggregate(
+            aggregate_type="execution",
+            event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
+            preferred_event_type="execution.terminal",
+            limit=execution_limit,
+        )
     finally:
         await store.close()
-    return lifecycle_events
 
 
 async def _execution_events(
@@ -238,23 +222,42 @@ async def _execution_events(
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
     persisted: list[BaseEvent] = []
-    offset = 0
     try:
+        if not include_all:
+            terminal = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+                limit=1,
+                aggregate_type="execution",
+            )
+            if terminal:
+                return terminal
+            candidates: list[BaseEvent] = []
+            for event_type in _ROOT_EXECUTION_EVENT_STATUS:
+                candidates.extend(
+                    await store.query_events(
+                        aggregate_id=execution_id,
+                        event_type=event_type,
+                        limit=1,
+                        aggregate_type="execution",
+                    )
+                )
+            return sorted(
+                candidates,
+                key=lambda event: (event.timestamp, event.id),
+                reverse=True,
+            )[:1]
+
+        offset = 0
         while True:
-            page_limit = _STATUS_EXECUTION_EVENT_PAGE_SIZE
-            if not include_all:
-                remaining = _STATUS_EXECUTION_DEFAULT_EVENT_LIMIT - offset
-                if remaining <= 0:
-                    break
-                page_limit = min(page_limit, remaining)
             page = await store.query_events(
                 aggregate_id=execution_id,
-                limit=page_limit,
+                limit=_STATUS_EXECUTION_EVENT_PAGE_SIZE,
                 offset=offset,
                 aggregate_type="execution",
             )
             persisted.extend(page)
-            if len(page) < page_limit:
+            if len(page) < _STATUS_EXECUTION_EVENT_PAGE_SIZE:
                 break
             offset += len(page)
     finally:
@@ -384,11 +387,11 @@ def executions(
         persisted = asyncio.run(
             _recent_execution_events(
                 _configured_event_store_path(),
-                max_events=None if all_ else _STATUS_EXECUTION_DEFAULT_EVENT_LIMIT,
+                execution_limit=None if all_ else limit,
             )
         )
     except Exception as exc:
-        print_error(f"Execution status failed: {exc}")
+        print_error(f"Execution status failed: {escape(str(exc))}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
 
     latest_by_id: dict[str, BaseEvent] = {}
@@ -435,7 +438,7 @@ def execution(
             )
         )
     except Exception as exc:
-        print_error(f"Execution status failed: {exc}")
+        print_error(f"Execution status failed: {escape(str(exc))}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
     latest_lifecycle = next(
         (event for event in persisted if event.type == "execution.terminal"),
@@ -445,7 +448,9 @@ def execution(
         None,
     )
     if latest_lifecycle is None:
-        print_error(f"Execution status failed: no persisted execution found: {execution_id}")
+        print_error(
+            f"Execution status failed: no persisted execution found: {escape(execution_id)}"
+        )
         raise typer.Exit(_STATUS_RUN_EXIT_UNKNOWN_RUN)
 
     print_table(
@@ -545,12 +550,7 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
 
 
 def _database_file_path(data: dict, config_path: Path) -> Path:
-    configured = data.get("persistence", {}).get("database_path")
-    if configured:
-        path = Path(str(configured)).expanduser()
-        if path.is_absolute():
-            return path
-        return config_path.parent / path
+    del data
     return config_path.parent / "ouroboros.db"
 
 
@@ -743,7 +743,7 @@ def health() -> None:
     else:
         try:
             db_path = _database_file_path(data, config_path)
-            db_detail = _resolve_db_path(data, config_path)
+            db_detail = str(db_path)
             if not db_path.exists():
                 checks.append(
                     _health_row(
