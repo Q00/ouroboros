@@ -23,7 +23,7 @@ from ouroboros.backends import (
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
 )
-from ouroboros.cli.commands.config import _load_config
+from ouroboros.cli.commands.config import _database_file_path, _load_config
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import (
     create_key_value_table,
@@ -549,18 +549,6 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
         detail = check.get("detail", "")
         if detail:
             typer.echo(f"{check['name']}: {check['status']} - {detail}")
-
-
-def _database_file_path(data: dict, config_path: Path) -> Path:
-    configured = data.get("persistence", {}).get("database_path")
-    runtime_path = config_path.parent / "ouroboros.db"
-    if configured:
-        configured_path = Path(str(configured)).expanduser()
-        if not configured_path.is_absolute():
-            configured_path = config_path.parent / configured_path
-        if configured_path.exists() or not runtime_path.exists():
-            return configured_path
-    return runtime_path
 
 
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:

@@ -132,6 +132,18 @@ def _load_config() -> tuple[dict, Path]:
     return data, config_path
 
 
+def _database_file_path(data: dict, config_path: Path) -> Path:
+    configured = data.get("persistence", {}).get("database_path")
+    runtime_path = config_path.parent / "ouroboros.db"
+    if configured:
+        configured_path = Path(str(configured)).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = config_path.parent / configured_path
+        if configured_path.exists() or not runtime_path.exists():
+            return configured_path
+    return runtime_path
+
+
 def _save_config(data: dict, path: Path) -> None:
     """Write config dict back to YAML."""
     path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))

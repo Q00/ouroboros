@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.resume import (
     EXIT_CORRUPTED_DB,
+    _default_db_path,
     _format_reattach_guidance,
     _get_event_store,
     _get_in_flight_sessions,
@@ -24,6 +25,22 @@ runner = CliRunner()
 
 # Patch target for SessionRepository — imported lazily inside the function
 _SESSION_REPO_PATH = "ouroboros.orchestrator.session.SessionRepository"
+
+
+def test_resume_and_status_resolve_the_same_configured_event_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.cli.commands.status import _configured_event_store_path
+
+    config_dir = tmp_path / "config"
+    configured_db = config_dir / "data" / "events.db"
+    configured_db.parent.mkdir(parents=True)
+    configured_db.touch()
+    (config_dir / "config.yaml").write_text("persistence:\n  database_path: data/events.db\n")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    assert Path(_default_db_path()) == _configured_event_store_path() == configured_db
 
 
 # ---------------------------------------------------------------------------
