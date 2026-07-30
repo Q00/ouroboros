@@ -5130,6 +5130,8 @@ def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
     target = r"0\.2(?:0)?"
     patterns = (
         rf"{score}\s*(?:<=|<)\s*{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+(?:be|remain)\s*(?:<=|<)\s*{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+be\s+reduced\s+to\s+{target}",
         rf"{score}\s+(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+{target}",
         rf"{score}\s+must\s+not\s+exceed\s+{target}",
         rf"{score}\s+(?:is|remains)\s+above\s+{target}\s+and\s+exceeds\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+)?gate",
