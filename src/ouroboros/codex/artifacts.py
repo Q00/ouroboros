@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import importlib.resources
 import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import tempfile
 from typing import Literal
 
@@ -384,6 +387,56 @@ def _installed_artifact_exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _raise_rename_error(source_path: Path, target_path: Path) -> None:
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, os.strerror(error_number), str(target_path))
+    raise OSError(
+        error_number,
+        os.strerror(error_number),
+        f"{source_path} -> {target_path}",
+    )
+
+
+def _rename_noreplace(source_path: Path, target_path: Path) -> None:
+    """Atomically rename without replacing a target created by another writer."""
+    source_bytes = os.fsencode(source_path)
+    target_bytes = os.fsencode(target_path)
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    if sys.platform == "darwin":
+        rename_exclusive = libc.renamex_np
+        rename_exclusive.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename_exclusive.restype = ctypes.c_int
+        if rename_exclusive(source_bytes, target_bytes, 0x00000004) != 0:
+            _raise_rename_error(source_path, target_path)
+        return
+
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename_exclusive = libc.renameat2
+        rename_exclusive.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename_exclusive.restype = ctypes.c_int
+        if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) != 0:
+            _raise_rename_error(source_path, target_path)
+        return
+
+    if os.name == "nt":
+        os.rename(source_path, target_path)
+        return
+
+    if source_path.is_dir() and not source_path.is_symlink():
+        msg = f"Atomic no-replace directory rename is unavailable on {sys.platform}"
+        raise OSError(errno.ENOTSUP, msg, str(target_path))
+    os.link(source_path, target_path, follow_symlinks=False)
+    source_path.unlink()
+
+
 def _artifact_fingerprint(path: Path) -> str:
     """Return a content, topology, and mode fingerprint without following symlinks."""
     digest = hashlib.sha256()
@@ -623,7 +676,11 @@ class _CodexArtifactBatchTransaction:
             if entry.rollback_path is None:
                 msg = f"Managed Codex artifact rollback is missing its prior generation: {entry.target_path}"
                 raise OSError(msg)
-            os.replace(entry.rollback_path, entry.target_path)
+            try:
+                _rename_noreplace(entry.rollback_path, entry.target_path)
+            except FileExistsError as restore_conflict:
+                msg = f"Managed Codex artifact changed during batch rollback: {entry.target_path}"
+                raise OSError(msg) from restore_conflict
             _record_current_generation(entry.target_path, entry.on_generation)
             return
 
@@ -649,13 +706,19 @@ class _CodexArtifactBatchTransaction:
                 if entry.on_generation is not None:
                     entry.on_generation(CodexArtifactGeneration(entry.target_path, missing=True))
             else:
-                os.replace(entry.rollback_path, entry.target_path)
+                _rename_noreplace(entry.rollback_path, entry.target_path)
                 _record_current_generation(entry.target_path, entry.on_generation)
+        except FileExistsError as restore_conflict:
+            if _installed_artifact_exists(displaced_path):
+                try:
+                    _remove_installed_artifact(displaced_path)
+                except BaseException:
+                    pass
+            msg = f"Managed Codex artifact changed during batch rollback: {entry.target_path}"
+            raise OSError(msg) from restore_conflict
         except BaseException:
-            if _installed_artifact_exists(displaced_path) and not _installed_artifact_exists(
-                entry.target_path
-            ):
-                os.replace(displaced_path, entry.target_path)
+            if _installed_artifact_exists(displaced_path):
+                _restore_displaced_concurrent_generation(entry.target_path, displaced_path)
                 _record_current_generation(entry.target_path, entry.on_generation)
             raise
 
@@ -668,13 +731,14 @@ class _CodexArtifactBatchTransaction:
 
 def _restore_displaced_concurrent_generation(target_path: Path, displaced_path: Path) -> None:
     """Put a concurrently changed target back without overwriting another writer."""
-    if _installed_artifact_exists(target_path):
+    try:
+        _rename_noreplace(displaced_path, target_path)
+    except FileExistsError as restore_conflict:
         msg = (
             "Managed Codex artifact changed again during batch rollback; "
             f"preserved the displaced generation at {displaced_path}"
         )
-        raise OSError(msg)
-    os.replace(displaced_path, target_path)
+        raise OSError(msg) from restore_conflict
 
 
 def _commit_staged_artifact(
@@ -687,7 +751,7 @@ def _commit_staged_artifact(
     transaction: _CodexArtifactBatchTransaction | None = None,
 ) -> None:
     """Commit one staged artifact while retaining the previous generation until success."""
-    active_fingerprint = _artifact_fingerprint(staging_path) if transaction is not None else None
+    active_fingerprint = _artifact_fingerprint(staging_path)
     backup_path: Path | None = None
     prepared_generation = False
     staged_generation_active = False
@@ -728,7 +792,11 @@ def _commit_staged_artifact(
                 if before_mutation is not None:
                     before_mutation(target_path)
                 os.replace(target_path, staging_path)
-                os.replace(backup_path, target_path)
+                if _artifact_fingerprint(staging_path) != active_fingerprint:
+                    _restore_displaced_concurrent_generation(target_path, staging_path)
+                    msg = f"Managed Codex artifact changed during rollback: {target_path}"
+                    raise OSError(msg)
+                _rename_noreplace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
                 try:
                     _remove_installed_artifact(staging_path)
@@ -737,7 +805,7 @@ def _commit_staged_artifact(
             elif _installed_artifact_exists(target_path):
                 _remove_installed_artifact(backup_path)
             else:
-                os.replace(backup_path, target_path)
+                _rename_noreplace(backup_path, target_path)
                 _record_current_generation(target_path, on_generation)
         elif prepared_generation and not _installed_artifact_exists(target_path):
             if on_generation is not None:
@@ -772,7 +840,7 @@ def _remove_artifact_transactionally(
         backup_path = None
     except BaseException:
         if _installed_artifact_exists(backup_path) and not _installed_artifact_exists(target_path):
-            os.replace(backup_path, target_path)
+            _rename_noreplace(backup_path, target_path)
             _record_current_generation(target_path, on_generation)
         raise
 

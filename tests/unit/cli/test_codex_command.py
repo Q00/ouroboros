@@ -267,6 +267,97 @@ class TestCodexRefresh:
         assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
         assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.rollback"))
 
+    def test_refresh_preserves_rule_created_after_rollback_verification(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No-replace restoration must close the post-fingerprint creation window."""
+        codex_dir = tmp_path / ".codex"
+        rule_path = codex_dir / "rules" / "ouroboros.md"
+        rule_path.parent.mkdir(parents=True)
+        rule_path.write_text("old rule generation\n", encoding="utf-8")
+        original_fingerprint = codex_artifacts._artifact_fingerprint
+        injected = False
+
+        def _fingerprint_then_recreate(path: Path) -> str:
+            nonlocal injected
+            fingerprint = original_fingerprint(path)
+            if path.name.endswith(".rollback") and not injected:
+                injected = True
+                rule_path.write_text("post-verification operator edit\n", encoding="utf-8")
+            return fingerprint
+
+        def _fail_skills(**_kwargs: object) -> tuple[Path, ...]:
+            raise OSError("synthetic late skill failure")
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(codex_artifacts, "_artifact_fingerprint", _fingerprint_then_recreate)
+        monkeypatch.setattr(codex_artifacts, "install_codex_skills", _fail_skills)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "changed during batch rollback" in cli_result.output
+        assert injected is True
+        assert rule_path.read_text(encoding="utf-8") == ("post-verification operator edit\n")
+        backup_paths = tuple(rule_path.parent.glob(f".{rule_path.name}.*.backup"))
+        assert len(backup_paths) == 1
+        assert backup_paths[0].read_text(encoding="utf-8") == "old rule generation\n"
+        assert not tuple(rule_path.parent.glob(f".{rule_path.name}.*.rollback"))
+
+    def test_refresh_preserves_removed_target_recreated_at_rollback_commit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Prune rollback must not replace a target recreated after its absence check."""
+        codex_dir = tmp_path / ".codex"
+        stale_path = codex_dir / "skills" / "ouroboros-stale"
+        stale_path.mkdir(parents=True)
+        stale_path.joinpath("SKILL.md").write_text("old stale generation\n", encoding="utf-8")
+        original_rename_noreplace = codex_artifacts._rename_noreplace
+        injected = False
+
+        def _remove_stale_then_fail(**kwargs: object) -> tuple[Path, ...]:
+            transaction = kwargs["_transaction"]
+            assert isinstance(transaction, codex_artifacts._CodexArtifactBatchTransaction)
+            codex_artifacts._remove_artifact_transactionally(
+                stale_path,
+                before_mutation=None,
+                on_generation=None,
+                transaction=transaction,
+            )
+            raise OSError("synthetic late skill failure")
+
+        def _recreate_before_restore(source: Path, target: Path) -> None:
+            nonlocal injected
+            if target == stale_path and source.name.endswith(".backup") and not injected:
+                injected = True
+                stale_path.mkdir(parents=True)
+                stale_path.joinpath("SKILL.md").write_text(
+                    "concurrent stale generation\n", encoding="utf-8"
+                )
+            original_rename_noreplace(source, target)
+
+        monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+        monkeypatch.setattr(codex_artifacts, "_rename_noreplace", _recreate_before_restore)
+        monkeypatch.setattr(codex_artifacts, "install_codex_skills", _remove_stale_then_fail)
+
+        cli_result = runner.invoke(app, ["refresh"])
+
+        assert cli_result.exit_code == 1
+        assert "changed during batch rollback" in cli_result.output
+        assert injected is True
+        assert stale_path.joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "concurrent stale generation\n"
+        )
+        backup_paths = tuple(stale_path.parent.glob(f".{stale_path.name}.*.backup"))
+        assert len(backup_paths) == 1
+        assert backup_paths[0].joinpath("SKILL.md").read_text(encoding="utf-8") == (
+            "old stale generation\n"
+        )
+
     def test_refresh_preserves_directory_shaped_rule_when_staging_fails(
         self,
         tmp_path: Path,
