@@ -1371,8 +1371,10 @@ class TestGeneratedSeedImmutability:
 
 
 class TestAcceptanceCriteriaGranularityContract:
-    """Guard the seed-generation prompt against silent loss of the AC granularity
-    contract (the fix for Fable-5-style over-atomization at seed-gen time).
+    """Guard every surface that carries the AC granularity contract — the
+    extraction prompt, the retry prompt, the seed-architect contract, and the QA
+    quality bar — against silent loss of it (the fix for Fable-5-style
+    over-atomization at seed-gen time).
 
     The contract hands the model a distinction to reason with — a criterion is a
     state of the finished work, an implementation step is a means of reaching it
@@ -1417,6 +1419,41 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
+
+    def test_extraction_retry_prompt_carries_granularity_contract(self) -> None:
+        """The retry prompt is a parallel surface for the same contract: a parse
+        failure must not be the moment the model stops being told what a
+        criterion is, nor the crack a count creeps back in through."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=AsyncMock(),
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            prompt = generator._build_retry_prompt(
+                "Q: goal?\nA: build a thing",
+                failed_response="not parseable",
+                error="missing GOAL",
+            )
+
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        assert not any(char.isdigit() for char in rule)
+
+    def test_seed_qa_quality_bar_carries_granularity_contract(self) -> None:
+        """The QA quality bar is where the judgment actually lands once the
+        deterministic gate stopped counting, so it carries the same distinction
+        and, like the prompts, states no quantity."""
+        quality_bar = next(
+            line
+            for line in Path("skills/seed/SKILL.md").read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("quality_bar:")
+        ).lower()
+
+        assert "acceptance_criteria" in quality_bar
+        assert "implementation step" in quality_bar
+        assert "siblings" in quality_bar
+        assert not any(char.isdigit() for char in quality_bar)
 
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt
