@@ -501,10 +501,15 @@ def _has_git_metadata(root: Path) -> bool:
         pointer = marker.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
         return False
+    if len(pointer.splitlines()) != 1:
+        return False
     prefix, separator, raw_path = pointer.partition(":")
     if not separator or prefix.casefold() != _GITDIR_PREFIX.removesuffix(":"):
         return False
-    target = Path(raw_path.strip())
+    normalized_path = raw_path.strip()
+    if not normalized_path:
+        return False
+    target = Path(normalized_path)
     if not target.is_absolute():
         target = root / target
     try:
@@ -517,7 +522,7 @@ def _has_git_metadata(root: Path) -> bool:
 def detect_brownfield(cwd: str | Path) -> bool:
     """Detect whether a directory is a brownfield project.
 
-    Checks for the presence of any recognised config file from ``_CONFIG_FILES``.
+    Checks for valid Git metadata or a recognised config file from ``_CONFIG_FILES``.
 
     Args:
         cwd: Directory to inspect.

@@ -57,3 +57,20 @@ class TestDetectBrownfield:
         (tmp_path / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
 
         assert detect_brownfield(tmp_path) is False
+
+    def test_detect_brownfield_rejects_empty_git_pointer(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("gitdir:\n", encoding="utf-8")
+        (tmp_path / "HEAD").write_text("ref: refs/heads/not-git\n", encoding="utf-8")
+
+        assert detect_brownfield(tmp_path) is False
+
+    def test_detect_brownfield_rejects_multiline_git_pointer(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (tmp_path / ".git").write_text(
+            f"gitdir: {git_dir}\nunexpected\n",
+            encoding="utf-8",
+        )
+
+        assert detect_brownfield(tmp_path) is False
