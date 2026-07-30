@@ -415,6 +415,23 @@ def _atomic_install_file(
         raise
 
 
+def _stage_install_directory(source_path: Path, target_path: Path) -> Path:
+    """Copy one skill into a setup-owned sibling before touching its target."""
+    staging_path = Path(
+        tempfile.mkdtemp(
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            dir=str(target_path.parent),
+        )
+    )
+    try:
+        shutil.copytree(source_path, staging_path, dirs_exist_ok=True)
+    except BaseException:
+        _remove_installed_artifact(staging_path)
+        raise
+    return staging_path
+
+
 def _is_namespaced_rule_artifact(path: Path) -> bool:
     """Return whether a rules entry is managed by Ouroboros."""
     if path.name == CODEX_RULE_FILENAME:
@@ -520,22 +537,20 @@ def install_codex_skills(
 
         for packaged_skill in packaged_skills:
             target_path = target_root / packaged_skill.install_dir_name
-            if _installed_artifact_exists(target_path):
-                if before_mutation is not None:
-                    before_mutation(target_path)
-                _remove_installed_artifact(target_path)
-                if on_generation is not None:
-                    on_generation(CodexArtifactGeneration(target_path, missing=True))
-
+            staging_path = _stage_install_directory(packaged_skill.source_dir, target_path)
             try:
+                if _installed_artifact_exists(target_path):
+                    if before_mutation is not None:
+                        before_mutation(target_path)
+                    _remove_installed_artifact(target_path)
+                    if on_generation is not None:
+                        on_generation(CodexArtifactGeneration(target_path, missing=True))
                 if before_mutation is not None:
                     before_mutation(target_path)
-                shutil.copytree(packaged_skill.source_dir, target_path)
-            except Exception:
-                if _installed_artifact_exists(target_path):
-                    _remove_installed_artifact(target_path)
-                if on_generation is not None:
-                    on_generation(CodexArtifactGeneration(target_path, missing=True))
+                os.replace(staging_path, target_path)
+            except BaseException:
+                if _installed_artifact_exists(staging_path):
+                    _remove_installed_artifact(staging_path)
                 raise
             if on_generation is not None:
                 on_generation(

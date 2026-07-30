@@ -1,6 +1,7 @@
 """Unit tests for packaged Codex artifact installation."""
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -457,6 +458,36 @@ class TestInstallCodexSkills:
             )
 
         assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "operator skill"
+
+    def test_failed_staging_copy_preserves_concurrently_created_skill(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Failed staging cleanup must never delete a target another process created."""
+        source_skills_dir = tmp_path / "packaged-skills"
+        self._write_skill(source_skills_dir, "status", body="fresh skill")
+        codex_dir = tmp_path / ".codex"
+        target_path = codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}status"
+
+        def _copytree_then_race(
+            _source: Path,
+            _destination: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> Path:
+            del args, kwargs
+            target_path.mkdir(parents=True)
+            target_path.joinpath("SKILL.md").write_text("operator skill", encoding="utf-8")
+            raise OSError("synthetic staging copy failure")
+
+        monkeypatch.setattr(shutil, "copytree", _copytree_then_race)
+
+        with pytest.raises(OSError, match="synthetic staging copy failure"):
+            install_codex_skills(codex_dir=codex_dir, skills_dir=source_skills_dir)
+
+        assert target_path.joinpath("SKILL.md").read_text(encoding="utf-8") == "operator skill"
+        assert not tuple(target_path.parent.glob(f".{target_path.name}.*.tmp"))
 
     def test_refreshes_existing_namespaced_skills_from_updated_packaged_bundle(
         self,
