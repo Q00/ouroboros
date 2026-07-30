@@ -70,7 +70,6 @@ from ouroboros.auto.state import (
 )
 from ouroboros.auto.task_class_application import apply_default_ac_template
 from ouroboros.auto.trace_export import best_effort_export_trace
-from ouroboros.core.security import mask_sensitive_value
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 from ouroboros.resilience.lateral import ThinkingPersona
@@ -2832,7 +2831,10 @@ class AutoPipeline:
                     current_review,
                 )
             except Exception as exc:
-                state.mark_blocked(f"Seed QA raised: {exc}", tool_name="seed_qa")
+                state.mark_blocked(
+                    f"Seed QA raised {type(exc).__name__}",
+                    tool_name="seed_qa",
+                )
                 self._save(state)
                 return (
                     self._result(state, ledger, review=current_review, blocker=state.last_error),
@@ -2842,7 +2844,7 @@ class AutoPipeline:
 
             if qa_result.error:
                 state.mark_blocked(
-                    f"Seed QA reported transient error: {qa_result.error}",
+                    "Seed QA reported a transient evaluator error",
                     tool_name="seed_qa",
                 )
                 self._save(state)
@@ -2853,7 +2855,7 @@ class AutoPipeline:
                 )
 
             state.last_qa_score = float(qa_result.score)
-            state.last_qa_verdict = str(qa_result.verdict)
+            state.last_qa_verdict = _safe_seed_qa_verdict(qa_result.verdict)
             state.last_qa_passed = bool(qa_result.passed)
             state.last_qa_differences = _safe_seed_qa_evidence(qa_result.differences)
             state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
@@ -2868,7 +2870,7 @@ class AutoPipeline:
                         current_review,
                     )
                 state.mark_progress(
-                    f"Seed QA passed: {qa_result.verdict} (score {qa_result.score:.2f})",
+                    f"Seed QA passed: {state.last_qa_verdict} (score {qa_result.score:.2f})",
                     tool_name="seed_qa",
                 )
                 self._save(state)
@@ -2890,7 +2892,7 @@ class AutoPipeline:
                             "auto_session_id": state.auto_session_id,
                             "seed_id": current_seed.metadata.seed_id,
                             "attempts": attempt,
-                            "verdict": str(qa_result.verdict)[:80],
+                            "verdict": state.last_qa_verdict,
                             "score": float(qa_result.score),
                             "differences": state.last_qa_differences[:5],
                             "suggestions": state.last_qa_suggestions[:5],
@@ -2942,12 +2944,10 @@ class AutoPipeline:
 
             details = [
                 f"Seed QA did not pass after {attempt} attempt(s): "
-                f"{qa_result.verdict} (score {qa_result.score:.2f})"
+                f"{state.last_qa_verdict} (score {qa_result.score:.2f})"
             ]
-            if qa_result.differences:
-                details.append("differences: " + "; ".join(qa_result.differences[:3]))
-            if qa_result.suggestions:
-                details.append("suggestions: " + "; ".join(qa_result.suggestions[:3]))
+            details.extend(state.last_qa_differences)
+            details.extend(state.last_qa_suggestions)
             await self._emit_runtime_event(
                 "auto.seed_qa.blocked",
                 state.auto_session_id,
@@ -2956,7 +2956,7 @@ class AutoPipeline:
                     "auto_session_id": state.auto_session_id,
                     "seed_id": current_seed.metadata.seed_id,
                     "attempts": attempt,
-                    "verdict": str(qa_result.verdict)[:80],
+                    "verdict": state.last_qa_verdict,
                     "score": float(qa_result.score),
                     "differences": state.last_qa_differences[:5],
                     "suggestions": state.last_qa_suggestions[:5],
@@ -5116,7 +5116,17 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
 
 
 def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
-    return [mask_sensitive_value(item)[:320] for item in feedback[:5]]
+    count = len(feedback[:5])
+    if count == 0:
+        return []
+    return [f"{count} Seed QA feedback item(s) withheld from durable state"]
+
+
+def _safe_seed_qa_verdict(verdict: str) -> str:
+    normalized = verdict.strip().casefold()
+    if normalized in {"fail", "pass", "revise"}:
+        return normalized
+    return "unknown"
 
 
 def _first_nonempty(*values: str | None) -> str | None:

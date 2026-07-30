@@ -2061,9 +2061,7 @@ class TestEventStoreClose:
         await ro.initialize()
         await ro.close()  # must not raise
 
-    async def test_read_only_store_preserves_literal_uri_characters_in_path(
-        self, tmp_path
-    ) -> None:
+    async def test_read_only_store_preserves_literal_uri_characters_in_path(self, tmp_path) -> None:
         template_path = tmp_path / "template.db"
         writer = EventStore(f"sqlite+aiosqlite:///{template_path}")
         await writer.initialize()

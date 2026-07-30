@@ -198,13 +198,11 @@ def _configured_event_store_path() -> Path:
 async def _recent_execution_events(
     db_path: Path,
     *,
-    execution_limit: int | None,
     max_events: int | None,
 ) -> list[BaseEvent]:
     store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
     await store.initialize(create_schema=False)
     lifecycle_events: list[BaseEvent] = []
-    seen_execution_ids: set[str] = set()
     offset = 0
     try:
         while True:
@@ -223,10 +221,7 @@ async def _recent_execution_events(
                 if _root_execution_status(event) is None:
                     continue
                 lifecycle_events.append(event)
-                seen_execution_ids.add(event.aggregate_id)
             if len(page) < page_limit:
-                break
-            if execution_limit is not None and len(seen_execution_ids) >= execution_limit:
                 break
             offset += len(page)
     finally:
@@ -389,7 +384,6 @@ def executions(
         persisted = asyncio.run(
             _recent_execution_events(
                 _configured_event_store_path(),
-                execution_limit=None if all_ else limit,
                 max_events=None if all_ else _STATUS_EXECUTION_DEFAULT_EVENT_LIMIT,
             )
         )
@@ -472,9 +466,9 @@ def execution(
         table.add_column("Status")
         for event in reversed(persisted):
             table.add_row(
-                event.timestamp.isoformat(),
-                event.type,
-                _root_execution_status(event) or "",
+                Text(event.timestamp.isoformat()),
+                Text(event.type),
+                Text(_root_execution_status(event) or ""),
             )
         print_table(table)
 

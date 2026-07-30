@@ -82,7 +82,7 @@ def create_key_value_table(
     table.add_column("Value", style=value_style)
 
     for key, value in data.items():
-        table.add_row(str(key), str(value))
+        table.add_row(Text(str(key), style=key_style), Text(str(value), style=value_style or None))
 
     return table
 

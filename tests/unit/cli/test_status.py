@@ -244,9 +244,7 @@ def test_executions_normalizes_untrusted_terminal_status_markup(
     assert "unknown" in result.output
 
 
-def test_executions_keeps_terminal_status_after_late_progress(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_executions_keeps_terminal_status_after_late_progress(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
     db_path.parent.mkdir(parents=True)
@@ -309,9 +307,12 @@ def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path:
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 
     result = runner.invoke(app, ["execution", "exec_paged_terminal"])
+    list_result = runner.invoke(app, ["executions"])
 
     assert result.exit_code == 0
     assert "failed" in result.output
+    assert list_result.exit_code == 0
+    assert "failed" in list_result.output
 
 
 def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Path) -> None:
