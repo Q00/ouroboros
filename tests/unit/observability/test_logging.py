@@ -16,6 +16,7 @@ import warnings
 import pytest
 import structlog
 
+import ouroboros.observability.logging as ouroboros_logging
 from ouroboros.observability.logging import (
     LoggingConfig,
     LogMode,
@@ -471,6 +472,63 @@ class TestLogRotation:
 
 class TestResetLogging:
     """Test reset_logging function."""
+
+    def test_reconfigure_reentrant_log_cannot_reopen_retiring_file(
+        self,
+        tmp_path: Path,
+        capsys: Any,
+    ) -> None:
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        configure_logging(LoggingConfig(log_dir=old_dir, enable_file_logging=True))
+        proxy = structlog.get_logger("reconfigure.overlap")
+        proxy.info("before-reconfigure")
+        old_file = old_dir / "ouroboros.log"
+        original_setup = ouroboros_logging._setup_file_handler
+
+        def setup_with_reentrant_log(
+            config: LoggingConfig,
+        ) -> Any:
+            proxy.info("during-reconfigure")
+            return original_setup(config)
+
+        with patch(
+            "ouroboros.observability.logging._setup_file_handler",
+            side_effect=setup_with_reentrant_log,
+        ):
+            configure_logging(LoggingConfig(log_dir=new_dir, enable_file_logging=True))
+
+        proxy.info("after-reconfigure")
+        captured = capsys.readouterr()
+        assert "during-reconfigure" in captured.err
+        assert "during-reconfigure" not in old_file.read_text(encoding="utf-8")
+        new_content = (new_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert "after-reconfigure" in new_content
+
+    def test_reset_reentrant_log_cannot_use_retiring_file(
+        self,
+        tmp_path: Path,
+        capsys: Any,
+    ) -> None:
+        configure_logging(LoggingConfig(log_dir=tmp_path, enable_file_logging=True))
+        proxy = structlog.get_logger("reset.overlap")
+        proxy.info("before-reset")
+        log_file = tmp_path / "ouroboros.log"
+        original_close = ouroboros_logging._close_root_handlers
+
+        def close_with_reentrant_log() -> None:
+            proxy.info("during-reset")
+            original_close()
+
+        with patch(
+            "ouroboros.observability.logging._close_root_handlers",
+            side_effect=close_with_reentrant_log,
+        ):
+            reset_logging()
+
+        captured = capsys.readouterr()
+        assert "during-reset" in captured.err
+        assert "during-reset" not in log_file.read_text(encoding="utf-8")
 
     def test_reset_leaves_import_time_proxies_quiet_on_stdout(self, capsys: Any) -> None:
         """#1794: reset must not restore structlog's print-everything defaults.

@@ -40,12 +40,14 @@ Usage:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
 import sys
+from threading import RLock
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -324,12 +326,22 @@ def _get_file_processors() -> list[Any]:
 
 # Global flag to control console log output
 _console_logging_enabled: bool = True
-# The live sink: every _FileWritingPrintLogger instance routes through this
-# module state, so bound loggers cached before a reset or reconfiguration
-# (cache_logger_on_first_use) always follow the CURRENT configuration
-# instead of a frozen wrapper/handler pair (#1794 rounds five and six).
-_current_min_level: int = logging.INFO
-_current_file_handler: TimedRotatingFileHandler | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveSink:
+    """One atomically published logging destination generation."""
+
+    min_level: int
+    file_handler: TimedRotatingFileHandler | None
+
+
+# Emission holds this lock through handler.emit(), while configure/reset hold
+# it through sink publication and old-handler retirement. RLock is required so
+# a handler/setup hook that logs during a transition safely reaches the neutral
+# sink instead of deadlocking or reopening the retiring file.
+_sink_lock = RLock()
+_live_sink = _LiveSink(min_level=logging.INFO, file_handler=None)
 
 
 def set_console_logging(enabled: bool) -> None:
@@ -339,7 +351,8 @@ def set_console_logging(enabled: bool) -> None:
         enabled: True to enable console logging, False to disable.
     """
     global _console_logging_enabled
-    _console_logging_enabled = enabled
+    with _sink_lock:
+        _console_logging_enabled = enabled
 
 
 def is_console_logging_enabled() -> bool:
@@ -348,7 +361,8 @@ def is_console_logging_enabled() -> bool:
     Returns:
         True if console logging is enabled.
     """
-    return _console_logging_enabled
+    with _sink_lock:
+        return _console_logging_enabled
 
 
 class _FileWritingPrintLogger:
@@ -359,14 +373,6 @@ class _FileWritingPrintLogger:
     logging. Supports proper log levels.
     """
 
-    def __init__(self, file_handler: TimedRotatingFileHandler | None = None) -> None:
-        """Initialize the file-writing print logger.
-
-        Args:
-            file_handler: Optional file handler for persistent logging.
-        """
-        self._file_handler = file_handler
-
     def _log(self, message: str, level: int = logging.INFO) -> None:
         """Log a message to console and file with proper level.
 
@@ -375,28 +381,29 @@ class _FileWritingPrintLogger:
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
 
-        # Route through the live sink, not per-instance state: cached bound
-        # loggers keep their old wrapper (and old filtering), so the floor and
-        # the file handler must come from the current configuration.
-        if level < _current_min_level:
-            return
+        # Snapshot the complete sink exactly once and keep retirement fenced
+        # through emit(). Cached proxies therefore cannot observe a new level
+        # with an old handler, dereference a removed handler, or reopen a file
+        # that reset/reconfigure has just closed.
+        with _sink_lock:
+            sink = _live_sink
+            if level < sink.min_level:
+                return
 
-        # Print to stderr only if console logging is enabled
-        if _console_logging_enabled:
-            print(message, file=sys.stderr)
+            if _console_logging_enabled:
+                print(message, file=sys.stderr)
 
-        # Write to file if the CURRENT configuration has one
-        if _current_file_handler is not None:
-            record = logging.LogRecord(
-                name="ouroboros",
-                level=level,
-                pathname="",
-                lineno=0,
-                msg=message,
-                args=(),
-                exc_info=None,
-            )
-            _current_file_handler.emit(record)
+            if sink.file_handler is not None:
+                record = logging.LogRecord(
+                    name="ouroboros",
+                    level=level,
+                    pathname="",
+                    lineno=0,
+                    msg=message,
+                    args=(),
+                    exc_info=None,
+                )
+                sink.file_handler.emit(record)
 
     def msg(self, message: str) -> None:
         """Log a message to console and file (default INFO level)."""
@@ -444,21 +451,13 @@ class _FileWritingPrintLogger:
 class _FileWritingPrintLoggerFactory:
     """Factory for creating file-writing print loggers."""
 
-    def __init__(self, file_handler: TimedRotatingFileHandler | None = None) -> None:
-        """Initialize the factory.
-
-        Args:
-            file_handler: Optional file handler for persistent logging.
-        """
-        self._file_handler = file_handler
-
     def __call__(self, *_args: Any) -> _FileWritingPrintLogger:
         """Create a new logger instance.
 
         Args:
             *_args: Ignored arguments (structlog may pass logger name).
         """
-        return _FileWritingPrintLogger(self._file_handler)
+        return _FileWritingPrintLogger()
 
 
 def configure_logging(config: LoggingConfig | None = None) -> None:
@@ -481,57 +480,45 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # Or specify config explicitly
         configure_logging(LoggingConfig(mode=LogMode.PROD, max_log_days=14))
     """
-    global _configured, _current_config
+    global _configured, _current_config, _live_sink
 
     if config is None:
         config = LoggingConfig(mode=_get_mode_from_env())
 
-    _current_config = config
-
-    # Set up standard library logging
     log_level = _get_log_level(config.log_level)
-
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-
-    # Remove existing handlers to avoid duplicates on reconfigure
-    _close_root_handlers()
-
-    # Add file handler if enabled
-    file_handler = _setup_file_handler(config)
-    if file_handler:
-        root_logger.addHandler(file_handler)
-
-    # Get processors for console output
     processors = _get_console_processors(config.mode)
 
-    # Publish the live sink for every logger instance, cached ones included
-    global _current_min_level, _current_file_handler
-    _current_min_level = log_level
-    _current_file_handler = file_handler
+    with _sink_lock:
+        # Publish a handler-free transition generation before touching the old
+        # handler. Re-entrant logs from setup/flush/close remain observable on
+        # stderr but can never reopen or append to the retiring file.
+        _live_sink = _LiveSink(min_level=log_level, file_handler=None)
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        _close_root_handlers()
 
-    # Create logger factory that writes to both console and file
-    logger_factory = _FileWritingPrintLoggerFactory(file_handler)
+        file_handler = _setup_file_handler(config)
+        if file_handler:
+            root_logger.addHandler(file_handler)
 
-    # Configure structlog
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        context_class=dict,
-        logger_factory=logger_factory,
-        # Never cache bound loggers: a cached wrapper freezes filtering and
-        # processors, so proxies materialized under one configuration would
-        # ignore later ones in BOTH directions — a stale INFO wrapper defeats
-        # an operator's DEBUG setting, and a stale DEV renderer defeats PROD
-        # output contracts (#1794 round seven). Known limitation: a logger
-        # materialized explicitly via ``get_logger().bind(...)`` snapshots the
-        # processor chain at bind time and will not follow reconfiguration —
-        # keep module-level loggers as bare lazy proxies.
-        cache_logger_on_first_use=False,
-    )
-
-    _configured = True
+        structlog.configure(
+            processors=processors,
+            wrapper_class=structlog.make_filtering_bound_logger(log_level),
+            context_class=dict,
+            logger_factory=_FileWritingPrintLoggerFactory(),
+            # Never cache bound loggers: a cached wrapper freezes filtering and
+            # processors, so proxies materialized under one configuration would
+            # ignore later ones in BOTH directions — a stale INFO wrapper defeats
+            # an operator's DEBUG setting, and a stale DEV renderer defeats PROD
+            # output contracts (#1794 round seven). Known limitation: a logger
+            # materialized explicitly via ``get_logger().bind(...)`` snapshots the
+            # processor chain at bind time and will not follow reconfiguration —
+            # keep module-level loggers as bare lazy proxies.
+            cache_logger_on_first_use=False,
+        )
+        _live_sink = _LiveSink(min_level=log_level, file_handler=file_handler)
+        _current_config = config
+        _configured = True
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
@@ -551,10 +538,10 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     """
     global _configured
 
-    if not _configured:
-        configure_logging()
-
-    return structlog.get_logger(name)
+    with _sink_lock:
+        if not _configured:
+            configure_logging()
+        return structlog.get_logger(name)
 
 
 def bind_context(**kwargs: Any) -> None:
@@ -619,7 +606,8 @@ def get_current_config() -> LoggingConfig | None:
     Returns:
         The current LoggingConfig or None if not configured.
     """
-    return _current_config
+    with _sink_lock:
+        return _current_config
 
 
 def is_configured() -> bool:
@@ -628,7 +616,8 @@ def is_configured() -> bool:
     Returns:
         True if configure_logging has been called.
     """
-    return _configured
+    with _sink_lock:
+        return _configured
 
 
 def reset_logging() -> None:
@@ -674,23 +663,21 @@ def reset_logging() -> None:
     :func:`set_console_logging` honored across a reset instead of silently
     re-enabling console output.
     """
-    global _configured, _current_config, _current_min_level, _current_file_handler
-    # Read before clearing: the reset must not be louder than what it replaces.
-    outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
-    baseline_level = max(logging.INFO, outgoing_level)
-    _configured = False
-    _current_config = None
-    _current_min_level = baseline_level
-    _current_file_handler = None
-    _close_root_handlers()
-    # Clear any bound context
-    structlog.contextvars.clear_contextvars()
-    # Reset structlog configuration
-    structlog.reset_defaults()
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(baseline_level),
-        # No file handler: the outgoing one was just closed by
-        # _close_root_handlers(), and a reset must not hold a resource.
-        logger_factory=_FileWritingPrintLoggerFactory(None),
-        cache_logger_on_first_use=False,
-    )
+    global _configured, _current_config, _live_sink
+    with _sink_lock:
+        # Read before clearing: the reset must not be louder than what it replaces.
+        outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
+        baseline_level = max(logging.INFO, outgoing_level)
+        _configured = False
+        _current_config = None
+        _live_sink = _LiveSink(min_level=baseline_level, file_handler=None)
+        _close_root_handlers()
+        structlog.contextvars.clear_contextvars()
+        structlog.reset_defaults()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(baseline_level),
+            # No file handler: the outgoing one was just closed by
+            # _close_root_handlers(), and a reset must not hold a resource.
+            logger_factory=_FileWritingPrintLoggerFactory(),
+            cache_logger_on_first_use=False,
+        )
