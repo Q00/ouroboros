@@ -79,8 +79,14 @@ class _ACReservedFieldFragment:
     canonical: bool
 
 
-def _is_word_apostrophe(value: str, index: int) -> bool:
+def _is_word_apostrophe(value: str, index: int, *, shell_context: bool = False) -> bool:
     if value[index] != "'" or index == 0 or not value[index - 1].isalnum():
+        return False
+    if shell_context:
+        # POSIX has no contraction exception in command tokens: an apostrophe
+        # always opens a single-quoted segment, including adjacent forms such
+        # as ``foo're'``. Prose heuristics remain limited to descriptions and
+        # non-command fields, so later possessives cannot hide outer markers.
         return False
     next_character = value[index + 1] if index + 1 < len(value) else ""
     if next_character.isspace() or (
@@ -277,6 +283,21 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     index = 0
     while index < len(body):
         char = body[index]
+        if quote == "'":
+            # POSIX single quotes make every enclosed character literal.
+            # In particular, a backslash cannot escape the closing quote.
+            if char == "'":
+                if not structured_payload_started and quote_start is not None:
+                    quoted_payload = body[quote_start:index]
+                    quoted_marker = _find_pipe_led_ac_field_fragment(quoted_payload)
+                    if quoted_marker is not None:
+                        raise ValueError(
+                            f"Quoted {quoted_marker.name} field in acceptance criterion"
+                        )
+                quote = None
+                quote_start = None
+            index += 1
+            continue
         if escaped:
             escaped = False
             index += 1
@@ -303,7 +324,14 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 quote_start = None
             index += 1
             continue
-        if char in {"'", '"'} and not (char == "'" and _is_word_apostrophe(body, index)):
+        if char in {"'", '"'} and not (
+            char == "'"
+            and _is_word_apostrophe(
+                body,
+                index,
+                shell_context=structured_payload_started and active_field == "verify",
+            )
+        ):
             quote = char
             quote_start = index + 1
             index += 1

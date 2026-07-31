@@ -1,6 +1,7 @@
 """Unit tests for ouroboros.bigbang.seed_generator module."""
 
 from pathlib import Path
+import subprocess
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1740,6 +1741,90 @@ class TestSeedGeneratorExtraction:
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_command", "expected_output"),
+        (
+            (
+                r"printf '%s\n' 'trailing\' | grep -F 'trailing\'",
+                "trailing\\\n",
+            ),
+            (
+                r"printf '%s\n' foo're| artifacts: literal' | "
+                r"grep -F 'foore| artifacts: literal'",
+                "foore| artifacts: literal\n",
+            ),
+            (r"printf '%s\n' foo're' | grep -Fx foore", "foore\n"),
+        ),
+    )
+    async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
+        self,
+        verify_command: str,
+        expected_output: str,
+    ) -> None:
+        """Concrete `/bin/sh` forms survive extraction, Seed grading, and execution.
+
+        These expand the markdown-truncated review examples into complete
+        commands: one ends a single-quoted value with a literal backslash; the
+        other begins an adjacent quoted segment with contraction-like ``re``.
+        """
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+        mock_adapter = AsyncMock()
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: POSIX shell quoting survives | "
+                f"verify: {verify_command} | artifacts: NONE | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(
+                create_interview_state_with_rounds(),
+                create_low_ambiguity_score(),
+            )
+
+            assert result.is_ok
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+            grade = GradeGate().grade_seed(result.value)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=result.value,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="posix-quote-test",
+                execution_id="posix-quote-test",
+            )
+
+            assert gated.success is True
+            assert gated.verify_gate_outcome is not None
+            assert gated.verify_gate_outcome.passed is True
+            assert gated.verify_gate_outcome.output_tail == expected_output
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
