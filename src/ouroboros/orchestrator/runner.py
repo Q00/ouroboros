@@ -59,9 +59,12 @@ from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
-    git_capability_probe_scope,
+    PublicationEvidence,
+    active_publication_evidence_sink,
+    publication_evidence_sink,
     resolve_managed_project_identity,
     resolve_project_identity,
+    resolve_project_identity_for_publication,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
@@ -3318,7 +3321,12 @@ class OrchestratorRunner:
             effective_cwd = self._effective_cwd()
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():
                 return None
-            return resolve_project_identity(effective_cwd)
+            sink = active_publication_evidence_sink()
+            if sink is None:
+                return resolve_project_identity(effective_cwd)
+            identity, evidence = resolve_project_identity_for_publication(effective_cwd)
+            sink[0] = evidence
+            return identity
         except ProjectIdentityError as exc:
             raise self._project_identity_error(exc) from exc
 
@@ -8523,14 +8531,17 @@ class OrchestratorRunner:
         This allows callers such as MCP handlers to return stable tracking IDs
         immediately and then start the actual runtime work asynchronously.
 
-        Contract construction and the publication-boundary revalidation each
-        resolve project identity, so the whole preparation shares one Git
-        capability probe (#1796); outside this scope every resolution keeps
-        probing on its own.
+        Contract construction captures the resolver's repo-local input
+        closure, and the publication boundary revalidates from that evidence
+        by metadata alone when nothing observable changed — escalating to the
+        full re-resolution (probe included) otherwise (#1796 L2).
         """
-        with git_capability_probe_scope():
+        with publication_evidence_sink() as evidence_sink:
             return await self._prepare_session_scoped(
-                seed, execution_id=execution_id, session_id=session_id
+                seed,
+                execution_id=execution_id,
+                session_id=session_id,
+                evidence_sink=evidence_sink,
             )
 
     async def _prepare_session_scoped(
@@ -8538,6 +8549,7 @@ class OrchestratorRunner:
         seed: Seed,
         execution_id: str | None = None,
         session_id: str | None = None,
+        evidence_sink: list[PublicationEvidence | None] | None = None,
     ) -> Result[SessionTracker, OrchestratorError]:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
@@ -8604,13 +8616,18 @@ class OrchestratorRunner:
             if self._task_workspace is not None:
                 create_session_kwargs["project_task_workspace"] = self._task_workspace
             try:
-                if (
-                    "acceptance_root_indices"
-                    in inspect.signature(self._session_repo.create_session).parameters
-                ):
+                repo_parameters = inspect.signature(self._session_repo.create_session).parameters
+                if "acceptance_root_indices" in repo_parameters:
                     create_session_kwargs["acceptance_root_indices"] = range(
                         len(seed.acceptance_criteria)
                     )
+                if (
+                    "project_identity_evidence" in repo_parameters
+                    and evidence_sink is not None
+                    and evidence_sink[0] is not None
+                    and self._task_workspace is None
+                ):
+                    create_session_kwargs["project_identity_evidence"] = evidence_sink[0]
             except (TypeError, ValueError):
                 # Legacy/mock repositories may not expose an inspectable signature;
                 # the durable SessionRepository path always does.

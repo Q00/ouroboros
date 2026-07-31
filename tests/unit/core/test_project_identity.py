@@ -1015,142 +1015,121 @@ def test_project_identity_rejects_noncanonical_fields(
         )
 
 
-class TestGitCapabilityProbeScope:
-    """#1796: one probe per scope; per-call probing everywhere else."""
+class TestPublicationEvidence:
+    """#1796 L2: publication accepts by metadata closure or escalates."""
 
-    def _counting_probe(self, monkeypatch):
-        calls = {"n": 0}
+    def _repo(self, tmp_path):
+        import subprocess as sp
 
-        def fake(*arguments: str, executable: str | None = None) -> bytes:
-            assert arguments == ("--version",)
-            calls["n"] += 1
-            return b"git version 2.44.0\n"
+        repo = tmp_path / "repo"
+        repo.mkdir(parents=True)
+        sp.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "sub").mkdir()
+        return repo
 
-        monkeypatch.setattr(project_identity, "_run_git_command", fake)
-        return calls
+    def test_happy_path_is_stable_and_runs_no_git(self, tmp_path, monkeypatch) -> None:
+        repo = self._repo(tmp_path)
+        identity, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert identity == project_identity.resolve_project_identity(repo / "sub")
+        assert evidence.escalate is False
 
-    def test_scoped_commands_run_the_verified_executable(self, monkeypatch, tmp_path) -> None:
-        """Every git command inside a scope binds to the verified binary.
+        spawns = {"n": 0}
+        real_run = project_identity.subprocess.run
 
-        Skipping the publication resolver's probe is only sound if its
-        topology queries cannot run a different git than the one the scope
-        verified — so the scope pins argv[0] to the verified absolute
-        executable, and a PATH switch mid-scope changes nothing.
-        """
-        git_a = tmp_path / "git-a"
-        git_a.write_text("")
-        git_b = tmp_path / "git-b"
-        git_b.write_text("")
+        def counting_run(*args, **kwargs):  # noqa: ANN001, ANN202
+            spawns["n"] += 1
+            return real_run(*args, **kwargs)
 
-        lookups = {"n": 0}
+        monkeypatch.setattr(project_identity.subprocess, "run", counting_run)
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        assert spawns["n"] == 0, "the fast path must not spawn any git subprocess"
 
-        def switching_which(_name: str) -> str:
-            lookups["n"] += 1
-            return str(git_a) if lookups["n"] == 1 else str(git_b)
+    def test_each_closure_mutation_destabilizes(self, tmp_path) -> None:
+        cases = []
 
-        monkeypatch.setattr(project_identity.shutil, "which", switching_which)
+        def case(name):
+            def register(fn):
+                cases.append((name, fn))
+                return fn
 
-        invoked: list[str] = []
+            return register
 
-        def recording_run(argv, **kwargs):  # noqa: ANN001, ANN202
-            invoked.append(argv[0])
-            kwargs["stdout"].write(b"git version 2.44.0\n")
+        @case("config content edited in place")
+        def _(repo):
+            config = repo / ".git" / "config"
+            config.write_text(config.read_text() + "[user]\n\tname = drift\n")
 
-            class _Done:
-                returncode = 0
+        @case("commondir appears (worktree constellation)")
+        def _(repo):
+            (repo / ".git" / "commondir").write_text("../..\n")
 
-            return _Done()
+        @case("new intermediate boundary marker")
+        def _(repo):
+            (repo / "sub" / ".git").mkdir()
 
-        monkeypatch.setattr(project_identity.subprocess, "run", recording_run)
+        @case("HEAD rewritten")
+        def _(repo):
+            (repo / ".git" / "HEAD").write_text("ref: refs/heads/elsewhere\n")
 
-        with project_identity.git_capability_probe_scope():
-            project_identity._require_supported_git()
-            project_identity._run_git_command("--version")
-            project_identity._require_supported_git()
-            project_identity._run_git_command("rev-parse", "--show-toplevel")
+        @case("worktree registry appears")
+        def _(repo):
+            (repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
+            (repo / ".git" / "worktrees" / "wt" / "gitdir").write_text("x\n")
 
-        assert invoked == [str(git_a)] * 3, (
-            "a scoped git command escaped the verified executable binding"
+        for name, mutate in cases:
+            repo = self._repo(tmp_path / name.replace(" ", "-"))
+            _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+            assert evidence.escalate is False, name
+            assert (
+                project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+            ), name
+            mutate(repo)
+            assert (
+                project_identity.publication_evidence_is_stable(evidence, repo / "sub") is False
+            ), f"mutation not detected: {name}"
+
+    def test_unenumerable_shapes_escalate_at_capture(self, tmp_path) -> None:
+        import subprocess as sp
+
+        include_repo = self._repo(tmp_path / "inc")
+        config = include_repo / ".git" / "config"
+        config.write_text(config.read_text() + "[include]\n\tpath = other\n")
+        _, evidence = project_identity.resolve_project_identity_for_publication(
+            include_repo / "sub"
+        )
+        assert evidence.escalate is True
+
+        linked_base = self._repo(tmp_path / "base")
+        sp.run(
+            ["git", "-C", str(linked_base), "commit", "--allow-empty", "-q", "-m", "x"],
+            check=True,
+        )
+        linked = tmp_path / "linked"
+        sp.run(
+            ["git", "-C", str(linked_base), "worktree", "add", "-q", str(linked)],
+            check=True,
+        )
+        _, linked_evidence = project_identity.resolve_project_identity_for_publication(linked)
+        assert linked_evidence.escalate is True, (
+            "a gitdir-pointer checkout must not take the fast path"
         )
 
-    def test_escaped_child_task_loses_the_scope_trust(self, monkeypatch) -> None:
-        """A task created inside the scope must re-probe after scope exit."""
-        import asyncio
+    def test_escalating_evidence_is_never_stable(self, tmp_path) -> None:
+        repo = self._repo(tmp_path)
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        forced = project_identity.PublicationEvidence(
+            identity=evidence.identity,
+            effective_directory=evidence.effective_directory,
+            directory_evidence=evidence.directory_evidence,
+            file_evidence=evidence.file_evidence,
+            escalate=True,
+        )
+        assert project_identity.publication_evidence_is_stable(forced, repo / "sub") is False
 
-        calls = {"n": 0}
-
-        def fake(*arguments: str, executable: str | None = None) -> bytes:
-            calls["n"] += 1
-            return b"git version 2.44.0\n"
-
-        monkeypatch.setattr(project_identity, "_run_git_command", fake)
-
-        async def scenario() -> None:
-            release = asyncio.Event()
-
-            async def escaped_child() -> None:
-                await release.wait()
-                project_identity._require_supported_git()
-
-            with project_identity.git_capability_probe_scope():
-                project_identity._require_supported_git()
-                child = asyncio.create_task(escaped_child())
-                await asyncio.sleep(0)
-            release.set()
-            await child
-
-        asyncio.run(scenario())
-        assert calls["n"] == 2, "an escaped child reused the scope's verification after exit"
-
-    def test_without_scope_every_call_probes(self, monkeypatch) -> None:
-        calls = self._counting_probe(monkeypatch)
-        project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert calls["n"] == 2
-
-    def test_scope_shares_a_single_probe(self, monkeypatch) -> None:
-        calls = self._counting_probe(monkeypatch)
-        with project_identity.git_capability_probe_scope():
-            project_identity._require_supported_git()
-            project_identity._require_supported_git()
-            project_identity._require_supported_git()
-        assert calls["n"] == 1
-
-    def test_nothing_survives_the_scope(self, monkeypatch) -> None:
-        calls = self._counting_probe(monkeypatch)
-        with project_identity.git_capability_probe_scope():
-            project_identity._require_supported_git()
-        project_identity._require_supported_git()
-        assert calls["n"] == 2
-
-    def test_scope_failure_is_not_memoized(self, monkeypatch) -> None:
-        attempts = {"n": 0}
-
-        def flaky(*arguments: str, executable: str | None = None) -> bytes:
-            attempts["n"] += 1
-            if attempts["n"] == 1:
-                raise project_identity.ProjectIdentityUnavailableError("transient")
-            return b"git version 2.44.0\n"
-
-        monkeypatch.setattr(project_identity, "_run_git_command", flaky)
-        with project_identity.git_capability_probe_scope():
-            with pytest.raises(project_identity.ProjectIdentityUnavailableError):
-                project_identity._require_supported_git()
-            project_identity._require_supported_git()
-            project_identity._require_supported_git()
-        assert attempts["n"] == 2
-
-    @pytest.mark.asyncio
-    async def test_concurrent_scopes_are_isolated(self, monkeypatch) -> None:
-        import asyncio
-
-        calls = self._counting_probe(monkeypatch)
-
-        async def one_scope() -> None:
-            with project_identity.git_capability_probe_scope():
-                project_identity._require_supported_git()
-                await asyncio.sleep(0)
-                project_identity._require_supported_git()
-
-        await asyncio.gather(one_scope(), one_scope())
-        assert calls["n"] == 2
+    def test_evidence_vouches_only_for_its_own_workspace(self, tmp_path) -> None:
+        repo = self._repo(tmp_path)
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        assert project_identity.publication_evidence_is_stable(evidence, repo) is False, (
+            "evidence must not transfer to a different effective directory"
+        )

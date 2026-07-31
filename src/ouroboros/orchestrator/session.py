@@ -35,6 +35,8 @@ from uuid import uuid4
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.project_identity import (
     ProjectIdentity,
+    PublicationEvidence,
+    publication_evidence_is_stable,
     resolve_managed_project_identity,
     resolve_project_identity,
 )
@@ -97,6 +99,7 @@ async def _validate_project_identity_publication(
     project_identity: ProjectIdentity | None,
     project_workspace: str | None,
     project_task_workspace: TaskWorkspace | None,
+    project_identity_evidence: PublicationEvidence | None = None,
 ) -> None:
     """Require the immutable top-level and nested project scopes to agree."""
     raw_proof = (
@@ -122,6 +125,21 @@ async def _validate_project_identity_publication(
         raise ValueError("project identity conflicts with execution contract")
     if project_identity is not None and project_workspace is not None:
         if project_task_workspace is None:
+            if (
+                project_identity_evidence is not None
+                and project_identity_evidence.identity == project_identity
+                and await asyncio.to_thread(
+                    publication_evidence_is_stable,
+                    project_identity_evidence,
+                    project_workspace,
+                )
+            ):
+                # The resolver's whole repo-local input closure is unchanged
+                # since construction, so re-running it must reproduce the same
+                # identity; the recheck issues no Git query, so the V1 probe
+                # invariant is vacuously satisfied. Any doubt fell through to
+                # the full re-resolution below, which probes for itself.
+                return
             revalidated_identity = await asyncio.to_thread(
                 resolve_project_identity,
                 project_workspace,
@@ -751,6 +769,7 @@ class SessionRepository:
         project_identity: ProjectIdentity | None = None,
         project_workspace: str | None = None,
         project_task_workspace: TaskWorkspace | None = None,
+        project_identity_evidence: PublicationEvidence | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -775,6 +794,11 @@ class SessionRepository:
                 immutable publication. It is validation input, not event data.
             project_task_workspace: Frozen managed source/execution paths to
                 revalidate together at the immutable publication boundary.
+            project_identity_evidence: Captured input closure of the identity
+                resolution that produced ``project_identity``. When every
+                captured stat/hash still matches at publication, the boundary
+                skips the redundant re-resolution; otherwise it is ignored and
+                the full revalidation runs as before. Direct workspaces only.
 
         Returns:
             Result containing new SessionTracker.
@@ -789,6 +813,7 @@ class SessionRepository:
             project_identity,
             project_workspace,
             project_task_workspace,
+            project_identity_evidence,
         )
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 
