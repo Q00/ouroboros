@@ -201,6 +201,23 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
         assert summary.reports[0].has_discrepancy
 
+    def test_t1_constant_preserves_quoted_multiword_value(self) -> None:
+        """Exact comparison retains the complete contents of quoted scalars."""
+        project = self._create_project({"config.py": 'GREETING = "hello world"\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Greeting should be hello world",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"GREETING\s*=\s*",
+            expected_value="hello world",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
     @pytest.mark.parametrize("actual_value", ["50", "15"])
     def test_t1_constant_rejects_prefix_and_suffix_collisions(self, actual_value: str) -> None:
         """Expected constants require exact extracted-value equality."""

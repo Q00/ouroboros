@@ -281,26 +281,38 @@ class SpecVerifier:
         end = match.end()
         rest = content[end : end + 100]
 
+        def scalar_value(value_match: re.Match[str] | None) -> str | None:
+            if value_match is None:
+                return None
+            return next(group for group in value_match.groups() if group is not None)
+
         # Try to extract a value: number, quoted string, or identifier
-        value_match = re.match(
-            r'\s*[=:]\s*["\']?([^"\'\s,;)\]}{]+)["\']?',
-            rest,
+        value = scalar_value(
+            re.match(
+                r'\s*[=:]\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)\]}{]+))',
+                rest,
+            )
         )
-        if value_match:
-            return value_match.group(1)
+        if value is not None:
+            return value
 
         # Try parenthesized value
-        paren_match = re.match(r'\s*\(\s*["\']?([^"\'\s,;)]+)["\']?\s*\)', rest)
-        if paren_match:
-            return paren_match.group(1)
+        value = scalar_value(
+            re.match(
+                r'\s*\(\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)]+))\s*\)',
+                rest,
+            )
+        )
+        if value is not None:
+            return value
 
         # The assertion pattern may already consume the assignment delimiter
         # (for example ``NAME\s*=\s*``). Extract the next scalar token rather
         # than returning an arbitrary source suffix that only supported
         # substring comparison.
-        direct_match = re.match(r'\s*["\']?([^"\'\s,;)\]}{]+)["\']?', rest)
-        if direct_match:
-            return direct_match.group(1)
+        value = scalar_value(re.match(r'\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)\]}{]+))', rest))
+        if value is not None:
+            return value
 
         # Return first 50 chars of what follows
         return rest.strip()[:50]
