@@ -12,7 +12,7 @@ The V1 delivery is intentionally split:
 
 1. **Identity anchor (implemented)** — one canonical resolver and additive
    `orchestrator.session.started` fields.
-2. **Projection (planned)** — bounded EventStore queries plus frozen
+2. **Projection (implemented)** — complete EventStore history plus frozen
    `ProjectRunSummary` and `ProjectRecord` values.
 3. **Query surfaces (planned)** — read-only MCP/CLI output with JSON parity.
 
@@ -211,14 +211,16 @@ Historical session starts without top-level identity remain readable. The
 projection slice may identify an older row from its nested execution contract
 and must label that source explicitly. If top-level and nested identities
 conflict, it must fail the complete project query rather than return a partial
-map.
+map. Complete top-level anchors from the public low-level event producer also
+remain readable when no execution contract exists; nested identity is compared
+only when it is present.
 
 ## Authority boundary
 
 Project identity is an indexing and attribution contract only:
 
 - EventStore remains the source of truth.
-- A `ProjectRecord` will be rebuilt from events and never written back as
+- A `ProjectRecord` is rebuilt from events and never written back as
   execution state.
 - `project_id` does not authenticate a caller or authorize a provider effect.
 - Project Map cannot turn provisional route success into acceptance; the Final
@@ -226,16 +228,22 @@ Project identity is an indexing and attribution contract only:
 - Workspace filtering cannot hide conflicts and then claim a complete project
   map. Truncation and identity conflicts must be explicit.
 
-## V1 projection requirements
+## V1 projection
 
-The next slice must:
+`ProjectMapBuilder` ships these invariants without a second state model:
 
-1. replay every attributable session needed for the requested project;
-2. reuse `SessionRepository` lifecycle semantics rather than inventing status;
-3. return frozen, deterministic `ProjectRunSummary` and `ProjectRecord` values;
-4. distinguish top-level anchors from compatible nested-only legacy identity;
-5. reject conflicting identity and unmarked truncation; and
-6. remain read-only at the storage boundary.
+1. `EventStore.get_all_sessions()` enumerates the complete lifecycle history;
+2. `SessionRepository.reconstruct_session()` remains the only owner of status,
+   while the projection opts into its strict related-event read so a storage
+   failure cannot publish a lifecycle result from incomplete history;
+3. frozen `ProjectRunSummary` and `ProjectRecord` values have deterministic
+   ordering and JSON serialization;
+4. compatible nested-only historical anchors are labeled
+   `identity_source="execution_contract"`;
+5. project conflicts are validated before workspace filtering can hide them;
+6. an explicit limit below the attributable population raises a typed error
+   instead of returning an unmarked recent window; and
+7. projection performs no EventStore write and grants no execution authority.
 
 ## V1 non-goals
 

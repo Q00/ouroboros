@@ -76,6 +76,25 @@ class PiLLMAdapter(CodexCliLLMAdapter):
         """Pi JSON mode does not currently expose Codex-style permission flags."""
         return []
 
+    def _codex_failure_details(
+        self,
+        *,
+        returncode: int | None,
+        session_id: str | None,
+        stderr: str,
+        stdout_errors: list[str],
+        message: str,
+        cli_path: str | None = None,
+    ) -> dict[str, object]:
+        """Keep Pi failures backend-neutral despite the shared subprocess base."""
+        del message, cli_path
+        return {
+            "returncode": returncode,
+            "session_id": session_id,
+            "stderr": stderr,
+            "stdout_errors": stdout_errors,
+        }
+
     def _prompt_stdin_bytes(self, prompt: str) -> bytes | None:
         """Pi JSON mode receives the prompt as a positional argument."""
         del prompt

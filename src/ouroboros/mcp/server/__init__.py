@@ -7,7 +7,7 @@ Public API:
     MCPServer: Protocol defining the server interface
     ToolHandler: Protocol for tool handlers
     ResourceHandler: Protocol for resource handlers
-    MCPServerAdapter: Concrete implementation using FastMCP
+    MCPServerAdapter: Concrete implementation using the MCP SDK v2 server API
 """
 
 from ouroboros.mcp.server.adapter import MCPServerAdapter

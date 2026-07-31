@@ -566,8 +566,6 @@ class TestOpenCodeToolEnvelopeSoftEnforcement:
         """A ``tool_use`` event for a tool outside the envelope triggers
         the violation warning; an in-envelope event does not.
         """
-        import structlog
-
         adapter = OpenCodeLLMAdapter(
             cli_path="opencode",
             cwd="/tmp",
@@ -579,30 +577,25 @@ class TestOpenCodeToolEnvelopeSoftEnforcement:
             {"type": "text", "part": {"type": "text", "text": "done"}},
         ]
 
-        with structlog.testing.capture_logs() as captured:
+        with patch("ouroboros.providers.opencode_adapter.log.warning") as warning:
             adapter._audit_tool_envelope_violations(events)
 
-        violations = [
-            e for e in captured if e.get("event") == "opencode_adapter.tool_envelope_violation"
-        ]
-        assert len(violations) == 1
-        assert violations[0]["tool"] == "Edit"
-        assert violations[0]["allowed_tools"] == ["Read"]
+        warning.assert_called_once_with(
+            "opencode_adapter.tool_envelope_violation",
+            tool="Edit",
+            allowed_tools=["Read"],
+        )
 
     def test_no_envelope_means_no_audit(self) -> None:
         """With no envelope declared, the audit is a no-op even when
         ``tool_use`` events are present.
         """
-        import structlog
-
         adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")
         events = [
             {"type": "tool_use", "part": {"tool": "Edit", "state": {"status": "completed"}}},
         ]
 
-        with structlog.testing.capture_logs() as captured:
+        with patch("ouroboros.providers.opencode_adapter.log.warning") as warning:
             adapter._audit_tool_envelope_violations(events)
 
-        assert not [
-            e for e in captured if e.get("event") == "opencode_adapter.tool_envelope_violation"
-        ]
+        warning.assert_not_called()

@@ -197,6 +197,13 @@ def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> floa
             raise ValueError(
                 f"{field_label} entry field 'weight' must be a number; got {raw_weight!r}."
             )
+        if isinstance(raw_weight, _JsonNonFiniteToken):
+            # Non-standard constants (NaN/Infinity/-Infinity) are not JSON
+            # numbers, so they take the documented 1.0 default rather than
+            # the sign-saturation reserved for genuine numeric overflow;
+            # without this check float(str(...)) below would turn a stored
+            # -Infinity literal into a 0.0 clamp (#1766).
+            return 1.0
         try:
             numeric = float(str(raw_weight).strip())
         except (ValueError, OverflowError):
@@ -1100,7 +1107,7 @@ Please try again. Extract requirements from this interview:
 
 You MUST respond with ONLY the following format, one field per line, no other text:
 
-ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
+ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
@@ -1134,6 +1141,9 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
             'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
             'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
+            "CONTEXT_REFERENCES rule: respond with one single-line JSON array of objects. "
+            "Path, role, and summary values may contain any characters, including literal "
+            ": colons and | pipes; never use a bare pipe as the list separator.\n"
             "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
             "Pattern values may contain any characters, including literal | pipes; "
             "never use a bare pipe as the list separator.\n"
@@ -1207,7 +1217,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
-ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
+ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 

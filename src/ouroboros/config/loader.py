@@ -977,6 +977,38 @@ def get_agent_reasoning_effort() -> str | None:
         return None
 
 
+def get_execution_model() -> str | None:
+    """Return an explicit Execute-stage model pin, if one was configured.
+
+    Environment remains the one-off highest-priority override.  The web/TUI
+    setting writes ``execution.default_model``; an empty value or the UI's
+    ``default``/``current`` sentinel deliberately means "let this runtime pick"
+    rather than a model named ``default``.
+    """
+    env_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    if env_model is not None:
+        stripped = env_model.strip()
+        return None if not stripped or stripped.lower() in {"default", "current"} else stripped
+    try:
+        model = load_config().execution.default_model
+    except ConfigError:
+        return None
+    if model is None:
+        return None
+    stripped = model.strip()
+    return None if not stripped or stripped.lower() in {"default", "current"} else stripped
+
+
+def resolve_execution_model(runtime_backend: str | None) -> str | None:
+    """Resolve the exact Execute-stage model pin shared by CLI, MCP, and config views."""
+    execution_model = get_execution_model()
+    if execution_model is not None:
+        return execution_model
+    if (runtime_backend or "").strip().lower() in {"claude", "claude_code"}:
+        return DEFAULT_SONNET_MODEL
+    return None
+
+
 def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
     """Parse a worker-cap setting without validating unrelated config keys."""
     if isinstance(value, bool):

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import re
+import sys
 
 import pytest
 from sqlalchemy import text
@@ -48,6 +49,18 @@ class _OkWaitHandler:
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="unchanged cursor=7"),),
                 meta={"job_id": "job_123", "status": "running", "cursor": 7},
+            )
+        )
+
+
+class _NoisyOkWaitHandler:
+    async def handle(self, arguments):
+        print("debug stdout leak 2026-07-28 19:09:21")
+        print("debug stderr leak 2026-07-28 19:09:21", file=sys.stderr)
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="stable wait output"),),
+                meta={"job_id": arguments["job_id"], "status": "running"},
             )
         )
 
@@ -183,6 +196,19 @@ def test_documented_job_wait_command_exits_zero(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "unchanged cursor=7" in result.output
+
+
+def test_job_wait_command_suppresses_handler_console_diagnostics(monkeypatch) -> None:
+    from ouroboros.cli.commands import job as job_command
+    from ouroboros.cli.main import app
+
+    monkeypatch.setattr(job_command, "JobWaitHandler", _NoisyOkWaitHandler)
+
+    result = runner.invoke(app, ["job", "wait", "job_123"])
+
+    assert result.exit_code == 0
+    assert result.output == "stable wait output\n"
+    assert not re.search(r"\b\d{4}-\d{2}-\d{2}[T ][0-9:.+-]", result.output)
 
 
 def test_detached_auto_job_wait_command_reports_completed_status(monkeypatch) -> None:

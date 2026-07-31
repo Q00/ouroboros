@@ -216,6 +216,7 @@ class CopilotCliRuntime(CodexCliRuntime):
         event stream by ``_convert_event``).
         """
         del output_last_message_path, resume_session_id
+        self._assert_cli_executable_identity_unchanged()
 
         command = [
             self._cli_path,

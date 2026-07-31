@@ -6,11 +6,12 @@ timeouts.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 
 import structlog
 
@@ -25,6 +26,7 @@ from ouroboros.mcp.types import (
     MCPResourceDefinition,
     MCPServerConfig,
     MCPServerInfo,
+    MCPServerSnapshot,
     MCPToolDefinition,
     MCPToolResult,
 )
@@ -51,16 +53,51 @@ class ServerConnection:
         adapter: The client adapter for this connection.
         state: Current connection state.
         last_error: Last error message if any.
-        tools: Cached list of tools from this server.
-        resources: Cached list of resources from this server.
+        generation: Monotonic revision used to reject stale async work.
+        tools: Tool definitions captured for this connection generation.
+        resources: Resource definitions captured for this connection generation.
+        server_snapshot: Negotiated protocol snapshot for this generation.
     """
 
     config: MCPServerConfig
     adapter: MCPClientAdapter
     state: ConnectionState = ConnectionState.DISCONNECTED
+    generation: int = 0
     last_error: str | None = None
     tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
     resources: tuple[MCPResourceDefinition, ...] = field(default_factory=tuple)
+    server_snapshot: MCPServerSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ServerConnectionSnapshot:
+    """Deeply immutable public view of a managed connection.
+
+    The live adapter is intentionally absent: exposing it would let a caller
+    mutate transport state outside the manager's generation/lock protocol.
+    Every structured value referenced here is recursively frozen before it is
+    stored by the manager.
+    """
+
+    config: MCPServerConfig
+    state: ConnectionState = ConnectionState.DISCONNECTED
+    generation: int = 0
+    last_error: str | None = None
+    tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
+    resources: tuple[MCPResourceDefinition, ...] = field(default_factory=tuple)
+    server_snapshot: MCPServerSnapshot | None = None
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Return a recursively immutable copy of a protocol/config value."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        cls = type(value)
+        return cls(**{item.name: _deep_freeze(getattr(value, item.name)) for item in fields(value)})
+    return value
 
 
 class MCPClientManager:
@@ -132,6 +169,21 @@ class MCPClientManager:
         conn = self._connections.get(server_name)
         return conn.state if conn else None
 
+    def get_connection_snapshot(self, server_name: str) -> ServerConnectionSnapshot | None:
+        """Return a deeply immutable, adapter-free connection snapshot."""
+        conn = self._connections.get(server_name)
+        if conn is None:
+            return None
+        return ServerConnectionSnapshot(
+            config=conn.config,
+            state=conn.state,
+            generation=conn.generation,
+            last_error=conn.last_error,
+            tools=conn.tools,
+            resources=conn.resources,
+            server_snapshot=conn.server_snapshot,
+        )
+
     async def add_server(
         self,
         config: MCPServerConfig,
@@ -157,8 +209,9 @@ class MCPClientManager:
                 )
 
             adapter = MCPClientAdapter(max_retries=self._max_retries)
+            frozen_config = cast(MCPServerConfig, _deep_freeze(config))
             self._connections[config.name] = ServerConnection(
-                config=config,
+                config=frozen_config,
                 adapter=adapter,
                 state=ConnectionState.DISCONNECTED,
             )
@@ -193,12 +246,13 @@ class MCPClientManager:
                     )
                 )
 
-            # Disconnect if connected
-            if conn.adapter.is_connected:
-                await conn.adapter.disconnect()
-
             del self._connections[server_name]
             log.info("mcp.manager.server_removed", server=server_name)
+
+        # Never hold the manager lock across transport cleanup. Any in-flight
+        # connect is prevented from reinstalling itself by the identity check.
+        if conn.adapter.is_connected:
+            await conn.adapter.disconnect()
 
         return Result.ok(None)
 
@@ -221,29 +275,66 @@ class MCPClientManager:
                         details={"resource_type": "server", "resource_id": server_name},
                     )
                 )
+            if conn.state == ConnectionState.CONNECTING:
+                return Result.err(
+                    MCPConnectionError(
+                        f"Connection already in progress: {server_name}",
+                        server_name=server_name,
+                    )
+                )
 
-            # Update state to connecting
-            self._connections[server_name] = ServerConnection(
+            generation = conn.generation + 1
+            connecting = ServerConnection(
                 config=conn.config,
                 adapter=conn.adapter,
                 state=ConnectionState.CONNECTING,
+                generation=generation,
             )
+            self._connections[server_name] = connecting
 
-        # Connect outside the lock
+        # All transport I/O, including discovery, stays outside the global lock.
         result = await conn.adapter.connect(conn.config)
 
-        async with self._lock:
-            if result.is_ok:
-                # Cache tools and resources
-                tools = await self._fetch_tools(conn.adapter, server_name)
-                resources = await self._fetch_resources(conn.adapter, server_name)
+        tools: tuple[MCPToolDefinition, ...] = ()
+        resources: tuple[MCPResourceDefinition, ...] = ()
+        if result.is_ok:
+            tools, resources = await asyncio.gather(
+                self._fetch_tools(conn.adapter, server_name),
+                self._fetch_resources(conn.adapter, server_name),
+            )
+            tools = tuple(cast(MCPToolDefinition, _deep_freeze(tool)) for tool in tools)
+            resources = tuple(
+                cast(MCPResourceDefinition, _deep_freeze(resource)) for resource in resources
+            )
 
+        superseded = False
+        orphaned_adapter = False
+        async with self._lock:
+            current = self._connections.get(server_name)
+            if (
+                current is None
+                or current.adapter is not conn.adapter
+                or current.generation != generation
+            ):
+                superseded = True
+                orphaned_adapter = current is None or current.adapter is not conn.adapter
+                log.info(
+                    "mcp.manager.connect_superseded",
+                    server=server_name,
+                    generation=generation,
+                )
+            elif result.is_ok:
                 self._connections[server_name] = ServerConnection(
                     config=conn.config,
                     adapter=conn.adapter,
                     state=ConnectionState.CONNECTED,
+                    generation=generation,
                     tools=tools,
                     resources=resources,
+                    server_snapshot=cast(
+                        MCPServerSnapshot | None,
+                        _deep_freeze(getattr(conn.adapter, "server_snapshot", None)),
+                    ),
                 )
                 log.info(
                     "mcp.manager.connected",
@@ -256,6 +347,7 @@ class MCPClientManager:
                     config=conn.config,
                     adapter=conn.adapter,
                     state=ConnectionState.ERROR,
+                    generation=generation,
                     last_error=str(result.error),
                 )
                 log.error(
@@ -263,6 +355,26 @@ class MCPClientManager:
                     server=server_name,
                     error=str(result.error),
                 )
+
+        if superseded:
+            # A removed/replaced adapter is no longer manager-owned. Close it
+            # outside the lock; a newer generation on the same adapter still
+            # owns that transport and must not be interrupted.
+            if orphaned_adapter:
+                cleanup = await conn.adapter.disconnect()
+                if cleanup.is_err:
+                    log.warning(
+                        "mcp.manager.superseded_cleanup_failed",
+                        server=server_name,
+                        generation=generation,
+                        error=str(cleanup.error),
+                    )
+            return Result.err(
+                MCPConnectionError(
+                    f"Connection attempt was superseded: {server_name}",
+                    server_name=server_name,
+                )
+            )
 
         return result
 
@@ -318,15 +430,30 @@ class MCPClientManager:
                     )
                 )
 
-        result = await conn.adapter.disconnect()
-
         async with self._lock:
-            self._connections[server_name] = ServerConnection(
+            current = self._connections.get(server_name)
+            if current is not conn:
+                return Result.ok(None)
+            replacement = ServerConnection(
                 config=conn.config,
                 adapter=MCPClientAdapter(max_retries=self._max_retries),
                 state=ConnectionState.DISCONNECTED,
-                last_error=str(result.error) if result.is_err else None,
+                generation=conn.generation + 1,
             )
+            self._connections[server_name] = replacement
+
+        result = await conn.adapter.disconnect()
+        if result.is_err:
+            async with self._lock:
+                current = self._connections.get(server_name)
+                if current is replacement:
+                    self._connections[server_name] = ServerConnection(
+                        config=replacement.config,
+                        adapter=replacement.adapter,
+                        state=replacement.state,
+                        generation=replacement.generation,
+                        last_error=str(result.error),
+                    )
 
         return result
 
@@ -610,14 +737,29 @@ class MCPClientManager:
     ) -> Result[ServerConnection, MCPClientError]:
         """Mark a connection unhealthy, reconnect, and return the refreshed connection."""
         async with self._lock:
-            current = self._connections.get(server_name, conn)
+            current = self._connections.get(server_name)
+            if (
+                current is None
+                or current.adapter is not conn.adapter
+                or current.generation != conn.generation
+            ):
+                if current is not None and current.state == ConnectionState.CONNECTED:
+                    return Result.ok(current)
+                return Result.err(
+                    MCPConnectionError(
+                        f"Connection changed while handling failure: {server_name}",
+                        server_name=server_name,
+                    )
+                )
             self._connections[server_name] = ServerConnection(
                 config=current.config,
                 adapter=current.adapter,
                 state=ConnectionState.UNHEALTHY,
+                generation=current.generation + 1,
                 last_error=str(error),
                 tools=current.tools,
                 resources=current.resources,
+                server_snapshot=current.server_snapshot,
             )
 
         reconnect_result = await self.connect(server_name)
@@ -661,13 +803,22 @@ class MCPClientManager:
                 result = await conn.adapter.list_tools()
                 if result.is_err:
                     async with self._lock:
+                        current = self._connections.get(server_name)
+                        if (
+                            current is None
+                            or current.adapter is not conn.adapter
+                            or current.generation != conn.generation
+                        ):
+                            continue
                         self._connections[server_name] = ServerConnection(
                             config=conn.config,
                             adapter=conn.adapter,
                             state=ConnectionState.UNHEALTHY,
+                            generation=conn.generation + 1,
                             last_error=str(result.error),
                             tools=conn.tools,
                             resources=conn.resources,
+                            server_snapshot=conn.server_snapshot,
                         )
                     log.warning(
                         "mcp.manager.health_check_failed",

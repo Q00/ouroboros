@@ -649,6 +649,7 @@ class TestGetEngine:
                 max_turns=1,
                 use_case="interview",
                 allowed_tools=[],
+                strict_mcp_config=True,
             )
             mock_engine_cls.create.assert_called_once()
             call_kwargs = mock_engine_cls.create.call_args
@@ -674,6 +675,7 @@ class TestGetEngine:
                 max_turns=1,
                 use_case="interview",
                 allowed_tools=None,
+                strict_mcp_config=True,
             )
 
     def test_omits_tool_envelope_for_configured_hermes_backend(self) -> None:
@@ -700,6 +702,7 @@ class TestGetEngine:
                 max_turns=1,
                 use_case="interview",
                 allowed_tools=None,
+                strict_mcp_config=True,
             )
 
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:

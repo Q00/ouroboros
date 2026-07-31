@@ -3,6 +3,7 @@
 from ouroboros.codex.artifacts import (
     CODEX_RULE_FILENAME,
     CODEX_SKILL_NAMESPACE,
+    CodexArtifactGeneration,
     CodexArtifactInstallResult,
     CodexManagedArtifact,
     CodexPackagedAssets,
@@ -15,9 +16,11 @@ from ouroboros.codex.artifacts import (
     resolve_packaged_codex_assets,
     resolve_packaged_codex_skill_path,
 )
+from ouroboros.codex.home import resolve_codex_home
 
 __all__ = [
     "CodexManagedArtifact",
+    "CodexArtifactGeneration",
     "CodexArtifactInstallResult",
     "CodexPackagedAssets",
     "CodexPackagedSkill",
@@ -30,4 +33,5 @@ __all__ = [
     "load_packaged_codex_rules",
     "resolve_packaged_codex_assets",
     "resolve_packaged_codex_skill_path",
+    "resolve_codex_home",
 ]

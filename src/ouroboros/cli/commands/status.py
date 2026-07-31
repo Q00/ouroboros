@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Annotated, Any
 
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 import typer
@@ -22,11 +23,22 @@ from ouroboros.backends import (
     resolve_llm_backend_name,
     resolve_runtime_backend_name,
 )
-from ouroboros.cli.commands.config import _load_config, _resolve_db_path
+from ouroboros.cli.commands.config import (
+    _database_file_path,
+    _load_config,
+)
 from ouroboros.cli.formatters.panels import print_error, print_info
-from ouroboros.cli.formatters.tables import create_status_table, print_table
+from ouroboros.cli.formatters.tables import (
+    create_key_value_table,
+    create_status_table,
+    create_table,
+    print_table,
+)
 from ouroboros.config.loader import load_config
+from ouroboros.config.models import resolve_event_store_path
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="status",
@@ -145,11 +157,207 @@ _STATUS_RUN_EXIT_OK = 0
 _STATUS_RUN_EXIT_GENERIC_ERROR = 1
 _STATUS_RUN_EXIT_UNKNOWN_RUN = 2
 _STATUS_RUN_EXIT_MALFORMED_INPUT = 64
+_STATUS_EXECUTION_EVENT_PAGE_SIZE = 500
+_ROOT_EXECUTION_EVENT_STATUS = {
+    "execution.completed": "complete",
+    "execution.failed": "failed",
+    "execution.plan.created": "running",
+    "execution.run.configuration_resolved": "running",
+    "execution.started": "running",
+    "workflow.progress.updated": "running",
+}
+_ABSORBING_EXECUTION_EVENT_TYPES = {
+    "execution.completed",
+    "execution.failed",
+}
+_ABSORBING_TERMINAL_STATUSES = {
+    "cancelled",
+    "complete",
+    "completed",
+    "error",
+    "failed",
+    "failure",
+    "success",
+    "succeeded",
+}
+_TERMINAL_STATUS_ALIASES = {
+    "active": "running",
+    "blocked": "blocked",
+    "cancelled": "cancelled",
+    "complete": "complete",
+    "completed": "complete",
+    "error": "failed",
+    "failed": "failed",
+    "failure": "failed",
+    "paused": "paused",
+    "pending": "pending",
+    "running": "running",
+    "success": "complete",
+    "succeeded": "complete",
+    "waiting": "waiting",
+}
 
 
 def _is_unknown_run_error(message: str) -> bool:
     lowered = message.lower()
     return "no events found" in lowered
+
+
+def _configured_event_store_path() -> Path:
+    db_path = resolve_event_store_path()
+    if not db_path.exists():
+        raise FileNotFoundError(f"configured database does not exist: {db_path}")
+    if not db_path.is_file():
+        raise OSError(f"configured database is not a file: {db_path}")
+    return db_path
+
+
+async def _recent_execution_events(
+    db_path: Path,
+    *,
+    execution_limit: int | None,
+) -> list[tuple[str, BaseEvent]]:
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        persisted = await store.query_latest_events_per_aggregate(
+            aggregate_type="execution",
+            event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
+            preferred_event_type="execution.terminal",
+            preferred_event_types=_ABSORBING_EXECUTION_EVENT_TYPES,
+            preferred_event_statuses=_ABSORBING_TERMINAL_STATUSES,
+            preserve_session_candidates=True,
+            # Session aggregates used by resumed executions must be collapsed
+            # before applying the user-visible execution limit.
+            limit=None,
+        )
+        snapshots = await store.get_session_activity_snapshots()
+    finally:
+        await store.close()
+
+    execution_by_session = {
+        snapshot.session_id: snapshot.execution_id
+        for snapshot in snapshots
+        if snapshot.execution_id
+    }
+    events_by_execution: dict[str, list[BaseEvent]] = {}
+    for event in persisted:
+        execution_id = execution_by_session.get(event.aggregate_id, event.aggregate_id)
+        events_by_execution.setdefault(execution_id, []).append(event)
+    latest_by_execution = {
+        execution_id: latest
+        for execution_id, events in events_by_execution.items()
+        if (latest := _latest_execution_lifecycle(events)) is not None
+    }
+    ordered = sorted(
+        latest_by_execution.items(),
+        key=lambda item: (item[1].timestamp, item[1].id),
+        reverse=True,
+    )
+    return ordered if execution_limit is None else ordered[:execution_limit]
+
+
+def _latest_execution_lifecycle(events: list[BaseEvent]) -> BaseEvent | None:
+    """Select current lifecycle across original and resumed session scopes."""
+    latest_by_session: dict[str, BaseEvent] = {}
+    for event in events:
+        if _root_execution_status(event) is None:
+            continue
+        raw_session_id = event.data.get("session_id")
+        session_id = (
+            raw_session_id.strip()
+            if isinstance(raw_session_id, str) and raw_session_id.strip()
+            else event.aggregate_id
+        )
+        current = latest_by_session.get(session_id)
+        should_replace = current is None
+        if current is not None:
+            current_absorbing = _root_execution_status(current) in {
+                "cancelled",
+                "complete",
+                "failed",
+            }
+            event_absorbing = _root_execution_status(event) in {
+                "cancelled",
+                "complete",
+                "failed",
+            }
+            should_replace = not current_absorbing and (
+                event_absorbing or (event.timestamp, event.id) > (current.timestamp, current.id)
+            )
+        if should_replace:
+            latest_by_session[session_id] = event
+    return max(
+        latest_by_session.values(),
+        key=lambda event: (event.timestamp, event.id),
+        default=None,
+    )
+
+
+async def _execution_events(
+    db_path: Path,
+    execution_id: str,
+    *,
+    include_all: bool,
+) -> list[BaseEvent]:
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        snapshots = await store.get_session_activity_snapshots()
+        session_ids = [
+            snapshot.session_id for snapshot in snapshots if snapshot.execution_id == execution_id
+        ]
+        if session_ids:
+            related_pages = await asyncio.gather(
+                *(
+                    store.query_session_related_events(
+                        session_id,
+                        execution_id=execution_id,
+                        limit=None,
+                    )
+                    for session_id in session_ids
+                )
+            )
+            persisted = list({event.id: event for page in related_pages for event in page}.values())
+        else:
+            persisted = []
+            offset = 0
+            while True:
+                page = await store.query_events(
+                    aggregate_id=execution_id,
+                    limit=_STATUS_EXECUTION_EVENT_PAGE_SIZE,
+                    offset=offset,
+                    aggregate_type="execution",
+                )
+                persisted.extend(page)
+                if len(page) < _STATUS_EXECUTION_EVENT_PAGE_SIZE:
+                    break
+                offset += len(page)
+    finally:
+        await store.close()
+    persisted.sort(key=lambda event: (event.timestamp, event.id), reverse=True)
+    if include_all:
+        return persisted
+    latest = _latest_execution_lifecycle(persisted)
+    return [latest] if latest is not None else []
+
+
+async def _validate_event_store(db_path: Path) -> None:
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
+    await store.initialize(create_schema=False)
+    try:
+        await store.query_events(limit=1)
+    finally:
+        await store.close()
+
+
+def _root_execution_status(event: BaseEvent) -> str | None:
+    if event.type == "execution.terminal":
+        explicit = event.data.get("status")
+        if isinstance(explicit, str) and explicit.strip():
+            return _TERMINAL_STATUS_ALIASES.get(explicit.strip().casefold(), "unknown")
+        return "unknown"
+    return _ROOT_EXECUTION_EVENT_STATUS.get(event.type)
 
 
 @app.command(name="run")
@@ -258,13 +466,27 @@ def executions(
 
     Shows execution history with status information.
     """
-    # Placeholder implementation with example data
-    example_data = [
-        {"name": "exec-001", "status": "complete"},
-        {"name": "exec-002", "status": "running"},
-        {"name": "exec-003", "status": "failed"},
+    if limit <= 0:
+        print_error("Execution status failed: limit must be a positive integer")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+    try:
+        persisted = asyncio.run(
+            _recent_execution_events(
+                _configured_event_store_path(),
+                execution_limit=None if all_ else limit,
+            )
+        )
+    except Exception as exc:
+        print_error(f"Execution status failed: {escape(str(exc))}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
+
+    rows = [
+        {"name": execution_id, "status": _root_execution_status(event) or "unknown"}
+        for execution_id, event in persisted
     ]
-    table = create_status_table(example_data, "Recent Executions")
+    if not all_:
+        rows = rows[:limit]
+    table = create_status_table(rows, "Recent Executions")
     print_table(table)
 
     if not all_:
@@ -286,10 +508,47 @@ def execution(
 
     Displays execution metadata, progress, and optionally events.
     """
-    # Placeholder implementation
-    print_info(f"Would show details for execution: {execution_id}")
+    try:
+        persisted = asyncio.run(
+            _execution_events(
+                _configured_event_store_path(),
+                execution_id,
+                include_all=True,
+            )
+        )
+    except Exception as exc:
+        print_error(f"Execution status failed: {escape(str(exc))}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
+    latest_lifecycle = _latest_execution_lifecycle(persisted)
+    if latest_lifecycle is None:
+        print_error(
+            f"Execution status failed: no persisted execution found: {escape(execution_id)}"
+        )
+        raise typer.Exit(_STATUS_RUN_EXIT_UNKNOWN_RUN)
+
+    print_table(
+        create_key_value_table(
+            {
+                "Execution ID": execution_id,
+                "Status": _root_execution_status(latest_lifecycle) or "unknown",
+                "Latest event": latest_lifecycle.type,
+                "Updated": latest_lifecycle.timestamp.isoformat(),
+            },
+            "Execution Details",
+        )
+    )
     if events:
-        print_info("Would include event history")
+        table = create_table("Execution Events")
+        table.add_column("Timestamp", no_wrap=True)
+        table.add_column("Event", style="cyan")
+        table.add_column("Status")
+        for event in reversed(persisted):
+            table.add_row(
+                Text(event.timestamp.isoformat()),
+                Text(event.type),
+                Text(_root_execution_status(event) or ""),
+            )
+        print_table(table)
 
 
 _CREDENTIAL_PROVIDER_BY_LLM_BACKEND = {
@@ -361,16 +620,6 @@ def _print_health_details(checks: list[dict[str, str]]) -> None:
         detail = check.get("detail", "")
         if detail:
             typer.echo(f"{check['name']}: {check['status']} - {detail}")
-
-
-def _database_file_path(data: dict, config_path: Path) -> Path:
-    configured = data.get("persistence", {}).get("database_path")
-    if configured:
-        path = Path(str(configured)).expanduser()
-        if path.is_absolute():
-            return path
-        return config_path.parent / path
-    return config_path.parent / "ouroboros.db"
 
 
 def _candidate_cli_paths(backend: str, data: dict) -> list[str]:
@@ -562,7 +811,7 @@ def health() -> None:
     else:
         try:
             db_path = _database_file_path(data, config_path)
-            db_detail = _resolve_db_path(data, config_path)
+            db_detail = str(db_path)
             if not db_path.exists():
                 checks.append(
                     _health_row(
@@ -578,7 +827,14 @@ def health() -> None:
                 except OSError as exc:
                     checks.append(_health_row("Database", "error", f"not readable: {exc}"))
                 else:
-                    checks.append(_health_row("Database", "ok", db_detail))
+                    try:
+                        asyncio.run(_validate_event_store(db_path))
+                    except Exception as exc:
+                        checks.append(
+                            _health_row("Database", "error", f"invalid event store: {exc}")
+                        )
+                    else:
+                        checks.append(_health_row("Database", "ok", db_detail))
         except Exception as exc:
             checks.append(_health_row("Database", "error", str(exc)))
 

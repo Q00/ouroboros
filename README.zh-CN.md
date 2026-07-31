@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> 支持 Claude Code、Codex CLI、OpenCode、Hermes。安装脚本会自动检测 Claude Code、Codex CLI 和 Hermes CLI 并注册 MCP server。OpenCode 用户在安装后运行 `ouroboros setup --runtime opencode` 即可。
+> 支持 Claude Code、Codex CLI、OpenCode、Hermes。安装脚本会为 Claude Code 配置独立的 `[claude]` 运行环境，并为 Codex CLI 和 Hermes CLI 注册隔离的 MCP 2 server。OpenCode 用户在安装后运行 `ouroboros setup --runtime opencode` 即可。
 
 <details>
 <summary><strong>其他安装方式</strong></summary>
@@ -87,9 +87,11 @@ pip install 'ouroboros-ai[claude]'        # + Claude Code 依赖
 pip install 'ouroboros-ai[litellm]'       # + LiteLLM 多 provider；Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'           # + MCP server / client 支持
 pip install 'ouroboros-ai[tui]'           # + Textual 终端 UI
-pip install 'ouroboros-ai[all]'           # 全部 (claude + litellm + mcp + tui + dashboard)；Python 3.12-3.13
+pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI + dashboard（不含 MCP 2）；Python 3.12-3.13
 ouroboros setup                         # 配置运行时
 ```
+
+`[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
 
 基础包和非 LiteLLM 安装支持 Python 3.12-3.14。包含 LiteLLM 的安装（`[litellm]`、`[all]`、source `--all-extras`）支持 Python 3.12-3.13；当前示例优先使用 Python 3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix)。
 

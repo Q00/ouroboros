@@ -34,11 +34,17 @@ def resolve_zcode_electron_node_path(cli_path: str | Path | None) -> str | None:
 
     metadata_path = path.with_name(ZCODE_NODE_BUNDLE_METADATA)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata_text = metadata_path.read_text(encoding="utf-8")
     except OSError as exc:
         msg = f"ZCode app-bundle CLI metadata is missing or unreadable: {metadata_path}: {exc}"
         raise RuntimeError(msg) from exc
-    except json.JSONDecodeError as exc:
+    except Exception as exc:
+        msg = f"ZCode app-bundle CLI metadata is invalid JSON: {metadata_path}: {exc}"
+        raise RuntimeError(msg) from exc
+
+    try:
+        metadata = json.loads(metadata_text)
+    except Exception as exc:
         msg = f"ZCode app-bundle CLI metadata is invalid JSON: {metadata_path}: {exc}"
         raise RuntimeError(msg) from exc
 
@@ -66,7 +72,16 @@ def resolve_zcode_electron_node_path(cli_path: str | Path | None) -> str | None:
     try:
         with info_plist.open("rb") as stream:
             bundle_info = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException) as exc:
+    except Exception as exc:
+        # This resolver normalizes every other bundle-metadata failure to RuntimeError,
+        # so the parse arm has to cover whatever `plistlib.load()` can raise. Enumerating
+        # the types kept missing one, and they share no useful base class:
+        #   binary plist, bad header            -> plistlib.InvalidFileException
+        #   malformed XML                       -> xml.parsers.expat.ExpatError
+        #   well-formed XML, bad <integer>/<real> -> ValueError
+        #   well-formed XML, bad <date>         -> AttributeError
+        # An unreadable file is operator-facing input, so any failure to turn it into a
+        # dict becomes the actionable message rather than leaking a parser internal.
         msg = f"ZCode app bundle metadata is present but {info_plist} is unreadable: {exc}"
         raise RuntimeError(msg) from exc
 

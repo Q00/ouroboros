@@ -6,12 +6,14 @@ server configuration, tool definitions, and results.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import ipaddress
 import os
 import socket
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 # Schemes permitted for SSE / HTTP / STREAMABLE_HTTP transports.
@@ -25,6 +27,24 @@ _ALLOW_LOCAL_TRANSPORT_ENV = "OUROBOROS_ALLOW_LOCAL_TRANSPORT"
 # ``ipaddress.ip_address()`` check (they raise ``ValueError`` because they are
 # not IP literals), so we must block them explicitly.
 _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+
+# MCP payloads and JSON Schema keywords are deliberately not flattened into a
+# smaller, application-specific type.  The protocol permits arbitrary JSON as
+# structured content and uses full JSON Schema 2020-12 documents.
+type JSONScalar = str | int | float | bool | None
+type JSONValue = JSONScalar | list[JSONValue] | dict[str, JSONValue]
+type JSONObject = dict[str, JSONValue]
+type JSONSchema = JSONObject | bool
+type MCPCacheScope = Literal["public", "private"]
+
+
+def _mutable_json_copy(value: Any) -> Any:
+    """Return a detached mutable JSON tree from dicts or frozen mappings."""
+    if isinstance(value, Mapping):
+        return {key: _mutable_json_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_json_copy(item) for item in value]
+    return value
 
 
 def _is_blocked_transport_ip(ip: ipaddress._BaseAddress) -> bool:
@@ -275,9 +295,9 @@ class MCPToolParameter:
     type: ToolInputType
     description: str = ""
     required: bool = True
-    default: Any = None
+    default: JSONValue = None
     enum: tuple[str, ...] | None = None
-    items: dict[str, str] | None = None
+    items: JSONSchema | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +315,13 @@ class MCPToolDefinition:
     description: str
     parameters: tuple[MCPToolParameter, ...] = field(default_factory=tuple)
     server_name: str | None = None
+    input_schema: JSONObject | None = None
+    output_schema: JSONObject | None = None
+    title: str | None = None
+    execution: JSONObject | None = None
+    icons: tuple[JSONObject, ...] = field(default_factory=tuple)
+    annotations: JSONObject | None = None
+    meta: JSONObject = field(default_factory=dict)
 
     def to_input_schema(self) -> dict[str, Any]:
         """Convert to JSON Schema for tool input.
@@ -302,6 +329,11 @@ class MCPToolDefinition:
         Returns:
             A JSON Schema dict describing the tool's input parameters.
         """
+        if self.input_schema is not None:
+            # Return a detached mutable tree even when the definition belongs
+            # to a deeply frozen connection snapshot.
+            return _mutable_json_copy(self.input_schema)
+
         properties: dict[str, Any] = {}
         required: list[str] = []
 
@@ -315,7 +347,7 @@ class MCPToolDefinition:
             if param.enum is not None:
                 prop["enum"] = list(param.enum)
             if param.items is not None:
-                prop["items"] = dict(param.items)
+                prop["items"] = _mutable_json_copy(param.items)
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)
@@ -345,8 +377,9 @@ class MCPToolResult:
 
     content: tuple[MCPContentItem, ...] = field(default_factory=tuple)
     is_error: bool = False
-    meta: dict[str, Any] = field(default_factory=dict)
-    structured_content: dict[str, Any] | None = None
+    meta: JSONObject = field(default_factory=dict)
+    structured_content: JSONValue = None
+    result_type: str = "complete"
 
     @property
     def text_content(self) -> str:
@@ -365,7 +398,9 @@ class ContentType(StrEnum):
 
     TEXT = "text"
     IMAGE = "image"
+    AUDIO = "audio"
     RESOURCE = "resource"
+    RESOURCE_LINK = "resource_link"
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +420,14 @@ class MCPContentItem:
     data: str | None = None
     mime_type: str | None = None
     uri: str | None = None
+    resource: MCPResourceContent | None = None
+    name: str | None = None
+    title: str | None = None
+    description: str | None = None
+    size: int | None = None
+    icons: tuple[JSONObject, ...] = field(default_factory=tuple)
+    annotations: JSONObject | None = None
+    meta: JSONObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,7 +444,12 @@ class MCPResourceDefinition:
     uri: str
     name: str
     description: str = ""
-    mime_type: str = "text/plain"
+    mime_type: str | None = "text/plain"
+    title: str | None = None
+    size: int | None = None
+    icons: tuple[JSONObject, ...] = field(default_factory=tuple)
+    annotations: JSONObject | None = None
+    meta: JSONObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,7 +466,55 @@ class MCPResourceContent:
     uri: str
     text: str | None = None
     blob: str | None = None
-    mime_type: str = "text/plain"
+    mime_type: str | None = "text/plain"
+    meta: JSONObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResourceResult:
+    """Lossless ordered result of an MCP ``resources/read`` request.
+
+    ``first_content`` is the compatibility view for callers that historically
+    consumed only the first resource payload.
+    """
+
+    contents: tuple[MCPResourceContent, ...] = field(default_factory=tuple)
+    meta: JSONObject = field(default_factory=dict)
+    ttl_ms: int = 0
+    cache_scope: MCPCacheScope = "private"
+    result_type: str = "complete"
+
+    @property
+    def first_content(self) -> MCPResourceContent | None:
+        """Return the first content item, or ``None`` for an empty result."""
+        return self.contents[0] if self.contents else None
+
+
+@dataclass(frozen=True, slots=True)
+class MCPPromptMessage:
+    """One role-preserving message in an MCP prompt result."""
+
+    role: str
+    content: MCPContentItem
+
+
+@dataclass(frozen=True, slots=True)
+class MCPPromptResult:
+    """Lossless MCP ``prompts/get`` result with a text compatibility view."""
+
+    messages: tuple[MCPPromptMessage, ...] = field(default_factory=tuple)
+    description: str | None = None
+    meta: JSONObject = field(default_factory=dict)
+    result_type: str = "complete"
+
+    @property
+    def text_content(self) -> str:
+        """Join text message bodies for callers using the legacy string API."""
+        return "\n".join(
+            message.content.text
+            for message in self.messages
+            if message.content.type == ContentType.TEXT and message.content.text is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +530,9 @@ class MCPPromptDefinition:
     name: str
     description: str = ""
     arguments: tuple[MCPPromptArgument, ...] = field(default_factory=tuple)
+    title: str | None = None
+    icons: tuple[JSONObject, ...] = field(default_factory=tuple)
+    meta: JSONObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +547,8 @@ class MCPPromptArgument:
 
     name: str
     description: str = ""
-    required: bool = True
+    required: bool | None = True
+    title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,12 +560,50 @@ class MCPCapabilities:
         resources: Whether the server supports resources.
         prompts: Whether the server supports prompts.
         logging: Whether the server supports logging.
+        completions: Whether the server supports argument completion.
+        tasks: Whether the server supports protocol-level tasks.
+        experimental: Whether the server declared experimental capabilities.
+        details: Complete deeply immutable SDK capability model.
     """
 
     tools: bool = False
     resources: bool = False
     prompts: bool = False
     logging: bool = False
+    completions: bool = False
+    tasks: bool = False
+    experimental: bool = False
+    details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+
+@dataclass(frozen=True, slots=True)
+class MCPPeerIdentity:
+    """Complete immutable application identity advertised by an MCP peer."""
+
+    name: str
+    application_version: str
+    title: str | None = None
+    description: str | None = None
+    website_url: str | None = None
+    icons: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+
+@dataclass(frozen=True, slots=True)
+class MCPServerSnapshot:
+    """Immutable negotiated view of one connected MCP server."""
+
+    identity: MCPPeerIdentity | None
+    protocol_version: str
+    supported_protocol_versions: tuple[str, ...]
+    capabilities: MCPCapabilities = field(default_factory=MCPCapabilities)
+    extensions: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    instructions: str | None = None
+    meta: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    ttl_ms: int = 0
+    cache_scope: Literal["public", "private"] = "private"
+    result_type: str = "complete"
+    discovery_details: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,10 +621,16 @@ class MCPServerInfo:
 
     name: str
     version: str = "1.0.0"
+    protocol_version: str = ""
     capabilities: MCPCapabilities = field(default_factory=MCPCapabilities)
     tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
     resources: tuple[MCPResourceDefinition, ...] = field(default_factory=tuple)
     prompts: tuple[MCPPromptDefinition, ...] = field(default_factory=tuple)
+
+    @property
+    def application_version(self) -> str:
+        """Compatibility alias that makes the version domain explicit."""
+        return self.version
 
 
 @dataclass(frozen=True, slots=True)

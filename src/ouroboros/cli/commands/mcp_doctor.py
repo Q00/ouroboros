@@ -17,11 +17,14 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import sys
 from typing import Annotated, Literal
 
 from rich.console import Console
 import typer
+
+from ouroboros.config.models import resolve_event_store_path
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -52,7 +55,7 @@ class CheckResult:
 
 _PID_FILE = Path.home() / ".ouroboros" / "mcp-server.pid"
 _PID_REGISTRY_DIR = Path.home() / ".ouroboros" / "mcp-servers"
-_EVENT_STORE_PATH = Path.home() / ".ouroboros" / "ouroboros.db"
+_EVENT_STORE_PATH: Path | None = None
 _EVENT_STORE_WARN_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
@@ -103,7 +106,7 @@ def check_ouroboros_version() -> CheckResult:
 
 
 def check_mcp_import() -> CheckResult:
-    """Check that the ``mcp`` extra is installed."""
+    """Check that the isolated modern ``mcp`` extra is installed."""
     try:
         import mcp  # noqa: F401
     except ImportError:
@@ -112,8 +115,8 @@ def check_mcp_import() -> CheckResult:
             status="fail",
             message="mcp package not importable",
             remediation=(
-                "pip install 'ouroboros-ai[mcp,claude]'  or  "
-                "uv tool install 'ouroboros-ai[mcp,claude]'"
+                "Run the server in its isolated profile: "
+                "uvx --from 'ouroboros-ai[mcp]' ouroboros mcp serve"
             ),
         )
 
@@ -126,6 +129,21 @@ def check_mcp_import() -> CheckResult:
             status="pass",
             message="mcp (version unknown)",
         )
+    try:
+        major = int(version.split(".", maxsplit=1)[0])
+    except ValueError:
+        major = 0
+    if major != 2:
+        return CheckResult(
+            name="mcp_import",
+            status="fail",
+            message=f"mcp {version} is not the required MCP 2 runtime",
+            remediation=(
+                "Do not add MCP 2 to the Claude SDK environment. Launch the "
+                "separate server process with: uvx --from 'ouroboros-ai[mcp]' "
+                "ouroboros mcp serve"
+            ),
+        )
     return CheckResult(
         name="mcp_import",
         status="pass",
@@ -134,6 +152,7 @@ def check_mcp_import() -> CheckResult:
 
 
 _CLAUDE_RUNTIME_BACKENDS = frozenset({"claude", "claude_code"})
+_CLAUDE_LLM_BACKENDS = frozenset({"claude", "claude_code"})
 _GOOSE_RUNTIME_BACKENDS = frozenset({"goose", "goose_cli"})
 
 
@@ -166,7 +185,8 @@ def check_claude_agent_sdk_import() -> CheckResult:
     because the package is not required for that backend.
     """
     runtime = _get_runtime_backend()
-    needs_claude = runtime in _CLAUDE_RUNTIME_BACKENDS
+    llm_backend = _get_llm_backend()
+    needs_claude = runtime in _CLAUDE_RUNTIME_BACKENDS or llm_backend in _CLAUDE_LLM_BACKENDS
 
     try:
         import claude_agent_sdk  # noqa: F401
@@ -178,17 +198,21 @@ def check_claude_agent_sdk_import() -> CheckResult:
         return CheckResult(
             name="claude_agent_sdk_import",
             status="pass",
-            message=f"claude-agent-sdk {version}",
+            message=f"claude-agent-sdk {version} (standalone Claude profile)",
         )
     except ImportError:
         if needs_claude:
             return CheckResult(
                 name="claude_agent_sdk_import",
                 status="fail",
-                message="claude-agent-sdk not importable",
+                message=(
+                    "Claude SDK backend is configured but unavailable in the isolated MCP 2 process"
+                ),
                 remediation=(
-                    "pip install 'ouroboros-ai[mcp,claude]'  or  "
-                    "uv tool install 'ouroboros-ai[mcp,claude]'"
+                    "Do not combine the incompatible [mcp] and [claude] profiles. "
+                    "For MCP execution, configure a supported CLI-backed runtime and "
+                    "LLM backend. For standalone Claude workflows, use a separate "
+                    "'ouroboros-ai[claude]' environment."
                 ),
             )
         return CheckResult(
@@ -196,7 +220,8 @@ def check_claude_agent_sdk_import() -> CheckResult:
             status="warn",
             message=f"claude-agent-sdk not installed (not required for {runtime} runtime)",
             remediation=(
-                "Install if switching to Claude runtime: pip install 'ouroboros-ai[mcp,claude]'"
+                "Standalone Claude SDK workflows require a separate "
+                "'ouroboros-ai[claude]' environment; never combine it with [mcp]."
             ),
         )
 
@@ -222,12 +247,11 @@ def check_litellm_import() -> CheckResult:
             remediation = (
                 litellm_missing_dependency_message("LiteLLM is optional but not installed.")
                 + " For uv tool: uv tool install --python 3.13 --force "
-                "'ouroboros-ai[mcp,claude,litellm]'."
+                "'ouroboros-ai[litellm]'."
             )
         else:
             remediation = (
-                "pip install 'ouroboros-ai[litellm]'  or  "
-                "uv tool install 'ouroboros-ai[mcp,claude,litellm]'"
+                "pip install 'ouroboros-ai[litellm]'  or  uv tool install 'ouroboros-ai[litellm]'"
             )
 
         return CheckResult(
@@ -315,19 +339,28 @@ def check_codex_oauth_auth() -> CheckResult:
 
 def check_event_store() -> CheckResult:
     """Check EventStore path existence and warn if it exceeds 500 MB."""
-    if not _EVENT_STORE_PATH.exists():
+    try:
+        event_store_path = _EVENT_STORE_PATH or resolve_event_store_path()
+    except ValueError:
+        return CheckResult(
+            name="event_store",
+            status="fail",
+            message="Invalid EventStore configuration.",
+            remediation="Fix persistence.database_path in the Ouroboros configuration.",
+        )
+    if not event_store_path.exists():
         return CheckResult(
             name="event_store",
             status="pass",
-            message=f"{_EVENT_STORE_PATH} not found (will be created on first use)",
+            message=f"{event_store_path} not found (will be created on first use)",
         )
     try:
-        size_bytes = _EVENT_STORE_PATH.stat().st_size
+        size_bytes = event_store_path.stat().st_size
     except OSError as exc:
         return CheckResult(
             name="event_store",
             status="warn",
-            message=f"Cannot stat {_EVENT_STORE_PATH}: {exc}",
+            message=f"Cannot stat {event_store_path}: {exc}",
         )
 
     size_mb = size_bytes / (1024 * 1024)
@@ -335,16 +368,16 @@ def check_event_store() -> CheckResult:
         return CheckResult(
             name="event_store",
             status="warn",
-            message=f"{_EVENT_STORE_PATH} is {size_mb:.1f} MB (>500 MB)",
+            message=f"{event_store_path} is {size_mb:.1f} MB (>500 MB)",
             remediation=(
                 "Consider archiving or pruning old sessions. "
-                "The DB can be vacuumed with: sqlite3 ~/.ouroboros/ouroboros.db VACUUM;"
+                f"The DB can be vacuumed with: sqlite3 {shlex.quote(str(event_store_path))} VACUUM;"
             ),
         )
     return CheckResult(
         name="event_store",
         status="pass",
-        message=f"{_EVENT_STORE_PATH} ({size_mb:.1f} MB)",
+        message=f"{event_store_path} ({size_mb:.1f} MB)",
     )
 
 
@@ -508,11 +541,10 @@ def register_doctor_command(app: typer.Typer) -> None:
     ) -> None:
         """Run environment diagnostics for the MCP server.
 
-        Checks Python version, installed extras (mcp, claude-agent-sdk,
-        litellm), Codex OAuth readiness, EventStore health, and PID file liveness.  Backend-specific
-        extras are validated against the configured runtime so that non-Claude
-        setups (codex, opencode) do not produce false failures.  Exit code 1
-        if any check fails.
+        Checks Python version, the isolated MCP 2 profile, backend-specific
+        dependencies, Codex OAuth readiness, EventStore health, and PID file
+        liveness. Claude Agent SDK and MCP 2 are intentionally diagnosed as
+        separate process profiles. Exit code 1 if any check fails.
 
         Examples:
 

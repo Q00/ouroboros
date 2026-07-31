@@ -1,6 +1,6 @@
 """Brownfield repository registry — DB-backed business logic.
 
-Manages the global brownfield registry in ``~/.ouroboros/ouroboros.db``
+Manages the global brownfield registry in the configured runtime database
 via :class:`~ouroboros.persistence.brownfield.BrownfieldStore`.
 
 Business-level operations:

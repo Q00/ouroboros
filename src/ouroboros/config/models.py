@@ -21,11 +21,13 @@ Classes:
     OuroborosConfig: Top-level configuration combining all sections
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+import yaml
 
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
@@ -168,7 +170,10 @@ class LLMProviderProfileConfig(BaseModel, frozen=True):
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     max_turns: int | None = Field(default=None, ge=1)
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Provider-scoped mappings may use the Codex-native ``xhigh`` level.
+    # Keeping it here (rather than in a generated Codex profile file) lets
+    # Ouroboros apply it only to the selected Codex invocation.
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
 
 
 class LLMTaskProfileConfig(BaseModel, frozen=True):
@@ -181,6 +186,23 @@ class LLMTaskProfileConfig(BaseModel, frozen=True):
     max_turns: int | None = Field(default=None, ge=1)
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     providers: dict[str, LLMProviderProfileConfig] = Field(default_factory=dict)
+
+    @field_validator("providers")
+    @classmethod
+    def validate_provider_reasoning_efforts(
+        cls, providers: dict[str, LLMProviderProfileConfig]
+    ) -> dict[str, LLMProviderProfileConfig]:
+        """Keep Codex-only reasoning effort levels out of non-Codex providers."""
+        for provider_name, provider_config in providers.items():
+            if provider_config.reasoning_effort != "xhigh":
+                continue
+            if provider_name.strip().lower() not in {"codex", "codex_cli"}:
+                msg = (
+                    "reasoning_effort='xhigh' is only supported for Codex provider "
+                    f"profiles, not {provider_name!r}"
+                )
+                raise ValueError(msg)
+        return providers
 
 
 class ClarificationConfig(BaseModel, frozen=True):
@@ -208,6 +230,8 @@ class ExecutionConfig(BaseModel, frozen=True):
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
         auto_evaluate: When true, a successful `execute_seed` run automatically
             enqueues formal evaluation as a background job.
+        default_model: Optional model pin for every Execute-stage runtime call.
+            ``None`` (the default) keeps the runtime's own selected model.
         run_verify_commands: Whether the orchestrator checks an AC's success
             contract itself before accepting the AC: all ``expected_artifacts``
             must exist under the run workspace and ``verify_command`` must exit
@@ -235,6 +259,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True
+    default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)
@@ -812,3 +837,59 @@ def get_config_dir() -> Path:
         Path to ~/.ouroboros/
     """
     return Path.home() / ".ouroboros"
+
+
+def _existing_event_store_target(path: Path) -> bool:
+    """Return whether *path* exists, rejecting entries SQLite cannot open as a file."""
+    try:
+        exists = path.exists() or path.is_symlink()
+        is_file = path.is_file() if exists else False
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("invalid EventStore configuration") from None
+    if exists and not is_file:
+        raise ValueError("invalid EventStore configuration")
+    return exists
+
+
+def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> Path:
+    """Resolve the EventStore path while preserving an existing legacy database."""
+    persistence = data.get("persistence")
+    if persistence is not None and not isinstance(persistence, Mapping):
+        raise ValueError("config section 'persistence' must be a mapping")
+
+    legacy_path = config_path.parent / "ouroboros.db"
+    if not persistence or "database_path" not in persistence:
+        _existing_event_store_target(legacy_path)
+        return legacy_path
+    configured = persistence["database_path"]
+    if not isinstance(configured, str) or not configured.strip():
+        raise ValueError("config field 'persistence.database_path' must be a non-empty string")
+
+    try:
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = config_path.parent / configured_path
+        configured_exists = _existing_event_store_target(configured_path)
+        legacy_exists = legacy_path.is_file()
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("invalid EventStore configuration") from None
+    if configured_exists or not legacy_exists:
+        return configured_path
+    return legacy_path
+
+
+def resolve_event_store_path(config_path: Path | None = None) -> Path:
+    """Resolve the authoritative EventStore path for runtime and CLI readers."""
+    if config_path is None:
+        config_path = get_config_dir() / "config.yaml"
+
+    if not config_path.exists():
+        return config_path.parent / "ouroboros.db"
+
+    try:
+        loaded = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        raise ValueError("invalid EventStore configuration") from None
+    if not isinstance(loaded, Mapping):
+        raise ValueError("invalid EventStore configuration")
+    return event_store_path_from_config(loaded, config_path)

@@ -7,6 +7,8 @@ parser, and the merge layering (TOML + explicit overrides).
 
 from pathlib import Path
 
+import pytest
+
 from ouroboros.evaluation.languages import (
     _parse_command,
     build_mechanical_config,
@@ -197,3 +199,57 @@ class TestBuildMechanicalConfigFromToml:
         config = build_mechanical_config(tmp_path)
         # TOML parse failed → fall back to empty defaults, not crash.
         assert config.lint_command is None
+
+    def test_non_utf8_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Invalid UTF-8 raises UnicodeDecodeError, not TOMLDecodeError."""
+        ouroboros_dir = tmp_path / ".ouroboros"
+        ouroboros_dir.mkdir(exist_ok=True)
+        (ouroboros_dir / "mechanical.toml").write_bytes(b'lint = "\xff"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
+    def test_pathologically_nested_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Deeply nested documents exhaust tomllib's recursive parser.
+
+        RecursionError shares no base class with TOMLDecodeError or
+        UnicodeDecodeError, so enumerating decode errors alone does not hold the
+        "never raises" contract.
+        """
+        self._write_toml(tmp_path, "a = " + "[" * 2000 + "]" * 2000)
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
+    def test_unreadable_toml_is_ignored(self, tmp_path: Path) -> None:
+        """Existing but unopenable toml falls back to defaults instead of raising.
+
+        A directory in the config's place reproduces the general case — an
+        unreadable mode, or a delete racing the ``exists()`` probe — without
+        depending on the privileges of the user running the suite.
+        """
+        ouroboros_dir = tmp_path / ".ouroboros"
+        ouroboros_dir.mkdir(exist_ok=True)
+        (ouroboros_dir / "mechanical.toml").mkdir()
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+        assert config.test_command is None
+
+    def test_toml_exists_probe_failure_is_avoided(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An inaccessible parent must not escape through a preflight stat."""
+        config_path = tmp_path / ".ouroboros" / "mechanical.toml"
+        original_exists = Path.exists
+
+        def _raise_for_config(path: Path) -> bool:
+            if path == config_path:
+                raise PermissionError("stat denied")
+            return original_exists(path)
+
+        monkeypatch.setattr(Path, "exists", _raise_for_config)
+
+        config = build_mechanical_config(tmp_path)
+
+        assert config.lint_command is None
+        assert config.test_command is None

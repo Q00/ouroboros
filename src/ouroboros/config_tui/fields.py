@@ -37,6 +37,7 @@ class SettingField:
     label: str
     env_vars: tuple[str, ...] = ()
     stage: str | None = None
+    empty_env_value_overrides: bool = False
 
 
 GLOBAL_RUNTIME_FIELD = SettingField(
@@ -62,15 +63,20 @@ def stage_runtime_field(stage: Stage) -> SettingField:
 
 
 # Friendly per-stage model bindings. "seed" is not a separate stage: it
-# shares clarification config with interview (see Stage docstring). Execute is
-# runtime-only here: the old execution model key was removed from the config
-# schema, and no replacement execution model contract exists.
+# shares clarification config with interview (see Stage docstring).
 STAGE_MODEL_FIELDS: dict[Stage, SettingField] = {
     Stage.INTERVIEW: SettingField(
         key="clarification.default_model",
         label="Interview & Seed model",
         env_vars=("OUROBOROS_CLARIFICATION_MODEL",),
         stage=Stage.INTERVIEW.value,
+    ),
+    Stage.EXECUTE: SettingField(
+        key="execution.default_model",
+        label="Execute model",
+        env_vars=("OUROBOROS_EXECUTION_MODEL",),
+        stage=Stage.EXECUTE.value,
+        empty_env_value_overrides=True,
     ),
     Stage.EVALUATE: SettingField(
         key="evaluation.semantic_model",
@@ -90,7 +96,14 @@ ADVANCED_MODEL_FIELDS: tuple[SettingField, ...] = ()
 
 
 def active_env_overrides(field: SettingField) -> tuple[str, ...]:
-    """Names of this field's override env vars that are currently set (non-empty)."""
+    """Names of this field's override env vars that are currently present.
+
+    Model override variables intentionally count even when empty: the runtime
+    treats a present empty model var as an explicit clear, so the UI must warn
+    that saved config is currently shadowed.
+    """
+    if field.empty_env_value_overrides:
+        return tuple(name for name in field.env_vars if name in os.environ)
     return tuple(name for name in field.env_vars if os.environ.get(name, "").strip())
 
 
