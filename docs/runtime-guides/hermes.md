@@ -13,16 +13,44 @@ hermes version
 
 ## Setup
 
-Run the Ouroboros setup command and select the `hermes` runtime:
+Install the MCP profile with a package-isolated launcher, then select the
+`hermes` runtime:
 
 ```bash
+pipx install 'ouroboros-ai[mcp]'         # or: uv tool install 'ouroboros-ai[mcp]'
 ouroboros setup --runtime hermes
 ```
+
+Setup requires `uvx` or `pipx` and registers the MCP 2 server through that
+isolated process. It never falls back to a direct `ouroboros` binary or
+`python -m`, because those environments may contain the Claude SDK's MCP 1.x
+dependency or no MCP extra. If neither launcher is available, setup exits
+non-zero before changing persistent Ouroboros runtime configuration.
 
 This will:
 1.  Configure `~/.ouroboros/config.yaml` to use the `hermes` backend.
 2.  Install Ouroboros skills into `~/.hermes/skills/autonomous-ai-agents/ouroboros/`.
 3.  Register the Ouroboros MCP server in `~/.hermes/config.yaml`.
+
+With `uvx`, the generated host entry is:
+
+```yaml
+mcp_servers:
+  ouroboros:
+    command: uvx
+    args: [--from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
+    enabled: true
+```
+
+When only `pipx` is available, setup writes:
+
+```yaml
+mcp_servers:
+  ouroboros:
+    command: pipx
+    args: [run, --spec, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
+    enabled: true
+```
 
 ## Usage
 

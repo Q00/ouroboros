@@ -35,6 +35,8 @@ from uuid import uuid4
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.project_identity import (
     ProjectIdentity,
+    active_publication_evidence,
+    publication_evidence_is_stable,
     resolve_managed_project_identity,
     resolve_project_identity,
 )
@@ -122,6 +124,26 @@ async def _validate_project_identity_publication(
         raise ValueError("project identity conflicts with execution contract")
     if project_identity is not None and project_workspace is not None:
         if project_task_workspace is None:
+            # The runner deposits resolver-issued evidence in a scope it owns;
+            # nothing about the fast path is caller-suppliable through this
+            # module's API. Acceptance is still re-proven here: issuance,
+            # identity, workspace anchor, closure completeness, stability.
+            evidence = active_publication_evidence()
+            if (
+                evidence is not None
+                and evidence.identity == project_identity
+                and await asyncio.to_thread(
+                    publication_evidence_is_stable,
+                    evidence,
+                    project_workspace,
+                )
+            ):
+                # The resolver's whole repo-local input closure is unchanged
+                # since construction, so re-running it must reproduce the same
+                # identity; the recheck issues no Git query, so the V1 probe
+                # invariant is vacuously satisfied. Any doubt fell through to
+                # the full re-resolution below, which probes for itself.
+                return
             revalidated_identity = await asyncio.to_thread(
                 resolve_project_identity,
                 project_workspace,

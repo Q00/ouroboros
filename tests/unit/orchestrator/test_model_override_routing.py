@@ -78,7 +78,13 @@ class TestCapabilityDeclarations:
 
 class TestCodexModelOverrideEnforcement:
     def _runtime(self, *, model: str | None = None) -> CodexCliRuntime:
-        return CodexCliRuntime(cli_path="codex", cwd="/tmp", model=model)
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp", model=model)
+        # These tests exercise command construction, not live executable drift.
+        # Keep the initialization snapshot stable so an App/CLI updater cannot
+        # make this unit suite depend on a second external ``codex --version``.
+        version_snapshot = runtime._cli_executable_version_identity_snapshot  # noqa: SLF001
+        runtime._cli_executable_version_identity = lambda: version_snapshot  # type: ignore[method-assign]  # noqa: SLF001
+        return runtime
 
     def test_per_call_model_is_enforced_via_flag(self) -> None:
         command = self._runtime()._build_command(

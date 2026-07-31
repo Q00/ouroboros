@@ -1,0 +1,19 @@
+{
+  "name": "ouroboros",
+  "interface": {
+    "displayName": "Ouroboros"
+  },
+  "plugins": [
+    {
+      "name": "ouroboros",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

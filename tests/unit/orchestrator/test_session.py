@@ -15,8 +15,11 @@ from ouroboros.core import project_identity as project_identity_module
 from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
+    ProjectIdentityUnavailableError,
+    publication_evidence_sink,
     resolve_managed_project_identity,
     resolve_project_identity,
+    resolve_project_identity_for_publication,
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace
@@ -243,6 +246,169 @@ class TestSessionRepository:
             key: event.data[key] for key in ("project_id", "project_root", "workspace_path")
         } == identity.to_event_data()
         assert event.data["execution_contract"] == execution_contract
+
+    @pytest.mark.asyncio
+    async def test_create_session_accepts_stable_evidence_without_re_resolution(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A stable captured closure lets publication skip the second resolution."""
+        project_root = tmp_path / "project-map"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        with publication_evidence_sink():
+            identity, _evidence = resolve_project_identity_for_publication(workspace)
+            execution_contract = {"frugality_proof": identity.to_workspace_data()}
+
+            with patch(
+                "ouroboros.orchestrator.session.resolve_project_identity",
+                side_effect=AssertionError("publication must not re-run the resolver"),
+            ):
+                result = await repository.create_session(
+                    execution_id="exec_123",
+                    seed_id="seed_456",
+                    execution_contract=execution_contract,
+                    project_identity=identity,
+                    project_workspace=str(workspace),
+                )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args.args[0]
+        assert event.data["project_root"] == identity.project_root
+
+    @pytest.mark.asyncio
+    async def test_create_session_re_resolves_when_evidence_closure_drifts(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Any change inside the captured closure forces the full revalidation."""
+        project_root = tmp_path / "project-map"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        resolves = {"n": 0}
+
+        def counting(effective_cwd):
+            resolves["n"] += 1
+            return resolve_project_identity(effective_cwd)
+
+        with publication_evidence_sink():
+            identity, _evidence = resolve_project_identity_for_publication(workspace)
+            execution_contract = {"frugality_proof": identity.to_workspace_data()}
+            config = project_root / ".git" / "config"
+            config.write_bytes(config.read_bytes() + b"# identity-neutral edit\n")
+
+            with patch(
+                "ouroboros.orchestrator.session.resolve_project_identity",
+                side_effect=counting,
+            ):
+                result = await repository.create_session(
+                    execution_id="exec_123",
+                    seed_id="seed_456",
+                    execution_contract=execution_contract,
+                    project_identity=identity,
+                    project_workspace=str(workspace),
+                )
+
+        assert result.is_ok
+        assert resolves["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_create_session_ignores_evidence_for_a_different_identity(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Evidence must vouch for the published identity itself, not merely exist."""
+        project_root = tmp_path / "project-map"
+        workspace = project_root / "packages" / "app"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(project_root)], check=True)
+        other_root = tmp_path / "other"
+        other_root.mkdir()
+        subprocess.run(["git", "init", "-q", str(other_root)], check=True)
+        identity = resolve_project_identity(workspace)
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
+
+        resolves = {"n": 0}
+
+        def counting(effective_cwd):
+            resolves["n"] += 1
+            return resolve_project_identity(effective_cwd)
+
+        with publication_evidence_sink():
+            resolve_project_identity_for_publication(other_root)
+
+            with patch(
+                "ouroboros.orchestrator.session.resolve_project_identity",
+                side_effect=counting,
+            ):
+                result = await repository.create_session(
+                    execution_id="exec_123",
+                    seed_id="seed_456",
+                    execution_contract=execution_contract,
+                    project_identity=identity,
+                    project_workspace=str(workspace),
+                )
+
+        assert result.is_ok
+        assert resolves["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_create_session_refuses_planted_evidence_over_invalid_git_shape(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A caller-assembled closure never substitutes for the re-resolution.
+
+        Even evidence that structurally matches the live filesystem is refused
+        when the resolver did not issue it; publication falls through to the
+        full re-resolution, which fails closed on the invalid marker shape.
+        """
+        fake_root = (tmp_path / "fake").resolve()
+        fake_root.mkdir()
+        (fake_root / ".git").mkdir()
+        identity = ProjectIdentity.from_root(fake_root, workspace_path=".", require_exists=True)
+        git_dir = fake_root / ".git"
+        forged_files = [project_identity_module._capture_topology_file(git_dir, hash_content=True)]
+        for name in project_identity_module._GIT_DIR_CLOSURE_NAMES:
+            forged_files.append(
+                project_identity_module._capture_topology_file(git_dir / name, hash_content=True)
+            )
+        forged_files.append(
+            project_identity_module._capture_topology_file(
+                git_dir / "worktrees", hash_content=False
+            )
+        )
+        forged = project_identity_module.PublicationEvidence(
+            identity=identity,
+            effective_directory=fake_root,
+            directory_evidence=(project_identity_module._capture_live_directory(fake_root),),
+            file_evidence=tuple(forged_files),
+            escalate=False,
+        )
+        execution_contract = {"frugality_proof": identity.to_workspace_data()}
+
+        with publication_evidence_sink() as cell:
+            cell[0] = forged
+            with pytest.raises(ProjectIdentityUnavailableError):
+                await repository.create_session(
+                    execution_id="exec_123",
+                    seed_id="seed_456",
+                    execution_contract=execution_contract,
+                    project_identity=identity,
+                    project_workspace=str(fake_root),
+                )
+
+        mock_event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_session_rejects_workspace_deleted_after_topology_resolution(

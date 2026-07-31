@@ -7,11 +7,11 @@ and server adapters without requiring real external MCP servers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 import inspect
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -100,12 +100,8 @@ class MockMCPServerState:
         self.prompts[name] = (definition, template)
 
 
-class MockMCPSession:
-    """Mock MCP session that simulates the MCP SDK ClientSession.
-
-    This class provides the same interface as the real MCP SDK ClientSession
-    but operates entirely in memory without network communication.
-    """
+class MockMCPClient:
+    """In-memory test double for the public MCP SDK v2 ``Client``."""
 
     def __init__(self, server_state: MockMCPServerState) -> None:
         """Initialize with server state.
@@ -114,10 +110,26 @@ class MockMCPSession:
             server_state: The mock server state to use.
         """
         self._state = server_state
-        self._initialized = False
+        from mcp import types as sdk_types
 
-    async def __aenter__(self) -> MockMCPSession:
+        self.server_info = sdk_types.Implementation(
+            name=server_state.name, version=server_state.version
+        )
+        self.protocol_version = "2026-07-28"
+        self.server_capabilities = sdk_types.ServerCapabilities(
+            tools=sdk_types.ToolsCapability() if server_state.tools else None,
+            resources=sdk_types.ResourcesCapability() if server_state.resources else None,
+            prompts=sdk_types.PromptsCapability() if server_state.prompts else None,
+            logging=sdk_types.LoggingCapability(),
+        )
+        self.instructions = None
+        self.session = SimpleNamespace(
+            discover_result=SimpleNamespace(supported_versions=(self.protocol_version,))
+        )
+
+    async def __aenter__(self) -> MockMCPClient:
         """Enter async context manager."""
+        self._state.initialized = True
         return self
 
     async def __aexit__(
@@ -129,51 +141,26 @@ class MockMCPSession:
         """Exit async context manager."""
         pass
 
-    async def initialize(self) -> MagicMock:
-        """Initialize the session and return server info.
-
-        Returns:
-            Mock initialization result with server capabilities.
-        """
-        self._initialized = True
-        self._state.initialized = True
-
-        # Create mock init result
-        result = MagicMock()
-        result.protocolVersion = "1.0.0"
-        result.capabilities = MagicMock()
-        # MCP SDK returns None for missing capabilities, not False
-        # The adapter checks "is not None" to determine capability presence
-        result.capabilities.tools = MagicMock() if len(self._state.tools) > 0 else None
-        result.capabilities.resources = MagicMock() if len(self._state.resources) > 0 else None
-        result.capabilities.prompts = MagicMock() if len(self._state.prompts) > 0 else None
-        result.capabilities.logging = MagicMock()
-
-        return result
-
-    async def list_tools(self) -> MagicMock:
+    async def list_tools(self, *, cursor: str | None = None) -> Any:
         """List available tools.
 
         Returns:
             Mock result with tool list.
         """
-        result = MagicMock()
-        result.tools = []
+        from mcp import types as sdk_types
 
-        for name, (definition, _handler) in self._state.tools.items():
-            mock_tool = MagicMock()
-            mock_tool.name = name
-            mock_tool.description = definition.description
-            mock_tool.inputSchema = definition.to_input_schema()
-            result.tools.append(mock_tool)
+        from ouroboros.mcp.sdk_mapping import tool_to_sdk
 
-        return result
+        del cursor
+        return sdk_types.ListToolsResult(
+            tools=[tool_to_sdk(definition) for definition, _handler in self._state.tools.values()]
+        )
 
     async def call_tool(
         self,
         name: str,
         arguments: dict[str, Any],
-    ) -> MagicMock:
+    ) -> Any:
         """Call a tool.
 
         Args:
@@ -201,42 +188,35 @@ class MockMCPSession:
 
         # Execute handler if provided
         if handler is not None:
-            if inspect.iscoroutinefunction(handler):
-                text = await handler(arguments)
-            else:
-                text = handler(arguments)
+            text = handler(arguments)
+            if inspect.isawaitable(text):
+                text = await text
         else:
             text = f"Tool {name} executed with {arguments}"
 
-        # Create mock result
-        result = MagicMock()
-        mock_content = MagicMock()
-        mock_content.text = text
-        result.content = [mock_content]
-        result.isError = False
+        from mcp import types as sdk_types
 
-        return result
+        return sdk_types.CallToolResult(content=[sdk_types.TextContent(text=str(text))])
 
-    async def list_resources(self) -> MagicMock:
+    async def list_resources(self, *, cursor: str | None = None) -> Any:
         """List available resources.
 
         Returns:
             Mock result with resource list.
         """
-        result = MagicMock()
-        result.resources = []
+        from mcp import types as sdk_types
 
-        for uri, (definition, _content) in self._state.resources.items():
-            mock_resource = MagicMock()
-            mock_resource.uri = uri
-            mock_resource.name = definition.name
-            mock_resource.description = definition.description
-            mock_resource.mimeType = definition.mime_type
-            result.resources.append(mock_resource)
+        from ouroboros.mcp.sdk_mapping import resource_to_sdk
 
-        return result
+        del cursor
+        return sdk_types.ListResourcesResult(
+            resources=[
+                resource_to_sdk(definition)
+                for definition, _content in self._state.resources.values()
+            ]
+        )
 
-    async def read_resource(self, uri: str) -> MagicMock:
+    async def read_resource(self, uri: str) -> Any:
         """Read a resource.
 
         Args:
@@ -260,40 +240,34 @@ class MockMCPSession:
 
         _definition, content = self._state.resources[uri]
 
-        result = MagicMock()
-        mock_content = MagicMock()
-        mock_content.text = content
-        mock_content.mimeType = "text/plain"
-        result.contents = [mock_content]
+        from mcp import types as sdk_types
 
-        return result
+        return sdk_types.ReadResourceResult(
+            contents=[sdk_types.TextResourceContents(uri=uri, text=content, mime_type="text/plain")]
+        )
 
-    async def list_prompts(self) -> MagicMock:
+    async def list_prompts(self, *, cursor: str | None = None) -> Any:
         """List available prompts.
 
         Returns:
             Mock result with prompt list.
         """
-        result = MagicMock()
-        result.prompts = []
+        from mcp import types as sdk_types
 
-        for name, (definition, _template) in self._state.prompts.items():
-            mock_prompt = MagicMock()
-            mock_prompt.name = name
-            mock_prompt.description = definition.description
-            mock_prompt.arguments = [
-                MagicMock(name=arg.name, description=arg.description, required=arg.required)
-                for arg in definition.arguments
+        from ouroboros.mcp.sdk_mapping import prompt_to_sdk
+
+        del cursor
+        return sdk_types.ListPromptsResult(
+            prompts=[
+                prompt_to_sdk(definition) for definition, _template in self._state.prompts.values()
             ]
-            result.prompts.append(mock_prompt)
-
-        return result
+        )
 
     async def get_prompt(
         self,
         name: str,
         arguments: dict[str, str],
-    ) -> MagicMock:
+    ) -> Any:
         """Get a filled prompt.
 
         Args:
@@ -324,13 +298,16 @@ class MockMCPSession:
         for key, value in arguments.items():
             filled = filled.replace(f"{{{key}}}", value)
 
-        result = MagicMock()
-        mock_message = MagicMock()
-        mock_message.content = MagicMock()
-        mock_message.content.text = filled
-        result.messages = [mock_message]
+        from mcp import types as sdk_types
 
-        return result
+        return sdk_types.GetPromptResult(
+            messages=[
+                sdk_types.PromptMessage(
+                    role="user",
+                    content=sdk_types.TextContent(text=filled),
+                )
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -744,43 +721,8 @@ def second_server_config() -> MCPServerConfig:
     )
 
 
-def create_mock_session_factory(state: MockMCPServerState):
-    """Create a factory function that returns mock sessions.
+def create_mock_sdk_client_resources(state: MockMCPServerState) -> Any:
+    """Return adapter-owned resources backed by an in-memory SDK v2 client."""
+    from ouroboros.mcp.client.sdk_factory import SDKClientResources
 
-    Args:
-        state: The server state to use.
-
-    Returns:
-        A context manager that yields (read_stream, write_stream).
-    """
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def mock_stdio_client(_params: Any) -> AsyncIterator[tuple[Any, Any]]:
-        """Mock stdio client that yields mock streams."""
-        # Create mock streams
-        read_stream = MagicMock()
-        write_stream = MagicMock()
-        yield (read_stream, write_stream)
-
-    return mock_stdio_client
-
-
-def create_mock_client_session_class(state: MockMCPServerState) -> type:
-    """Create a mock ClientSession class bound to a server state.
-
-    Args:
-        state: The server state to use.
-
-    Returns:
-        A mock ClientSession class.
-    """
-
-    class BoundMockSession(MockMCPSession):
-        """A MockMCPSession bound to a specific state."""
-
-        def __init__(self, read_stream: Any, write_stream: Any) -> None:
-            """Initialize ignoring streams (they're mock objects)."""
-            super().__init__(state)
-
-    return BoundMockSession
+    return SDKClientResources(client=MockMCPClient(state))

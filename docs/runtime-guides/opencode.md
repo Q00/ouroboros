@@ -88,7 +88,7 @@ What each mode installs:
 - Bridge plugin at `<opencode_config_dir>/plugins/ouroboros-bridge/ouroboros-bridge.ts` (atomic write, content-hashed — no-op if unchanged)
 - Plugin entry in `~/.config/opencode/opencode.jsonc` or `opencode.json` (dedupes stale entries)
 - Ouroboros MCP server in the same file
-- Claude Code MCP sidecar entry (if `~/.claude/` exists) — MCP is runtime-independent
+- No Claude SDK MCP sidecar mutation; its MCP 1.x profile remains isolated
 
 **subprocess**
 - `orchestrator.runtime_backend: opencode` in `~/.ouroboros/config.yaml`

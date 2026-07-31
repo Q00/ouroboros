@@ -675,7 +675,7 @@ await manager.disconnect_all()
 
 ### Class: `MCPServerAdapter`
 
-Concrete implementation of MCPServer protocol using FastMCP.
+Concrete implementation of the Ouroboros `MCPServer` protocol using the MCP SDK v2 server API.
 
 ```python
 class MCPServerAdapter:

@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from ouroboros.core import project_identity
 from ouroboros.core.project_identity import (
     ManagedProjectOwnershipError,
     ManagedProjectScopeError,
@@ -691,7 +692,8 @@ def test_git_version_probe_does_not_depend_on_workdir_capability() -> None:
     ) as run_git_command:
         _require_supported_git()
 
-    run_git_command.assert_called_once_with("--version")
+    assert run_git_command.call_count == 1
+    assert run_git_command.call_args.args == ("--version",)
 
 
 def test_repository_query_nonzero_after_git_probe_is_unavailable(tmp_path: Path) -> None:
@@ -1010,4 +1012,267 @@ def test_project_identity_rejects_noncanonical_fields(
             project_id=project_id,
             project_root=project_root,
             workspace_path=workspace_path,
+        )
+
+
+class TestPublicationEvidence:
+    """#1796 L2: publication accepts by metadata closure or escalates."""
+
+    def _repo(self, tmp_path):
+        import subprocess as sp
+
+        repo = tmp_path / "repo"
+        repo.mkdir(parents=True)
+        sp.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "sub").mkdir()
+        return repo
+
+    def test_happy_path_is_stable_and_runs_no_git(self, tmp_path, monkeypatch) -> None:
+        repo = self._repo(tmp_path)
+        identity, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert identity == project_identity.resolve_project_identity(repo / "sub")
+        assert evidence.escalate is False
+
+        spawns = {"n": 0}
+        real_run = project_identity.subprocess.run
+
+        def counting_run(*args, **kwargs):  # noqa: ANN001, ANN202
+            spawns["n"] += 1
+            return real_run(*args, **kwargs)
+
+        monkeypatch.setattr(project_identity.subprocess, "run", counting_run)
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        assert spawns["n"] == 0, "the fast path must not spawn any git subprocess"
+
+    def test_each_closure_mutation_destabilizes(self, tmp_path) -> None:
+        cases = []
+
+        def case(name):
+            def register(fn):
+                cases.append((name, fn))
+                return fn
+
+            return register
+
+        @case("config content edited in place")
+        def _(repo):
+            config = repo / ".git" / "config"
+            config.write_text(config.read_text() + "[user]\n\tname = drift\n")
+
+        @case("commondir appears (worktree constellation)")
+        def _(repo):
+            (repo / ".git" / "commondir").write_text("../..\n")
+
+        @case("new intermediate boundary marker")
+        def _(repo):
+            (repo / "sub" / ".git").mkdir()
+
+        @case("HEAD rewritten")
+        def _(repo):
+            (repo / ".git" / "HEAD").write_text("ref: refs/heads/elsewhere\n")
+
+        @case("worktree registry appears")
+        def _(repo):
+            (repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
+            (repo / ".git" / "worktrees" / "wt" / "gitdir").write_text("x\n")
+
+        @case("worktree-scoped config appears")
+        def _(repo):
+            (repo / ".git" / "config.worktree").write_text("[core]\n\tbare = true\n")
+
+        for name, mutate in cases:
+            repo = self._repo(tmp_path / name.replace(" ", "-"))
+            _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+            assert evidence.escalate is False, name
+            assert (
+                project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+            ), name
+            mutate(repo)
+            assert (
+                project_identity.publication_evidence_is_stable(evidence, repo / "sub") is False
+            ), f"mutation not detected: {name}"
+
+    def test_unenumerable_shapes_escalate_at_capture(self, tmp_path) -> None:
+        import subprocess as sp
+
+        include_repo = self._repo(tmp_path / "inc")
+        config = include_repo / ".git" / "config"
+        config.write_text(config.read_text() + "[include]\n\tpath = other\n")
+        _, evidence = project_identity.resolve_project_identity_for_publication(
+            include_repo / "sub"
+        )
+        assert evidence.escalate is True
+
+        linked_base = self._repo(tmp_path / "base")
+        sp.run(
+            [
+                "git",
+                "-C",
+                str(linked_base),
+                "-c",
+                "user.name=Project Identity Test",
+                "-c",
+                "user.email=project-identity@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "x",
+            ],
+            check=True,
+        )
+        linked = tmp_path / "linked"
+        sp.run(
+            ["git", "-C", str(linked_base), "worktree", "add", "-q", str(linked)],
+            check=True,
+        )
+        _, linked_evidence = project_identity.resolve_project_identity_for_publication(linked)
+        assert linked_evidence.escalate is True, (
+            "a gitdir-pointer checkout must not take the fast path"
+        )
+
+    def test_mutation_between_resolution_and_capture_escalates(self, tmp_path, monkeypatch) -> None:
+        """Evidence must be bound to the exact resolution that produced it.
+
+        A closure mutated after the resolver's queries but before the capture
+        would otherwise record the new state against the old identity; the
+        pre/post capture bracket detects the interleaving and escalates.
+        """
+        repo = self._repo(tmp_path)
+        original = project_identity._resolve_canonical_project_identity
+
+        def resolve_then_mutate(effective):
+            resolved = original(effective)
+            config = repo / ".git" / "config"
+            config.write_text(config.read_text() + "[user]\n\tname = other-owner\n")
+            return resolved
+
+        monkeypatch.setattr(
+            project_identity, "_resolve_canonical_project_identity", resolve_then_mutate
+        )
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert evidence.escalate is True, (
+            "a closure change between resolution and capture must not produce usable evidence"
+        )
+
+    def test_worktree_scoped_config_is_part_of_the_closure(self, tmp_path) -> None:
+        """config.worktree can carry topology-affecting values; pin it."""
+        repo = self._repo(tmp_path / "edit")
+        worktree_config = repo / ".git" / "config.worktree"
+        worktree_config.write_text("[core]\n")
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert evidence.escalate is False
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        worktree_config.write_text("[core]\n\tbare = true\n")
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is False, (
+            "an in-place config.worktree edit must destabilize the evidence"
+        )
+
+        include_repo = self._repo(tmp_path / "include")
+        (include_repo / ".git" / "config.worktree").write_text("[include]\n\tpath = other\n")
+        _, include_evidence = project_identity.resolve_project_identity_for_publication(
+            include_repo / "sub"
+        )
+        assert include_evidence.escalate is True
+
+    def test_include_detection_is_position_and_bom_insensitive(self, tmp_path) -> None:
+        """Include escalation must over-approximate Git's grammar, never under."""
+        bom_repo = self._repo(tmp_path / "bom")
+        (bom_repo / ".git" / "config").write_bytes(b"\xef\xbb\xbf[include]\n\tpath = other\n")
+        _, bom_evidence = project_identity.resolve_project_identity_for_publication(
+            bom_repo / "sub"
+        )
+        assert bom_evidence.escalate is True, "a BOM must not hide an include section"
+
+        mid_repo = self._repo(tmp_path / "mid")
+        config = mid_repo / ".git" / "config"
+        config.write_text(config.read_text() + '[includeIf "gitdir:/x"]\n\tpath = other\n')
+        _, mid_evidence = project_identity.resolve_project_identity_for_publication(
+            mid_repo / "sub"
+        )
+        assert mid_evidence.escalate is True
+
+    def test_incomplete_or_forged_evidence_is_refused(self, tmp_path) -> None:
+        """Acceptance rests on what the evidence proves, not where it came from."""
+        import dataclasses
+
+        repo = self._repo(tmp_path)
+        identity, real = project_identity.resolve_project_identity_for_publication(repo / "sub")
+
+        forged = project_identity.PublicationEvidence(
+            identity=identity,
+            effective_directory=real.effective_directory,
+            directory_evidence=(),
+            file_evidence=(),
+            escalate=False,
+        )
+        assert project_identity.publication_evidence_is_stable(forged, repo / "sub") is False, (
+            "an empty closure must never be accepted"
+        )
+
+        for index in range(len(real.file_evidence)):
+            partial = dataclasses.replace(
+                real,
+                file_evidence=real.file_evidence[:index] + real.file_evidence[index + 1 :],
+            )
+            dropped = real.file_evidence[index].path
+            assert (
+                project_identity.publication_evidence_is_stable(partial, repo / "sub") is False
+            ), f"dropping {dropped} from the closure must be refused"
+
+    def test_caller_assembled_closure_is_refused_even_when_structurally_complete(
+        self, tmp_path
+    ) -> None:
+        """Trust comes from issuance, not shape.
+
+        A closure assembled with the capture helpers over an invalid marker
+        shape matches the live filesystem entry for entry, but the resolver
+        never issued it — acceptance must refuse it and leave the shape to
+        the full re-resolution, which fails closed.
+        """
+        fake_root = (tmp_path / "fake").resolve()
+        fake_root.mkdir()
+        git_dir = fake_root / ".git"
+        git_dir.mkdir()
+        identity = project_identity.ProjectIdentity.from_root(
+            fake_root, workspace_path=".", require_exists=True
+        )
+        forged_files = [project_identity._capture_topology_file(git_dir, hash_content=True)]
+        for name in project_identity._GIT_DIR_CLOSURE_NAMES:
+            forged_files.append(
+                project_identity._capture_topology_file(git_dir / name, hash_content=True)
+            )
+        forged_files.append(
+            project_identity._capture_topology_file(git_dir / "worktrees", hash_content=False)
+        )
+        forged = project_identity.PublicationEvidence(
+            identity=identity,
+            effective_directory=fake_root,
+            directory_evidence=(project_identity._capture_live_directory(fake_root),),
+            file_evidence=tuple(forged_files),
+            escalate=False,
+        )
+
+        assert project_identity.publication_evidence_is_stable(forged, fake_root) is False
+        with pytest.raises(ProjectIdentityUnavailableError):
+            project_identity.resolve_project_identity(fake_root)
+
+    def test_escalating_evidence_is_never_stable(self, tmp_path) -> None:
+        repo = self._repo(tmp_path)
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        forced = project_identity.PublicationEvidence(
+            identity=evidence.identity,
+            effective_directory=evidence.effective_directory,
+            directory_evidence=evidence.directory_evidence,
+            file_evidence=evidence.file_evidence,
+            escalate=True,
+        )
+        assert project_identity.publication_evidence_is_stable(forced, repo / "sub") is False
+
+    def test_evidence_vouches_only_for_its_own_workspace(self, tmp_path) -> None:
+        repo = self._repo(tmp_path)
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        assert project_identity.publication_evidence_is_stable(evidence, repo) is False, (
+            "evidence must not transfer to a different effective directory"
         )

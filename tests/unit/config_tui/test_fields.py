@@ -8,7 +8,7 @@ from ouroboros.orchestrator_stage import VALID_STAGE_KEYS, Stage
 
 def test_stage_model_fields_cover_configurable_stage_models_only() -> None:
     assert {stage.value for stage in fields.STAGE_MODEL_FIELDS} <= VALID_STAGE_KEYS
-    assert Stage.EXECUTE not in fields.STAGE_MODEL_FIELDS
+    assert fields.STAGE_MODEL_FIELDS[Stage.EXECUTE].key == "execution.default_model"
 
 
 def test_stage_runtime_field_targets_runtime_profile() -> None:
@@ -29,10 +29,15 @@ def test_active_env_overrides_unset(monkeypatch) -> None:
     assert fields.active_env_overrides(fields.GLOBAL_LLM_BACKEND_FIELD) == ()
 
 
-def test_active_env_overrides_blank_value_does_not_count(monkeypatch) -> None:
+def test_active_env_overrides_blank_internal_model_value_does_not_count(monkeypatch) -> None:
     monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "   ")
     field = fields.STAGE_MODEL_FIELDS[Stage.INTERVIEW]
     assert fields.active_env_overrides(field) == ()
+
+
+def test_active_env_overrides_blank_runtime_value_does_not_count(monkeypatch) -> None:
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "   ")
+    assert fields.active_env_overrides(fields.GLOBAL_RUNTIME_FIELD) == ()
 
 
 def test_runtime_field_tracks_both_runtime_env_vars(monkeypatch) -> None:

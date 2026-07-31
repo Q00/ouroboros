@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -147,20 +148,40 @@ def test_refresh_models_parses_one_model_per_line(monkeypatch) -> None:
     assert captured["argv"] == ("/bin/opencode", "models")
 
 
-def test_detect_backend_cli_prefers_configured_path(monkeypatch) -> None:
+def test_detect_backend_cli_prefers_executable_configured_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from ouroboros.config import loader as config_loader
 
-    monkeypatch.setattr(config_loader, "get_codex_cli_path", lambda: "/opt/bin/codex")
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    cli.chmod(0o755)
+    monkeypatch.setattr(config_loader, "get_codex_cli_path", lambda: str(cli))
     monkeypatch.setattr(mc.shutil, "which", lambda _name: "/usr/bin/should-not-win")
-    assert mc.detect_backend_cli("codex") == "/opt/bin/codex"
+    assert mc.detect_backend_cli("codex") == str(cli)
 
 
-def test_detect_backend_cli_uses_configured_ourocode_path(monkeypatch) -> None:
+def test_detect_backend_cli_ignores_stale_configured_path(monkeypatch) -> None:
     from ouroboros.config import loader as config_loader
 
-    monkeypatch.setattr(config_loader, "get_ourocode_cli_path", lambda: "/opt/bin/ourocode")
+    monkeypatch.setattr(config_loader, "get_codex_cli_path", lambda: "/opt/bin/missing-codex")
+    monkeypatch.setattr(mc.shutil, "which", lambda _name: "/usr/bin/codex")
+    assert mc.detect_backend_cli("codex") == "/usr/bin/codex"
+
+
+def test_detect_backend_cli_uses_configured_ourocode_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from ouroboros.config import loader as config_loader
+
+    cli = tmp_path / "ourocode"
+    cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    cli.chmod(0o755)
+    monkeypatch.setattr(config_loader, "get_ourocode_cli_path", lambda: str(cli))
     monkeypatch.setattr(mc.shutil, "which", lambda _name: "/usr/bin/should-not-win")
-    assert mc.detect_backend_cli("ourocode") == "/opt/bin/ourocode"
+    assert mc.detect_backend_cli("ourocode") == str(cli)
 
 
 def test_detect_backend_cli_falls_back_to_path_lookup(monkeypatch) -> None:
@@ -203,6 +224,15 @@ def test_configured_default_model_codex(monkeypatch, tmp_path) -> None:
     (tmp_path / ".codex" / "config.toml").write_text('model = "gpt-9-codex"\n')
     monkeypatch.setattr(mc.Path, "home", classmethod(lambda _cls: tmp_path))
     assert mc.configured_default_model("codex") == "gpt-9-codex"
+
+
+def test_configured_default_model_codex_uses_codex_home(monkeypatch, tmp_path) -> None:
+    codex_home = tmp_path / "custom-codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-9-codex-home"\n')
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert mc.configured_default_model("codex") == "gpt-9-codex-home"
 
 
 def test_configured_default_model_missing_file(monkeypatch, tmp_path) -> None:

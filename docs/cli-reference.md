@@ -285,24 +285,25 @@ ouroboros setup --non-interactive
 - Detects configured paths and PATH entries for the shipped runtimes, including `zcode` and the macOS ZCode app-bundle script
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
-- For Claude Code: registers the MCP server in `~/.claude/mcp.json`
+- For standalone Claude SDK setup: configures runtime/LLM settings and leaves `~/.claude/mcp.json` untouched because that profile requires MCP 1.x
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
 - For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom blocks by default
-- For Codex CLI: installs managed `~/.codex/ouroboros-*.config.toml` profile-v2 anchors on current Codex releases, or legacy `[profiles.ouroboros-*]` anchors when the detected CLI still requires them
+- For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
 - For Gemini CLI: installs the runtime skill capability guide into `~/.gemini/GEMINI.md`
-- For Kiro CLI: sets `orchestrator.kiro_cli_path` and `llm.backend: kiro` in `~/.ouroboros/config.yaml`, and registers the Ouroboros MCP server in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked into the entry's `env` so `ooo <skill>` shortcuts route to the Kiro adapter on the very next `kiro-cli chat`. The detector prefers the resolved `ouroboros` binary over `uvx` to stay within Kiro's MCP init timeout
+- For Kiro CLI: sets `orchestrator.kiro_cli_path` and `llm.backend: kiro` in `~/.ouroboros/config.yaml`, and registers the Ouroboros MCP server in `~/.kiro/settings/mcp.json` with `OUROBOROS_RUNTIME=kiro` / `OUROBOROS_LLM_BACKEND=kiro` baked into the entry's `env`. The launcher is always isolated through `uvx` or `pipx run`; direct global binaries are rejected because they cannot guarantee MCP 2
+- Kiro, Copilot, and Hermes setup is transactional at the activation boundary: if no isolated launcher is available or host registration fails, setup exits non-zero without persisting the selected Ouroboros runtime
 - For Kiro CLI: installs the runtime skill capability guide into `~/.kiro/steering/ouroboros-skill-capability-guide.md`
 - For Copilot CLI: installs the runtime skill capability guide into `~/.copilot/ouroboros-instructions/AGENTS.md` and configures Ouroboros-launched Copilot child sessions to read it via `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
 - For GJC: sets `orchestrator.gjc_cli_path` and `llm.backend: gjc` in `~/.ouroboros/config.yaml`
 - For GJC: installs the `ooo` bridge extension into `<agent-dir>/extensions` and the renderer-generated skill capability guide into `<agent-dir>/rules/ouroboros-skill-capability-guide.md`
 - For Zcode: sets `orchestrator.runtime_backend: zcode` and `orchestrator.zcode_cli_path` while leaving the completion-only `llm.backend` unchanged
 
-> **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup on current Codex releases; profile anchors live in `~/.codex/<profile>.config.toml`. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
+> **Codex config split:** use `ouroboros config` or `ouroboros config --web` to choose **Use Codex default model** (Codex's current default) or **Enter another model ID…** to pin a model for each pipeline stage, including Execute. The web view is the same settings UI as the terminal TUI. `~/.codex/config.toml` remains the Codex MCP/env hookup file; user-created Codex `--profile` settings remain supported. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
 ### Brownfield Subcommands
 
@@ -1055,36 +1056,38 @@ ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
 
 For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
 
-FastMCP caveats: Network serving uses the MCP SDK's FastMCP server. The streamable HTTP path is FastMCP's default `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for FastMCP transports because FastMCP does not pass credentials or stable client identity to handlers; protect `0.0.0.0` binds with normal network controls.
+MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for SDK-managed transports because the handler boundary does not expose credentials or stable client identity; protect `0.0.0.0` binds with normal network controls.
 
 **Startup behavior:**
 
 On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or `PAUSED` state for more than 1 hour. These are treated as orphaned from a previous crash. Cancelled sessions are reported on stderr for `stdio` and on the console for network transports (`sse`, `streamable-http`). This cleanup is best-effort and does not prevent the server from starting if it fails.
 
-**Claude Desktop / Claude Code CLI Integration:**
+**MCP host integration:**
 
-`ouroboros setup --runtime claude` writes this automatically to `~/.claude/mcp.json`.
-To register manually, add to `~/.claude/mcp.json`:
+`ouroboros setup --runtime claude` configures the standalone Claude SDK profile
+and deliberately leaves `~/.claude/mcp.json` untouched. Its MCP 1.x dependency
+cannot share the Ouroboros MCP 2 process. Supported CLI-backed host setup writes
+an isolated launcher equivalent to:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
     }
   }
 }
 ```
 
-If Ouroboros is installed directly (not via `uvx`), use:
+If `uvx` is unavailable, use the package-isolated pipx runner:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "ouroboros",
-      "args": ["mcp", "serve"]
+      "command": "pipx",
+      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
     }
   }
 }

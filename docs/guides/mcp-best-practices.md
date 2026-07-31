@@ -9,6 +9,54 @@ External MCP servers should make the child agent more capable without making
 execution brittle, slow, or unsafe. Prefer a small, named set of tools for one
 workflow over a large always-on catalog.
 
+## MCP 2026-07-28 Runtime Contract
+
+Ouroboros uses the official Python SDK v2 as its protocol compatibility
+boundary. The high-level SDK client runs in `mode="auto"`: it first performs
+`server/discover` for MCP 2026-07-28 and falls back to the legacy `initialize`
+handshake only when the peer is a handshake-era server. Application code must
+not reproduce that negotiation, cache protocol results, or implement its own
+multi-round-trip request state machine.
+
+Modern Streamable HTTP is stateless and POST-oriented. Do not depend on
+`Mcp-Session-Id`, HTTP GET event streams, or transport session affinity. Keep
+workflow identity explicit in ordinary application data instead, for example
+`session_id`, `execution_id`, and `job_id`. Those values are Ouroboros handles;
+they are not MCP transport sessions and remain stable when a request moves to a
+different worker.
+
+SSE and the older HTTP+SSE transport are deprecated compatibility options. Use
+STDIO for local subprocess servers and modern Streamable HTTP for remote
+servers. When an upstream server only supports SSE, isolate that choice in its
+server entry so it can be removed without changing the workflow contract.
+
+### MCP and Claude process profiles
+
+`mcp==2.0.0` and the current `claude-agent-sdk` cannot safely share one Python
+interpreter: the Claude SDK embeds MCP 1.x internals and declares `mcp<2`.
+Ouroboros therefore treats them as separate runtime profiles and processes:
+
+- Run the Ouroboros protocol server/client boundary from the `[mcp]` profile.
+- Run Claude Agent SDK work from the `[claude]` profile or through the existing
+  Claude CLI worker boundary.
+- Do not install `[mcp,claude]` together or override either package's declared
+  dependency constraint.
+
+This is a process boundary, not a feature flag. Data crossing it should use
+explicit serializable requests and application handles rather than imported
+SDK objects.
+
+### Known SDK v2.0.0 limitation
+
+The SDK model layer accepts arbitrary JSON for `structuredContent`, and the
+Ouroboros mapper preserves JSON null. However, `mcp==2.0.0` currently drops an
+explicit wire-level `structuredContent: null`; when a tool has an output schema,
+the SDK validator then reports the value as missing. The dual-era integration
+matrix keeps this case as a strict expected failure so a future SDK patch cannot
+silently change behavior. Until that upstream defect is fixed, use an object or
+array wrapper when a tool needs to distinguish an explicit JSON null from an
+absent structured result.
+
 ## Recommended Server Roles
 
 | Server | Use when | Typical scope |
