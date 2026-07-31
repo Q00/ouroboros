@@ -575,9 +575,9 @@ ouroboros cleanup --force
 ```
 
 Related: the `orchestrator.worktree_cleanup` config field (`keep` | `remove` |
-`prune-merged`, default `keep`) controls automatic cleanup when a session
-releases its worktree; `ooo cleanup` handles residue from sessions that ended
-before this policy existed, were cancelled, or ran with `keep`.
+`prune-merged`, default `prune-merged`) controls automatic cleanup when a
+session releases its worktree; `ooo cleanup` handles residue from sessions that
+ended before this policy existed, were cancelled, or ran with `keep`.
 
 ---
 

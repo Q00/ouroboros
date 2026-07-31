@@ -112,8 +112,15 @@ def _worktrees_enabled() -> bool:
 
 
 def _worktree_cleanup_policy() -> str:
-    config = _orchestrator_config()
-    return getattr(config, "worktree_cleanup", "keep")
+    # Cleanup is destructive, so configuration failures must not inherit the
+    # model default.  Other worktree settings can safely use
+    # ``_orchestrator_config``'s defaults, but cleanup requires a positively
+    # loaded and validated operator policy.
+    try:
+        config = load_config().orchestrator
+    except (ConfigError, OSError):
+        return "keep"
+    return config.worktree_cleanup
 
 
 def _run_git_process(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -495,12 +502,21 @@ def cleanup_task_workspace(
     return True
 
 
-def release_task_workspace(workspace: TaskWorkspace | None) -> None:
-    """Release a task workspace lock and best-effort configured cleanup."""
+def release_task_workspace(
+    workspace: TaskWorkspace | None,
+    *,
+    cleanup: bool,
+) -> None:
+    """Release a task workspace lock and optionally apply configured cleanup.
+
+    Callers must positively establish that no delegated or resumable work is
+    still using the workspace before passing ``cleanup=True``.
+    """
     if workspace is None:
         return
     try:
-        cleanup_task_workspace(workspace)
+        if cleanup:
+            cleanup_task_workspace(workspace)
     except WorktreeError as exc:
         log.warning(
             "worktree.cleanup_failed",
