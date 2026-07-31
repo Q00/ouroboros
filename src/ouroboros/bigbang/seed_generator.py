@@ -147,6 +147,30 @@ class _PosixCaseTracker:
 
     def consume_word(self, word: str, *, token_ends: bool) -> None:
         """Consume one unquoted identifier while preserving token provenance."""
+        if self.awaiting_function_body:
+            # POSIX function bodies are compound commands.  Braces and
+            # subshells are handled by ``consume_grouping``; the remaining
+            # valid direct forms begin with one of these reserved words.
+            # Restore command position before consuming it so a ``case`` body
+            # cannot expose reserved-looking pipes in its patterns as outer AC
+            # fields (for example ``f() case x in x | artifacts:) ...``).
+            if (
+                not self.word_started
+                and token_ends
+                and word
+                in {
+                    "case",
+                    "if",
+                    "while",
+                    "until",
+                    "for",
+                }
+            ):
+                self.awaiting_function_body = False
+                self.command_position = True
+            else:
+                self.invalid = True
+                self.awaiting_function_body = False
         reserved = not self.word_started and token_ends
         if self.for_phase == "await_name":
             self.command_position = False

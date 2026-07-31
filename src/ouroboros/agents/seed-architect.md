@@ -27,8 +27,10 @@ Example: ["Python >= 3.12", "No external database", "Must work offline"]
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
-Format: one `AC:` line per criterion
-Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: created task"
+Format: exactly one non-empty, single-line JSON array. Every object contains
+exactly `description`, `verify`, `artifacts`, and `expect`. `artifacts` is a JSON
+array of paths or the string `NONE`; the other contract fields are strings.
+Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","artifacts":"NONE","expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
@@ -82,14 +84,13 @@ If the interview mentions existing codebases, extract:
 
 ## OUTPUT FORMAT
 
-Provide your analysis in this exact structure:
+Provide your analysis in this exact structure. In particular,
+`ACCEPTANCE_CRITERIA` is one field on one line; never emit nested `AC:` lines.
 
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
@@ -110,8 +111,5 @@ For brownfield projects, ensure context references and patterns are extracted fr
 Few-shot examples:
 
 ```
-ACCEPTANCE_CRITERIA:
-AC: Task create/list flows pass automated verification | verify: python -m pytest tests/test_tasks.py -q && echo OK | artifacts: NONE | expect: OK
-AC: Greeting import check prints OK | verify: python -c "from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')" | artifacts: hello.py | expect: OK
-AC: README documents the CLI usage examples | verify: NONE | artifacts: README.md | expect: NONE
+ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","artifacts":["README.md"],"expect":"NONE"}]
 ```

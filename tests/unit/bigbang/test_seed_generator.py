@@ -1922,6 +1922,7 @@ class TestSeedGeneratorExtraction:
                 "ok",
             ),
             ("f() { case y in (y | artifacts:) printf yes;; esac; }; f", "yes"),
+            ("f() case y in (y | artifacts:) printf yes;; esac; f", "yes"),
             ("(case y in (y | verify:) printf yes;; esac)", "yes"),
             ("case esac in (esac'') printf yes;; esac", "yes"),
             (
@@ -3173,6 +3174,27 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "schema v2 outputs" in system_prompt
         assert "artifacts: NONE" in system_prompt
         assert "concrete `verify` command" in system_prompt
+
+    def test_seed_architect_agent_prompt_uses_strict_json_ac_contract(self) -> None:
+        from ouroboros.agents.loader import load_agent_prompt
+
+        system_prompt = load_agent_prompt("seed-architect")
+        assert 'ACCEPTANCE_CRITERIA: [{"description":' in system_prompt
+        assert "one field on one line" in system_prompt
+        assert "never emit nested `AC:` lines" in system_prompt
+        assert "\nAC: <description>" not in system_prompt
+
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        documented = next(
+            line
+            for line in system_prompt.splitlines()
+            if line.startswith('ACCEPTANCE_CRITERIA: [{"description":')
+        )
+        response = create_valid_extraction_response(
+            acceptance_criteria=documented.removeprefix("ACCEPTANCE_CRITERIA: ")
+        )
+        parsed = generator._parse_extraction_response(response)
+        assert parsed["acceptance_criteria"]
 
 
 class TestObjectArrayExtractionContract:
