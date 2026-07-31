@@ -510,18 +510,34 @@ def _runtime_message_effective_cwd(message: AgentMessage, *, task_cwd: str | Non
         return None
     tool_input = message.data.get("tool_input")
     if not isinstance(tool_input, dict):
-        return task_cwd
+        return None if _path_has_symlink_component(Path(task_cwd)) else task_cwd
     cwd = tool_input.get("cwd")
     if not isinstance(cwd, str) or not cwd.strip():
-        return task_cwd
+        return None if _path_has_symlink_component(Path(task_cwd)) else task_cwd
     try:
         workspace = Path(task_cwd).resolve()
         candidate = Path(cwd)
-        effective = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+        unresolved_effective = candidate if candidate.is_absolute() else Path(task_cwd) / candidate
+        if _path_has_symlink_component(unresolved_effective):
+            return None
+        effective = unresolved_effective.resolve()
         effective.relative_to(workspace)
     except (OSError, RuntimeError, ValueError):
         return None
     return str(effective)
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """Return True when any existing path component is a symlink."""
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts if not path.is_absolute() else path.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
 
 
 def _python_c_pathlib_write_targets_reference(
@@ -805,10 +821,12 @@ def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
         if not path.is_absolute():
             return False
         candidate = path if path.is_absolute() else Path(task_cwd) / path
-        verifier_executable = Path(sys.executable)
+        if candidate.is_symlink():
+            return False
+        verifier_executable = Path(sys.executable).resolve()
         if _normalize_absolute_path(candidate) != _normalize_absolute_path(verifier_executable):
             return False
-        return candidate.resolve() == verifier_executable.resolve()
+        return candidate.resolve() == verifier_executable
     except (OSError, RuntimeError, ValueError):
         return False
 

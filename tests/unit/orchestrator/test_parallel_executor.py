@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import shlex
 import sys
 from types import SimpleNamespace
@@ -82,7 +83,7 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 
 
 def _trusted_python_c(source: str) -> str:
-    return shlex.join([sys.executable, "-I", "-S", "-c", source])
+    return shlex.join([str(Path(sys.executable).resolve()), "-I", "-S", "-c", source])
 
 
 def _trusted_preflight_split(
@@ -456,7 +457,7 @@ def test_files_touched_rejects_absolute_python_symlink_final_state_spoof(tmp_pat
     claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
     fake_python = tmp_path / "python3"
     try:
-        os.symlink(sys.executable, fake_python)
+        os.symlink(Path(sys.executable).resolve(), fake_python)
     except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
         pytest.skip("symlink creation not permitted in this environment")
     command = shlex.join(
@@ -485,6 +486,91 @@ def test_files_touched_rejects_absolute_python_symlink_final_state_spoof(tmp_pat
     assert (
         _runtime_messages_support_file_claim(
             "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_exact_sys_executable_symlink_final_state_spoof(
+    tmp_path, monkeypatch
+) -> None:
+    """Even the exact sys.executable path is unsafe when it is a mutable symlink."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_python = tmp_path / "python3"
+    try:
+        os.symlink(Path(sys.executable).resolve(), fake_python)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    command = shlex.join(
+        [
+            str(fake_python),
+            "-I",
+            "-S",
+            "-c",
+            "from pathlib import Path; Path('claimed.py').write_text('x')",
+        ]
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_command_cwd_symlink_final_state_spoof(tmp_path) -> None:
+    """A retargetable cwd symlink cannot prove where a historical command ran."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    claimed_file = subdir / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    run_link = tmp_path / "run"
+    try:
+        os.symlink(outside, run_link)
+        run_link.unlink()
+        os.symlink(subdir, run_link)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "run"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "sub/claimed.py",
             messages,
             task_cwd=str(tmp_path),
         )
@@ -3207,7 +3293,7 @@ def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tm
         },
         {
             "cmd": [
-                sys.executable,
+                str(Path(sys.executable).resolve()),
                 "-I",
                 "-S",
                 "-c",
