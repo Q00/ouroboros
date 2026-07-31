@@ -965,7 +965,7 @@ ouroboros tui [monitor] [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
+| `--db-path PATH` | Override the shared EventStore path (default: resolved from `persistence.database_path`, with the legacy database fallback) |
 | `--backend TEXT` | TUI backend to use: `python` (Textual, default) or `slt` (native Rust binary) |
 
 **Examples:**
@@ -974,7 +974,7 @@ ouroboros tui [monitor] [OPTIONS]
 # Launch TUI monitor (default Textual backend)
 ouroboros tui monitor
 
-# Monitor with a specific database file
+# Override the shared database path for this monitor
 ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 
 # Use the native SLT backend (requires ouroboros-tui binary)
@@ -1179,7 +1179,7 @@ Ouroboros stores configuration in `~/.ouroboros/`:
 |------|-------------|
 | `config.yaml` | Main configuration — see [config-reference.md](config-reference.md) for all options |
 | `credentials.yaml` | API keys (chmod 600; created by `ouroboros config init`) |
-| `ouroboros.db` | SQLite database for event sourcing (actual path: `~/.ouroboros/ouroboros.db`; the `persistence.database_path` config key is currently not honored — see [config-reference.md](config-reference.md#persistence)) |
+| `ouroboros.db` | SQLite database for event sourcing. The runtime, status/resume commands, and TUI share `persistence.database_path`; legacy installs continue using `~/.ouroboros/ouroboros.db` until the configured target exists. |
 | `logs/ouroboros.log` | Log output (path configurable via `logging.log_path`) |
 
 ---

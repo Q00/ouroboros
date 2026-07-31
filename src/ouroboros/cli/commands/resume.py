@@ -14,14 +14,15 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import shlex
 from typing import Annotated
 
 import typer
 
-from ouroboros.cli.commands.config import _resolved_database_file_path
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.cli.formatters.tables import create_table, print_table
+from ouroboros.persistence.paths import resolve_event_store_path
 
 app = typer.Typer(
     name="resume",
@@ -42,7 +43,7 @@ EXIT_CORRUPTED_DB = 2
 
 def _default_db_path() -> str:
     """Return the canonical SQLite path used by the running CLI."""
-    return str(_resolved_database_file_path())
+    return str(resolve_event_store_path())
 
 
 async def _get_event_store(db_path: str | None = None):
@@ -197,7 +198,7 @@ def _format_reattach_guidance(tracker) -> str:
     exec_id = tracker.execution_id or "<unknown>"
     seed_hint = tracker.seed_id or "<seed.yaml>"
 
-    monitor_line = "ouroboros tui monitor"
+    monitor_line = f"ouroboros tui monitor --db-path {shlex.quote(_default_db_path())}"
     resume_line = f"ouroboros run workflow --orchestrator --resume {tracker.session_id} {seed_hint}"
 
     lines = [

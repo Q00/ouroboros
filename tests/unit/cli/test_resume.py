@@ -32,6 +32,8 @@ def test_resume_and_status_resolve_the_same_configured_event_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from ouroboros.cli.commands.status import _configured_event_store_path
+    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.paths import resolve_event_store_path
 
     config_dir = tmp_path / "config"
     configured_db = config_dir / "data" / "events.db"
@@ -40,7 +42,21 @@ def test_resume_and_status_resolve_the_same_configured_event_store(
     (config_dir / "config.yaml").write_text("persistence:\n  database_path: data/events.db\n")
     monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
 
-    assert Path(_default_db_path()) == _configured_event_store_path() == configured_db
+    runtime_store_path = EventStore().sqlite_path()
+    assert runtime_store_path is not None
+    assert (
+        Path(_default_db_path())
+        == _configured_event_store_path()
+        == resolve_event_store_path()
+        == Path(runtime_store_path)
+        == configured_db
+    )
+    tracker = MagicMock(
+        session_id="orch_configured",
+        execution_id="exec_configured",
+        seed_id="seed_configured",
+    )
+    assert f"tui monitor --db-path {configured_db}" in _format_reattach_guidance(tracker)
 
 
 # ---------------------------------------------------------------------------

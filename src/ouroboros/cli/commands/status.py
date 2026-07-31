@@ -26,7 +26,6 @@ from ouroboros.backends import (
 from ouroboros.cli.commands.config import (
     _database_file_path,
     _load_config,
-    _resolved_database_file_path,
 )
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import (
@@ -39,6 +38,7 @@ from ouroboros.config.loader import load_config
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.paths import resolve_event_store_path
 
 app = typer.Typer(
     name="status",
@@ -190,7 +190,7 @@ def _is_unknown_run_error(message: str) -> bool:
 
 
 def _configured_event_store_path() -> Path:
-    db_path = _resolved_database_file_path()
+    db_path = resolve_event_store_path()
     if not db_path.exists():
         raise FileNotFoundError(f"configured database does not exist: {db_path}")
     if not db_path.is_file():

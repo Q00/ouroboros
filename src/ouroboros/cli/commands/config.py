@@ -20,6 +20,7 @@ from ouroboros.backends import (
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, create_table, print_table
+from ouroboros.persistence.paths import event_store_path_from_config
 
 app = typer.Typer(
     name="config",
@@ -133,26 +134,7 @@ def _load_config() -> tuple[dict, Path]:
 
 
 def _database_file_path(data: dict, config_path: Path) -> Path:
-    configured = data.get("persistence", {}).get("database_path")
-    runtime_path = config_path.parent / "ouroboros.db"
-    if configured:
-        configured_path = Path(str(configured)).expanduser()
-        if not configured_path.is_absolute():
-            configured_path = config_path.parent / configured_path
-        if configured_path.exists() or not runtime_path.exists():
-            return configured_path
-    return runtime_path
-
-
-def _resolved_database_file_path() -> Path:
-    """Resolve the active EventStore path with or without ``config.yaml``."""
-    from ouroboros.config.models import get_config_dir
-
-    config_path = get_config_dir() / "config.yaml"
-    if not config_path.exists():
-        return config_path.parent / "ouroboros.db"
-    data, loaded_config_path = _load_config()
-    return _database_file_path(data, loaded_config_path)
+    return event_store_path_from_config(data, config_path)
 
 
 def _save_config(data: dict, path: Path) -> None:

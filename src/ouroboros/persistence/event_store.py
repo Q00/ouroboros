@@ -13,7 +13,6 @@ from datetime import datetime
 import hashlib
 import json
 import logging
-from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
@@ -486,7 +485,8 @@ class EventStore:
         Args:
             database_url: SQLAlchemy database URL.
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
-                         If not provided, defaults to ~/.ouroboros/ouroboros.db
+                         If not provided, uses the configured EventStore path
+                         with the legacy ~/.ouroboros/ouroboros.db fallback.
             read_only: When True, open the underlying SQLite database in true
                 read-only mode by rewriting the URL into the ``file:<path>?mode=ro&uri=true``
                 form and passing ``connect_args={"uri": True}`` to aiosqlite.
@@ -499,7 +499,9 @@ class EventStore:
                 ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
         if database_url is None:
-            db_path = Path.home() / ".ouroboros" / "ouroboros.db"
+            from ouroboros.persistence.paths import resolve_event_store_path
+
+            db_path = resolve_event_store_path()
             if not read_only:
                 db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"
