@@ -253,6 +253,46 @@ def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _ApplicationCallsite:
+    """Application frame captured before entering the custom processor loop."""
+
+    filename: str
+    lineno: int
+    func_name: str
+
+
+_CALLSITE_EVENT_KEY = "_ouroboros_application_callsite"
+
+
+class _ApplicationCallsiteParameterAdder:
+    """Preserve sync callers while retaining structlog's async stack support."""
+
+    def __init__(self) -> None:
+        self._fallback = structlog.processors.CallsiteParameterAdder(
+            parameters=[
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.LINENO,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+            ]
+        )
+
+    def __call__(
+        self,
+        logger: Any,
+        method_name: str,
+        event_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        callsite = event_dict.pop(_CALLSITE_EVENT_KEY, None)
+        if not isinstance(callsite, _ApplicationCallsite):
+            return self._fallback(logger, method_name, event_dict)
+
+        event_dict["filename"] = Path(callsite.filename).name
+        event_dict["lineno"] = callsite.lineno
+        event_dict["func_name"] = callsite.func_name
+        return event_dict
+
+
 def _get_shared_processors() -> list[Any]:
     """Get the shared processor chain for structlog.
 
@@ -273,12 +313,7 @@ def _get_shared_processors() -> list[Any]:
         # Add stack info for exceptions
         structlog.processors.StackInfoRenderer(),
         # Add caller info (file, line, function) - useful for debugging
-        structlog.processors.CallsiteParameterAdder(
-            parameters=[
-                structlog.processors.CallsiteParameter.FILENAME,
-                structlog.processors.CallsiteParameter.LINENO,
-            ]
-        ),
+        _ApplicationCallsiteParameterAdder(),
     ]
 
 
@@ -367,6 +402,37 @@ _METHOD_LEVELS = {
 }
 
 
+def _capture_sync_application_callsite() -> _ApplicationCallsite | None:
+    """Return the sync application frame outside the native structlog wrapper."""
+    try:
+        frame = sys._getframe(2)
+    except ValueError:  # pragma: no cover - CPython always has these frames here.
+        return None
+
+    while frame is not None:
+        module_name = str(frame.f_globals.get("__name__", ""))
+        if module_name == "structlog" or module_name.startswith("structlog."):
+            frame = frame.f_back
+            continue
+
+        # Native async methods execute _proxy_to_logger in an executor.  In
+        # that case structlog's CallsiteParameterAdder uses its preserved
+        # calling-stack context; substituting an executor frame would corrupt
+        # the already-correct async attribution.
+        if module_name == "threading" or module_name.startswith(
+            ("asyncio.", "concurrent.futures.")
+        ):
+            return None
+
+        return _ApplicationCallsite(
+            filename=frame.f_code.co_filename,
+            lineno=frame.f_lineno,
+            func_name=frame.f_code.co_name,
+        )
+
+    return None
+
+
 class _GenerationBoundLogger(
     structlog.make_filtering_bound_logger(logging.NOTSET)  # type: ignore[misc]
 ):
@@ -391,6 +457,15 @@ class _GenerationBoundLogger(
             event_dict.update(**event_kw)
             if event is not None:
                 event_dict["event"] = event
+
+            # capture_logs() intentionally replaces the processor list.  Only
+            # attach the private frame marker when our consuming processor is
+            # present so the marker cannot leak into captured/public payloads.
+            if any(
+                isinstance(processor, _ApplicationCallsiteParameterAdder)
+                for processor in generation.processors
+            ):
+                event_dict[_CALLSITE_EVENT_KEY] = _capture_sync_application_callsite()
 
             try:
                 for processor in generation.processors:
@@ -768,7 +843,10 @@ def reset_logging() -> None:
     global _configured, _current_config, _live_generation
     with _sink_lock:
         # Read before clearing: the reset must not be louder than what it replaces.
-        outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
+        if _current_config is None:
+            outgoing_level = _live_generation.min_level
+        else:
+            outgoing_level = _get_log_level(_current_config.log_level)
         baseline_level = max(logging.INFO, outgoing_level)
         _configured = False
         _current_config = None

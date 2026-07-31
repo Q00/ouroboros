@@ -475,6 +475,41 @@ class TestLogRotation:
 class TestResetLogging:
     """Test reset_logging function."""
 
+    @pytest.mark.asyncio
+    async def test_sync_and_async_records_preserve_application_callsite(
+        self,
+        capsys: Any,
+    ) -> None:
+        """The generation wrapper is never reported as the event origin."""
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+        logger = structlog.get_logger("callsite-generation")
+
+        def emit_sync() -> int:
+            expected_line = sys._getframe().f_lineno + 1
+            logger.info("sync-callsite")
+            return expected_line
+
+        async def emit_async() -> int:
+            expected_line = sys._getframe().f_lineno + 1
+            await logger.ainfo("async-callsite")
+            return expected_line
+
+        sync_line = emit_sync()
+        async_line = await emit_async()
+        payloads = [
+            json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()
+        ]
+
+        assert [payload["filename"] for payload in payloads] == [
+            Path(__file__).name,
+            Path(__file__).name,
+        ]
+        assert [payload["lineno"] for payload in payloads] == [sync_line, async_line]
+        assert [payload["func_name"] for payload in payloads] == [
+            "emit_sync",
+            "emit_async",
+        ]
+
     def test_stdlib_record_selected_before_reconfigure_cannot_reopen_old_handler(
         self,
         tmp_path: Path,
@@ -1053,6 +1088,32 @@ class TestResetLogging:
         captured = capsys.readouterr()
         assert "reset.info.must.stay.silent" not in captured.out
         assert "reset.info.must.stay.silent" not in captured.err
+
+    def test_repeated_reset_preserves_quiet_neutral_generation(self, capsys: Any) -> None:
+        """A second reset cannot relax an already-neutral ERROR generation."""
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.PROD,
+                enable_file_logging=False,
+                log_level="ERROR",
+            )
+        )
+        bound = structlog.get_logger("repeated-reset").bind(component="worker")
+
+        reset_logging()
+        bound.error("after-first-reset")
+        first = capsys.readouterr()
+        reset_logging()
+        bound.info("info-after-second-reset-must-stay-silent")
+        bound.error("after-second-reset")
+        second = capsys.readouterr()
+
+        assert first.out == second.out == ""
+        assert "after-first-reset" in first.err
+        assert "after-second-reset" in second.err
+        assert "info-after-second-reset-must-stay-silent" not in second.err
+        assert '"event":' not in first.err
+        assert '"event":' not in second.err
 
     def test_reset_resolves_the_stream_at_emit_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The reset must not pin whatever ``sys.stderr`` happened to be.
