@@ -238,6 +238,33 @@ class TestExtractJsonPayload:
 
         assert extract_json_payload(text) is None
 
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            "Analysis: {'draft': <payload>",
+            "Analysis: {0: <payload>",
+            "Analysis: {draft: stale <payload>",
+            'Analysis: {"draft[key]": <payload>',
+            "Analysis: {draft: '}', payload: <payload>}",
+        ],
+        ids=[
+            "single-quoted-key",
+            "numeric-key",
+            "prose-before-payload",
+            "delimiter-in-quoted-key",
+            "single-quoted-early-closer",
+        ],
+    )
+    def test_malformed_structured_opener_does_not_promote_nested_payload(
+        self, wrapper: str
+    ) -> None:
+        text = wrapper.replace("<payload>", '{"stale": true}')
+
+        assert extract_json_payload(text) is None
+
+    def test_unclosed_human_heading_is_not_anthropic_prefill(self) -> None:
+        assert extract_json_payload('{Analysis: {"actual": true}') is None
+
     def test_balanced_invalid_wrapper_preserves_later_independent_payload(self) -> None:
         text = 'Analysis: {draft: {"stale": true}} Actual: {"valid": true}'
 

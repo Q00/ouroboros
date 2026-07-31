@@ -19,7 +19,6 @@ _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
-_MAPPING_WRAPPER_PREFIX = re.compile(r'^\s*(?:[A-Za-z_][A-Za-z0-9_-]*|"(?:[^"\\]|\\.)*")\s*:\s*$')
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -321,60 +320,73 @@ def _extract_json_from_text(text: str) -> tuple[str, ...]:
                 payloads.append(candidate)
                 pos = start + len(candidate)
                 continue
-        elif _starts_unclosed_mapping_wrapper(text, start):
-            # Unlike free-form prose introduced by the historical Anthropic
-            # prefill failure, ``{draft: <payload>`` is a structured wrapper
-            # whose missing outer closer leaves no safe boundary after it.
-            # Do not recover a nested value from inside that malformed owner.
+        else:
+            prefill_payload = _anthropic_prefill_payload(text, start)
+            if prefill_payload is not None:
+                payloads.append(prefill_payload)
+                return tuple(payloads)
+
+            # An unbalanced structured opener owns the remaining text.  Its
+            # nested delimiters have no independent boundary, so do not
+            # promote any inner object or array.  The sole recovery exception
+            # is the narrow historical Anthropic prefill shape above.
             raise _MalformedJsonBoundary
         pos = start + 1
 
 
-def _starts_unclosed_mapping_wrapper(text: str, start: int) -> bool:
-    """Return whether an unbalanced candidate begins a mapping-like wrapper."""
-    obj_start = text.find("{", start + 1)
-    arr_start = text.find("[", start + 1)
-    nested_starts = tuple(index for index in (obj_start, arr_start) if index != -1)
-    if not nested_starts:
-        return False
-    nested_start = min(nested_starts)
-    return _MAPPING_WRAPPER_PREFIX.fullmatch(text[start + 1 : nested_start]) is not None
+def _anthropic_prefill_payload(text: str, start: int) -> str | None:
+    """Recover the documented ``{<prose>\n\n<JSON>`` adapter failure only."""
+    if start != 0 or not text.startswith("{"):
+        return None
+
+    separators = tuple(re.finditer(r"(?:\r?\n){2,}", text[start + 1 :]))
+    if not separators:
+        return None
+    payload_start = start + 1 + separators[-1].end()
+    payload = text[payload_start:].strip()
+    try:
+        parsed = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(parsed, dict | list) else None
 
 
 def _bracket_extract(text: str, start: int) -> str | None:
     """Extract a bracket-balanced substring starting at *start*.
 
-    Supports both ``{}`` (objects) and ``[]`` (arrays).  Returns the
-    substring ``text[start:end+1]`` where *end* is the position of
-    the matching closer, or ``None`` if brackets never balance.
+    Supports nested ``{}`` and ``[]`` boundaries and treats double-quoted,
+    single-quoted, and backtick spans as lexically opaque. Returns the
+    substring through the matching outer closer, or ``None`` when the outer
+    boundary never balances or delimiters mismatch.
     """
-    open_char = text[start]
-    close_char = "}" if open_char == "{" else "]"
-    depth = 0
-    in_string = False
+    matching_opener = {"}": "{", "]": "["}
+    stack: list[str] = []
+    quote_char: str | None = None
     escape_next = False
 
     for i, char in enumerate(text[start:], start=start):
-        if escape_next:
-            escape_next = False
+        if quote_char is not None:
+            if escape_next:
+                escape_next = False
+                continue
+            if char == "\\":
+                escape_next = True
+                continue
+            if char == quote_char:
+                quote_char = None
             continue
 
-        if char == "\\":
-            escape_next = True
+        if char in ('"', "'", "`"):
+            quote_char = char
             continue
 
-        if char == '"' and not escape_next:
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char == open_char:
-            depth += 1
-        elif char == close_char:
-            depth -= 1
-            if depth == 0:
+        if char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or stack[-1] != matching_opener[char]:
+                return None
+            stack.pop()
+            if not stack:
                 return text[start : i + 1]
 
     return None

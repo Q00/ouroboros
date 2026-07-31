@@ -156,6 +156,21 @@ def _wrap_invalid_supported_fence_with_nested_payload(fence_info: str, nested_pa
     return f"```{fence_info}\ninvalid wrapper {nested_payload}\n```"
 
 
+MALFORMED_UNFENCED_WRAPPERS = [
+    "Analysis: {draft: <payload>}",
+    "Analysis: {draft: <payload>",
+    "Analysis: {'draft': <payload>",
+    "Analysis: {0: <payload>",
+    "Analysis: {draft: stale <payload>",
+    'Analysis: {"draft[key]": <payload>',
+    "Analysis: {draft: '}', payload: <payload>}",
+]
+
+
+def _wrap_malformed_unfenced_payload(wrapper: str, payload: str) -> str:
+    return wrapper.replace("<payload>", payload)
+
+
 def _wrap_unfenced_example_then_actual(example_payload: str, actual_payload: str) -> str:
     return f"For example: {example_payload}\nActual answer: {actual_payload}"
 
@@ -419,11 +434,11 @@ class TestWonderFenceRobustness:
             "What assumptions remain untested for goal: Build a login system?",
         )
 
-    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
-    def test_invalid_wrapper_with_nested_answer_uses_fallback(self, outer_closer: str) -> None:
-        content = (
-            'Analysis: {draft: {"questions": [], "should_continue": false, '
-            '"reasoning": "stale convergence"}' + outer_closer
+    @pytest.mark.parametrize("wrapper", MALFORMED_UNFENCED_WRAPPERS)
+    def test_invalid_wrapper_with_nested_answer_uses_fallback(self, wrapper: str) -> None:
+        content = _wrap_malformed_unfenced_payload(
+            wrapper,
+            '{"questions": [], "should_continue": false, "reasoning": "stale convergence"}',
         )
 
         out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(content, _seed())
@@ -849,17 +864,16 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
-    async def test_invalid_wrapper_with_nested_answer_returns_error(
-        self, outer_closer: str
-    ) -> None:
+    @pytest.mark.parametrize("wrapper", MALFORMED_UNFENCED_WRAPPERS)
+    async def test_invalid_wrapper_with_nested_answer_returns_error(self, wrapper: str) -> None:
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             CompletionResponse(
-                content=(
-                    'Analysis: {draft: {"refined_goal": "stale replacement", '
+                content=_wrap_malformed_unfenced_payload(
+                    wrapper,
+                    '{"refined_goal": "stale replacement", '
                     '"refined_constraints": ["stale constraint"], '
-                    '"ontology_mutations": [], "reasoning": "stale"}' + outer_closer
+                    '"ontology_mutations": [], "reasoning": "stale"}',
                 ),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
@@ -1201,11 +1215,11 @@ class TestAssertionExtractorFenceRobustness:
 
         assert assertions == ()
 
-    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
-    def test_invalid_wrapper_does_not_create_nested_assertion(self, outer_closer: str) -> None:
-        content = (
-            'Analysis: {draft: [{"ac_index": 0, "tier": "t4_unverifiable", '
-            '"description": "stale assertion"}]' + outer_closer
+    @pytest.mark.parametrize("wrapper", MALFORMED_UNFENCED_WRAPPERS)
+    def test_invalid_wrapper_does_not_create_nested_assertion(self, wrapper: str) -> None:
+        content = _wrap_malformed_unfenced_payload(
+            wrapper,
+            '[{"ac_index": 0, "tier": "t4_unverifiable", "description": "stale assertion"}]',
         )
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
