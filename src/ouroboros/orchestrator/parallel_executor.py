@@ -84,6 +84,7 @@ from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.ac_execution_capsule import (
+    UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
@@ -8068,81 +8069,109 @@ Respond with either ATOMIC or the structured JSON object only.
             model_router=model_router_snapshot,
             effort=None,
         )
-        capsule = compile_ac_execution_capsule(
-            runtime_identity=runtime_identity,
-            execution_id=execution_context_id,
-            semantic_ac_key=semantic_ac_key,
-            workspace=(
-                self._task_cwd or getattr(self._adapter, "working_directory", None) or os.getcwd()
-            ),
-            authority_scope=(
-                build_ac_dispatch_authority_scope(
-                    base_scope=self.execution_authority.fingerprint,
-                    dispatch_contract={
-                        "backend": getattr(self._adapter, "runtime_backend", None),
-                        "tools": list(tools),
-                        # The allow-list is only a projection of the provider
-                        # contract.  Fingerprint the complete canonical catalog
-                        # too, so schema/source changes cannot reuse a dispatch
-                        # authority that merely has the same tool names.
-                        # Preserve presence separately from entries: ``None``
-                        # means the provider received no catalog authority,
-                        # while an explicit empty tuple means an intentionally
-                        # empty capability/control-plane contract.
-                        "tool_catalog": {
-                            "present": tool_catalog is not None,
-                            "entries": serialize_tool_catalog(tool_catalog or ()),
+        try:
+            capsule = compile_ac_execution_capsule(
+                runtime_identity=runtime_identity,
+                execution_id=execution_context_id,
+                semantic_ac_key=semantic_ac_key,
+                workspace=(
+                    self._task_cwd
+                    or getattr(self._adapter, "working_directory", None)
+                    or os.getcwd()
+                ),
+                authority_scope=(
+                    build_ac_dispatch_authority_scope(
+                        base_scope=self.execution_authority.fingerprint,
+                        dispatch_contract={
+                            "backend": getattr(self._adapter, "runtime_backend", None),
+                            "tools": list(tools),
+                            # The allow-list is only a projection of the provider
+                            # contract.  Fingerprint the complete canonical catalog
+                            # too, so schema/source changes cannot reuse a dispatch
+                            # authority that merely has the same tool names.
+                            # Preserve presence separately from entries: ``None``
+                            # means the provider received no catalog authority,
+                            # while an explicit empty tuple means an intentionally
+                            # empty capability/control-plane contract.
+                            "tool_catalog": {
+                                "present": tool_catalog is not None,
+                                "entries": serialize_tool_catalog(tool_catalog or ()),
+                            },
+                            "system_prompt": system_prompt,
+                            "ac_content": ac_content,
+                            "seed_goal": seed_goal,
+                            "retry_prompt_extra": retry_prompt_extra,
+                            # These values are projected into the provider prompt
+                            # and therefore are part of the dispatch authority even
+                            # though they are not provider/session continuity.
+                            "sibling_acs": [
+                                {"ac_index": sibling_index, "content": sibling_content}
+                                for sibling_index, sibling_content in (sibling_acs or [])
+                            ],
+                            "level_context_prompt": build_context_prompt(level_contexts or []),
                         },
-                        "system_prompt": system_prompt,
-                        "ac_content": ac_content,
-                        "seed_goal": seed_goal,
-                        "retry_prompt_extra": retry_prompt_extra,
-                        # These values are projected into the provider prompt
-                        # and therefore are part of the dispatch authority even
-                        # though they are not provider/session continuity.
-                        "sibling_acs": [
-                            {"ac_index": sibling_index, "content": sibling_content}
-                            for sibling_index, sibling_content in (sibling_acs or [])
-                        ],
-                        "level_context_prompt": build_context_prompt(level_contexts or []),
-                    },
-                    execution_policy={
-                        "retry_attempt": retry_attempt,
-                        "is_sub_ac": is_sub_ac,
-                        "decomposition_trustworthy": decomposition_trustworthy,
-                        "base_reasoning_effort": self._reasoning_effort,
-                        "model_routing": serialize_model_router(model_router_snapshot),
-                        "route_compat": serialize_route_compat_contract(durable_route_projection),
-                        "route_id_override": route_id_override,
-                        "expected_route_candidate": (
-                            expected_route_candidate.to_contract_data()
-                            if expected_route_candidate is not None
-                            else None
-                        ),
-                        "execution_profile": (
-                            self._execution_profile.model_dump(mode="json")
-                            if self._execution_profile is not None
-                            else None
-                        ),
-                        "fat_harness_mode": self._fat_harness_mode,
-                        # Investment metadata is authority-bearing: the effort
-                        # router can lower or raise the dispatched tier from it.
-                        # Keep the canonical Seed representation in the capsule
-                        # scope so materially different investment decisions can
-                        # never reuse one durable dispatch identity.
-                        "investment_spec": (
-                            investment_spec.model_dump(mode="json")
-                            if investment_spec is not None
-                            else None
-                        ),
-                    },
-                )
-            ),
-            seed_goal=seed_goal,
-            ac_content=ac_content,
-            ac_spec=ac_spec,
-            level_contexts=tuple(level_contexts or ()),
-        )
+                        execution_policy={
+                            "retry_attempt": retry_attempt,
+                            "is_sub_ac": is_sub_ac,
+                            "decomposition_trustworthy": decomposition_trustworthy,
+                            "base_reasoning_effort": self._reasoning_effort,
+                            "model_routing": serialize_model_router(model_router_snapshot),
+                            "route_compat": serialize_route_compat_contract(
+                                durable_route_projection
+                            ),
+                            "route_id_override": route_id_override,
+                            "expected_route_candidate": (
+                                expected_route_candidate.to_contract_data()
+                                if expected_route_candidate is not None
+                                else None
+                            ),
+                            "execution_profile": (
+                                self._execution_profile.model_dump(mode="json")
+                                if self._execution_profile is not None
+                                else None
+                            ),
+                            "fat_harness_mode": self._fat_harness_mode,
+                            # Investment metadata is authority-bearing: the effort
+                            # router can lower or raise the dispatched tier from it.
+                            # Keep the canonical Seed representation in the capsule
+                            # scope so materially different investment decisions can
+                            # never reuse one durable dispatch identity.
+                            "investment_spec": (
+                                investment_spec.model_dump(mode="json")
+                                if investment_spec is not None
+                                else None
+                            ),
+                        },
+                    )
+                ),
+                seed_goal=seed_goal,
+                ac_content=ac_content,
+                ac_spec=ac_spec,
+                level_contexts=tuple(level_contexts or ()),
+            )
+        except UnmaterializableSuccessContractError as exc:
+            duration = (datetime.now(UTC) - start_time).total_seconds()
+            log.warning(
+                "parallel_executor.ac.admission_rejected",
+                ac_index=ac_index,
+                session_id=session_id,
+                execution_id=execution_context_id,
+                error_code=exc.code,
+                artifact=exc.artifact,
+                reason=exc.reason,
+            )
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                success=False,
+                error=str(exc),
+                final_message=str(exc),
+                duration_seconds=duration,
+                session_id=session_id,
+                retry_attempt=retry_attempt,
+                depth=depth,
+                outcome=ACExecutionOutcome.INVALID,
+            )
         if (
             expected_resume_capsule_fingerprint is not None
             and capsule.fingerprint != expected_resume_capsule_fingerprint
@@ -10034,6 +10063,17 @@ Respond with either ATOMIC or the structured JSON object only.
             "is_decomposed": result.is_decomposed,
             "is_decomposed_child": result.is_decomposed,
         }
+        if (
+            result.is_invalid
+            and result.error is not None
+            and result.error.startswith(f"{UnmaterializableSuccessContractError.code}:")
+        ):
+            event_data.update(
+                {
+                    "error_code": UnmaterializableSuccessContractError.code,
+                    "error": result.error,
+                }
+            )
         if required:
             assert route_candidate is not None
             assert route_episode_id is not None

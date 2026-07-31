@@ -39,6 +39,18 @@ if (
     raise RuntimeError("Seed success-contract limits exceed execution capsule capacity")
 
 
+class UnmaterializableSuccessContractError(ValueError):
+    """A portable success contract cannot fit beneath the active workspace."""
+
+    code = "unmaterializable_success_contract"
+
+    def __init__(self, *, artifact: str, workspace: str, reason: str) -> None:
+        self.artifact = artifact
+        self.workspace = workspace
+        self.reason = reason
+        super().__init__(f"{self.code}: artifact {artifact!r} cannot materialize: {reason}")
+
+
 def _sha256_text(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -716,8 +728,12 @@ def compile_ac_execution_capsule(
         if (error := expected_artifact_workspace_path_error(path, canonical_workspace)) is not None
     )
     if unmaterializable_artifacts:
-        rendered = ", ".join(f"{path!r} ({error})" for path, error in unmaterializable_artifacts)
-        raise ValueError(f"success contract artifacts cannot materialize: {rendered}")
+        path, error = unmaterializable_artifacts[0]
+        raise UnmaterializableSuccessContractError(
+            artifact=path,
+            workspace=canonical_workspace,
+            reason=error,
+        )
     required_references: list[ACContextReference] = [
         ACContextReference(
             kind=ACContextReferenceKind.WORKSPACE,
@@ -839,6 +855,7 @@ __all__ = [
     "MAX_AC_CONTEXT_REFERENCES",
     "MAX_AC_SUCCESS_CONTRACT_ARTIFACTS",
     "MAX_AC_SUCCESS_CONTRACT_CHARS",
+    "UnmaterializableSuccessContractError",
     "ACContextReference",
     "ACContextReferenceManifest",
     "ACContextReferenceKind",

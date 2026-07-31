@@ -5158,6 +5158,32 @@ async def test_pipeline_recovers_seed_loader_failure_from_review(tmp_path) -> No
     assert state.seed_id == repaired_seed.metadata.seed_id
 
 
+def test_load_seed_reports_oversized_persisted_artifact_contract(tmp_path) -> None:
+    persisted = _seed().to_dict()
+    persisted["acceptance_criteria"] = [
+        {
+            "description": "Materialize an oversized persisted artifact path",
+            "expected_artifacts": ["a" * 256],
+        }
+    ]
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    pipeline = AutoPipeline(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        store=None,
+        seed_loader=lambda _path: Seed.from_dict(persisted),
+        skip_run=True,
+    )
+
+    loaded = pipeline._load_seed(state, str(tmp_path / "persisted.seed.yaml"))
+
+    assert loaded is None
+    assert state.phase is AutoPhase.FAILED
+    assert state.last_error is not None
+    assert state.last_error.startswith("seed load failed:")
+    assert "longer than 255 filesystem bytes" in state.last_error
+
+
 @pytest.mark.asyncio
 async def test_pipeline_run_resume_requires_may_run_even_when_required_grade_is_b(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001

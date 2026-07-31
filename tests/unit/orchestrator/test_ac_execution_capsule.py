@@ -22,6 +22,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
     ACSuccessContract,
+    UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
@@ -344,7 +345,10 @@ def test_capsule_rejects_artifact_exceeding_workspace_path_capacity(
         expected_artifacts=("a" * 255,),
     )
 
-    with pytest.raises(ValueError, match="workspace path exceeds POSIX capacity"):
+    with pytest.raises(
+        UnmaterializableSuccessContractError,
+        match=("unmaterializable_success_contract: .*workspace path exceeds POSIX capacity"),
+    ):
         compile_ac_execution_capsule(
             runtime_identity=identity,
             execution_id="execution-workspace-path-limit",
@@ -355,6 +359,44 @@ def test_capsule_rejects_artifact_exceeding_workspace_path_capacity(
             ac_content="Materialize artifact under workspace",
             ac_spec=spec,
         )
+
+
+def test_capsule_uses_typed_rejection_for_windows_workspace_capacity(monkeypatch) -> None:
+    from ouroboros.core.seed import expected_artifact_workspace_path_error
+
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-windows-path-limit",
+        retry_attempt=0,
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.ac_execution_capsule.expected_artifact_workspace_path_error",
+        lambda artifact, workspace: expected_artifact_workspace_path_error(
+            artifact,
+            workspace,
+            platform="windows",
+            path_capacity=260,
+        ),
+    )
+    spec = AcceptanceCriterionSpec(
+        description="Materialize artifact on Windows",
+        expected_artifacts=("nested/" + "a" * 200,),
+    )
+
+    with pytest.raises(UnmaterializableSuccessContractError) as raised:
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-windows-path-limit",
+            semantic_ac_key="semantic-key",
+            workspace=r"C:\Users\developer\source\ouroboros",
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Materialize artifact on Windows",
+            ac_spec=spec,
+        )
+
+    assert raised.value.code == "unmaterializable_success_contract"
+    assert "workspace path exceeds Windows capacity (260 UTF-16 units)" in str(raised.value)
 
 
 def test_schema_maximum_success_contract_materializes_into_capsule() -> None:

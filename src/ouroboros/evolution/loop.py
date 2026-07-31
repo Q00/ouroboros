@@ -797,7 +797,14 @@ class EvolutionaryLoop:
                         None,
                     )
                     if last_completed and last_completed.seed_json:
-                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
+                        try:
+                            current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
+                        except Exception as e:
+                            return Result.err(
+                                OuroborosError(
+                                    f"Failed to reconstruct fallback seed from seed_json: {e}"
+                                )
+                            )
                     else:
                         return Result.err(
                             OuroborosError(
