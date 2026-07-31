@@ -555,6 +555,10 @@ async def _run_mcp_server(
             resolved_db_path = Path(db_path).expanduser()
         else:
             resolved_db_path = resolve_event_store_path()
+        resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_exists = resolved_db_path.exists() or resolved_db_path.is_symlink()
+        if resolved_exists and not resolved_db_path.is_file():
+            raise ValueError("invalid EventStore target")
         database_url = sqlite_database_url(resolved_db_path)
     except (OSError, RuntimeError, ValueError):
         _console_out.print("[red]Invalid EventStore configuration.[/red]")
