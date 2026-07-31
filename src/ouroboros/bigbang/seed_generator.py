@@ -118,6 +118,76 @@ def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
     return char == "#" and not word_started
 
 
+@dataclass
+class _PosixCaseTracker:
+    """Track the reserved-word and pattern phases of nested POSIX case commands."""
+
+    states: list[str] = field(default_factory=list)
+    command_position: bool = True
+    word_started: bool = False
+
+    def consume_segment(self) -> None:
+        """Record a quote, escape, or expansion joined to the current shell word."""
+        self.word_started = True
+
+    def consume_word(self, word: str) -> None:
+        """Consume one unquoted identifier while preserving token provenance."""
+        reserved = not self.word_started
+        state = self.states[-1] if self.states else None
+        if state == "pattern" and not (reserved and self.command_position and word == "esac"):
+            self.word_started = True
+            return
+        if reserved and self.command_position and word == "case":
+            self.states.append("await_in")
+            self.command_position = False
+        elif reserved and state == "await_in" and word == "in":
+            self.states[-1] = "pattern"
+            self.command_position = True
+        elif (
+            reserved
+            and self.states
+            and self.command_position
+            and word == "esac"
+            and self.states[-1] in {"pattern", "action"}
+        ):
+            self.states.pop()
+            self.command_position = False
+        elif reserved and word in {"then", "do", "else", "elif"}:
+            self.command_position = True
+        else:
+            self.command_position = False
+        self.word_started = True
+
+    def consume_case_operator(self, value: str, index: int) -> int:
+        """Consume case-only syntax and return the number of bytes claimed."""
+        if self.states and self.states[-1] == "action" and value.startswith(";;", index):
+            self.states[-1] = "pattern"
+            self.command_position = True
+            self.word_started = False
+            return 2
+        if self.states and self.states[-1] == "pattern":
+            char = value[index]
+            if char == ")":
+                self.states[-1] = "action"
+                self.command_position = True
+                self.word_started = False
+                return 1
+            if char in "(|":
+                self.word_started = False
+                return 1
+        return 0
+
+    def consume_ordinary(self, char: str) -> None:
+        """Update token position for non-case shell text."""
+        if char.isspace():
+            self.word_started = False
+        elif char in ";|&\n":
+            self.command_position = True
+            self.word_started = False
+        else:
+            self.word_started = True
+
+
 def _posix_expansion_end(value: str, index: int) -> int | None:
     """Return the end of one balanced ``$()``/``${}`` shell expansion.
 
@@ -129,8 +199,8 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
     """
     if index + 1 >= len(value) or value[index] != "$" or value[index + 1] not in "({":
         return None
-    frames: list[tuple[str, str | None, list[str] | None, bool]] = [
-        (")", None, [], True) if value[index + 1] == "(" else ("}", None, None, False)
+    frames: list[tuple[str, str | None, _PosixCaseTracker | None]] = [
+        (")", None, _PosixCaseTracker()) if value[index + 1] == "(" else ("}", None, None)
     ]
     quote: str | None = None
     escaped = False
@@ -147,6 +217,9 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
             cursor += 1
             continue
         if char == "\\":
+            tracker = frames[-1][2]
+            if tracker is not None:
+                tracker.consume_segment()
             escaped = True
             cursor += 1
             continue
@@ -156,10 +229,13 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
                 cursor += 1
                 continue
             if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
+                tracker = frames[-1][2]
+                if tracker is not None:
+                    tracker.consume_segment()
                 frames.append(
-                    (")", quote, [], True)
+                    (")", quote, _PosixCaseTracker())
                     if value[cursor + 1] == "("
-                    else ("}", quote, None, False)
+                    else ("}", quote, None)
                 )
                 quote = None
                 cursor += 2
@@ -168,11 +244,17 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
                 substitution_end = _posix_backtick_substitution_end(value, cursor)
                 if substitution_end is None:
                     return None
+                tracker = frames[-1][2]
+                if tracker is not None:
+                    tracker.consume_segment()
                 cursor = substitution_end
                 continue
             cursor += 1
             continue
         if char in {"'", '"'}:
+            tracker = frames[-1][2]
+            if tracker is not None:
+                tracker.consume_segment()
             quote = char
             cursor += 1
             continue
@@ -180,85 +262,66 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
             substitution_end = _posix_backtick_substitution_end(value, cursor)
             if substitution_end is None:
                 return None
+            tracker = frames[-1][2]
+            if tracker is not None:
+                tracker.consume_segment()
             cursor = substitution_end
             continue
         if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
+            tracker = frames[-1][2]
+            if tracker is not None:
+                tracker.consume_segment()
             frames.append(
-                (")", quote, [], True) if value[cursor + 1] == "(" else ("}", quote, None, False)
+                (")", quote, _PosixCaseTracker())
+                if value[cursor + 1] == "("
+                else ("}", quote, None)
             )
             quote = None
             cursor += 2
             continue
-        closer, _, case_states, command_position = frames[-1]
-        if case_states is not None and (char.isascii() and (char.isalpha() or char == "_")):
+        closer, _, tracker = frames[-1]
+        if tracker is not None and _starts_posix_shell_comment(
+            char, word_started=tracker.word_started
+        ):
+            newline = value.find("\n", cursor + 1)
+            if newline < 0:
+                return None
+            tracker.consume_ordinary("\n")
+            cursor = newline + 1
+            continue
+        if tracker is not None and (char.isascii() and (char.isalpha() or char == "_")):
             word_end = cursor + 1
             while word_end < len(value) and (
                 value[word_end].isascii() and (value[word_end].isalnum() or value[word_end] == "_")
             ):
                 word_end += 1
-            word = value[cursor:word_end]
-            case_state = case_states[-1] if case_states else None
-            if case_state == "pattern" and word != "esac":
-                # Pattern words are not command-position reserved words.  In
-                # particular, a literal ``case)`` pattern must not open a
-                # nested compound command.
-                cursor = word_end
-                continue
-            if command_position and word == "case":
-                case_states.append("await_in")
-                command_position = False
-            elif case_states and case_states[-1] == "await_in" and word == "in":
-                case_states[-1] = "pattern"
-                command_position = True
-            elif (
-                case_states
-                and command_position
-                and word == "esac"
-                and case_states[-1] in {"pattern", "action"}
-            ):
-                case_states.pop()
-                command_position = False
-            elif word in {"then", "do", "else", "elif"}:
-                command_position = True
-            else:
-                command_position = False
-            frames[-1] = (closer, frames[-1][1], case_states, command_position)
+            tracker.consume_word(value[cursor:word_end])
             cursor = word_end
             continue
-        if case_states is not None and case_states and case_states[-1] == "action":
-            if value.startswith(";;", cursor):
-                case_states[-1] = "pattern"
-                frames[-1] = (closer, frames[-1][1], case_states, True)
-                cursor += 2
-                continue
-        if case_states is not None and case_states and case_states[-1] == "pattern":
-            if char == ")":
-                case_states[-1] = "action"
-                frames[-1] = (closer, frames[-1][1], case_states, True)
-                cursor += 1
-                continue
-            if char in "(|":
-                # POSIX permits an optional opening ``(`` before a case
-                # pattern.  Its closing ``)`` is still the pattern terminator,
-                # not a balanced subshell frame.
-                cursor += 1
+        if tracker is not None:
+            claimed = tracker.consume_case_operator(value, cursor)
+            if claimed:
+                cursor += claimed
                 continue
         if char == "(":
             arithmetic = cursor >= 2 and value[cursor - 2 : cursor] == "$("
-            frames.append((")", quote, None if arithmetic else [], not arithmetic))
+            frames.append((")", quote, None if arithmetic else _PosixCaseTracker()))
             cursor += 1
             continue
         if char == frames[-1][0]:
-            _, return_quote, open_cases, _ = frames.pop()
-            if open_cases:
+            _, return_quote, closing_tracker = frames.pop()
+            if closing_tracker is not None and closing_tracker.states:
                 return None
             quote = return_quote
             cursor += 1
             if not frames:
                 return cursor
+            parent_tracker = frames[-1][2]
+            if parent_tracker is not None:
+                parent_tracker.consume_segment()
             continue
-        if case_states is not None and char in ";|&\n":
-            frames[-1] = (closer, frames[-1][1], case_states, True)
+        if tracker is not None:
+            tracker.consume_ordinary(char)
         cursor += 1
     return None
 
@@ -430,7 +493,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     active_field: str | None = None
     escaped = False
     unquoted_comment = False
-    shell_word_started = False
+    shell_tracker = _PosixCaseTracker()
     index = 0
     while index < len(body):
         char = body[index]
@@ -473,7 +536,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 # The escaped byte belongs to the current word even when its
                 # raw spelling is whitespace or a control operator. Preserve
                 # that provenance so a following # cannot become a comment.
-                shell_word_started = True
+                shell_tracker.consume_segment()
             escaped = True
             index += 1
             continue
@@ -491,7 +554,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 quote = quote or "$("
                 index = len(body)
                 continue
-            shell_word_started = True
+            shell_tracker.consume_segment()
             index = expansion_end
             continue
         if (
@@ -508,7 +571,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 quote = quote or "`"
                 index = len(body)
                 continue
-            shell_word_started = True
+            shell_tracker.consume_segment()
             index = substitution_end
             continue
         if quote is not None:
@@ -527,7 +590,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if (
             structured_payload_started
             and active_field == "verify"
-            and _starts_posix_shell_comment(char, word_started=shell_word_started)
+            and _starts_posix_shell_comment(char, word_started=shell_tracker.word_started)
         ):
             unquoted_comment = True
             index += 1
@@ -541,17 +604,41 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             )
         ):
             if structured_payload_started and active_field == "verify":
-                shell_word_started = True
+                shell_tracker.consume_segment()
             quote = char
             quote_start = index + 1
             index += 1
             continue
+        if (
+            structured_payload_started
+            and active_field == "verify"
+            and char.isascii()
+            and (char.isalpha() or char == "_")
+        ):
+            word_end = index + 1
+            while word_end < len(body) and (
+                body[word_end].isascii() and (body[word_end].isalnum() or body[word_end] == "_")
+            ):
+                word_end += 1
+            shell_tracker.consume_word(body[index:word_end])
+            index = word_end
+            continue
+        if structured_payload_started and active_field == "verify":
+            claimed = shell_tracker.consume_case_operator(body, index)
+            if claimed:
+                index += claimed
+                continue
         if char != "|":
             if structured_payload_started and active_field == "verify":
-                if char.isspace() or char in ";&()":
-                    shell_word_started = False
-                else:
-                    shell_word_started = True
+                shell_tracker.consume_ordinary(char)
+            index += 1
+            continue
+
+        if active_field == "verify" and shell_tracker.states:
+            # A complete top-level case owns every pipeline until ``esac``.
+            # Reserved-looking bytes in its patterns or actions cannot become
+            # outer acceptance-contract fields.
+            shell_tracker.consume_ordinary("|")
             index += 1
             continue
 
@@ -559,7 +646,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if fragment is not None and fragment.has_colon and fragment.canonical:
             structured_payload_started = True
             active_field = fragment.name
-            shell_word_started = False
+            shell_tracker = _PosixCaseTracker()
             markers.append(
                 _ACFieldMarker(
                     name=fragment.name,
@@ -583,9 +670,11 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if fragment is not None:
             raise ValueError(f"Malformed {fragment.name} field in acceptance criterion")
         if active_field == "verify":
-            shell_word_started = False
+            shell_tracker.consume_ordinary("|")
         index += 1
-    if (quote is not None or escaped) and _find_pipe_led_ac_field_fragment(body):
+    if (
+        quote is not None or escaped or (active_field == "verify" and shell_tracker.states)
+    ) and _find_pipe_led_ac_field_fragment(body):
         raise ValueError("Unterminated quoted or escaped acceptance criterion contract")
     return tuple(markers)
 

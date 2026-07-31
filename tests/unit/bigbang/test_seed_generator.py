@@ -1896,14 +1896,22 @@ class TestSeedGeneratorExtraction:
         assert gated.verify_gate_outcome.output_tail == "case-ok\n"
 
     @pytest.mark.asyncio
-    async def test_extracted_dollar_case_survives_seed_grade_and_live_verify(self) -> None:
-        """Multi-pattern case bodies remain opaque inside modern command substitutions."""
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            """printf '%s\\n' "$(case y in (x) printf no;; """
+            '''(y | artifacts:) printf yes;; esac)"''',
+            "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
+            "(z | artifacts:) printf yes;; esac)",
+            "case y in x) printf no;; y | artifacts:) printf '%s\\n' yes;; esac",
+        ),
+    )
+    async def test_extracted_case_survives_seed_grade_and_live_verify(
+        self, verify_command: str
+    ) -> None:
+        """Top-level and substituted case bodies survive through the live shell gate."""
         if not Path("/bin/sh").exists():
             pytest.skip("POSIX shell regression")
-        verify_command = (
-            """printf '%s\\n' "$(case y in (x) printf no;; """
-            '''(y | artifacts:) printf yes;; esac)"'''
-        )
         syntax = subprocess.run(
             ["/bin/sh", "-n", "-c", verify_command],
             check=False,
@@ -1970,6 +1978,12 @@ class TestSeedGeneratorExtraction:
             '''printf '%s\\n' "$(case y in (y) printf '%s' esac;; esac)"''',
             """printf '%s\\n' "$(case y in (y) case z in """
             '''(z | artifacts:) printf nested;; esac;; esac)"''',
+            "case y in (y) case z in (z | artifacts:) printf nested;; esac;; esac",
+            "case z in (x) :;; (''esac) printf no;; (z | artifacts:) printf yes;; esac",
+            "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
+            "(z | artifacts:) printf yes;; esac)",
+            r"printf '%s\n' $(case esac in (\esac) printf escaped;; esac)",
+            "printf '%s\\n' ''case",
             '''printf '%s\\n' "$(printf '%s' ordinary)"''',
         ),
     )
@@ -1987,11 +2001,10 @@ class TestSeedGeneratorExtraction:
             "printf $(case y in x) printf hidden;; y | artifacts:) printf hidden;;",
             "printf $(case y in x) printf hidden;; y | artifacts:) printf $(unclosed",
             "printf $(case y in x) printf hidden;; y | artifacts:) printf `unclosed",
+            "case y in x) printf hidden;; y | artifacts:) printf hidden;;",
         ),
     )
-    def test_unclosed_dollar_case_frames_cannot_hide_outer_fields(
-        self, verify_command: str
-    ) -> None:
+    def test_unclosed_case_frames_cannot_hide_outer_fields(self, verify_command: str) -> None:
         with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
             _parse_acceptance_criterion_contract(
                 f"AC: Dollar case boundary | verify: {verify_command} | "
