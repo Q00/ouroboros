@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
@@ -101,7 +102,7 @@ class TestAdapterConstructor:
         assert adapter._io_recorder is None
 
 
-def _parse_prefill_content(content: str) -> str:
+def _parse_content(content: str, *, json_prefill: bool) -> str:
     text_block = MagicMock(type="text", text=content)
     response = _StubAnthropicResponse(
         content=[text_block],
@@ -114,10 +115,14 @@ def _parse_prefill_content(content: str) -> str:
         ._parse_response(
             response,
             "claude-sonnet-4-6",
-            json_prefill=True,
+            json_prefill=json_prefill,
         )
         .content
     )
+
+
+def _parse_prefill_content(content: str) -> str:
+    return _parse_content(content, json_prefill=True)
 
 
 class TestJsonPrefillResponseBoundary:
@@ -131,10 +136,10 @@ class TestJsonPrefillResponseBoundary:
     def test_malformed_quoted_key_continuation_keeps_opener_and_fails_closed(self) -> None:
         continuation = '  "draft": {"stale": true}'
 
-        normalized = _parse_prefill_content(continuation)
+        with pytest.raises(ProviderError, match="did not complete a valid object") as exc_info:
+            _parse_prefill_content(continuation)
 
-        assert normalized == "{" + continuation
-        assert extract_json_payload(normalized) is None
+        assert exc_info.value.details["error_type"] == "invalid_json_prefill_response"
 
     @pytest.mark.parametrize(
         "continuation",
@@ -146,46 +151,133 @@ class TestJsonPrefillResponseBoundary:
         ids=["closing-brace", "comma", "unquoted-key"],
     )
     def test_malformed_object_continuation_markers_fail_closed(self, continuation: str) -> None:
-        normalized = _parse_prefill_content(continuation)
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(continuation)
 
-        assert normalized == "{" + continuation
-        assert extract_json_payload(normalized) is None
+    @pytest.mark.parametrize(
+        "continuation",
+        [
+            '"draft":\n```json\n{"stale": true}\n```',
+            'draft:\n```json\n{"stale": true}\n```',
+            ', draft:\n```json\n{"stale": true}\n```',
+        ],
+        ids=["quoted-key-fence", "unquoted-key-fence", "comma-fence"],
+    )
+    def test_fenced_nested_payload_never_leaves_prefill_boundary(self, continuation: str) -> None:
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(continuation)
 
     @pytest.mark.parametrize(
         "content",
         ['{"ok": true}', '[{"ok": true}]'],
         ids=["full-object", "full-array"],
     )
-    def test_full_json_answer_ignoring_prefill_remains_raw(self, content: str) -> None:
-        normalized = _parse_prefill_content(content)
+    def test_full_json_bytes_are_invalid_when_request_used_prefill(self, content: str) -> None:
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(content)
+
+    @pytest.mark.parametrize(
+        "continuation",
+        [
+            '{"stale": true}}',
+            '[{"stale": true}]]',
+            'Let me explain.\n\n{"stale": true}',
+        ],
+        ids=["object-bytes", "array-bytes", "prose-json"],
+    )
+    def test_prefill_never_infers_ignored_assistant_prefix(self, continuation: str) -> None:
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(continuation)
+
+    @pytest.mark.parametrize(
+        "content",
+        ['{"ok": true}', '[{"ok": true}]'],
+        ids=["full-object", "full-array"],
+    )
+    def test_full_json_answer_without_prefill_remains_raw(self, content: str) -> None:
+        normalized = _parse_content(content, json_prefill=False)
 
         assert normalized == content
         assert extract_json_payload(normalized) == content
 
-    def test_prose_then_one_pretty_crlf_json_remains_raw_and_extractable(self) -> None:
+    def test_prose_then_json_is_rejected_when_request_used_prefill(self) -> None:
         payload = '{\r\n  "outer": {"value": 1},\r\n \t\r\n  "items": [1, 2]\r\n}'
         content = f"Let me inspect the response.\r\n  \r\n{payload}\r\n\t\r\n"
 
-        normalized = _parse_prefill_content(content)
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(content)
+
+        normalized = _parse_content(content, json_prefill=False)
 
         assert normalized == content
         assert extract_json_payload(normalized) == payload
 
-    def test_prose_with_two_json_answers_keeps_opener_and_is_ambiguous(self) -> None:
+    def test_prose_with_two_json_answers_is_rejected_at_prefill_boundary(self) -> None:
         content = 'Example:\n\n{"a": 1}\nActual:\n\n{"b": 2}'
 
-        normalized = _parse_prefill_content(content)
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(content)
 
-        assert normalized == "{" + content
+        normalized = _parse_content(content, json_prefill=False)
         assert extract_json_payload(normalized) is None
 
-    def test_malformed_prose_answer_keeps_opener_and_has_no_payload(self) -> None:
+    def test_malformed_prose_answer_is_rejected_at_prefill_boundary(self) -> None:
         content = 'Let me explain.\n\n{"unfinished": true'
 
-        normalized = _parse_prefill_content(content)
+        with pytest.raises(ProviderError, match="did not complete a valid object"):
+            _parse_prefill_content(content)
 
-        assert normalized == "{" + content
+        normalized = _parse_content(content, json_prefill=False)
         assert extract_json_payload(normalized) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "consumer_name",
+    ["wonder", "reflect", "semantic", "consensus", "judgment", "qa"],
+)
+@pytest.mark.parametrize(
+    "continuation",
+    [
+        '"draft":\n```json\n{"stale": true}\n```',
+        'draft:\n```json\n{"stale": true}\n```',
+        ', draft:\n```json\n{"stale": true}\n```',
+    ],
+    ids=["quoted-key", "unquoted-key", "comma"],
+)
+async def test_invalid_prefill_response_cannot_reach_downstream_consumer(
+    consumer_name: str,
+    continuation: str,
+) -> None:
+    adapter = AnthropicAdapter(api_key="dummy")
+    text_block = MagicMock(
+        type="text",
+        text=continuation,
+    )
+    response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=response)
+    adapter._client = fake_client
+    downstream_consumer = MagicMock(name=consumer_name)
+
+    result = await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="return JSON")],
+        config=CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={"type": "json_object"},
+        ),
+    )
+    if result.is_ok:
+        downstream_consumer(result.value.content)
+
+    assert result.is_err
+    assert result.error.details["error_type"] == "invalid_json_prefill_response"
+    downstream_consumer.assert_not_called()
 
 
 @pytest.mark.asyncio

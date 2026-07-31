@@ -7,13 +7,11 @@ for Ouroboros MCP server — no OpenRouter or LiteLLM dependency required.
 
 import json
 import os
-import re
 from typing import Any
 
 import structlog
 
 from ouroboros.core.errors import ProviderError
-from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.events.io_recorder import IOJournalRecorder, get_current_io_journal_recorder
@@ -29,19 +27,6 @@ from ouroboros.providers.profiles import resolve_completion_profile_result
 log = structlog.get_logger()
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-_PARAGRAPH_PAYLOAD_BOUNDARY = re.compile(r"\r?\n[ \t]*\r?\n[ \t]*\Z")
-
-
-def _has_unique_paragraph_json_payload(content: str) -> bool:
-    """Return whether raw prose owns one JSON payload after a blank line."""
-    payload = extract_json_payload(content)
-    if payload is None:
-        return False
-    payload_start = content.find(payload)
-    return (
-        payload_start >= 0
-        and _PARAGRAPH_PAYLOAD_BOUNDARY.search(content[:payload_start]) is not None
-    )
 
 
 def _is_fable_or_mythos_5(model: str) -> bool:
@@ -363,8 +348,8 @@ class AnthropicAdapter:
         Args:
             response: The raw Anthropic Message response.
             model: The model identifier used for the request.
-            json_prefill: If True, restore the assistant "{" only for a valid
-                or safely fail-closed object continuation.
+            json_prefill: If True, restore the assistant "{" for a valid
+                object continuation or raise a typed provider parse failure.
 
         Returns:
             Parsed CompletionResponse.
@@ -388,26 +373,24 @@ class AnthropicAdapter:
             )
             content = content[:MAX_LLM_RESPONSE_LENGTH]
 
-        # The synthetic "{" belongs to the provider request boundary. Restore
-        # it only when the continuation completes one valid JSON object. If a
-        # quoted-key continuation is malformed or truncated, retain the
-        # synthetic opener so downstream extraction fails closed. Full JSON
-        # answers and prose with one paragraph-delimited payload ignored the
-        # prefill and remain raw.
+        # The synthetic "{" belongs to this provider request boundary. Content
+        # returned after an assistant prefill is always a suffix; never infer
+        # from its bytes that the model ignored the prefill. Invalid suffixes
+        # terminate here so generic extractors cannot rescan fenced or nested
+        # fragments as an authoritative answer.
         if json_prefill:
             reconstructed = "{" + content
             try:
                 parsed_reconstruction = json.loads(reconstructed)
             except (json.JSONDecodeError, ValueError):
                 parsed_reconstruction = None
-            stripped_content = content.lstrip()
-            raw_full_json = stripped_content.startswith(("{", "["))
-            continuation_marker = stripped_content.startswith(('"', "}", ","))
-            raw_paragraph_answer = _has_unique_paragraph_json_payload(content)
-            if isinstance(parsed_reconstruction, dict) or (
-                not raw_full_json and (continuation_marker or not raw_paragraph_answer)
-            ):
-                content = reconstructed
+            if not isinstance(parsed_reconstruction, dict):
+                raise ProviderError(
+                    "Anthropic JSON prefill response did not complete a valid object",
+                    provider="anthropic",
+                    details={"error_type": "invalid_json_prefill_response"},
+                )
+            content = reconstructed
 
         usage = response.usage
 
@@ -436,6 +419,9 @@ class AnthropicAdapter:
         Returns:
             Result.err with an appropriate ProviderError.
         """
+        if isinstance(exc, ProviderError):
+            return Result.err(exc)
+
         try:
             import anthropic
         except ImportError:
