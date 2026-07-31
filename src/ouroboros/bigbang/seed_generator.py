@@ -132,6 +132,13 @@ class _PosixCaseTracker:
     word_started: bool = False
     function_name_candidate: bool = False
     awaiting_function_body: bool = False
+    for_phase: str | None = None
+    invalid: bool = False
+
+    @property
+    def incomplete(self) -> bool:
+        """Return whether a compound construct is unfinished or malformed."""
+        return bool(self.states or self.for_phase is not None or self.invalid)
 
     def consume_segment(self) -> None:
         """Record a quote, escape, or expansion joined to the current shell word."""
@@ -141,6 +148,37 @@ class _PosixCaseTracker:
     def consume_word(self, word: str, *, token_ends: bool) -> None:
         """Consume one unquoted identifier while preserving token provenance."""
         reserved = not self.word_started and token_ends
+        if self.for_phase == "await_name":
+            self.command_position = False
+            self.function_name_candidate = False
+            self.word_started = True
+            if token_ends:
+                self.for_phase = "after_name"
+            return
+        if self.for_phase == "after_name":
+            if reserved and word == "in":
+                self.for_phase = "in_list"
+            else:
+                self.invalid = True
+            self.command_position = False
+            self.function_name_candidate = False
+            self.word_started = True
+            return
+        if self.for_phase == "in_list":
+            self.command_position = False
+            self.function_name_candidate = False
+            self.word_started = True
+            return
+        if self.for_phase == "await_do":
+            if reserved and word == "do":
+                self.for_phase = None
+                self.command_position = True
+            else:
+                self.invalid = True
+                self.command_position = False
+            self.function_name_candidate = False
+            self.word_started = True
+            return
         state = self.states[-1] if self.states else None
         if state == "pattern" and not (reserved and self.command_position and word == "esac"):
             self.word_started = True
@@ -177,7 +215,11 @@ class _PosixCaseTracker:
                 "for",
             }
         ):
-            self.command_position = True
+            if word == "for":
+                self.for_phase = "await_name"
+                self.command_position = False
+            else:
+                self.command_position = True
         else:
             self.command_position = False
         self.function_name_candidate = (
@@ -188,7 +230,7 @@ class _PosixCaseTracker:
                 and word in {"case", "if", "then", "elif", "else", "while", "until", "do", "for"}
             )
         )
-        self.word_started = True
+        self.word_started = self.for_phase != "await_name"
 
     def consume_function_header(self, value: str, index: int) -> int:
         """Consume the ``()`` after a plain command-position function name."""
@@ -241,8 +283,19 @@ class _PosixCaseTracker:
     def consume_ordinary(self, char: str) -> None:
         """Update token position for non-case shell text."""
         if char.isspace():
+            if self.for_phase == "await_name" and self.word_started:
+                self.for_phase = "after_name"
+            if char == "\n" and self.for_phase in {"after_name", "in_list"}:
+                self.for_phase = "await_do"
+                self.command_position = True
             self.word_started = False
         elif char in ";|&\n" or (char == "!" and self.command_position and not self.word_started):
+            if self.for_phase == "await_name" and self.word_started:
+                self.for_phase = "after_name"
+            if char == ";" and self.for_phase in {"after_name", "in_list"}:
+                self.for_phase = "await_do"
+            elif self.for_phase is not None and char in "|&":
+                self.invalid = True
             self.command_position = True
             self.word_started = False
             self.function_name_candidate = False
@@ -380,7 +433,7 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
             continue
         if char == frames[-1][0]:
             _, return_quote, closing_tracker = frames.pop()
-            if closing_tracker is not None and closing_tracker.states:
+            if closing_tracker is not None and closing_tracker.incomplete:
                 return None
             quote = return_quote
             cursor += 1
@@ -719,7 +772,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             index += 1
             continue
 
-        if active_field == "verify" and shell_tracker.states:
+        if active_field == "verify" and shell_tracker.incomplete:
             # A complete top-level case owns every pipeline until ``esac``.
             # Reserved-looking bytes in its patterns or actions cannot become
             # outer acceptance-contract fields.
@@ -758,7 +811,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             shell_tracker.consume_ordinary("|")
         index += 1
     if (
-        quote is not None or escaped or (active_field == "verify" and shell_tracker.states)
+        quote is not None or escaped or (active_field == "verify" and shell_tracker.incomplete)
     ) and _find_pipe_led_ac_field_fragment(body):
         raise ValueError("Unterminated quoted or escaped acceptance criterion contract")
     return tuple(markers)

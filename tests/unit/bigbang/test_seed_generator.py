@@ -1924,6 +1924,11 @@ class TestSeedGeneratorExtraction:
             ("f() { case y in (y | artifacts:) printf yes;; esac; }; f", "yes"),
             ("(case y in (y | verify:) printf yes;; esac)", "yes"),
             ("case esac in (esac'') printf yes;; esac", "yes"),
+            (
+                "for case in y; do printf '%s' 'ok | artifacts: literal'; done",
+                "ok | artifacts: literal",
+            ),
+            ("for case in y; do :; done; printf ok", "ok"),
         ),
     )
     async def test_extracted_case_survives_seed_grade_and_live_verify(
@@ -2010,6 +2015,11 @@ class TestSeedGeneratorExtraction:
             '''(y | artifacts:) printf nested;; esac; }; f)"''',
             "until case y in (y | artifacts:) false;; esac; do :; done",
             "for x in y; do case $x in (y | artifacts:) :;; esac; done",
+            "for x; do case $x in (y | artifacts:) :;; esac; done",
+            "for 'case' in y; do case $case in (y | artifacts:) :;; esac; done",
+            r"for \case in y; do case $case in (y | artifacts:) :;; esac; done",
+            "for case in y; do for esac in z; do case $case in "
+            "(y | artifacts:) :;; esac; done; done",
             "{ case y in (y | artifacts:) :;; esac; }",
             "true && case y in (y | artifacts:) :;; esac",
             "false || case y in (y | artifacts:) :;; esac",
@@ -2032,6 +2042,7 @@ class TestSeedGeneratorExtraction:
             "printf $(case y in x) printf hidden;; y | artifacts:) printf $(unclosed",
             "printf $(case y in x) printf hidden;; y | artifacts:) printf `unclosed",
             "case y in x) printf hidden;; y | artifacts:) printf hidden;;",
+            "for in y; do :; done",
         ),
     )
     def test_unclosed_case_frames_cannot_hide_outer_fields(self, verify_command: str) -> None:
