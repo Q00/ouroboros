@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
 from ouroboros.providers.anthropic_adapter import (
@@ -98,6 +99,93 @@ class TestAdapterConstructor:
         # No io_recorder kwarg — must still construct.
         adapter = AnthropicAdapter(api_key="dummy")
         assert adapter._io_recorder is None
+
+
+def _parse_prefill_content(content: str) -> str:
+    text_block = MagicMock(type="text", text=content)
+    response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    return (
+        AnthropicAdapter(api_key="dummy")
+        ._parse_response(
+            response,
+            "claude-sonnet-4-6",
+            json_prefill=True,
+        )
+        .content
+    )
+
+
+class TestJsonPrefillResponseBoundary:
+    def test_valid_object_continuation_restores_synthetic_opener(self) -> None:
+        continuation = '"ok": true, "nested": {"value": 1}}'
+
+        normalized = _parse_prefill_content(continuation)
+
+        assert normalized == '{"ok": true, "nested": {"value": 1}}'
+
+    def test_malformed_quoted_key_continuation_keeps_opener_and_fails_closed(self) -> None:
+        continuation = '  "draft": {"stale": true}'
+
+        normalized = _parse_prefill_content(continuation)
+
+        assert normalized == "{" + continuation
+        assert extract_json_payload(normalized) is None
+
+    @pytest.mark.parametrize(
+        "continuation",
+        [
+            '} prose {"stale": true}',
+            ', "draft": {"stale": true}',
+            'draft: {"stale": true}',
+        ],
+        ids=["closing-brace", "comma", "unquoted-key"],
+    )
+    def test_malformed_object_continuation_markers_fail_closed(self, continuation: str) -> None:
+        normalized = _parse_prefill_content(continuation)
+
+        assert normalized == "{" + continuation
+        assert extract_json_payload(normalized) is None
+
+    @pytest.mark.parametrize(
+        "content",
+        ['{"ok": true}', '[{"ok": true}]'],
+        ids=["full-object", "full-array"],
+    )
+    def test_full_json_answer_ignoring_prefill_remains_raw(self, content: str) -> None:
+        normalized = _parse_prefill_content(content)
+
+        assert normalized == content
+        assert extract_json_payload(normalized) == content
+
+    def test_prose_then_one_pretty_crlf_json_remains_raw_and_extractable(self) -> None:
+        payload = '{\r\n  "outer": {"value": 1},\r\n \t\r\n  "items": [1, 2]\r\n}'
+        content = f"Let me inspect the response.\r\n  \r\n{payload}\r\n\t\r\n"
+
+        normalized = _parse_prefill_content(content)
+
+        assert normalized == content
+        assert extract_json_payload(normalized) == payload
+
+    def test_prose_with_two_json_answers_keeps_opener_and_is_ambiguous(self) -> None:
+        content = 'Example:\n\n{"a": 1}\nActual:\n\n{"b": 2}'
+
+        normalized = _parse_prefill_content(content)
+
+        assert normalized == "{" + content
+        assert extract_json_payload(normalized) is None
+
+    def test_malformed_prose_answer_keeps_opener_and_has_no_payload(self) -> None:
+        content = 'Let me explain.\n\n{"unfinished": true'
+
+        normalized = _parse_prefill_content(content)
+
+        assert normalized == "{" + content
+        assert extract_json_payload(normalized) is None
 
 
 @pytest.mark.asyncio

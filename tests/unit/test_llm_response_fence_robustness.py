@@ -76,12 +76,12 @@ def _wrap(variant: str, payload: str) -> str:
         return json.dumps(json.loads(payload), indent="\t")
     if variant == "anthropic_prefill_pretty_blanklines":
         pretty = json.dumps(json.loads(payload), indent=2).replace("\n", "\n \t\n", 1)
-        return f"{{Let me carefully evaluate this response.\n  \n{pretty}\n\t\n"
+        return f"Let me carefully evaluate this response.\n  \n{pretty}\n\t\n"
     if variant == "anthropic_prefill_crlf_trailing_blanks":
-        return f"{{I will analyze this response.\r\n  \r\n{payload}\r\n\t\r\n"
+        return f"I will analyze this response.\r\n  \r\n{payload}\r\n\t\r\n"
     if variant == "anthropic_prefill_ordinary_punctuation":
         return (
-            "{Let me review the user's \"goal\": it isn't ambiguous; "
+            "Let me review the user's \"goal\": it isn't ambiguous; "
             f"the `draft` [note] is prose.\n\n{payload}"
         )
     if variant == "no_fence":

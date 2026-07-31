@@ -19,9 +19,6 @@ _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
-_ANTHROPIC_PREFILL_PROSE = re.compile(r"^\{(?:Let me\s|I will analyze\s)")
-_ANTHROPIC_PREFILL_PREAMBLE = re.compile(r"^(?:Let me\s|I will analyze\s)")
-_PARAGRAPH_SEPARATOR = re.compile(r"\r?\n[ \t]*\r?\n")
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -324,52 +321,10 @@ def _extract_json_from_text(text: str) -> tuple[str, ...]:
                 pos = start + len(candidate)
                 continue
         else:
-            prefill_payload = _anthropic_prefill_payload(text, start)
-            if prefill_payload is not None:
-                payloads.append(prefill_payload)
-                return tuple(payloads)
-
-            # An unbalanced structured opener owns the remaining text.  Its
-            # nested delimiters have no independent boundary, so do not
-            # promote any inner object or array.  The sole recovery exception
-            # is the narrow historical Anthropic prefill shape above.
+            # An unbalanced structured opener owns the remaining text. Its
+            # nested delimiters have no independent boundary.
             raise _MalformedJsonBoundary
         pos = start + 1
-
-
-def _anthropic_prefill_payload(text: str, start: int) -> str | None:
-    """Recover the documented ``{<prose>\n\n<JSON>`` adapter failure only."""
-    if start != 0 or _ANTHROPIC_PREFILL_PROSE.match(text) is None:
-        return None
-
-    candidates: list[tuple[int, str]] = []
-    for separator in _PARAGRAPH_SEPARATOR.finditer(text[start + 1 :]):
-        payload_start = start + 1 + separator.end()
-        payload = text[payload_start:].strip()
-        try:
-            parsed = json.loads(payload)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(parsed, dict | list):
-            candidates.append((payload_start, payload))
-
-    if len(candidates) != 1:
-        return None
-
-    payload_start, payload = candidates[0]
-    preamble = text[start + 1 : payload_start]
-    try:
-        prior_payloads = _extract_json_from_text(preamble)
-    except _MalformedJsonBoundary:
-        return None
-    if prior_payloads or not _is_historical_anthropic_preamble(preamble):
-        return None
-    return payload
-
-
-def _is_historical_anthropic_preamble(preamble: str) -> bool:
-    """Require a corpus-proven prose stem with genuine whitespace continuation."""
-    return _ANTHROPIC_PREFILL_PREAMBLE.match(preamble) is not None
 
 
 def _bracket_extract(text: str, start: int) -> str | None:

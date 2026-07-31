@@ -5,12 +5,15 @@ protocol using the official Anthropic Python SDK. This is the recommended defaul
 for Ouroboros MCP server — no OpenRouter or LiteLLM dependency required.
 """
 
+import json
 import os
+import re
 from typing import Any
 
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.events.io_recorder import IOJournalRecorder, get_current_io_journal_recorder
@@ -26,6 +29,19 @@ from ouroboros.providers.profiles import resolve_completion_profile_result
 log = structlog.get_logger()
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+_PARAGRAPH_PAYLOAD_BOUNDARY = re.compile(r"\r?\n[ \t]*\r?\n[ \t]*\Z")
+
+
+def _has_unique_paragraph_json_payload(content: str) -> bool:
+    """Return whether raw prose owns one JSON payload after a blank line."""
+    payload = extract_json_payload(content)
+    if payload is None:
+        return False
+    payload_start = content.find(payload)
+    return (
+        payload_start >= 0
+        and _PARAGRAPH_PAYLOAD_BOUNDARY.search(content[:payload_start]) is not None
+    )
 
 
 def _is_fable_or_mythos_5(model: str) -> bool:
@@ -347,7 +363,8 @@ class AnthropicAdapter:
         Args:
             response: The raw Anthropic Message response.
             model: The model identifier used for the request.
-            json_prefill: If True, prepend "{" to content (assistant prefill).
+            json_prefill: If True, restore the assistant "{" only for a valid
+                or safely fail-closed object continuation.
 
         Returns:
             Parsed CompletionResponse.
@@ -371,10 +388,26 @@ class AnthropicAdapter:
             )
             content = content[:MAX_LLM_RESPONSE_LENGTH]
 
-        # When using JSON prefill, the "{" was sent as assistant content
-        # and is not echoed back in the response. Prepend it.
+        # The synthetic "{" belongs to the provider request boundary. Restore
+        # it only when the continuation completes one valid JSON object. If a
+        # quoted-key continuation is malformed or truncated, retain the
+        # synthetic opener so downstream extraction fails closed. Full JSON
+        # answers and prose with one paragraph-delimited payload ignored the
+        # prefill and remain raw.
         if json_prefill:
-            content = "{" + content
+            reconstructed = "{" + content
+            try:
+                parsed_reconstruction = json.loads(reconstructed)
+            except (json.JSONDecodeError, ValueError):
+                parsed_reconstruction = None
+            stripped_content = content.lstrip()
+            raw_full_json = stripped_content.startswith(("{", "["))
+            continuation_marker = stripped_content.startswith(('"', "}", ","))
+            raw_paragraph_answer = _has_unique_paragraph_json_payload(content)
+            if isinstance(parsed_reconstruction, dict) or (
+                not raw_full_json and (continuation_marker or not raw_paragraph_answer)
+            ):
+                content = reconstructed
 
         usage = response.usage
 

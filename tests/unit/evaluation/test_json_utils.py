@@ -110,9 +110,9 @@ class TestExtractJsonPayload:
         assert extract_json_payload(text) == '{"actual": true}'
 
     def test_prose_before_json(self):
-        """The classic Anthropic prefill failure: prose with braces before JSON."""
+        """Generic raw prose may contain braces before one JSON answer."""
         text = (
-            "{I will analyze this artifact carefully.\n\n"
+            "I will analyze this artifact carefully.\n\n"
             "The {complexity} is moderate.\n\n"
             '{"score": 0.90, "verdict": "pass"}'
         )
@@ -162,14 +162,10 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"score": 0.84' in result
 
-    def test_anthropic_prefill_failure_mode(self):
-        """Anthropic prefill failure: LLM explains before JSON.
-
-        The adapter prepends '{' to response, so we get:
-        '{Let me think...\n{"score": ...}'
-        """
+    def test_raw_provider_prose_before_json(self):
+        """A provider-preserved prose response exposes its unique JSON answer."""
         text = (
-            "{Let me carefully evaluate this document.\n\n"
+            "Let me carefully evaluate this document.\n\n"
             "Based on the quality bar provided:\n\n"
             '{"score": 0.88, "verdict": "pass", '
             '"dimensions": {"correctness": 0.90, "completeness": 0.85}}'
@@ -179,7 +175,7 @@ class TestExtractJsonPayload:
         assert '"score": 0.88' in result
 
     @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
-    def test_anthropic_prefill_preserves_pretty_json_blank_lines_and_trailing_space(
+    def test_raw_prose_preserves_pretty_json_blank_lines_and_trailing_space(
         self, line_ending: str
     ) -> None:
         payload = line_ending.join(
@@ -194,20 +190,20 @@ class TestExtractJsonPayload:
             ]
         )
         text = (
-            f"{{Let me carefully evaluate this response.{line_ending}  {line_ending}"
+            f"Let me carefully evaluate this response.{line_ending}  {line_ending}"
             f"{payload}{line_ending}\t{line_ending}"
         )
 
         assert extract_json_payload(text) == payload
 
-    def test_anthropic_prefill_rejects_multiple_paragraph_payloads(self) -> None:
-        text = '{Let me compare the answers.\n\n{"a": 1}\n\n{"b": 2}'
+    def test_raw_prose_rejects_multiple_paragraph_payloads(self) -> None:
+        text = 'Let me compare the answers.\n\n{"a": 1}\n\n{"b": 2}'
 
         assert extract_json_payload(text) is None
 
-    def test_anthropic_prefill_allows_ordinary_prose_punctuation(self) -> None:
+    def test_raw_prose_allows_ordinary_punctuation(self) -> None:
         text = (
-            "{Let me review the user's \"goal\": it isn't ambiguous; "
+            "Let me review the user's \"goal\": it isn't ambiguous; "
             "the `draft` [note] is prose.\n  \n"
             '{"actual": true}'
         )
@@ -219,7 +215,7 @@ class TestExtractJsonPayload:
         ["{Let me-json", "{Let me:", '{Let me"draft', "{I will analyze[draft]"],
         ids=["hyphen", "colon", "quote", "mixed-bracket"],
     )
-    def test_anthropic_prefill_requires_natural_prose_preamble(self, prefix: str) -> None:
+    def test_unbalanced_phrase_lookalike_fails_closed(self, prefix: str) -> None:
         assert extract_json_payload(f'{prefix} stale\n\n{{"stale": true}}') is None
 
     def test_multiple_unfenced_json_objects_fail_closed(self):
