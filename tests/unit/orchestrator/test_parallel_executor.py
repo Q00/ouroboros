@@ -719,6 +719,16 @@ def test_in_place_editor_parser_enumerates_every_file_operand(command) -> None:
     assert _shell_command_mutation_targets(command) == ("first.py", "second.py")
 
 
+def test_bsd_empty_sed_suffix_is_portable_evidence_grammar(monkeypatch) -> None:
+    """An explicit empty ``-i`` suffix stays unambiguous on Linux reviewers."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert _shell_command_mutation_targets("sed -i '' 's/before/after/' first.py second.py") == (
+        "first.py",
+        "second.py",
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     (

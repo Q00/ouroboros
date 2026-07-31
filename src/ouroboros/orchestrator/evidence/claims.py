@@ -886,7 +886,9 @@ def _sed_in_place_operands(arguments: list[str]) -> tuple[str, ...]:
                     in_place = True
                     if cluster_index + 1 < len(cluster):
                         cluster_index = len(cluster)
-                    elif not sys.platform.startswith("linux"):
+                    elif (
+                        index + 1 < len(arguments) and arguments[index + 1] == ""
+                    ) or not sys.platform.startswith("linux"):
                         if index + 1 >= len(arguments):
                             return ()
                         index += 1
