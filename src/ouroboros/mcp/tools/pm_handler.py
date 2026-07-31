@@ -28,6 +28,7 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
@@ -235,18 +236,29 @@ def _last_classification(engine: PMInterviewEngine) -> str | None:
     return engine.get_last_classification()
 
 
-def _format_pm_transcript(state: InterviewState) -> str:
-    """Format persisted PM interview rounds as readable transcript for subagent context."""
+def _format_pm_transcript(state: InterviewState, *, withhold_observations: bool = False) -> str:
+    """Format PM rounds for question generation or requirement extraction.
+
+    Resume/start subagents need raw observations to sharpen their next
+    question.  The plugin ``generate`` action is a requirement-producing
+    consumer, so it opts into the shared provenance projection instead.
+    """
     if not state.rounds:
         return ""
+    if withhold_observations:
+        rendered = [
+            (item.round_number, item.question, item.answer) for item in extraction_rounds(state)
+        ]
+    else:
+        rendered = [(r.round_number, r.question, r.user_response) for r in state.rounds]
     lines: list[str] = []
     if state.initial_context:
         lines.append(f"**Product Idea:** {state.initial_context}")
         lines.append("")
-    for r in state.rounds:
-        lines.append(f"**Q{r.round_number}:** {r.question}")
-        if r.user_response:
-            lines.append(f"**A{r.round_number}:** {r.user_response}")
+    for round_number, question, answer in rendered:
+        lines.append(f"**Q{round_number}:** {question}")
+        if answer:
+            lines.append(f"**A{round_number}:** {answer}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -684,7 +696,10 @@ class PMInterviewHandler:
                             MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
                         )
                 # Build transcript from persisted rounds
-                transcript = _format_pm_transcript(state)
+                transcript = _format_pm_transcript(
+                    state,
+                    withhold_observations=action == "generate",
+                )
 
             payload = build_pm_interview_subagent(
                 session_id=real_session_id or "new",
