@@ -153,16 +153,7 @@ def _resolve_cli_path(data: dict) -> str | None:
 
 def _resolve_db_path(data: dict, config_path: Path) -> str:
     """Return a user-facing database path summary."""
-    db_path = data.get("persistence", {}).get("database_path")
-    if db_path:
-        path = Path(db_path)
-        if not path.is_absolute():
-            resolved = config_path.parent / path
-            return f"{db_path} ({resolved})"
-        return str(path)
-
-    resolved = config_path.parent / "ouroboros.db"
-    return f"ouroboros.db ({resolved})"
+    return str(_database_file_path(data, config_path))
 
 
 def _effective_value(

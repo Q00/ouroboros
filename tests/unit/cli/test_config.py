@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 import yaml
 
-from ouroboros.cli.commands.config import app
+from ouroboros.cli.commands.config import _resolve_db_path, app
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -87,7 +87,10 @@ class TestConfigShow:
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
-        assert "data/ouroboros.db" in result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert _resolve_db_path(data, config_dir / "config.yaml") == str(
+            config_dir / "data" / "ouroboros.db"
+        )
 
     def test_show_database_path_default(self, tmp_path: Path) -> None:
         """Without persistence.database_path, default is <config_dir>/ouroboros.db."""
@@ -101,7 +104,18 @@ class TestConfigShow:
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
-        assert "ouroboros.db" in result.output
+        assert _resolve_db_path(config, tmp_path / "config.yaml") == str(tmp_path / "ouroboros.db")
+
+    def test_show_database_path_uses_legacy_runtime_authority(self, config_dir: Path) -> None:
+        legacy_db = config_dir / "ouroboros.db"
+        legacy_db.touch()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show"])
+
+        assert result.exit_code == 0
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert _resolve_db_path(data, config_dir / "config.yaml") == str(legacy_db)
 
 
 # ── config backend ───────────────────────────────────────────────

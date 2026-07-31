@@ -41,7 +41,7 @@ When the user invokes this skill:
    ouroboros resume
    ```
 
-   This reads `~/.ouroboros/ouroboros.db` directly — the MCP server does **not**
+   This reads the configured runtime EventStore directly — the MCP server does **not**
    need to be running.
 
 2. If sessions are listed, enter the number of the session you want to work
