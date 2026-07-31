@@ -38,6 +38,22 @@ class _EncodingOnlyStream(_ReconfigurableStream):
         self._encoding = encoding
 
 
+class _OpaqueEncodingStream(StringIO):
+    @property
+    def encoding(self) -> str:
+        raise ValueError("detached")
+
+
+class _OpaqueReconfigureStream(StringIO):
+    @property
+    def encoding(self) -> str:
+        return "cp949"
+
+    @property
+    def reconfigure(self) -> Any:
+        raise OSError("host-owned")
+
+
 def test_legacy_windows_streams_are_reconfigured_in_place(monkeypatch: Any) -> None:
     stdout = _ReconfigurableStream("cp949")
     stderr = _ReconfigurableStream("cp932")
@@ -75,6 +91,31 @@ def test_failed_reconfigure_preserves_embedded_stream(monkeypatch: Any) -> None:
     streams.normalize_windows_standard_streams()
 
     assert sys.stdout is stdout
+
+
+def test_opaque_capability_properties_are_treated_as_unavailable(monkeypatch: Any) -> None:
+    stdout = _OpaqueEncodingStream()
+    stderr = _OpaqueReconfigureStream()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    streams.normalize_windows_standard_streams()
+
+    assert sys.stdout is stdout
+    assert sys.stderr is stderr
+
+
+def test_root_entry_tolerates_opaque_encoding_property(monkeypatch: Any) -> None:
+    stdout = _OpaqueEncodingStream()
+    messages: list[str] = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(console, "print", lambda message: messages.append(str(message)))
+
+    get_command(app).main(args=["--version"], prog_name="ouroboros", standalone_mode=False)
+
+    assert any("Ouroboros" in message for message in messages)
 
 
 def test_shared_console_resolves_replaced_stdout_dynamically(monkeypatch: Any) -> None:

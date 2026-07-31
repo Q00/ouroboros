@@ -19,9 +19,15 @@ def _is_utf8_stream(stream: Any) -> bool:
 
 def _normalize_stream(stream: Any) -> None:
     """Reconfigure one active legacy stream without replacing or owning it."""
-    if _is_utf8_stream(stream):
+    try:
+        if _is_utf8_stream(stream):
+            return
+        reconfigure = getattr(stream, "reconfigure", None)
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Host-owned streams may expose stale or intentionally opaque
+        # capability properties. Treat those capabilities as unavailable
+        # instead of preventing Click from dispatching the command.
         return
-    reconfigure = getattr(stream, "reconfigure", None)
     if not callable(reconfigure):
         return
     try:
