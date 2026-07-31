@@ -1,5 +1,6 @@
 """Tests for Stage 3 multi-model consensus evaluation."""
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -75,6 +76,22 @@ class TestParseVoteResponse:
         assert vote.approved is True
         assert vote.confidence == 0.95
         assert vote.reasoning == "Looks good"
+
+    def test_tab_indented_pretty_raw_vote(self) -> None:
+        response = json.dumps(
+            {
+                "approved": True,
+                "confidence": 0.95,
+                "reasoning": "Pretty vote remains intact",
+            },
+            indent="\t",
+        )
+
+        result = parse_vote_response(response, "gpt-4o")
+
+        assert result.is_ok
+        assert result.value.approved is True
+        assert result.value.reasoning == "Pretty vote remains intact"
 
     def test_vote_with_surrounding_text(self) -> None:
         """Parse vote embedded in text."""

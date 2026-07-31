@@ -18,11 +18,12 @@ import json
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
@@ -42,6 +43,13 @@ logger = logging.getLogger(__name__)
 def get_reflect_model(backend: str | None = None) -> str:
     """Compatibility wrapper for Reflect-stage model resolution."""
     return get_llm_model_for_role("reflect", backend=backend)
+
+
+def _clean_required_text(value: str, field_name: str) -> str:
+    text = value.strip()
+    if not text:
+        raise TypeError(f"Expected {field_name} to be a non-empty string")
+    return text
 
 
 class OntologyMutation(BaseModel, frozen=True):
@@ -92,11 +100,69 @@ class ReflectOutput(BaseModel, frozen=True):
         return value
 
 
+def _parse_ontology_mutations(data: dict[str, object]) -> list[OntologyMutation]:
+    raw_mutations = data.get("ontology_mutations", [])
+    if not isinstance(raw_mutations, list):
+        raise TypeError("Expected ontology_mutations to be a list")
+
+    mutations: list[OntologyMutation] = []
+    for item in raw_mutations:
+        if not isinstance(item, dict):
+            raise TypeError("Expected ontology_mutations to contain objects")
+
+        raw_field_name = item.get("field_name")
+        if not isinstance(raw_field_name, str) or not raw_field_name.strip():
+            raise TypeError("Expected ontology mutation field_name to be a non-empty string")
+        field_name = raw_field_name.strip()
+
+        if "action" not in item:
+            raise TypeError("Expected ontology mutation action to be explicit")
+        raw_action = item["action"]
+        try:
+            action = MutationAction(raw_action)
+        except (TypeError, ValueError):
+            raise TypeError(f"Expected valid ontology mutation action, got {raw_action!r}")
+
+        raw_field_type = item.get("field_type")
+        if raw_field_type is not None and not isinstance(raw_field_type, str):
+            raise TypeError("Expected ontology mutation field_type to be a string or null")
+        field_type = (
+            _clean_required_text(raw_field_type, "ontology mutation field_type")
+            if raw_field_type is not None
+            else None
+        )
+        raw_description = item.get("description")
+        if raw_description is not None and not isinstance(raw_description, str):
+            raise TypeError("Expected ontology mutation description to be a string or null")
+        description = (
+            _clean_required_text(raw_description, "ontology mutation description")
+            if raw_description is not None
+            else None
+        )
+        raw_reason = item.get("reason", "")
+        if not isinstance(raw_reason, str):
+            raise TypeError("Expected ontology mutation reason to be a string")
+        reason = raw_reason.strip()
+        if action is MutationAction.ADD and not (description or reason):
+            raise TypeError("Expected add ontology mutation description or reason to be non-empty")
+
+        mutations.append(
+            OntologyMutation(
+                action=action,
+                field_name=field_name,
+                field_type=field_type,
+                description=description,
+                reason=reason,
+            )
+        )
+    return mutations
+
+
 def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
     """Parse raw LLM patch objects, coercing unknown/``remove`` ops to keep."""
     patches: list[ACPatch] = []
     if not isinstance(raw_patches, list):
-        return patches
+        raise TypeError("Expected ac_patches to be a list")
     for item in raw_patches:
         if not isinstance(item, dict):
             continue
@@ -109,9 +175,11 @@ def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
             raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else None
         )
         raw_content = item.get("content")
-        content = raw_content if isinstance(raw_content, str) else None
+        content = None
+        if isinstance(raw_content, str):
+            content = _clean_required_text(raw_content, "acceptance criterion patch content")
         raw_reason = item.get("reason", "")
-        reason = raw_reason if isinstance(raw_reason, str) else ""
+        reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
         patches.append(ACPatch(op=op, index=index, content=content, reason=reason))
     return patches
 
@@ -632,28 +700,16 @@ Guidelines:
         can retry or propagate error.
         """
         try:
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                raise TypeError(f"Expected JSON object, got {type(data).__name__}")
 
-            data = json.loads(cleaned)
-
-            mutations: list[OntologyMutation] = []
-            for m in data.get("ontology_mutations", []):
-                try:
-                    action = MutationAction(m.get("action", "modify"))
-                except ValueError:
-                    action = MutationAction.MODIFY
-                mutations.append(
-                    OntologyMutation(
-                        action=action,
-                        field_name=m.get("field_name", "unknown"),
-                        field_type=m.get("field_type"),
-                        description=m.get("description"),
-                        reason=m.get("reason", ""),
-                    )
-                )
+            mutations = _parse_ontology_mutations(data)
 
             parent_acs = ac_texts(current_seed.acceptance_criteria)
             refined_acs, ac_patches, settled = self._compose_acs(
@@ -663,19 +719,36 @@ Guidelines:
                 wonder_output,
                 regression_report,
             )
+            refined_goal = data.get("refined_goal", current_seed.goal)
+            if not isinstance(refined_goal, str):
+                raise TypeError("Expected refined_goal to be a string")
+            if not refined_goal.strip():
+                raise TypeError("Expected refined_goal to be a non-empty string")
+            raw_refined_constraints = data.get(
+                "refined_constraints", list(current_seed.constraints)
+            )
+            if not isinstance(raw_refined_constraints, list | tuple) or not all(
+                isinstance(constraint, str) for constraint in raw_refined_constraints
+            ):
+                raise TypeError("Expected refined_constraints to be a list of strings")
+            refined_constraints = tuple(
+                _clean_required_text(constraint, "refined constraint")
+                for constraint in raw_refined_constraints
+            )
+            reasoning = data.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                raise TypeError("Expected reasoning to be a string")
 
             return ReflectOutput(
-                refined_goal=data.get("refined_goal", current_seed.goal),
-                refined_constraints=tuple(
-                    data.get("refined_constraints", list(current_seed.constraints))
-                ),
+                refined_goal=refined_goal,
+                refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
                 settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
-                reasoning=data.get("reasoning", ""),
+                reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning(
                 "reflect.parse_failed",
                 extra={
@@ -709,13 +782,20 @@ Guidelines:
         # from the settleable set before the backstop decides settling.
         settleable = passed_indices - regressed
 
-        raw_patches = data.get("ac_patches")
-        if isinstance(raw_patches, list) and raw_patches:
+        if "ac_patches" in data:
+            raw_patches = data["ac_patches"]
             patches = _parse_ac_patches(raw_patches)
             return _apply_satisficing_backstop(parent_acs, patches, protected, settleable)
 
         # Legacy full-list shape: derive patches by positional diff.
-        llm_refined_acs: tuple[str, ...] = tuple(data.get("refined_acs", list(parent_acs)))  # type: ignore[arg-type]
+        raw_refined_acs = data.get("refined_acs", list(parent_acs))
+        if not isinstance(raw_refined_acs, list) or not all(
+            isinstance(ac, str) for ac in raw_refined_acs
+        ):
+            raise TypeError("Expected refined_acs to be a list of strings")
+        llm_refined_acs = tuple(
+            _clean_required_text(ac, "refined acceptance criterion") for ac in raw_refined_acs
+        )
         legacy_patches = _derive_legacy_patches(llm_refined_acs, parent_acs)
         if legacy_patches is None:
             # Shorter list → full-rewrite semantics: use the LLM list as-is with

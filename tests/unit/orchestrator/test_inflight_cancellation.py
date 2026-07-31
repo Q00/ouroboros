@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -48,11 +49,11 @@ def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
 
 
 @pytest.fixture
-def mock_adapter() -> MagicMock:
+def mock_adapter(tmp_path: Path) -> MagicMock:
     """Create a mock Claude agent adapter."""
     adapter = MagicMock()
     adapter.runtime_backend = "opencode"
-    adapter.working_directory = "/tmp/project"
+    adapter.working_directory = str(tmp_path)
     adapter.permission_mode = "acceptEdits"
     return adapter
 

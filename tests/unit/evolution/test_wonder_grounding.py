@@ -134,6 +134,14 @@ class TestOutOfRangeDropped:
         assert gq.kind == "challenge"
         assert gq.ac_indices == (0,)
 
+    def test_non_finite_refs_are_rejected_without_overflow(self) -> None:
+        content = '{"questions": [{"question": "AC ref overflow", "ac_refs": [1e999, 2]}]}'
+        out = _engine()._parse_response(content, _seed(3))
+
+        gq = out.grounded_questions[0]
+        assert gq.kind == "challenge"
+        assert gq.ac_indices == (1,)
+
     def test_legacy_string_out_of_range_ref_dropped(self) -> None:
         content = json.dumps({"questions": ["AC 42 is suspicious"]})
         out = _engine()._parse_response(content, _seed(3))

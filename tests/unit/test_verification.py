@@ -201,6 +201,127 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
         assert summary.reports[0].has_discrepancy
 
+    def test_t1_constant_preserves_quoted_multiword_value(self) -> None:
+        """Exact comparison retains the complete contents of quoted scalars."""
+        project = self._create_project({"config.py": 'GREETING = "hello world"\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Greeting should be hello world",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"GREETING\s*=\s*",
+            expected_value="hello world",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
+    @pytest.mark.parametrize(
+        "source_value",
+        [
+            '"foo" + "bar"',
+            "'foo' 'bar'",
+            '"foo".strip()',
+            '"foo" // 2',
+        ],
+        ids=[
+            "binary-concatenation",
+            "implicit-concatenation",
+            "method-expression",
+            "floor-division-expression",
+        ],
+    )
+    def test_t1_constant_rejects_quoted_scalar_expression_prefix(self, source_value: str) -> None:
+        project = self._create_project({"config.py": f"NAME = {source_value}\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Name should be foo",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NAME\s*=\s*",
+            expected_value="foo",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+
+    @pytest.mark.parametrize(
+        "suffix",
+        ["", "   ", " # source comment", ";"],
+        ids=["line-end", "whitespace-line-end", "comment", "statement-terminator"],
+    )
+    def test_t1_constant_accepts_complete_quoted_scalar_terminator(self, suffix: str) -> None:
+        project = self._create_project({"config.py": f'NAME = "foo"{suffix}\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Name should be foo",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NAME\s*=\s*",
+            expected_value="foo",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
+    @pytest.mark.parametrize(
+        ("source_value", "expected_value"),
+        [
+            (r"hello \"world\"", 'hello "world"'),
+            ("x" * 110, "x" * 110),
+        ],
+        ids=["escaped-quote", "beyond-old-lookahead"],
+    )
+    def test_t1_constant_preserves_complete_quoted_value(
+        self,
+        source_value: str,
+        expected_value: str,
+    ) -> None:
+        project = self._create_project({"config.py": f'GREETING = "{source_value}"\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Greeting must match",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"GREETING\s*=\s*",
+            expected_value=expected_value,
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
+    @pytest.mark.parametrize("actual_value", ["50", "15"])
+    def test_t1_constant_rejects_prefix_and_suffix_collisions(self, actual_value: str) -> None:
+        """Expected constants require exact extracted-value equality."""
+        project = self._create_project({"config.py": f"MAX_RETRIES = {actual_value}\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MAX_RETRIES should be 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"MAX_RETRIES\s*",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+
     def test_t1_pattern_not_found(self) -> None:
         """T1: pattern not in any file → verification fails."""
         project = self._create_project(
@@ -270,7 +391,7 @@ class TestSpecVerifier:
         assert summary.skipped_count == 2
 
     def test_no_files_match_hint(self) -> None:
-        """File hint matches nothing → trust agent (verified=True)."""
+        """File hint matches nothing → verification fails closed."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
@@ -281,8 +402,10 @@ class TestSpecVerifier:
             expected_value="bar",
             file_hint="*.rs",
         )
-        summary = verifier.verify_all((assertion,))
-        assert summary.verified_count == 1  # Trust agent when can't verify
+        summary = verifier.verify_all((assertion,), agent_results={0: True})
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
 
     def test_multiple_assertions_per_ac(self) -> None:
         """Multiple assertions for one AC — all must pass."""
@@ -342,11 +465,15 @@ class TestAssertionExtractor:
 
     def _make_extractor(self, response_json: list[dict]) -> AssertionExtractor:
         """Create extractor with mocked LLM that returns given JSON."""
+        return self._make_extractor_content(json.dumps(response_json))
+
+    def _make_extractor_content(self, content: str) -> AssertionExtractor:
+        """Create extractor with mocked LLM that returns raw content."""
         mock_adapter = AsyncMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
                 CompletionResponse(
-                    content=json.dumps(response_json),
+                    content=content,
                     model="test",
                     usage={"input": 0, "output": 0},
                 )
@@ -375,6 +502,126 @@ class TestAssertionExtractor:
         assert len(assertions) == 1
         assert assertions[0].tier == VerificationTier.T1_CONSTANT
         assert assertions[0].expected_value == "10"
+
+    @pytest.mark.asyncio
+    async def test_t1_assertion_requires_expected_value_before_verifier(self) -> None:
+        """Empty T1 expected_value is rejected before regex presence can verify it."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"WARMUP_FRAMES\s*=\s*",
+                    "expected_value": "",
+                    "file_hint": "*.py",
+                    "description": "Warmup frames check",
+                }
+            ]
+        )
+        result = await extractor.extract("seed_empty_expected", ("WARMUP_FRAMES should be 10",))
+        assert result.is_ok
+        assert result.value == ()
+
+        project = TestSpecVerifier()._create_project({"config.py": "WARMUP_FRAMES = 999\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(
+            result.value, agent_results={0: True}
+        )
+        assert summary.total_assertions == 0
+        assert summary.verified_count == 0
+
+    @pytest.mark.asyncio
+    async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
+        """Invalid T1/T2 regexes are unusable and must not become assertions."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": "(",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "MAX_RETRIES should be five",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(f"Here is the answer:\n```json\n{payload}\n```")
+
+        result = await extractor.extract("seed_invalid_regex", ("MAX_RETRIES should be 5",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_overflowing_regex_assertion_rejected_before_verifier(self) -> None:
+        """Regex integer overflow follows the extractor's invalid-pattern fallback."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": "a{9999999999}",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "overflowing regex",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(payload)
+
+        result = await extractor.extract("seed_overflow_regex", ("constant is five",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    def test_overflowing_regex_fails_closed_in_verifier(self) -> None:
+        """Direct verifier callers cannot crash it with a regex overflow."""
+        project = TestSpecVerifier()._create_project({"config.py": "aaaa = 5\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="constant is five",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern="a{9999999999}",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wrapped_nonmatching_file_hint_fails_verification(self) -> None:
+        """A real extracted assertion with no matching files is failed, not promoted."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"MAX_RETRIES\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.rs",
+                    "description": "MAX_RETRIES should be five",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(f"```json\n{payload}\n```\nDone.")
+        result = await extractor.extract("seed_no_files", ("MAX_RETRIES should be 5",))
+        assert result.is_ok
+        assert len(result.value) == 1
+
+        project = TestSpecVerifier()._create_project({"config.py": "MAX_RETRIES = 5\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(
+            result.value, agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+        assert "No files matched hint" in summary.reports[0].results[0].detail
 
     @pytest.mark.asyncio
     async def test_caches_by_seed_id(self) -> None:
@@ -435,8 +682,8 @@ class TestAssertionExtractor:
         assert result.value == ()
 
     @pytest.mark.asyncio
-    async def test_invalid_tier_defaults_to_t4(self) -> None:
-        """Unknown tier string → defaults to T4_UNVERIFIABLE."""
+    async def test_invalid_tier_is_rejected(self) -> None:
+        """Unknown tier string is rejected instead of defaulting to unverifiable."""
         extractor = self._make_extractor(
             [
                 {
@@ -451,4 +698,4 @@ class TestAssertionExtractor:
         )
         result = await extractor.extract("seed_tier", ("test",))
         assert result.is_ok
-        assert result.value[0].tier == VerificationTier.T4_UNVERIFIABLE
+        assert result.value == ()

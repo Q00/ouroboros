@@ -14,13 +14,15 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import json
 import logging
+import math
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
@@ -63,10 +65,10 @@ def _ground_ac_indices(refs: Iterable[object], total_acs: int | None) -> tuple[i
     """Convert 1-based AC refs to deduped, in-range 0-based indices."""
     seen: list[int] = []
     for ref in refs:
-        try:
-            idx = int(ref) - 1  # type: ignore[call-overload]
-        except (TypeError, ValueError):
+        one_based = _coerce_finite_integer_ref(ref)
+        if one_based is None:
             continue
+        idx = one_based - 1
         if idx < 0:
             continue
         if total_acs is not None and idx >= total_acs:
@@ -74,6 +76,26 @@ def _ground_ac_indices(refs: Iterable[object], total_acs: int | None) -> tuple[i
         if idx not in seen:
             seen.append(idx)
     return tuple(seen)
+
+
+def _coerce_finite_integer_ref(ref: object) -> int | None:
+    """Return a finite integer AC ref, rejecting bools and non-finite numerics."""
+    if isinstance(ref, bool):
+        return None
+    if isinstance(ref, int):
+        return ref
+    if isinstance(ref, float):
+        if math.isfinite(ref) and ref.is_integer():
+            return int(ref)
+        return None
+    if isinstance(ref, str):
+        try:
+            value = float(ref)
+        except ValueError:
+            return None
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+    return None
 
 
 def ground_question_text(text: str, total_acs: int | None) -> GroundedQuestion:
@@ -403,24 +425,43 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         """Parse LLM response into WonderOutput."""
         total_acs = len(seed.acceptance_criteria) if seed else None
         try:
-            # Strip markdown fences if present
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
-
-            data = json.loads(cleaned)
-            grounded = self._parse_grounded_questions(data.get("questions", []), total_acs)
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                raise TypeError(f"Expected JSON object, got {type(data).__name__}")
+            raw_questions = data.get("questions", [])
+            if "questions" in data and not isinstance(raw_questions, list):
+                raise TypeError("Expected questions to be a list when present")
+            grounded = self._parse_grounded_questions(raw_questions, total_acs)
+            if raw_questions and not grounded:
+                raise TypeError("Expected questions to contain strings or question objects")
+            ontology_tensions = data.get("ontology_tensions", [])
+            if not isinstance(ontology_tensions, list) or not all(
+                isinstance(tension, str) for tension in ontology_tensions
+            ):
+                raise TypeError("Expected ontology_tensions to be a list of strings")
+            should_continue = data.get("should_continue", True)
+            if not isinstance(should_continue, bool):
+                raise TypeError("Expected should_continue to be a boolean")
+            if ontology_tensions and not should_continue:
+                raise TypeError("Expected should_continue=true when ontology_tensions are present")
+            reasoning = data.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                raise TypeError("Expected reasoning to be a string")
             return WonderOutput(
                 # ``questions`` stays a flat string tuple for events, lineage, and
                 # the repetitive-feedback convergence check (unchanged contract).
                 questions=tuple(gq.question for gq in grounded),
                 grounded_questions=grounded,
-                ontology_tensions=tuple(data.get("ontology_tensions", [])),
-                should_continue=data.get("should_continue", True),
-                reasoning=data.get("reasoning", ""),
+                ontology_tensions=tuple(ontology_tensions),
+                should_continue=should_continue,
+                reasoning=reasoning,
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
             scope_hint = f" for goal: {seed.goal}" if seed else ""
             fallback = f"What assumptions remain untested{scope_hint}?"

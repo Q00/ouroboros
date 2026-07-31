@@ -406,6 +406,60 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    def test_unavailable_spec_verification_result_does_not_approve_run(self) -> None:
+        """Unavailable verifier evidence is a failed formal AC, not approval."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Set MAX_RETRIES to 5",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Set MAX_RETRIES to 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"MAX_RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.rs",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Set MAX_RETRIES to 5",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=False,
+                            discrepancy=True,
+                            detail="No files matched hint: *.rs",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].evidence == "No files matched hint: *.rs"
+        assert summary.approval_status == "rejected"
+        assert summary.run_verdict == "FAIL"
+
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
         mechanical = EvaluationSummary(

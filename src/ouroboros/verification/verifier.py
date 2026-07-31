@@ -25,6 +25,104 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
+MAX_SCALAR_LENGTH = 4096
+
+
+def _skip_inline_space(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\f\v":
+        index += 1
+    return index
+
+
+def _scan_scalar(text: str, index: int) -> tuple[str, int] | None:
+    """Read one bounded scalar without truncating quoted source values."""
+    index = _skip_inline_space(text, index)
+    if index >= len(text) or text[index] in "\r\n":
+        return None
+
+    quote = text[index]
+    if quote in {'"', "'"}:
+        index += 1
+        value: list[str] = []
+        consumed = 0
+        while index < len(text) and consumed <= MAX_SCALAR_LENGTH:
+            char = text[index]
+            if char in "\r\n":
+                return None
+            if char == quote:
+                return "".join(value), index + 1
+            if char == "\\":
+                if index + 1 >= len(text) or text[index + 1] in "\r\n":
+                    return None
+                escaped = text[index + 1]
+                if escaped in {quote, "\\"}:
+                    value.append(escaped)
+                else:
+                    value.extend(("\\", escaped))
+                index += 2
+                consumed += 2
+                continue
+            value.append(char)
+            index += 1
+            consumed += 1
+        return None
+
+    start = index
+    while (
+        index < len(text)
+        and index - start <= MAX_SCALAR_LENGTH
+        and text[index] not in "\"'\r\n\t ,;)]}{"
+    ):
+        index += 1
+    if index == start or index - start > MAX_SCALAR_LENGTH:
+        return None
+    return text[start:index], index
+
+
+def _preceding_assignment_operator(text: str, index: int) -> str | None:
+    index -= 1
+    while index >= 0 and text[index] in " \t\f\v":
+        index -= 1
+    return text[index] if index >= 0 and text[index] in "=:" else None
+
+
+def _has_complete_scalar_terminator(text: str, index: int, operator: str | None) -> bool:
+    """Reject a scalar that is only the prefix of an assigned expression."""
+    index = _skip_inline_space(text, index)
+    if index >= len(text) or text[index] in "\r\n":
+        return True
+    if text[index] == "#":
+        return True
+    if operator == "=":
+        return text[index] == ";"
+    return text[index] in ",;)]}"
+
+
+def _extract_following_scalar(content: str, index: int) -> str:
+    """Extract a direct, assigned, or parenthesized scalar at index."""
+    index = _skip_inline_space(content, index)
+    if index < len(content) and content[index] in "=:":
+        operator = content[index]
+        scanned = _scan_scalar(content, index + 1)
+        if scanned is None:
+            return ""
+        value, end = scanned
+        return value if _has_complete_scalar_terminator(content, end, operator) else ""
+    if index < len(content) and content[index] == "(":
+        scanned = _scan_scalar(content, index + 1)
+        if scanned is None:
+            return ""
+        value, end = scanned
+        end = _skip_inline_space(content, end)
+        if end >= len(content) or content[end] != ")":
+            return ""
+        return value if _has_complete_scalar_terminator(content, end + 1, None) else ""
+    scanned = _scan_scalar(content, index)
+    if scanned is None:
+        return ""
+    value, end = scanned
+    operator = _preceding_assignment_operator(content, index)
+    return value if _has_complete_scalar_terminator(content, end, operator) else ""
 
 
 @dataclass
@@ -94,7 +192,7 @@ class SpecVerifier:
             return None
         try:
             return re.compile(pattern, flags)
-        except re.error as e:
+        except (re.error, OverflowError) as e:
             logger.warning("Invalid regex pattern: %s", e)
             return None
 
@@ -113,7 +211,8 @@ class SpecVerifier:
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="No pattern to verify",
             )
 
@@ -121,7 +220,8 @@ class SpecVerifier:
         if not files:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,  # Can't verify = trust agent
+                verified=False,
+                discrepancy=True,
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
 
@@ -129,7 +229,8 @@ class SpecVerifier:
         if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="Invalid or too-long regex pattern",
             )
 
@@ -143,7 +244,7 @@ class SpecVerifier:
                 # Extract the value after the pattern
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
-                    verified = assertion.expected_value in actual
+                    verified = assertion.expected_value.strip() == actual.strip()
                     return SpecVerificationResult(
                         assertion=assertion,
                         verified=verified,
@@ -178,7 +279,8 @@ class SpecVerifier:
         if not assertion.pattern:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="No pattern to verify",
             )
 
@@ -203,7 +305,8 @@ class SpecVerifier:
         if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
-                verified=True,
+                verified=False,
+                discrepancy=True,
                 detail="Invalid or too-long regex pattern",
             )
 
@@ -273,21 +376,4 @@ class SpecVerifier:
         - VAR(10)
         - "value"
         """
-        end = match.end()
-        rest = content[end : end + 100]
-
-        # Try to extract a value: number, quoted string, or identifier
-        value_match = re.match(
-            r'\s*[=:]\s*["\']?([^"\'\s,;)\]}{]+)["\']?',
-            rest,
-        )
-        if value_match:
-            return value_match.group(1)
-
-        # Try parenthesized value
-        paren_match = re.match(r'\s*\(\s*["\']?([^"\'\s,;)]+)["\']?\s*\)', rest)
-        if paren_match:
-            return paren_match.group(1)
-
-        # Return first 50 chars of what follows
-        return rest.strip()[:50]
+        return _extract_following_scalar(content, match.end())

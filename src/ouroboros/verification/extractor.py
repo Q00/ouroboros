@@ -13,8 +13,12 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import json
 import logging
+import re
+
+from pydantic import ValidationError
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.seed import AcceptanceCriterionInput, ac_texts
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -26,6 +30,8 @@ from ouroboros.providers.base import (
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
 logger = logging.getLogger(__name__)
+
+MAX_PATTERN_LENGTH = 200
 
 _SYSTEM_PROMPT = """You are a spec verification assistant. Given acceptance criteria for a software project, extract machine-verifiable assertions.
 
@@ -142,39 +148,113 @@ class AssertionExtractor:
     ) -> tuple[SpecAssertion, ...]:
         """Parse LLM response into SpecAssertions."""
         try:
-            cleaned = content.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:-1])
-
-            data = json.loads(cleaned)
+            # Extract the JSON payload, tolerating markdown fences and prose
+            # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
+            json_str = extract_json_payload(content)
+            if json_str is None:
+                raise ValueError("No valid JSON payload found")
+            data = json.loads(json_str)
             if not isinstance(data, list):
                 logger.warning("Expected JSON array, got: %s", type(data))
                 return ()
 
             assertions: list[SpecAssertion] = []
             for item in data:
-                ac_idx = item.get("ac_index", 0)
-                ac_text = acceptance_criteria[ac_idx] if ac_idx < len(acceptance_criteria) else ""
+                if not isinstance(item, dict):
+                    logger.warning("Expected assertion object, got: %s", type(item))
+                    continue
+                if "ac_index" not in item:
+                    logger.warning("Ignoring assertion without explicit ac_index: %r", item)
+                    continue
+                ac_idx = item["ac_index"]
+                if (
+                    not isinstance(ac_idx, int)
+                    or isinstance(ac_idx, bool)
+                    or ac_idx < 0
+                    or ac_idx >= len(acceptance_criteria)
+                ):
+                    logger.warning("Ignoring assertion with invalid ac_index: %r", ac_idx)
+                    continue
+                ac_text = acceptance_criteria[ac_idx]
+                if "tier" not in item:
+                    logger.warning("Ignoring assertion without explicit tier: %r", item)
+                    continue
+                raw_tier = item["tier"]
                 try:
-                    tier = VerificationTier(item.get("tier", "t4_unverifiable"))
-                except ValueError:
-                    tier = VerificationTier.T4_UNVERIFIABLE
-
-                assertions.append(
-                    SpecAssertion(
-                        ac_index=ac_idx,
-                        ac_text=ac_text,
-                        tier=tier,
-                        pattern=item.get("pattern", ""),
-                        expected_value=item.get("expected_value", ""),
-                        file_hint=item.get("file_hint", ""),
-                        description=item.get("description", ""),
+                    tier = VerificationTier(raw_tier)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring assertion with invalid tier: %r", raw_tier)
+                    continue
+                text_fields = {
+                    name: item.get(name, "")
+                    for name in ("pattern", "expected_value", "file_hint", "description")
+                }
+                if not all(isinstance(value, str) for value in text_fields.values()):
+                    logger.warning("Ignoring assertion with invalid text fields: %r", item)
+                    continue
+                if (
+                    tier
+                    in (
+                        VerificationTier.T1_CONSTANT,
+                        VerificationTier.T2_STRUCTURAL,
                     )
-                )
+                    and not text_fields["pattern"].strip()
+                ):
+                    logger.warning(
+                        "Ignoring %s assertion without verification pattern: %r",
+                        tier.value,
+                        item,
+                    )
+                    continue
+                if tier in (
+                    VerificationTier.T1_CONSTANT,
+                    VerificationTier.T2_STRUCTURAL,
+                ) and not _is_usable_regex_pattern(text_fields["pattern"]):
+                    logger.warning(
+                        "Ignoring %s assertion with unusable verification pattern: %r",
+                        tier.value,
+                        item,
+                    )
+                    continue
+                if (
+                    tier is VerificationTier.T1_CONSTANT
+                    and not text_fields["expected_value"].strip()
+                ):
+                    logger.warning(
+                        "Ignoring t1_constant assertion without expected_value: %r",
+                        item,
+                    )
+                    continue
+
+                try:
+                    assertions.append(
+                        SpecAssertion(
+                            ac_index=ac_idx,
+                            ac_text=ac_text,
+                            tier=tier,
+                            pattern=text_fields["pattern"],
+                            expected_value=text_fields["expected_value"],
+                            file_hint=text_fields["file_hint"],
+                            description=text_fields["description"],
+                        )
+                    )
+                except ValidationError as e:
+                    logger.warning("Ignoring invalid assertion object: %s", e)
+                    continue
 
             return tuple(assertions)
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse extraction response: %s", e)
             return ()
+
+
+def _is_usable_regex_pattern(pattern: str) -> bool:
+    """Return whether a verifier regex can be compiled within verifier limits."""
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        return False
+    try:
+        re.compile(pattern)
+    except (re.error, OverflowError):
+        return False
+    return True

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1160,11 +1161,15 @@ def _triad_events(run_id: str, ac_id: str, *, spend: float, baseline: float) -> 
     ]
 
 
-def _consumer_runner(fabricated: list) -> tuple[OrchestratorRunner, list, MagicMock]:
+def _consumer_runner(
+    fabricated: list,
+    *,
+    working_directory: Path,
+) -> tuple[OrchestratorRunner, list, MagicMock]:
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
     adapter.llm_backend = "anthropic"
-    adapter.working_directory = "/tmp/project"
+    adapter.working_directory = str(working_directory)
     adapter.permission_mode = "acceptEdits"
     adapter._model = "constructor-sonnet"
     store = AsyncMock()
@@ -1183,8 +1188,10 @@ def _consumer_runner(fabricated: list) -> tuple[OrchestratorRunner, list, MagicM
 
 class TestFrugalityProofConsumer:
     @pytest.mark.asyncio
-    async def test_process_local_authority_never_pools_runs_into_a_proof_cohort(self) -> None:
-        runner, appended, _console = _consumer_runner([])
+    async def test_process_local_authority_never_pools_runs_into_a_proof_cohort(
+        self, tmp_path: Path
+    ) -> None:
+        runner, appended, _console = _consumer_runner([], working_directory=tmp_path)
         store = runner._event_store
         cohort_seed = Seed(
             goal="Prove frugality",
@@ -1343,8 +1350,8 @@ class TestFrugalityProofConsumer:
         ]
 
     @pytest.mark.asyncio
-    async def test_missing_current_proof_identity_is_current_only(self) -> None:
-        runner, _appended, _console = _consumer_runner([])
+    async def test_missing_current_proof_identity_is_current_only(self, tmp_path: Path) -> None:
+        runner, _appended, _console = _consumer_runner([], working_directory=tmp_path)
         runner._event_store.query_events.return_value = [
             BaseEvent(
                 type="orchestrator.session.started",
@@ -1366,14 +1373,17 @@ class TestFrugalityProofConsumer:
         assert cohort == ("run-current",)
 
     @pytest.mark.asyncio
-    async def test_fabricated_full_triads_pass_and_emit(self) -> None:
+    async def test_fabricated_full_triads_pass_and_emit(self, tmp_path: Path) -> None:
         fabricated: list = []
         for run in range(3):
             for ac in range(7):
                 fabricated.extend(
                     _triad_events(f"run-{run}", f"ac-{run}-{ac}", spend=50, baseline=100)
                 )
-        runner, appended, console = _consumer_runner(fabricated)
+        runner, appended, console = _consumer_runner(
+            fabricated,
+            working_directory=tmp_path,
+        )
 
         await runner._evaluate_frugality_proof("run-0")
 
@@ -1389,8 +1399,8 @@ class TestFrugalityProofConsumer:
         assert "Frugality proof:" in console.print.call_args.args[0]
 
     @pytest.mark.asyncio
-    async def test_empty_events_report_insufficient_data(self) -> None:
-        runner, appended, console = _consumer_runner([])
+    async def test_empty_events_report_insufficient_data(self, tmp_path: Path) -> None:
+        runner, appended, console = _consumer_runner([], working_directory=tmp_path)
 
         await runner._evaluate_frugality_proof("run-empty")
 
@@ -1401,8 +1411,8 @@ class TestFrugalityProofConsumer:
         console.print.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_query_failure_never_raises(self) -> None:
-        runner, appended, _console = _consumer_runner([])
+    async def test_query_failure_never_raises(self, tmp_path: Path) -> None:
+        runner, appended, _console = _consumer_runner([], working_directory=tmp_path)
         runner._event_store.query_execution_related_events.side_effect = RuntimeError("db down")
 
         # Best-effort: a broken query degrades to a warning, never fails the run.
@@ -1577,24 +1587,24 @@ def _mini_seed() -> Seed:
     )
 
 
-def _runner_adapter() -> MagicMock:
+def _runner_adapter(working_directory: Path) -> MagicMock:
     adapter = MagicMock()
     adapter.runtime_backend = "claude"
-    adapter.working_directory = "/tmp/project"
+    adapter.working_directory = str(working_directory)
     adapter.permission_mode = "acceptEdits"
     return adapter
 
 
 class TestLiveRunPathsTriggerProof:
     @pytest.mark.asyncio
-    async def test_parallel_completion_evaluates_proof(self) -> None:
+    async def test_parallel_completion_evaluates_proof(self, tmp_path: Path) -> None:
         # The bug this pins: ``ooo run`` takes the PARALLEL path, whose terminal
         # event must be followed by a proof evaluation. Without the wiring a real
         # run produced token/effort events but never a frugality_proof.evaluated.
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
         seed = _mini_seed()
-        runner = OrchestratorRunner(_runner_adapter(), AsyncMock(), MagicMock())
+        runner = OrchestratorRunner(_runner_adapter(tmp_path), AsyncMock(), MagicMock())
         tracker = SessionTracker.create("exec_parallel", seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=(ACNode(index=0, content=seed.acceptance_criteria[0]),),
