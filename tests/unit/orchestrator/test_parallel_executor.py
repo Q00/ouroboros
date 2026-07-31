@@ -301,6 +301,74 @@ def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_
     )
 
 
+def test_files_touched_resolves_shell_target_from_recorded_command_cwd(tmp_path) -> None:
+    """A relative shell target authenticates only its command-cwd path."""
+    root_claim = tmp_path / "claimed.py"
+    command_cwd = tmp_path / "sub"
+    root_claim.write_text("original\n", encoding="utf-8")
+    command_cwd.mkdir()
+    command = "touch claimed.py"
+
+    completed = subprocess.run(command, cwd=command_cwd, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert root_claim.read_text(encoding="utf-8") == "original\n"
+    assert (command_cwd / "claimed.py").exists()
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "sub"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+    assert _runtime_messages_support_file_claim(
+        "sub/claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_allows_non_c_python_literal_redirect(tmp_path) -> None:
+    """A normal Python script may retain path-aware shell redirection proof."""
+    generator = tmp_path / "generator.py"
+    generator.write_text("print('generated')\n", encoding="utf-8")
+    command = f"{shlex.quote(str(Path(sys.executable).resolve()))} generator.py > claimed.py"
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "generated\n"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     (

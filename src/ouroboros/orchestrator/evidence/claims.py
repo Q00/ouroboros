@@ -393,6 +393,7 @@ def _runtime_message_supports_file_reference(
     if message.tool_name == "Bash":
         return _bash_message_mutates_file_reference(
             message,
+            reference=reference,
             normalized_reference=normalized_reference,
             task_cwd=task_cwd,
             allow_bash_command_text=allow_bash_command_text,
@@ -413,6 +414,7 @@ def _runtime_message_supports_file_reference(
 def _bash_message_mutates_file_reference(
     message: AgentMessage,
     *,
+    reference: str,
     normalized_reference: str,
     task_cwd: str | None,
     allow_bash_command_text: bool,
@@ -422,7 +424,7 @@ def _bash_message_mutates_file_reference(
         return True
     return allow_bash_command_text and _bash_command_mutates_file_reference(
         message,
-        normalized_reference=normalized_reference,
+        reference=reference,
         task_cwd=task_cwd,
     )
 
@@ -454,7 +456,7 @@ def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
 def _bash_command_mutates_file_reference(
     message: AgentMessage,
     *,
-    normalized_reference: str,
+    reference: str,
     task_cwd: str | None,
 ) -> bool:
     """Return True for explicit shell writes to the referenced file.
@@ -471,10 +473,8 @@ def _bash_command_mutates_file_reference(
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
     if task_cwd is not None and effective_cwd is None:
         return False
-    quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
     for command in _runtime_message_command_values(message):
-        normalized_command = command.strip().lower()
-        if not normalized_command:
+        if not command.strip():
             continue
         if _has_unquoted_compound_shell_control(command):
             # A successful compound command does not prove that every textual
@@ -492,49 +492,118 @@ def _bash_command_mutates_file_reference(
             # redirection: a successful shell necessarily opened that target.
             # All other expanded forms remain non-authoritative because they
             # can reconstruct the command, mutation primitive, or target.
-            if _has_literal_output_redirection(command, normalized_reference):
+            if _shell_command_targets_file_claim(
+                command,
+                reference=reference,
+                task_cwd=task_cwd,
+                effective_cwd=effective_cwd,
+                redirections_only=True,
+            ):
                 return True
             continue
-        if not _file_reference_pattern(normalized_reference).search(normalized_command):
-            continue
-        if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
-            return True
-        if re.search(
-            rf"(^|[\s;&|])(touch|truncate|tee)\b[^;&|]*\s{quoted_reference}(?=$|[\s;&|])",
-            normalized_command,
-        ) or re.search(
-            rf"(^|[\s;&|])(sed|perl)\b[^;&|]*\s-[^\s;&|]*i[^;&|]*\s"
-            rf"{quoted_reference}(?=$|[\s;&|])",
-            normalized_command,
+        if _shell_command_targets_file_claim(
+            command,
+            reference=reference,
+            task_cwd=task_cwd,
+            effective_cwd=effective_cwd,
         ):
             return True
     return False
 
 
-def _has_literal_output_redirection(command: str, normalized_reference: str) -> bool:
-    """Return whether shell syntax redirects output to the literal claim.
+def _shell_command_targets_file_claim(
+    command: str,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    effective_cwd: str | None,
+    redirections_only: bool = False,
+) -> bool:
+    """Return whether shell mutation syntax targets the canonical claim path.
 
-    Tokenizing with punctuation awareness distinguishes real shell redirection
-    from ``> claimed.py`` text inside a quoted Python ``-c`` payload. Quotes
-    around the target are accepted, while an expanded target is not.
+    Relative targets are interpreted from the recorded command cwd, never from
+    the task root by assumption. Tokenizing with punctuation awareness also
+    distinguishes real shell syntax from mutation-looking quoted payload text.
     """
-    wrapped_body = _shell_command_body(command)
-    if wrapped_body is not None:
-        return _has_literal_output_redirection(wrapped_body, normalized_reference)
+    if task_cwd is None or effective_cwd is None:
+        return False
+    return any(
+        _file_claim_matches_runtime_path(
+            reference,
+            target,
+            task_cwd=task_cwd,
+            runtime_cwd=effective_cwd,
+        )
+        for target in _shell_command_mutation_targets(
+            command,
+            redirections_only=redirections_only,
+        )
+    )
+
+
+def _shell_command_mutation_targets(
+    command: str,
+    *,
+    redirections_only: bool = False,
+) -> tuple[str, ...]:
+    """Extract literal targets from the narrow supported shell mutations."""
+    candidate = command
+    seen: set[str] = set()
+    for _ in range(16):
+        wrapped_body = _shell_command_body(candidate)
+        if wrapped_body is None:
+            break
+        if wrapped_body == candidate or wrapped_body in seen:
+            return ()
+        seen.add(candidate)
+        candidate = wrapped_body
+    else:
+        return ()
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer = shlex.shlex(candidate, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
     except (RuntimeError, ValueError):
-        return False
+        return ()
+    targets: list[str] = []
     for index, token in enumerate(tokens[:-1]):
         if token not in {">", ">>", "&>"}:
             continue
         target = tokens[index + 1]
-        if target.strip().lower() == normalized_reference:
-            return True
-    return False
+        if not _text_needs_shell_expansion(target):
+            targets.append(target)
+    if redirections_only:
+        return tuple(targets)
+
+    command_index = 0
+    while command_index < len(tokens) and re.match(
+        r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[command_index]
+    ):
+        command_index += 1
+    if command_index >= len(tokens):
+        return tuple(targets)
+    executable = Path(tokens[command_index]).name.lower()
+    arguments = tokens[command_index + 1 :]
+    redirect_index = next(
+        (index for index, argument in enumerate(arguments) if argument in {">", ">>", "&>"}),
+        len(arguments),
+    )
+    mutation_arguments = arguments[:redirect_index]
+    if mutation_arguments and mutation_arguments[-1].isdigit() and redirect_index < len(arguments):
+        mutation_arguments = mutation_arguments[:-1]
+    in_place_editor = executable in {"sed", "perl"} and any(
+        argument.startswith("-") and "i" in argument[1:] for argument in mutation_arguments
+    )
+    if executable in {"touch", "truncate", "tee"} or in_place_editor:
+        candidates = tuple(
+            argument
+            for argument in mutation_arguments
+            if not argument.startswith("-") and not _text_needs_shell_expansion(argument)
+        )
+        if candidates:
+            targets.append(candidates[-1])
+    return tuple(targets)
 
 
 def _has_unquoted_compound_shell_control(command: str) -> bool:
@@ -703,6 +772,8 @@ def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool
     for index, value in enumerate(argv):
         executable = Path(value).name.lower()
         if executable in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable):
+            if "-c" not in argv[index + 1 :]:
+                return None
             if index != 0:
                 return False
             return index if _trusted_python_executable(value, task_cwd=task_cwd) else False
