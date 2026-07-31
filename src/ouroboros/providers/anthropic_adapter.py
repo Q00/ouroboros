@@ -5,6 +5,7 @@ protocol using the official Anthropic Python SDK. This is the recommended defaul
 for Ouroboros MCP server — no OpenRouter or LiteLLM dependency required.
 """
 
+import json
 import os
 from typing import Any
 
@@ -347,7 +348,8 @@ class AnthropicAdapter:
         Args:
             response: The raw Anthropic Message response.
             model: The model identifier used for the request.
-            json_prefill: If True, prepend "{" to content (assistant prefill).
+            json_prefill: If True, restore the assistant "{" for a valid
+                object continuation or raise a typed provider parse failure.
 
         Returns:
             Parsed CompletionResponse.
@@ -361,8 +363,25 @@ class AnthropicAdapter:
         # Security: Validate response length *before* prepending the JSON
         # prefill character. Truncating after prepend would cut the JSON
         # mid-object, producing silently broken output.
-        is_valid, _ = InputValidator.validate_llm_response(content)
+        is_valid, validation_error = InputValidator.validate_llm_response(content)
         if not is_valid:
+            if json_prefill:
+                log.warning(
+                    "anthropic.response.rejected_prefill_length",
+                    model=model,
+                    original_length=len(content),
+                    max_length=MAX_LLM_RESPONSE_LENGTH,
+                )
+                raise ProviderError(
+                    "Anthropic JSON prefill response exceeded the safe length boundary",
+                    provider="anthropic",
+                    details={
+                        "error_type": "invalid_json_prefill_response_length",
+                        "validation_error": validation_error,
+                        "original_length": len(content),
+                        "max_length": MAX_LLM_RESPONSE_LENGTH,
+                    },
+                )
             log.warning(
                 "anthropic.response.truncated",
                 model=model,
@@ -371,10 +390,24 @@ class AnthropicAdapter:
             )
             content = content[:MAX_LLM_RESPONSE_LENGTH]
 
-        # When using JSON prefill, the "{" was sent as assistant content
-        # and is not echoed back in the response. Prepend it.
+        # The synthetic "{" belongs to this provider request boundary. Content
+        # returned after an assistant prefill is always a suffix; never infer
+        # from its bytes that the model ignored the prefill. Invalid suffixes
+        # terminate here so generic extractors cannot rescan fenced or nested
+        # fragments as an authoritative answer.
         if json_prefill:
-            content = "{" + content
+            reconstructed = "{" + content
+            try:
+                parsed_reconstruction = json.loads(reconstructed)
+            except (json.JSONDecodeError, ValueError):
+                parsed_reconstruction = None
+            if not isinstance(parsed_reconstruction, dict):
+                raise ProviderError(
+                    "Anthropic JSON prefill response did not complete a valid object",
+                    provider="anthropic",
+                    details={"error_type": "invalid_json_prefill_response"},
+                )
+            content = reconstructed
 
         usage = response.usage
 
@@ -403,6 +436,9 @@ class AnthropicAdapter:
         Returns:
             Result.err with an appropriate ProviderError.
         """
+        if isinstance(exc, ProviderError):
+            return Result.err(exc)
+
         try:
             import anthropic
         except ImportError:

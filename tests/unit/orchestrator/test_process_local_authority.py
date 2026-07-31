@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 import pickle
 from threading import Event
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1820,7 +1822,7 @@ async def test_terminal_precreated_tracker_uses_verified_durable_running_state()
     stale_terminal = prepared.with_status(SessionStatus.COMPLETED).with_progress(
         {EXECUTION_CONTRACT_PROGRESS_KEY: {"stale": "terminal progress must not execute"}}
     )
-    expected = Result.ok(
+    expected: Result[OrchestratorResult, OrchestratorError] = Result.ok(
         OrchestratorResult(
             success=True,
             session_id=prepared.session_id,
@@ -4068,7 +4070,9 @@ async def test_cancelled_before_first_background_turn_runs_process_local_cleanup
             *args: object,
             **kwargs: object,
         ) -> asyncio.Task[object]:
-            task = original_create_task(coroutine, *args, **kwargs)  # type: ignore[arg-type]
+            task: asyncio.Task[object] = original_create_task(  # type: ignore[arg-type]
+                coroutine, *args, **kwargs
+            )
             scheduled_tasks.append(task)
             if len(scheduled_tasks) == 1:
                 task.cancel()
@@ -5742,7 +5746,13 @@ async def test_prepare_publishes_liveness_before_a_running_tracker_is_observable
             str(kwargs["execution_id"]),
             str(kwargs["seed_id"]),
             session_id=str(kwargs["session_id"]),
-        ).with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: dict(kwargs["execution_contract"])})
+        ).with_progress(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: dict(
+                    cast(Mapping[str, object], kwargs["execution_contract"])
+                )
+            }
+        )
         observer._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(tracker))
         observer._session_repo.mark_failed = AsyncMock(return_value=Result.ok(None))
         observed_result = await observer.resume_session(tracker.session_id, _seed())

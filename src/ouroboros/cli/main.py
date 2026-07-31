@@ -18,7 +18,6 @@ from typing import Annotated
 
 import click
 import typer
-from typer.core import TyperGroup
 
 from ouroboros import __version__
 from ouroboros.cli.commands import (
@@ -48,9 +47,10 @@ from ouroboros.cli.commands import (
 )
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.cli.formatters import console
+from ouroboros.cli.streams import UnicodeSafeTyperGroup
 
 
-class _PluginAwareGroup(TyperGroup):
+class _PluginAwareGroup(UnicodeSafeTyperGroup):
     """A typer/click group that falls back to plugin dispatch for
     unknown top-level command names.
 

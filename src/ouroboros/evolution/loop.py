@@ -776,12 +776,16 @@ class EvolutionaryLoop:
                     try:
                         current_seed = Seed.from_dict(json.loads(interrupted_gen.seed_json))
                     except Exception as e:
-                        logger.warning(
-                            "evolution.resume.interrupted_seed_failed",
-                            extra={"error": str(e)},
+                        # A present interrupted Seed is the durable state for
+                        # this generation. If its structured contract is no
+                        # longer valid, rolling back to the prior completed
+                        # Seed would silently change acceptance semantics and
+                        # may redispatch work under stale direction.
+                        return Result.err(
+                            OuroborosError(
+                                f"Failed to reconstruct interrupted seed from seed_json: {e}"
+                            )
                         )
-                        # Fall through to last completed generation
-                        interrupted_gen = None
 
                 if not interrupted_gen or not interrupted_gen.seed_json:
                     # Fallback: use last completed generation's seed.
@@ -797,7 +801,14 @@ class EvolutionaryLoop:
                         None,
                     )
                     if last_completed and last_completed.seed_json:
-                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
+                        try:
+                            current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
+                        except Exception as e:
+                            return Result.err(
+                                OuroborosError(
+                                    f"Failed to reconstruct fallback seed from seed_json: {e}"
+                                )
+                            )
                     else:
                         return Result.err(
                             OuroborosError(

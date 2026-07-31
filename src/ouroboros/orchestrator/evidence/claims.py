@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
+import stat
+import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _normalized_command_claim_aliases,
+    _shell_command_body,
     _single_command_after_safe_shell_preamble,
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
@@ -100,27 +103,43 @@ def _file_claim_matches_runtime_path(
     runtime_path: str,
     *,
     task_cwd: str | None,
+    runtime_cwd: str | None = None,
 ) -> bool:
     """Return True when a claimed workspace path matches a runtime path value."""
-    claim_path = Path(claim.strip())
+    try:
+        claim_path = Path(claim.strip())
+    except (OSError, RuntimeError, ValueError):
+        return False
     if not claim_path or claim_path.is_absolute() or ".." in claim_path.parts:
         return False
 
-    runtime_path = runtime_path.strip()
-    if not runtime_path:
+    if not runtime_path.strip():
         return False
 
-    runtime_candidate = Path(runtime_path)
+    try:
+        runtime_candidate = Path(runtime_path)
+    except (OSError, RuntimeError, ValueError):
+        return False
     if task_cwd is not None:
-        base = Path(task_cwd).resolve()
-        claimed_absolute = (base / claim_path).resolve()
-        runtime_absolute = (
-            runtime_candidate if runtime_candidate.is_absolute() else base / runtime_candidate
-        ).resolve()
         try:
+            base = Path(task_cwd).resolve()
+            runtime_base = Path(runtime_cwd).resolve() if runtime_cwd is not None else base
+            runtime_base.relative_to(base)
+            claimed_candidate = base / claim_path
+            runtime_candidate_absolute = (
+                runtime_candidate
+                if runtime_candidate.is_absolute()
+                else runtime_base / runtime_candidate
+            )
+            if _path_has_resolution_error(claimed_candidate) or _path_has_resolution_error(
+                runtime_candidate_absolute
+            ):
+                return False
+            claimed_absolute = claimed_candidate.resolve()
+            runtime_absolute = runtime_candidate_absolute.resolve()
             claimed_absolute.relative_to(base)
             runtime_absolute.relative_to(base)
-        except ValueError:
+        except (OSError, RuntimeError, ValueError):
             return False
         return runtime_absolute == claimed_absolute
 
@@ -148,20 +167,33 @@ def _workspace_relative_file_claim(value: str, *, task_cwd: str | None) -> str |
     if not raw_value or task_cwd is None:
         return None
 
-    base = Path(task_cwd).resolve()
-    candidate = Path(raw_value)
-    if not candidate.is_absolute() and ".." in candidate.parts:
-        return None
-
-    resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
     try:
+        base = Path(task_cwd).resolve()
+        candidate = Path(raw_value)
+        if not candidate.is_absolute() and ".." in candidate.parts:
+            return None
+        absolute_candidate = candidate if candidate.is_absolute() else base / candidate
+        if _path_has_resolution_error(absolute_candidate):
+            return None
+        resolved = absolute_candidate.resolve()
         relative = resolved.relative_to(base)
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return None
 
     if not relative.parts or ".." in relative.parts:
         return None
     return relative.as_posix()
+
+
+def _path_has_resolution_error(path: Path) -> bool:
+    try:
+        path.resolve(strict=True)
+    except FileNotFoundError:
+        parent = path.parent
+        return parent != path and _path_has_resolution_error(parent)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
 
 
 def _runtime_support_messages_for_field(
@@ -286,8 +318,14 @@ def _runtime_messages_support_file_claim(
         if relative_claim is None:
             return False
         candidate = Path(relative_claim)
-        base = Path(task_cwd).resolve()
-        resolved = (base / candidate).resolve()
+        try:
+            base = Path(task_cwd).resolve()
+            absolute_candidate = base / candidate
+            if _path_has_resolution_error(absolute_candidate):
+                return False
+            resolved = absolute_candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
         if any(
             _runtime_message_supports_file_reference(
                 relative_claim,
@@ -353,13 +391,16 @@ def _runtime_message_supports_file_reference(
     normalized_reference = reference.strip().lower()
     if not normalized_reference:
         return False
-    text = _runtime_message_file_proof_text(message)
     if message.tool_name == "Bash":
-        return _text_supports_file_mutation_reference(text, normalized_reference) or (
-            allow_bash_command_text
-            and _bash_command_mutates_file_reference(message, normalized_reference)
-            and _runtime_message_has_success_evidence(message, messages=messages, index=index)
-        )
+        return _bash_message_mutates_file_reference(
+            message,
+            reference=reference,
+            normalized_reference=normalized_reference,
+            task_cwd=task_cwd,
+            allow_bash_command_text=allow_bash_command_text,
+            messages=messages,
+            index=index,
+        ) and _runtime_message_has_success_evidence(message, messages=messages, index=index)
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
         return _runtime_message_has_success_evidence(
             message,
@@ -369,7 +410,30 @@ def _runtime_message_supports_file_reference(
             _file_claim_matches_runtime_path(reference, path, task_cwd=task_cwd)
             for path in _runtime_message_file_path_values(message)
         )
+    text = _runtime_message_file_proof_text(message)
     return _text_supports_file_mutation_reference(text, normalized_reference)
+
+
+def _bash_message_mutates_file_reference(
+    message: AgentMessage,
+    *,
+    reference: str,
+    normalized_reference: str,
+    task_cwd: str | None,
+    allow_bash_command_text: bool,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> bool:
+    text = _runtime_message_file_proof_text(message)
+    if text and _text_supports_file_mutation_reference(text, normalized_reference):
+        return True
+    return allow_bash_command_text and _bash_command_mutates_file_reference(
+        message,
+        reference=reference,
+        task_cwd=task_cwd,
+        messages=messages,
+        index=index,
+    )
 
 
 def _text_supports_file_mutation_reference(text: str, normalized_reference: str) -> bool:
@@ -396,7 +460,14 @@ def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
 
 
-def _bash_command_mutates_file_reference(message: AgentMessage, normalized_reference: str) -> bool:
+def _bash_command_mutates_file_reference(
+    message: AgentMessage,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> bool:
     """Return True for explicit shell writes to the referenced file.
 
     Bash command text is only trusted when the command itself carries mutation
@@ -408,28 +479,924 @@ def _bash_command_mutates_file_reference(message: AgentMessage, normalized_refer
     tool_input = message.data.get("tool_input")
     if not isinstance(tool_input, dict):
         return False
-    command = tool_input.get("command")
-    if not isinstance(command, str):
+    effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
+    if task_cwd is not None and effective_cwd is None:
         return False
-    normalized_command = command.strip().lower()
-    if not normalized_command:
+    if not _runtime_message_has_stable_file_identity(
+        message,
+        reference=reference,
+        task_cwd=task_cwd,
+        effective_cwd=effective_cwd,
+        messages=messages,
+        index=index,
+    ):
+        # Command text and a zero exit status do not bind the receiver inode at
+        # execution time. A symlink may have been replaced before verification.
         return False
-    if not _file_reference_pattern(normalized_reference).search(normalized_command):
-        return False
-    quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
-    if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
-        return True
-    return bool(
-        re.search(
-            rf"(^|[\s;&|])(touch|truncate|tee)\b[^;&|]*\s{quoted_reference}(?=$|[\s;&|])",
-            normalized_command,
+    for command in _runtime_message_command_values(message):
+        if not command.strip():
+            continue
+        if _has_unquoted_compound_shell_control(command):
+            # A successful compound command does not prove that every textual
+            # mutation branch executed. Require structured file evidence
+            # instead of interpreting control flow from a transcript string.
+            continue
+        python_command_match = _python_c_command_file_claim_match(
+            command,
+            task_cwd=effective_cwd,
         )
-        or re.search(
-            rf"(^|[\s;&|])(sed|perl)\b[^;&|]*\s-[^\s;&|]*i[^;&|]*\s"
-            rf"{quoted_reference}(?=$|[\s;&|])",
-            normalized_command,
+        if python_command_match is not None:
+            if python_command_match:
+                return True
+            # Python source is never command-text evidence for its own file
+            # receiver.  A distinct, literal shell output redirection remains
+            # authoritative, however: the execution-span lease above proves
+            # that the shell opened and changed that receiver independently of
+            # anything the ``-c`` source may have done.
+            return _shell_command_targets_file_claim(
+                command,
+                reference=reference,
+                task_cwd=task_cwd,
+                effective_cwd=effective_cwd,
+                redirections_only=True,
+            )
+        if _text_needs_shell_expansion(command):
+            # Expansion in a payload does not weaken a literal shell output
+            # redirection: a successful shell necessarily opened that target.
+            # All other expanded forms remain non-authoritative because they
+            # can reconstruct the command, mutation primitive, or target.
+            if _shell_command_targets_file_claim(
+                command,
+                reference=reference,
+                task_cwd=task_cwd,
+                effective_cwd=effective_cwd,
+                redirections_only=True,
+            ):
+                return True
+            continue
+        if _shell_command_targets_file_claim(
+            command,
+            reference=reference,
+            task_cwd=task_cwd,
+            effective_cwd=effective_cwd,
+        ):
+            return True
+    return False
+
+
+def _runtime_message_has_stable_file_identity(
+    message: AgentMessage,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    effective_cwd: str | None,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> bool:
+    """Verify adapter-recorded execution-time identity against the current file."""
+    if task_cwd is None or effective_cwd is None:
+        return False
+    for evidence_message in _runtime_message_correlated_completions(message, messages, index):
+        effects = evidence_message.data.get("filesystem_effects")
+        if not isinstance(effects, (list, tuple)):
+            continue
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            path = effect.get("path")
+            device = effect.get("st_dev")
+            inode = effect.get("st_ino")
+            mode = effect.get("st_mode")
+            if (
+                effect.get("capture") != "ouroboros.leaf-dispatch.v1"
+                or not isinstance(path, str)
+                or isinstance(device, bool)
+                or not isinstance(device, int)
+                or isinstance(inode, bool)
+                or not isinstance(inode, int)
+                or isinstance(mode, bool)
+                or not isinstance(mode, int)
+                or not stat.S_ISREG(mode)
+                or not _file_claim_matches_runtime_path(
+                    reference,
+                    path,
+                    task_cwd=task_cwd,
+                    runtime_cwd=effective_cwd,
+                )
+            ):
+                continue
+            try:
+                candidate = Path(path)
+                absolute = candidate if candidate.is_absolute() else Path(effective_cwd) / candidate
+                current = absolute.lstat()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                stat.S_ISREG(current.st_mode)
+                and current.st_dev == device
+                and current.st_ino == inode
+                and stat.S_IFMT(current.st_mode) == stat.S_IFMT(mode)
+            ):
+                return True
+    return False
+
+
+def _runtime_message_correlated_completions(
+    message: AgentMessage,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> tuple[AgentMessage, ...]:
+    """Return only unambiguous completion messages correlated to a call."""
+    if _runtime_message_has_conflicting_tool_call_ids(message):
+        return ()
+    call_id = _runtime_message_tool_call_id(message)
+    if call_id is not None:
+        if any(
+            _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages[index + 1 :]
+        ):
+            return ()
+        completions = tuple(
+            candidate
+            for candidate in messages[index + 1 :]
+            if _runtime_message_is_tool_completion(candidate)
+            and not _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+        )
+        return completions if len(completions) == 1 else ()
+    for candidate in messages[index + 1 :]:
+        if _runtime_message_is_tool_completion(candidate):
+            if (
+                not _runtime_message_has_conflicting_tool_call_ids(candidate)
+                and _runtime_message_tool_call_id(candidate) is None
+                and (candidate.tool_name is None or candidate.tool_name == message.tool_name)
+            ):
+                return (candidate,)
+            break
+        if candidate.tool_name is not None:
+            break
+    return ()
+
+
+def _shell_command_targets_file_claim(
+    command: str,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    effective_cwd: str | None,
+    redirections_only: bool = False,
+) -> bool:
+    """Return whether shell mutation syntax targets the canonical claim path.
+
+    Relative targets are interpreted from the recorded command cwd, never from
+    the task root by assumption. Tokenizing with punctuation awareness also
+    distinguishes real shell syntax from mutation-looking quoted payload text.
+    """
+    if task_cwd is None or effective_cwd is None:
+        return False
+    return any(
+        _file_claim_matches_runtime_path(
+            reference,
+            target,
+            task_cwd=task_cwd,
+            runtime_cwd=effective_cwd,
+        )
+        for target in _shell_command_mutation_targets(
+            command,
+            redirections_only=redirections_only,
         )
     )
+
+
+def _shell_command_mutation_targets(
+    command: str,
+    *,
+    redirections_only: bool = False,
+) -> tuple[str, ...]:
+    """Extract literal targets from the narrow supported shell mutations."""
+    candidate = command
+    seen: set[str] = set()
+    for _ in range(16):
+        wrapped_body = _shell_command_body(candidate)
+        if wrapped_body is None:
+            break
+        if wrapped_body == candidate or wrapped_body in seen:
+            return ()
+        seen.add(candidate)
+        candidate = wrapped_body
+    else:
+        return ()
+    candidate = _strip_unquoted_shell_comment(candidate)
+    try:
+        lexer = shlex.shlex(
+            _mask_quoted_output_operators(_mark_adjacent_fd_selectors(candidate)),
+            posix=True,
+            punctuation_chars=";&|<>",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except (RuntimeError, ValueError):
+        return ()
+    mutation_arguments, targets = _shell_tokens_without_redirections(tokens)
+    if redirections_only:
+        return tuple(dict.fromkeys(targets))
+
+    command_index = 0
+    while command_index < len(mutation_arguments) and re.match(
+        r"^[A-Za-z_][A-Za-z0-9_]*=", mutation_arguments[command_index]
+    ):
+        command_index += 1
+    if command_index >= len(mutation_arguments):
+        return tuple(targets)
+    executable = Path(mutation_arguments[command_index]).name.lower()
+    mutation_arguments = mutation_arguments[command_index + 1 :]
+    candidates: tuple[str, ...] = ()
+    if executable == "touch":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("acfmh"),
+            short_values=frozenset("Adrt"),
+            long_flags=frozenset({"--no-create", "--no-dereference"}),
+            long_values=frozenset({"--date", "--reference", "--time"}),
+        )
+    elif executable == "truncate":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("co"),
+            short_values=frozenset("rs"),
+            long_flags=frozenset({"--io-blocks", "--no-create"}),
+            long_values=frozenset({"--reference", "--size"}),
+        )
+    elif executable == "tee":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("aip"),
+            short_values=frozenset(),
+            long_flags=frozenset({"--append", "--ignore-interrupts", "--output-error"}),
+            long_values=frozenset(),
+            long_value_prefixes=("--output-error=",),
+        )
+    elif executable == "sed":
+        candidates = _sed_in_place_operands(mutation_arguments)
+    elif executable == "perl":
+        candidates = _perl_in_place_operands(mutation_arguments)
+    targets.extend(
+        candidate for candidate in candidates if not _text_needs_shell_expansion(candidate)
+    )
+    return tuple(dict.fromkeys(targets))
+
+
+def _shell_tokens_without_redirections(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """Separate argv from shell redirections without treating fd copies as files."""
+    arguments: list[str] = []
+    file_targets: list[str] = []
+    output_operators = {">", ">>", ">&", "&>", ">|"}
+    non_file_operators = {"<", "<<", "<<<", "<&", "<>"}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token not in output_operators | non_file_operators:
+            arguments.append(token)
+            index += 1
+            continue
+        if arguments and arguments[-1].startswith(_FD_SELECTOR_MARKER):
+            arguments.pop()
+        if index + 1 >= len(tokens):
+            return [], []
+        target = tokens[index + 1]
+        if target in output_operators | non_file_operators | {";", "&", "|", "&&", "||"}:
+            return [], []
+        if token in {">", ">>", "&>", ">|"} and not _text_needs_shell_expansion(target):
+            file_targets.append(target)
+        # ``>&`` is descriptor duplication for the bounded proof grammar. Bash
+        # also accepts filename extensions of this form, but declining them is
+        # safer than confusing ``>&2`` with a file receiver.
+        index += 2
+    if any(argument.startswith(_FD_SELECTOR_MARKER) for argument in arguments):
+        return [], []
+    return arguments, file_targets
+
+
+_FD_SELECTOR_MARKER = "\uf001ouroboros-fd:"
+
+
+def _mark_adjacent_fd_selectors(command: str) -> str:
+    """Mark shell IO-number tokens only when lexically adjacent to ``<``/``>``."""
+    marked: list[str] = []
+    quote: str | None = None
+    escaped = False
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            marked.append(char)
+            escaped = False
+            at_word_start = False
+            index += 1
+            continue
+        if quote == "'":
+            marked.append(char)
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            marked.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote == '"':
+            marked.append(char)
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            marked.append(char)
+            quote = char
+            at_word_start = False
+            index += 1
+            continue
+        if at_word_start and char.isascii() and char.isdigit():
+            end = index + 1
+            while end < len(command) and command[end].isascii() and command[end].isdigit():
+                end += 1
+            digits = command[index:end]
+            if end < len(command) and command[end] in {"<", ">"}:
+                marked.append(f"{_FD_SELECTOR_MARKER}{digits}")
+            else:
+                marked.append(digits)
+            at_word_start = False
+            index = end
+            continue
+        marked.append(char)
+        if char.isspace() or char in ";&|()<>":
+            at_word_start = True
+        else:
+            at_word_start = False
+        index += 1
+    return "".join(marked)
+
+
+def _mutation_operands_with_options(
+    arguments: list[str],
+    *,
+    short_flags: frozenset[str],
+    short_values: frozenset[str],
+    long_flags: frozenset[str],
+    long_values: frozenset[str],
+    long_value_prefixes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return positional receivers for a bounded conventional option grammar."""
+    operands: list[str] = []
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            if argument in long_flags or any(
+                argument.startswith(prefix) and len(argument) > len(prefix)
+                for prefix in long_value_prefixes
+            ):
+                index += 1
+                continue
+            name, separator, _value = argument.partition("=")
+            if name in long_values:
+                if separator:
+                    index += 1
+                elif index + 1 < len(arguments):
+                    index += 2
+                else:
+                    return ()
+                continue
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in short_flags:
+                    cluster_index += 1
+                    continue
+                if option in short_values:
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                return ()
+            index += 1
+            continue
+        operands.append(argument)
+        index += 1
+    return tuple(operands)
+
+
+def _sed_in_place_operands(arguments: list[str]) -> tuple[str, ...]:
+    """Return sed input files for conservative GNU/BSD in-place forms."""
+    positionals: list[str] = []
+    in_place = False
+    script_from_option = False
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            name, separator, _value = argument.partition("=")
+            if name == "--in-place":
+                in_place = True
+                index += 1
+                continue
+            if name in {"--expression", "--file"}:
+                script_from_option = True
+                if separator:
+                    index += 1
+                elif index + 1 < len(arguments):
+                    index += 2
+                else:
+                    return ()
+                continue
+            if name in {"--quiet", "--silent", "--regexp-extended", "--separate"}:
+                index += 1
+                continue
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in {"n", "E", "r", "s", "u", "z"}:
+                    cluster_index += 1
+                    continue
+                if option == "i":
+                    in_place = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif (
+                        index + 1 < len(arguments) and arguments[index + 1] == ""
+                    ) or not sys.platform.startswith("linux"):
+                        if index + 1 >= len(arguments):
+                            return ()
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        cluster_index += 1
+                    continue
+                if option in {"e", "f"}:
+                    script_from_option = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                return ()
+            index += 1
+            continue
+        positionals.append(argument)
+        index += 1
+    if not in_place:
+        return ()
+    if script_from_option:
+        return tuple(positionals)
+    return tuple(positionals[1:]) if len(positionals) >= 2 else ()
+
+
+def _perl_in_place_operands(arguments: list[str]) -> tuple[str, ...]:
+    """Return Perl input files for conservative in-place edit forms."""
+    positionals: list[str] = []
+    in_place = False
+    script_from_option = False
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in {"a", "c", "l", "n", "p", "s", "w", "W", "X"}:
+                    cluster_index += 1
+                    continue
+                if option == "i":
+                    in_place = True
+                    # Any remainder is the backup extension, not more options.
+                    cluster_index = len(cluster)
+                    continue
+                if option in {"e", "E"}:
+                    script_from_option = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                if option in {"F", "I", "m", "M"}:
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                if option in {"0", "C", "d", "D", "V", "x"}:
+                    # These switches take optional attached values. A
+                    # standalone form must not swallow the next switch/operand.
+                    cluster_index = len(cluster)
+                    continue
+                return ()
+            index += 1
+            continue
+        positionals.append(argument)
+        index += 1
+    if not in_place:
+        return ()
+    if script_from_option:
+        return tuple(positionals)
+    return tuple(positionals[1:]) if len(positionals) >= 2 else ()
+
+
+def _strip_unquoted_shell_comment(command: str) -> str:
+    """Drop a real shell comment while preserving literal ``#`` bytes.
+
+    POSIX shells begin a comment only when an unquoted, unescaped ``#`` occurs
+    at the start of a word.  Quoted hashes, escaped hashes, and hashes embedded
+    in tokens such as ``foo#bar`` remain ordinary argv data.
+    """
+    quote: str | None = None
+    escaped = False
+    at_word_start = True
+    uncommented: list[str] = []
+    for char in command:
+        if escaped:
+            escaped = False
+            if char == "\n":
+                # A POSIX backslash-LF continuation is removed before token
+                # recognition.  It therefore cannot turn a preceding word
+                # boundary into token-internal state before a following '#'.
+                uncommented.pop()
+                continue
+            uncommented.append(char)
+            at_word_start = False
+            continue
+        if quote == "'":
+            uncommented.append(char)
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            uncommented.append(char)
+            escaped = True
+            continue
+        if quote == '"':
+            uncommented.append(char)
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            uncommented.append(char)
+            quote = char
+            at_word_start = False
+            continue
+        if char == "#" and at_word_start:
+            return "".join(uncommented)
+        uncommented.append(char)
+        if char.isspace() or char in ";&|()<>":
+            at_word_start = True
+        else:
+            at_word_start = False
+    return "".join(uncommented)
+
+
+def _mask_quoted_output_operators(command: str) -> str:
+    """Mask quoted or escaped ``>`` bytes before punctuation tokenization."""
+    quote: str | None = None
+    escaped = False
+    masked: list[str] = []
+    for char in command:
+        if escaped:
+            masked.append("\uf000" if char == ">" else char)
+            escaped = False
+            continue
+        if quote != "'" and char == "\\":
+            masked.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            masked.append(char)
+            continue
+        masked.append("\uf000" if char == ">" and quote is not None else char)
+    return "".join(masked)
+
+
+def _has_unquoted_compound_shell_control(command: str) -> bool:
+    """Return True when command text contains execution control operators."""
+    wrapped_body = _shell_command_body(command)
+    if wrapped_body is not None:
+        return _has_unquoted_compound_shell_control(wrapped_body)
+    command = _strip_unquoted_shell_comment(command)
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "|" and index > 0 and command[index - 1] == ">":
+            # ``>|`` is the shell's clobber redirection operator, not a pipe.
+            continue
+        if char in {"|", ";", "\n", "\r"}:
+            return True
+        if char == "&":
+            previous = command[index - 1] if index > 0 else ""
+            following = command[index + 1] if index + 1 < len(command) else ""
+            if previous not in {">", "<"} and following != ">":
+                return True
+    return False
+
+
+def _runtime_message_effective_cwd(message: AgentMessage, *, task_cwd: str | None) -> str | None:
+    """Return the command cwd only when it is contained by the task workspace."""
+    if task_cwd is None:
+        return None
+    tool_input = message.data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None if _path_has_symlink_component(Path(task_cwd)) else task_cwd
+    cwd = tool_input.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None if _path_has_symlink_component(Path(task_cwd)) else task_cwd
+    try:
+        workspace = Path(task_cwd).resolve()
+        candidate = Path(cwd)
+        unresolved_effective = candidate if candidate.is_absolute() else Path(task_cwd) / candidate
+        if _path_has_symlink_component(unresolved_effective):
+            return None
+        effective = unresolved_effective.resolve()
+        effective.relative_to(workspace)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return str(effective)
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    """Return True when any existing path component is a symlink."""
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts if not path.is_absolute() else path.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _python_c_command_file_claim_match(
+    command: str,
+    *,
+    task_cwd: str | None,
+) -> bool | None:
+    """Classify Python ``-c`` command text as rejected or unrelated.
+
+    ``None`` means the command is not a recognized Python ``-c`` form and other
+    shell mutation evidence may still be considered. ``False`` is authoritative:
+    Python command text cannot safely prove a historical filesystem mutation
+    without execution-bound file evidence.
+    """
+    if task_cwd is None:
+        return None
+    candidate = command
+    seen: set[str] = set()
+    for _ in range(16):
+        match = _direct_python_c_command_file_claim_match(candidate, task_cwd=task_cwd)
+        if match is not None:
+            return match
+        body = _shell_command_body(candidate)
+        if body is None or body == candidate or body in seen:
+            return None
+        seen.add(candidate)
+        candidate = body
+    # Excessive supported-wrapper nesting is not trustworthy command-text
+    # proof. Do not let inert inner argv reach generic shell heuristics.
+    return False
+
+
+def _direct_python_c_command_file_claim_match(
+    command: str,
+    *,
+    task_cwd: str,
+) -> bool | None:
+    """Classify one unwrapped command as Python ``-c`` or unrelated."""
+    # Command text can never prove the historical identity of a pathlib
+    # receiver. Detect the Python source itself before shell tokenization so
+    # executable quoting/concatenation (for example ``py"thon"``) cannot move
+    # the same payload into generic shell mutation heuristics.
+    if _raw_command_mentions_python_c_pathlib(command):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        if _raw_command_mentions_python_c_pathlib(command):
+            return False
+        return None
+    python_index = _python_c_argv_index(argv, task_cwd=task_cwd)
+    if python_index is False:
+        return False
+    if python_index is None:
+        if _raw_command_mentions_python_c_pathlib(command) or _argv_mentions_python_c_pathlib(argv):
+            return False
+        return None
+    if "-c" not in argv[python_index + 1 :]:
+        return None
+    source_index = argv.index("-c", python_index + 1) + 1
+    if len(argv) <= source_index:
+        return False
+    # Once a Python ``-c`` invocation is recognized, its remaining argv is
+    # Python data, not additional shell syntax. It must therefore be
+    # authoritative before generic ``touch``/redirection heuristics even when
+    # the source reconstructs pathlib without lexical ``pathlib``/``Path``
+    # signatures. Command text alone never proves its historical file target.
+    return False
+
+
+def _normalize_absolute_path(path: Path) -> Path:
+    """Collapse lexical ``.`` segments without resolving symlinks."""
+    return Path(PurePosixPath(path).as_posix())
+
+
+def _raw_command_mentions_python_c_pathlib(command: str) -> bool:
+    return re.search(r"(?:^|\s)-c(?:\s|$)", command) is not None and _source_mentions_pathlib(
+        command
+    )
+
+
+def _source_mentions_pathlib(source: str) -> bool:
+    return re.search(r"\bpathlib\b|\bPath\s*\(", source, re.IGNORECASE) is not None
+
+
+def _text_needs_shell_expansion(value: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            continue
+        if char in {"$", "`"}:
+            return True
+    return False
+
+
+def _argv_mentions_python_c_pathlib(argv: list[str]) -> bool:
+    return any(_raw_command_mentions_python_c_pathlib(value) for value in argv)
+
+
+def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool:
+    index = 0
+    while index < len(argv) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[index]):
+        index += 1
+    if index >= len(argv):
+        return None
+    if Path(argv[index]).name.lower() == "env":
+        if not _trusted_env_executable(argv[index]):
+            return None
+        index = _env_command_index(argv, index + 1)
+        if index is None:
+            return None
+    executable = Path(argv[index]).name.lower()
+    if (
+        executable not in {"python", "python3"}
+        and re.fullmatch(r"python3\.\d+", executable) is None
+    ):
+        return None
+    if not _python_invocation_uses_c(argv, python_index=index):
+        return None
+    return index if _trusted_python_executable(argv[index], task_cwd=task_cwd) else False
+
+
+def _trusted_env_executable(value: str) -> bool:
+    """Accept only the immutable system ``env`` executable wrapper."""
+    try:
+        candidate = Path(value)
+        if not candidate.is_absolute() or candidate.is_symlink():
+            return False
+        resolved = candidate.resolve()
+        return any(
+            system_env.exists() and resolved == system_env.resolve()
+            for system_env in (Path("/usr/bin/env"), Path("/bin/env"))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _env_command_index(argv: list[str], index: int) -> int | None:
+    """Return the wrapped executable position for a narrow system-env prefix."""
+    while index < len(argv):
+        value = argv[index]
+        if value == "--":
+            index += 1
+            break
+        if value in {"-i", "--ignore-environment"} or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", value):
+            index += 1
+            continue
+        if value in {"-u", "--unset"}:
+            index += 2
+            continue
+        if value.startswith("--unset="):
+            index += 1
+            continue
+        if value.startswith("-"):
+            return None
+        break
+    return index if index < len(argv) else None
+
+
+def _python_invocation_uses_c(argv: list[str], *, python_index: int) -> bool:
+    """Return whether ``-c`` occurs in Python's option prefix, before a script."""
+    index = python_index + 1
+    while index < len(argv):
+        value = argv[index]
+        if value == "-c":
+            return True
+        if value in {"--", "-m"} or not value.startswith("-"):
+            return False
+        if value in {"-W", "-X"}:
+            index += 2
+            continue
+        index += 1
+    return False
+
+
+def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            return False
+        candidate = path if path.is_absolute() else Path(task_cwd) / path
+        if candidate.is_symlink():
+            return False
+        verifier_executable = Path(sys.executable).resolve()
+        if _normalize_absolute_path(candidate) != _normalize_absolute_path(verifier_executable):
+            return False
+        return candidate.resolve() == verifier_executable
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
@@ -489,25 +1456,36 @@ def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
     return success_signal
 
 
-def _runtime_message_tool_call_id(message: AgentMessage) -> str | None:
-    """Return the normalized tool-call correlation id carried by a message."""
-    for key in ("tool_call_id", "tool_use_id", "call_id"):
-        value = message.data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+def _runtime_message_tool_call_ids(message: AgentMessage) -> frozenset[str]:
+    """Return every normalized correlation-id alias carried by a message."""
+    values: set[str] = set()
+    containers: list[dict[str, object]] = [message.data]
+    message_meta = message.data.get("meta")
+    if isinstance(message_meta, dict):
+        containers.append(message_meta)
     tool_result = message.data.get("tool_result")
     if isinstance(tool_result, dict):
-        for key in ("tool_call_id", "tool_use_id", "call_id"):
-            value = tool_result.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        containers.append(tool_result)
         meta = tool_result.get("meta")
         if isinstance(meta, dict):
-            for key in ("tool_call_id", "tool_use_id", "call_id"):
-                value = meta.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-    return None
+            containers.append(meta)
+    for container in containers:
+        for key in ("tool_call_id", "tool_use_id", "call_id"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value.strip())
+    return frozenset(values)
+
+
+def _runtime_message_has_conflicting_tool_call_ids(message: AgentMessage) -> bool:
+    """Return whether aliases disagree, making correlation fail closed."""
+    return len(_runtime_message_tool_call_ids(message)) > 1
+
+
+def _runtime_message_tool_call_id(message: AgentMessage) -> str | None:
+    """Return the sole normalized correlation id, or ``None`` if absent/ambiguous."""
+    values = _runtime_message_tool_call_ids(message)
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _runtime_message_is_tool_completion(message: AgentMessage) -> bool:
@@ -518,7 +1496,7 @@ def _runtime_message_is_tool_completion(message: AgentMessage) -> bool:
         return True
     runtime_event_type = message.data.get("runtime_event_type")
     return isinstance(runtime_event_type, str) and runtime_event_type.strip().lower().endswith(
-        ("tool.completed", "tool.failed")
+        ("tool.completed", "tool.failed", "tool.output")
     )
 
 
@@ -535,8 +1513,16 @@ def _runtime_message_has_success_evidence(
     for the same named tool (or an unnamed adjacent result). Missing, failed, or
     ambiguous completion evidence fails closed.
     """
+    if _runtime_message_has_conflicting_tool_call_ids(message):
+        return False
     call_id = _runtime_message_tool_call_id(message)
     if call_id is not None:
+        if any(
+            _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages
+        ):
+            return False
         matching_starts = tuple(
             candidate
             for candidate in messages
@@ -554,8 +1540,16 @@ def _runtime_message_has_success_evidence(
 def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], index: int) -> bool:
     """Return True when a tool call has one correlated successful completion."""
     start = messages[index]
+    if _runtime_message_has_conflicting_tool_call_ids(start):
+        return False
     start_call_id = _runtime_message_tool_call_id(start)
     if start_call_id is not None:
+        if any(
+            _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and start_call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages
+        ):
+            return False
         matching_starts = tuple(
             candidate
             for candidate in messages
@@ -569,6 +1563,7 @@ def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], i
             candidate
             for candidate in messages[index + 1 :]
             if _runtime_message_is_tool_completion(candidate)
+            and not _runtime_message_has_conflicting_tool_call_ids(candidate)
             and _runtime_message_tool_call_id(candidate) == start_call_id
         )
         return (
@@ -581,6 +1576,8 @@ def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], i
         )
 
     for candidate in messages[index + 1 :]:
+        if _runtime_message_has_conflicting_tool_call_ids(candidate):
+            return False
         candidate_call_id = _runtime_message_tool_call_id(candidate)
         if _runtime_message_is_tool_completion(candidate):
             # An id-bearing result cannot be safely assigned to an id-less

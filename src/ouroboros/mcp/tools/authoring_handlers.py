@@ -33,6 +33,7 @@ from ouroboros.bigbang.ambiguity import (
     get_milestone,
     qualifies_for_seed_completion,
 )
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
@@ -55,7 +56,6 @@ from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.types import Result
 from ouroboros.interview_adapters import (
     InterviewTurnContext,
-    detect_explicit_confusion_terms,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
@@ -1186,18 +1186,33 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
     return False
 
 
-def _format_interview_transcript(state: InterviewState) -> str:
-    """Format persisted interview rounds as a readable transcript for subagent context."""
+def _format_interview_transcript(
+    state: InterviewState, *, withhold_observations: bool = False
+) -> str:
+    """Format persisted interview rounds as a readable transcript for subagent context.
+
+    Two call sites with different roles read this one formatter. Seed generation
+    is a requirement-producing consumer and passes ``withhold_observations``; the
+    interview subagent's conversation history does not, because the interview
+    keeps seeing observations in full — informing the next question is what they
+    were collected for (#1755). Question lines are unchanged either way.
+    """
     if not state.rounds:
         return ""
+    if withhold_observations:
+        rendered = [
+            (item.round_number, item.question, item.answer) for item in extraction_rounds(state)
+        ]
+    else:
+        rendered = [(r.round_number, r.question, r.user_response) for r in state.rounds]
     lines: list[str] = []
     if state.initial_context:
         lines.append(f"**Initial Context:** {state.initial_context}")
         lines.append("")
-    for r in state.rounds:
-        lines.append(f"**Q{r.round_number}:** {r.question}")
-        if r.user_response:
-            lines.append(f"**A{r.round_number}:** {r.user_response}")
+    for round_number, question, answer in rendered:
+        lines.append(f"**Q{round_number}:** {question}")
+        if answer:
+            lines.append(f"**A{round_number}:** {answer}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -1473,7 +1488,7 @@ class GenerateSeedHandler:
                         )
                     )
 
-            transcript = _format_interview_transcript(interview_state)
+            transcript = _format_interview_transcript(interview_state, withhold_observations=True)
             distillation = build_requirement_distillation(interview_state)
             from ouroboros.core.requirement_candidate import evaluate_promotion
 
@@ -2384,60 +2399,29 @@ class InterviewHandler:
                     state.status = InterviewStatus.IN_PROGRESS
                     state.clear_stored_ambiguity()
                     state.completion_candidate_streak = 0
-                if state.rounds and state.rounds[-1].user_response is None:
+                # ``record_answer`` decides which shape this is — filling a
+                # round persisted question-only, or appending — and settles
+                # provenance where the answer arrives either way.
+                has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
+                if has_pending:
                     question_text = last_question or state.rounds[-1].question
-                    plugin_intent_guard_report = _guard_interview_answer(
-                        state=state,
-                        question=question_text,
-                        answer=answer,
-                    )
-                    if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
-                        return Result.err(
-                            MCPToolError(
-                                _format_intent_guard_blocker(plugin_intent_guard_report),
-                                tool_name="ouroboros_interview",
-                            )
-                        )
-                    # Round exists with question but no answer yet — fill it.
-                    # If last_question was provided, update the question text
-                    # in case the existing one is a stale placeholder from a
-                    # previous partial persistence.
-                    if last_question:
-                        state.rounds[-1].question = last_question
-                    state.rounds[-1].user_response = answer
-                    state.record_adapter_answer(question_text, answer)
                 else:
-                    # No rounds yet or all answered — append new round.
-                    # Use last_question when available; fall back to a
-                    # descriptive placeholder for backward compatibility
-                    # (callers that don't supply last_question yet).
-                    from ouroboros.bigbang.interview import InterviewRound
-
+                    # Fall back to a descriptive placeholder for backward
+                    # compatibility (callers that don't supply last_question).
                     question_text = last_question if last_question else "(continued from subagent)"
-                    plugin_intent_guard_report = _guard_interview_answer(
-                        state=state,
-                        question=question_text,
-                        answer=answer,
-                    )
-                    if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
-                        return Result.err(
-                            MCPToolError(
-                                _format_intent_guard_blocker(plugin_intent_guard_report),
-                                tool_name="ouroboros_interview",
-                            )
-                        )
-                    state.rounds.append(
-                        InterviewRound(
-                            round_number=len(state.rounds) + 1,
-                            question=question_text,
-                            user_response=answer,
+                plugin_intent_guard_report = _guard_interview_answer(
+                    state=state,
+                    question=question_text,
+                    answer=answer,
+                )
+                if plugin_intent_guard_report.status is IntentGuardStatus.FAIL:
+                    return Result.err(
+                        MCPToolError(
+                            _format_intent_guard_blocker(plugin_intent_guard_report),
+                            tool_name="ouroboros_interview",
                         )
                     )
-                    state.record_adapter_answer(question_text, answer)
-                detected_terms = detect_explicit_confusion_terms(answer)
-                if detected_terms:
-                    state.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
-                state.invalidate_requirement_distillation()
+                state.record_answer(question_text, answer)
                 plugin_state_changed = True
             # Build transcript from persisted rounds
             transcript = _format_interview_transcript(state)
@@ -3014,14 +2998,9 @@ class InterviewHandler:
                 if is_safe_default_synthesis:
                     if has_pending_round:
                         state.rounds.pop()
-                    from ouroboros.bigbang.interview import InterviewRound
-
-                    state.rounds.append(
-                        InterviewRound(
-                            round_number=len(state.rounds) + 1,
-                            question=last_question or "[driver safe-default finalization]",
-                            user_response=answer,
-                        )
+                    state.record_answer(
+                        last_question or "[driver safe-default finalization]",
+                        answer,
                     )
                     state.clear_stored_ambiguity()
                     state.mark_updated()

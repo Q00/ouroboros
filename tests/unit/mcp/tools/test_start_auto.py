@@ -29,6 +29,7 @@ from ouroboros.auto.state import (
     AutoWorktreePolicy,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.auto_handler import (
@@ -85,6 +86,19 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
 
 _AUTO_ID_RE = re.compile(r"auto_[0-9a-f]+")
 _UUID_HEX_RE = re.compile(r"\b[0-9a-f]{32}\b")
+
+
+def _managed_workspace(tmp_path) -> TaskWorkspace:
+    return TaskWorkspace(
+        durable_id="auto_cleanup_test",
+        repo_root=str(tmp_path / "repo"),
+        repo_name="repo",
+        original_cwd=str(tmp_path / "repo"),
+        effective_cwd=str(tmp_path / "worktree"),
+        worktree_path=str(tmp_path / "worktree"),
+        branch="ooo/auto_cleanup_test",
+        lock_path=str(tmp_path / "cleanup.lock"),
+    )
 
 
 def _normalize_detached_auto_response(value):
@@ -204,6 +218,97 @@ def fake_inner_auto():
         )
     )
     return inner
+
+
+@pytest.mark.parametrize(
+    ("pipeline_result", "expected_cleanup"),
+    [
+        (
+            AutoPipelineResult(
+                status="complete",
+                auto_session_id="auto_terminal",
+                phase="complete",
+            ),
+            True,
+        ),
+        (
+            AutoPipelineResult(
+                status="complete",
+                auto_session_id="auto_handoff",
+                phase="complete",
+                job_id="job_live",
+                run_handoff_status="started",
+            ),
+            False,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_auto_releases_with_result_based_cleanup_eligibility(
+    event_store,
+    tmp_path,
+    monkeypatch,
+    pipeline_result: AutoPipelineResult,
+    expected_cleanup: bool,
+) -> None:
+    workspace = _managed_workspace(tmp_path)
+    releases: list[tuple[TaskWorkspace | None, bool]] = []
+
+    async def fake_run(_self, _state):
+        return pipeline_result
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.ensure_auto_worktree",
+        lambda _state: workspace,
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.release_auto_worktree",
+        lambda candidate, *, cleanup: releases.append((candidate, cleanup)),
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+        fake_run,
+    )
+
+    result = await AutoHandler(
+        store=AutoStore(tmp_path / "store"),
+        event_store=event_store,
+    )._run({"goal": "build a CLI", "cwd": str(tmp_path)})
+
+    assert result is pipeline_result
+    assert releases == [(workspace, expected_cleanup)]
+
+
+@pytest.mark.asyncio
+async def test_mcp_auto_exception_releases_without_cleanup(
+    event_store, tmp_path, monkeypatch
+) -> None:
+    workspace = _managed_workspace(tmp_path)
+    releases: list[tuple[TaskWorkspace | None, bool]] = []
+
+    async def fail_run(_self, _state):
+        raise RuntimeError("pipeline interrupted")
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.ensure_auto_worktree",
+        lambda _state: workspace,
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.release_auto_worktree",
+        lambda candidate, *, cleanup: releases.append((candidate, cleanup)),
+    )
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+        fail_run,
+    )
+
+    with pytest.raises(RuntimeError, match="pipeline interrupted"):
+        await AutoHandler(
+            store=AutoStore(tmp_path / "store"),
+            event_store=event_store,
+        )._run({"goal": "build a CLI", "cwd": str(tmp_path)})
+
+    assert releases == [(workspace, False)]
 
 
 class TestDefinition:

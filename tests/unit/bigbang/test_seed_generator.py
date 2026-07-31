@@ -1,12 +1,15 @@
 """Unit tests for ouroboros.bigbang.seed_generator module."""
 
+import json
 from pathlib import Path
+import subprocess
 import tempfile
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
+from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AmbiguityScore,
@@ -21,6 +24,8 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _iter_outer_ac_field_markers,
+    _parse_acceptance_criterion_contract,
     _parse_context_references,
     _parse_evaluation_principles,
     _parse_exit_conditions,
@@ -32,6 +37,7 @@ from ouroboros.bigbang.seed_generator import (
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     AcceptanceCriterionSpec,
     ContextReference,
     EvaluationPrinciple,
@@ -43,7 +49,37 @@ from ouroboros.core.seed import (
     ac_texts,
 )
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelACExecutor,
+)
 from ouroboros.providers.base import CompletionResponse, UsageInfo
+
+_ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS = (
+    "printf'%s| artifacts: literal'",
+    "echo foo'| artifacts: literal'",
+    "python -c'print(\"| verify: literal\")'",
+)
+
+
+class _RuntimeVerifyAdapter:
+    def __init__(self, working_directory: str) -> None:
+        self.runtime_backend = "claude"
+        self.self_governs_rate_limit = True
+        self.working_directory = working_directory
+        self.permission_mode = "acceptEdits"
+
+
+def create_runtime_verify_executor(working_directory: str) -> ParallelACExecutor:
+    return ParallelACExecutor(
+        adapter=_RuntimeVerifyAdapter(working_directory),  # type: ignore[arg-type]
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        verify_command_timeout_seconds=5,
+        ac_retry_attempts=0,
+    )
 
 
 def create_mock_completion_response(
@@ -80,6 +116,42 @@ def create_valid_extraction_response(
     ),
 ) -> str:
     """Create a valid LLM extraction response string."""
+    if not acceptance_criteria.lstrip().startswith("["):
+        try:
+            if "AC:" in acceptance_criteria:
+                specs = [
+                    _parse_acceptance_criterion_contract(line.strip())
+                    for line in acceptance_criteria.splitlines()
+                    if line.strip()
+                ]
+                if any(spec is None for spec in specs):
+                    raise ValueError("invalid legacy AC fixture")
+                criteria_objects = [
+                    {
+                        "description": spec.description,
+                        "verify": spec.verify_command or "NONE",
+                        "artifacts": list(spec.expected_artifacts) or "NONE",
+                        "expect": spec.output_assertion or "NONE",
+                    }
+                    for spec in specs
+                    if spec is not None
+                ]
+            else:
+                criteria_objects = [
+                    {
+                        "description": description.strip(),
+                        "verify": "NONE",
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                    for description in acceptance_criteria.split("|")
+                    if description.strip()
+                ]
+            acceptance_criteria = json.dumps(criteria_objects)
+        except ValueError:
+            # Negative fixtures intentionally feed malformed legacy extraction
+            # text so the production retry boundary can reject it.
+            pass
     return f"""GOAL: {goal}
 CONSTRAINTS: {constraints}
 ACCEPTANCE_CRITERIA: {acceptance_criteria}
@@ -440,6 +512,411 @@ class TestSeedGeneratorAmbiguityGating:
 class TestSeedGeneratorExtraction:
     """Test SeedGenerator requirement extraction."""
 
+    @pytest.mark.parametrize("description", ("Users' files exist", "James' file exists"))
+    def test_ac_field_marker_scanner_treats_word_final_possessives_as_prose(
+        self,
+        description: str,
+    ) -> None:
+        body = f"{description} | verify: test -f output.txt | artifacts: output.txt | expect: NONE"
+
+        markers = _iter_outer_ac_field_markers(body)
+
+        assert tuple(marker.name for marker in markers) == ("verify", "artifacts", "expect")
+
+    @pytest.mark.parametrize(
+        "body",
+        (
+            (
+                'Command works | verify: sh -c \'printf "%s\\n" '
+                '"| artifacts: literal"\' | artifacts: out.log | expect: NONE'
+            ),
+            (
+                "Command works | verify: bash -lc \"printf '%s\\n' "
+                "'| verify: literal'"
+                '" | artifacts: out.log | expect: NONE'
+            ),
+            (
+                r"Command works | verify: printf \|\ artifacts:literal > out.log | "
+                "artifacts: out.log | expect: NONE"
+            ),
+            (
+                "Command works | verify: sh -c 'printf \"| artifacts literal\"' | "
+                "artifacts: out.log | expect: NONE"
+            ),
+        ),
+    )
+    def test_ac_field_marker_scanner_preserves_quoted_and_escaped_pipe_payloads(
+        self,
+        body: str,
+    ) -> None:
+        markers = _iter_outer_ac_field_markers(body)
+
+        assert tuple(marker.name for marker in markers) == ("verify", "artifacts", "expect")
+
+    @pytest.mark.parametrize(
+        ("body", "field_name"),
+        (
+            ("Files exist | verify: test -f output.txt | artifacts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | ver ify --mode strict", "verify"),
+            (r"Pipeline works | verify: printf READY | ver\ify --mode strict", "verify"),
+            ("Pipeline works | verify: printf READY | ver'ify --mode strict", "verify"),
+            ("Pipeline works | verify: printf READY | arti facts output.txt", "artifacts"),
+            (r"Pipeline works | verify: printf READY | arti\facts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | arti'facts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | ex pect READY", "expect"),
+            (r"Pipeline works | verify: printf READY | ex\pect READY", "expect"),
+            ("Pipeline works | verify: printf READY | ex'pect READY", "expect"),
+            ("Pipeline works | verify: printf READY | verify'': strict", "verify"),
+            (r"Pipeline works | verify: printf READY | verify\:", "verify"),
+            ('Pipeline works | verify: printf READY | verify"": strict', "verify"),
+            ("Pipeline works | verify: printf READY | artifacts'': out.txt", "artifacts"),
+            (r"Pipeline works | verify: printf READY | artifacts\:", "artifacts"),
+            ('Pipeline works | verify: printf READY | artifacts"": out.txt', "artifacts"),
+            ("Pipeline works | verify: printf READY | expect'': READY", "expect"),
+            (r"Pipeline works | verify: printf READY | expect\:", "expect"),
+            ('Pipeline works | verify: printf READY | expect"": READY', "expect"),
+        ),
+    )
+    def test_ac_field_marker_scanner_rejects_malformed_or_obfuscated_operator(
+        self,
+        body: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _iter_outer_ac_field_markers(body)
+
+    @pytest.mark.parametrize(
+        "line",
+        (
+            (
+                'AC: Output file exists " | verify: true | '
+                "artifacts: schema v2 outputs.json | expect: NONE"
+            ),
+            'AC: Output file exists " | artifacts: schema v2 outputs.json | expect: NONE',
+            'AC: Output file exists " | artifacts schema v2 outputs.json',
+            'AC: Output file exists " | verify: true | artifacts: outputs.json | expect: NONE \\',
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_unterminated_quote_hiding_reserved_fields(
+        self,
+        line: str,
+    ) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            (
+                r"AC: Output file exists \| artifacts: schema v2 outputs.json | expect: NONE",
+                "artifacts",
+            ),
+            (r"AC: Output file exists \| artifacts schema v2 outputs.json", "artifacts"),
+            (
+                r"AC: Output file exists \| verify: true | artifacts: outputs.json | expect: NONE",
+                "verify",
+            ),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_escaped_pre_marker_reserved_fields(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Escaped {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            (
+                'AC: Output file exists "| artifacts: schema v2 outputs.json"',
+                "artifacts",
+            ),
+            ('AC: Output file exists "| artifacts schema v2 outputs.json"', "artifacts"),
+            ('AC: Command status is enforced "| verify: exit 1"', "verify"),
+            ('AC: Command output is checked "| expect: READY"', "expect"),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_quoted_pre_marker_reserved_fields(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Quoted {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            ("AC: Output file exists | arti facts: schema v2 outputs.json", "artifacts"),
+            ('AC: Output file exists | arti"facts: schema v2 outputs.json', "artifacts"),
+            (r"AC: Output file exists | arti\facts: schema v2 outputs.json", "artifacts"),
+            ("AC: Command status is enforced | ver ify: exit 1", "verify"),
+            ("AC: Command output is checked | ex pect: READY", "expect"),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_split_pre_marker_reserved_fields(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    def test_acceptance_contract_parser_allows_unrelated_pipe_led_prose(self) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Report preserves terminology | art facts: explanatory prose"
+        )
+
+        assert criterion is not None
+        assert criterion.description == (
+            "Report preserves terminology | art facts: explanatory prose"
+        )
+        assert criterion.has_success_contract is False
+
+    def test_acceptance_contract_parser_preserves_apostrophes_in_structured_values(
+        self,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Operator documentation is ready | verify: test -f guide.md | "
+            "artifacts: reports/user's guide.md | expect: operator's ready"
+        )
+
+        assert criterion is not None
+        assert criterion.expected_artifacts == ("reports/user's guide.md",)
+        assert criterion.output_assertion == "operator's ready"
+
+    @pytest.mark.parametrize(
+        "line,field_name",
+        (
+            (
+                "AC: Command output is checked | verify: printf WAITING | ex pect: READY",
+                "expect",
+            ),
+            (
+                "AC: Output file exists | verify: true | arti facts: missing.txt",
+                "artifacts",
+            ),
+            (
+                "AC: Command status is enforced | verify: true | ver ify: exit 1",
+                "verify",
+            ),
+        ),
+    )
+    def test_acceptance_contract_parser_rejects_split_reserved_fields_after_real_field(
+        self,
+        line: str,
+        field_name: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _parse_acceptance_criterion_contract(line)
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            'sh -c \'printf "%s\\n" "| ex pect: literal"\'',
+            "bash -lc \"printf '%s\\n' '| arti facts: literal'\"",
+            r"printf \|\ ver\ ify:\ literal",
+        ),
+    )
+    def test_acceptance_contract_parser_preserves_quoted_or_escaped_split_marker_literals(
+        self,
+        verify_command: str,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Command payload is preserved | "
+            f"verify: {verify_command} | artifacts: output.txt | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("output.txt",)
+
+    def test_acceptance_contract_parser_allows_closed_quote_without_reserved_marker(
+        self,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            'AC: Output file is named "draft | final" | verify: true | '
+            "artifacts: output.txt | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.description == 'Output file is named "draft | final"'
+        assert criterion.verify_command == "true"
+        assert criterion.expected_artifacts == ("output.txt",)
+
+    def test_acceptance_contract_parser_allows_unmatched_quote_without_reserved_marker(
+        self,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract('AC: Output file is named "draft')
+
+        assert criterion is not None
+        assert criterion.description == 'Output file is named "draft'
+        assert criterion.verify_command is None
+        assert criterion.expected_artifacts == ()
+
+    @pytest.mark.parametrize("representation", ("block", "inline"))
+    @pytest.mark.parametrize(
+        "ac_line,continuation,field_name",
+        (
+            ('AC: Output file exists "', "| artifacts: schema v2 outputs.json", "artifacts"),
+            ('AC: Output file exists "', "| artifacts schema v2 outputs.json", "artifacts"),
+            ("AC: Command status is enforced \\", "| verify: exit 1", "verify"),
+            ('AC: Command output is checked "', "| expect: READY", "expect"),
+            ('AC: Output file exists "', "| arti facts: schema v2 outputs.json", "artifacts"),
+            ('AC: Output file exists "', '| arti"facts: schema v2 outputs.json', "artifacts"),
+            ('AC: Output file exists "', r"| arti\facts: schema v2 outputs.json", "artifacts"),
+            ("AC: Command status is enforced \\", "| ver ify: exit 1", "verify"),
+            ('AC: Command output is checked "', "| ex pect: READY", "expect"),
+        ),
+    )
+    def test_extraction_rejects_reserved_non_ac_continuation_lines(
+        self,
+        representation: str,
+        ac_line: str,
+        continuation: str,
+        field_name: str,
+    ) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        acceptance_criteria = f"{ac_line}\n{continuation}"
+        if representation == "block":
+            acceptance_criteria = f"\n{acceptance_criteria}\n"
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
+
+        with pytest.raises(ValueError, match="JSON array of objects|Unrecognized extraction line"):
+            generator._parse_extraction_response(response)
+
+    @pytest.mark.parametrize("representation", ("block", "inline"))
+    def test_extraction_rejects_any_non_ac_acceptance_continuation(
+        self,
+        representation: str,
+    ) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        acceptance_criteria = "AC: Output file exists\nwrapped prose continuation"
+        if representation == "block":
+            acceptance_criteria = f"\n{acceptance_criteria}\n"
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
+
+        with pytest.raises(ValueError, match="JSON array of objects|Unrecognized extraction line"):
+            generator._parse_extraction_response(response)
+
+    def test_extraction_allows_reserved_marker_text_in_other_fields(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(
+            acceptance_criteria="\nAC: Output file exists\n",
+            ontology_description="Domain prose with | verify: text",
+        )
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert requirements["ontology_description"] == "Domain prose with | verify: text"
+
+    def test_extraction_collects_inline_and_continued_ac_records(self) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "AC: First output exists | verify: NONE | artifacts: first.txt | expect: NONE\n"
+                "AC: Second output exists | verify: NONE | artifacts: second.txt | expect: NONE"
+            )
+        )
+
+        requirements = generator._parse_extraction_response(response)
+
+        assert tuple(spec.description for spec in requirements["acceptance_criteria"]) == (
+            "First output exists",
+            "Second output exists",
+        )
+        assert tuple(spec.expected_artifacts for spec in requirements["acceptance_criteria"]) == (
+            ("first.txt",),
+            ("second.txt",),
+        )
+
+    @pytest.mark.parametrize(
+        "acceptance_criteria",
+        (
+            '[{"description":"x","verify":"true","artifacts":"NONE"}]',
+            '[{"description":"x","verify":"true","artifacts":"NONE","expect":"NONE","extra":true}]',
+            '[{"description":"x","description":"y","verify":"true",'
+            '"artifacts":"NONE","expect":"NONE"}]',
+            '[{"description":"x","verify":1,"artifacts":"NONE","expect":"NONE"}]',
+            '[{"description":"x","verify":"true","artifacts":"out.txt","expect":"NONE"}]',
+            '[{"description":"x","verify":"cat <<EOF","artifacts":"NONE","expect":"NONE"}]',
+            json.dumps(
+                [
+                    {
+                        "description": "x",
+                        "verify": 'printf "%s" "`unterminated"',
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                ]
+            ),
+            '[{"description":"x","verify":"true","artifacts":["../out.txt"],"expect":"NONE"}]',
+        ),
+    )
+    def test_extraction_rejects_invalid_acceptance_criteria_json_contract(
+        self, acceptance_criteria: str
+    ) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
+
+        with pytest.raises(ValueError):
+            generator._parse_extraction_response(response)
+
+    @pytest.mark.parametrize("malformed_kind", ("missing", "empty", "duplicate", "injected"))
+    @pytest.mark.asyncio
+    async def test_generate_rejects_required_acceptance_criteria_shape_on_both_attempts(
+        self, malformed_kind: str
+    ) -> None:
+        response = create_valid_extraction_response(
+            acceptance_criteria="[]" if malformed_kind == "empty" else "Outcome exists"
+        )
+        if malformed_kind == "missing":
+            response = "\n".join(
+                line
+                for line in response.splitlines()
+                if not line.startswith("ACCEPTANCE_CRITERIA:")
+            )
+        elif malformed_kind == "duplicate":
+            acceptance_line = next(
+                line for line in response.splitlines() if line.startswith("ACCEPTANCE_CRITERIA:")
+            )
+            response = response.replace(acceptance_line, f"{acceptance_line}\n{acceptance_line}")
+        elif malformed_kind == "injected":
+            response += "\nAC: injected | verify: true | artifacts: NONE | expect: NONE"
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(response)),
+                Result.ok(create_mock_completion_response(response)),
+            ]
+        )
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(
+            create_interview_state_with_rounds(), create_low_ambiguity_score()
+        )
+
+        assert result.is_err
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
+    def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
+        self,
+        verify_command: str,
+    ) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Adjacent shell quote remains payload | "
+            f"verify: {verify_command} | artifacts: out.txt | expect: OK"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("out.txt",)
+        assert criterion.output_assertion == "OK"
+
     @pytest.mark.asyncio
     async def test_generate_extracts_goal(self) -> None:
         """SeedGenerator extracts goal from interview."""
@@ -516,6 +993,140 @@ class TestSeedGeneratorExtraction:
 
             assert result.is_ok
             assert result.value.constraints == ("--lang ko|en", "keep exact flag")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("multiline", "inline"))
+    @pytest.mark.parametrize(
+        "malformed_artifacts",
+        (
+            ",",
+            "safe.txt,,other.txt",
+            "safe.txt | artifacts: other.txt",
+            "safe.txt | artifacts other.txt",
+            "schema v2 outputs.json",
+            "reports/summary,v2.json",
+            r"docs\guide.md",
+            "NUL",
+            "docs/a:b",
+            "a" * 256,
+            "docs/" + ("\u00e9" * 128),
+            "NONE, report.txt",
+            '["NONE", "report.txt"]',
+        ),
+    )
+    async def test_generate_retries_on_malformed_artifact_fields(
+        self,
+        representation: str,
+        malformed_artifacts: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = (
+            f"AC: Files exist | verify: pytest -q | artifacts: {malformed_artifacts} | expect: NONE"
+        )
+        repaired_contract = (
+            "AC: Files exist | verify: pytest -q | "
+            "artifacts: safe.txt, other.txt, ./Build Outputs | expect: NONE"
+        )
+        if representation == "multiline":
+            bad_contract = f"\n{bad_contract}\n"
+            repaired_contract = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_contract)
+        repaired_response = create_valid_extraction_response(acceptance_criteria=repaired_contract)
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.expected_artifacts == ("safe.txt", "other.txt", "./Build Outputs")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("multiline", "inline"))
+    async def test_generate_retries_on_contract_marker_without_leading_whitespace(
+        self,
+        representation: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = "AC: Files exist|artifacts: NUL"
+        repaired_contract = "AC: Files exist|artifacts: reports/summary.json, ./Build Outputs"
+        if representation == "multiline":
+            bad_contract = f"\n{bad_contract}\n"
+            repaired_contract = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_contract)
+        repaired_response = create_valid_extraction_response(acceptance_criteria=repaired_contract)
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.expected_artifacts == ("reports/summary.json", "./Build Outputs")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expectation", ("success", "exit code 0"))
+    async def test_generate_retries_when_status_expectation_lacks_verify_command(
+        self,
+        expectation: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_contract = f"AC: CLI succeeds | verify: NONE | artifacts: NONE | expect: {expectation}"
+        repaired_contract = (
+            "AC: CLI succeeds | verify: python -m app | artifacts: NONE | expect: NONE"
+        )
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bad_contract}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command == "python -m app"
+        assert criterion.output_assertion is None
 
     @pytest.mark.asyncio
     async def test_generate_retries_bracket_prose_and_accepts_reformatted_json(self) -> None:
@@ -691,7 +1302,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria=(
                 "\n"
                 'AC: CLI lists tasks | verify: bash -lc "pytest -q | tee out.log" | '
-                "artifacts: tasks.json, logs/task.log | expect: No tasks\n"
+                "artifacts: tasks.json, logs/task.log, ./Build Outputs | expect: No tasks\n"
                 "AC: Docs explain usage | verify: NONE | artifacts: README.md | expect: NONE\n"
                 "AC: Legacy line without contract"
             )
@@ -713,13 +1324,1009 @@ class TestSeedGeneratorExtraction:
             assert isinstance(first, AcceptanceCriterionSpec)
             assert first.description == "CLI lists tasks"
             assert first.verify_command == 'bash -lc "pytest -q | tee out.log"'
-            assert first.expected_artifacts == ("tasks.json", "logs/task.log")
+            assert first.expected_artifacts == ("tasks.json", "logs/task.log", "./Build Outputs")
             assert first.output_assertion == "No tasks"
             assert second.description == "Docs explain usage"
             assert second.verify_command is None
             assert second.expected_artifacts == ("README.md",)
             assert third.description == "Legacy line without contract"
             assert third.verify_command is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_command", "expected_artifact"),
+        (
+            (
+                """bash -lc "printf '%s\\n' '| artifacts: literal' | tee out.log" """.strip(),
+                "out.log",
+            ),
+            (
+                """sh -c 'printf "%s\\n" "| verify: literal" | tee reports/verify.log'""",
+                "reports/verify.log",
+            ),
+            (
+                r"""python -c "print(\"| expect: literal\")" > escaped-quote.txt""",
+                "escaped-quote.txt",
+            ),
+            (
+                r"""printf \|\ artifacts:literal > escaped-pipe.txt""",
+                "escaped-pipe.txt",
+            ),
+        ),
+    )
+    async def test_generate_preserves_quoted_reserved_pipe_literals_in_contracts(
+        self,
+        verify_command: str,
+        expected_artifact: str,
+    ) -> None:
+        """Quoted/escaped reserved pipe text is verify payload, not an outer AC field."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                f"AC: Command preserves reserved pipe literal | verify: {verify_command} | "
+                f"artifacts: {expected_artifact} | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 1
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert criterion.expected_artifacts == (expected_artifact,)
+            assert criterion.output_assertion is None
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+
+    @pytest.mark.asyncio
+    async def test_generate_preserves_apostrophes_through_seed_schema_and_grade(self) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Users don't lose files | verify: test -f guide.md | "
+                "artifacts: reports/user's guide.md | expect: operator's ready\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        (criterion,) = result.value.acceptance_criteria
+        assert criterion.description == "Users don't lose files"
+        assert criterion.expected_artifacts == ("reports/user's guide.md",)
+        assert criterion.output_assertion == "operator's ready"
+        assert Seed.model_validate(result.value.model_dump()) == result.value
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    async def test_generate_does_not_treat_possessive_description_as_quote_bypass(
+        self,
+    ) -> None:
+        """A possessive apostrophe cannot hide malformed structured AC fields."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bypass_attempt = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: User's file exists | verify: test -f user.txt | "
+                "artifacts: schema v2 outputs.json | expect: NONE\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: User's file exists | verify: test -f user.txt | "
+                "artifacts: user.txt | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bypass_attempt)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "User's file exists"
+        assert criterion.verify_command == "test -f user.txt"
+        assert criterion.expected_artifacts == ("user.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    async def test_generate_does_not_treat_word_final_possessive_as_quote_bypass(
+        self,
+    ) -> None:
+        """A word-final possessive cannot hide malformed structured AC fields."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bypass_attempt = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Users' files exist | verify: test -f users.txt | "
+                "artifacts: schema v2 outputs.json | expect: NONE\n"
+            )
+        )
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Users' files exist | verify: test -f users.txt | "
+                "artifacts: users.txt | expect: NONE\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bypass_attempt)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "Users' files exist"
+        assert criterion.verify_command == "test -f users.txt"
+        assert criterion.expected_artifacts == ("users.txt",)
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bypass_attempt,repaired_contract,expected_verify,expected_artifacts",
+        (
+            (
+                (
+                    'AC: Output file exists " | verify: true | '
+                    "artifacts: schema v2 outputs.json | expect: NONE"
+                ),
+                "AC: Output file exists | verify: true | artifacts: outputs.json | expect: NONE",
+                "true",
+                ("outputs.json",),
+            ),
+            (
+                'AC: Output file exists " | artifacts schema v2 outputs.json',
+                "AC: Output file exists | verify: test -f outputs.json | "
+                "artifacts: outputs.json | expect: NONE",
+                "test -f outputs.json",
+                ("outputs.json",),
+            ),
+            (
+                'AC: Output file exists " | artifacts: schema v2 outputs.json | expect: NONE',
+                "AC: Output file exists | verify: NONE | artifacts: outputs.json | expect: NONE",
+                None,
+                ("outputs.json",),
+            ),
+        ),
+    )
+    async def test_generate_retries_unterminated_quote_hiding_success_contracts_before_grading(
+        self,
+        bypass_attempt: str,
+        repaired_contract: str,
+        expected_verify: str | None,
+        expected_artifacts: tuple[str, ...],
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bypass_attempt}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "Output file exists"
+        assert criterion.verify_command == expected_verify
+        assert criterion.expected_artifacts == expected_artifacts
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bypass_attempt,repaired_contract,expected_verify,expected_artifacts",
+        (
+            (
+                r"AC: Output file exists \| artifacts: schema v2 outputs.json | expect: NONE",
+                "AC: Output file exists | verify: NONE | artifacts: outputs.json | expect: NONE",
+                None,
+                ("outputs.json",),
+            ),
+            (
+                r"AC: Output file exists \| artifacts schema v2 outputs.json",
+                "AC: Output file exists | verify: test -f outputs.json | "
+                "artifacts: outputs.json | expect: NONE",
+                "test -f outputs.json",
+                ("outputs.json",),
+            ),
+            (
+                r"AC: Output file exists \| verify: true | artifacts: outputs.json | expect: NONE",
+                "AC: Output file exists | verify: true | artifacts: outputs.json | expect: NONE",
+                "true",
+                ("outputs.json",),
+            ),
+        ),
+    )
+    async def test_generate_retries_escaped_pre_marker_success_contracts_before_grading(
+        self,
+        bypass_attempt: str,
+        repaired_contract: str,
+        expected_verify: str | None,
+        expected_artifacts: tuple[str, ...],
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad_response = create_valid_extraction_response(acceptance_criteria=f"\n{bypass_attempt}\n")
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=f"\n{repaired_contract}\n"
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.description == "Output file exists"
+        assert criterion.verify_command == expected_verify
+        assert criterion.expected_artifacts == expected_artifacts
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation", ("block", "inline"))
+    @pytest.mark.parametrize(
+        "bypass_attempt,repaired_contract,expected_gate_error",
+        (
+            (
+                'AC: Command status is enforced "| verify: exit 1"',
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+            (
+                'AC: Output file exists "| artifacts: schema v2 outputs.json"',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Output file exists "| artifacts schema v2 outputs.json"',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Command output is checked "| expect: READY"',
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+            (
+                "AC: Command status is enforced \\\n| verify: exit 1",
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+            (
+                'AC: Output file exists "\n| artifacts: schema v2 outputs.json',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Command output is checked "\n| expect: READY',
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+            (
+                "AC: Output file exists | arti facts: schema v2 outputs.json",
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                'AC: Output file exists | arti"facts: schema v2 outputs.json',
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                r"AC: Output file exists | arti\facts: schema v2 outputs.json",
+                "AC: Output file exists | verify: NONE | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                "AC: Command status is enforced | ver ify: exit 1",
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+            (
+                "AC: Command output is checked | ex pect: READY",
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+            (
+                "AC: Command output is checked | verify: printf WAITING | ex pect: READY",
+                "AC: Command output is checked | verify: printf WAITING | "
+                "artifacts: NONE | expect: READY",
+                "output_assertion",
+            ),
+            (
+                "AC: Output file exists | verify: true | arti facts: missing.txt",
+                "AC: Output file exists | verify: true | artifacts: missing.txt | expect: NONE",
+                "expected_artifacts missing",
+            ),
+            (
+                "AC: Command status is enforced | verify: true | ver ify: exit 1",
+                "AC: Command status is enforced | verify: exit 1 | artifacts: NONE | expect: NONE",
+                "status 1",
+            ),
+        ),
+    )
+    async def test_generate_retries_reserved_contract_bypasses_before_runtime_gate(
+        self,
+        representation: str,
+        bypass_attempt: str,
+        repaired_contract: str,
+        expected_gate_error: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        bad_acceptance_criteria = bypass_attempt
+        repaired_acceptance_criteria = repaired_contract
+        if representation == "block":
+            bad_acceptance_criteria = f"\n{bypass_attempt}\n"
+            repaired_acceptance_criteria = f"\n{repaired_contract}\n"
+        bad_response = create_valid_extraction_response(acceptance_criteria=bad_acceptance_criteria)
+        repaired_response = create_valid_extraction_response(
+            acceptance_criteria=repaired_acceptance_criteria
+        )
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(bad_response)),
+                Result.ok(create_mock_completion_response(repaired_response)),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            seed = result.value
+            assert isinstance(seed, Seed)
+            assert mock_adapter.complete.await_count == 2
+            (criterion,) = seed.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.has_success_contract
+
+            grade = GradeGate().grade_seed(seed)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            executor = create_runtime_verify_executor(tmp_dir)
+            gated = await executor._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="quoted-pre-marker-test",
+                execution_id="quoted-pre-marker-test",
+            )
+
+        assert gated.success is False
+        assert gated.outcome is ACExecutionOutcome.FAILED
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is False
+        assert expected_gate_error in (gated.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
+    async def test_generate_preserves_adjacent_single_quoted_verify_payloads(
+        self,
+        verify_command: str,
+    ) -> None:
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Adjacent shell quote remains payload | "
+                f"verify: {verify_command} | artifacts: out.txt | expect: OK\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 1
+        (criterion,) = result.value.acceptance_criteria
+        assert isinstance(criterion, AcceptanceCriterionSpec)
+        assert criterion.verify_command == verify_command
+        assert criterion.expected_artifacts == ("out.txt",)
+        assert criterion.output_assertion == "OK"
+        grade = GradeGate().grade_seed(result.value)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    async def test_stored_legacy_unquoted_backtick_case_survives_live_verify(self) -> None:
+        """Legacy line contracts keep shell syntax inside backtick substitutions."""
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        verify_command = "printf '%s\\n' `case x in x | artifacts:) printf case-ok;; esac`"
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Legacy backtick case runs | "
+            f"verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        requirements = generator._parse_extraction_response(create_valid_extraction_response())
+        requirements["acceptance_criteria"] = (criterion,)
+        seed = generator._build_seed(requirements, SeedMetadata(interview_id="legacy-backtick"))
+        assert Seed.model_validate(seed.model_dump()) == seed
+        grade = GradeGate().grade_seed(seed)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="legacy-backtick-test",
+                execution_id="legacy-backtick-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
+        assert gated.verify_gate_outcome.output_tail == "case-ok\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_command", "expected_output"),
+        (
+            (
+                """printf '%s\\n' "$(case y in (x) printf no;; """
+                '''(y | artifacts:) printf yes;; esac)"''',
+                "yes\n",
+            ),
+            (
+                "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
+                "(z | artifacts:) printf yes;; esac)",
+                "yes\n",
+            ),
+            (
+                "case y in x) printf no;; y | artifacts:) printf '%s\\n' yes;; esac",
+                "yes\n",
+            ),
+            (
+                "while case y in (x) true;; (y | artifacts:) false;; esac; do :; done; printf ok",
+                "ok",
+            ),
+            (
+                "if case y in (x) true;; (y | verify:) true;; esac; then printf ok; fi",
+                "ok",
+            ),
+            ("f() { case y in (y | artifacts:) printf yes;; esac; }; f", "yes"),
+            ("f() case y in (y | artifacts:) printf yes;; esac; f", "yes"),
+            ("(case y in (y | verify:) printf yes;; esac)", "yes"),
+            ("case esac in (esac'') printf yes;; esac", "yes"),
+            (
+                "for case in y; do printf '%s' 'ok | artifacts: literal'; done",
+                "ok | artifacts: literal",
+            ),
+            ("for case in y; do :; done; printf ok", "ok"),
+        ),
+    )
+    async def test_extracted_case_survives_seed_grade_and_live_verify(
+        self, verify_command: str, expected_output: str
+    ) -> None:
+        """Top-level and substituted case bodies survive through the live shell gate."""
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                create_mock_completion_response(
+                    create_valid_extraction_response(
+                        acceptance_criteria=(
+                            "\nAC: Dollar case runs | "
+                            f"verify: {verify_command} | artifacts: NONE | expect: NONE\n"
+                        )
+                    )
+                )
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            generated = await generator.generate(
+                create_interview_state_with_rounds(), create_low_ambiguity_score()
+            )
+            assert generated.is_ok
+            seed = generated.value
+            assert Seed.model_validate(seed.model_dump()) == seed
+            grade = GradeGate().grade_seed(seed)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0].description,
+                    success=True,
+                ),
+                session_id="dollar-case-test",
+                execution_id="dollar-case-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
+        assert gated.verify_gate_outcome.output_tail == expected_output
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            "printf '%s\\n' $(case y in x) printf no;; y | artifacts:) printf yes;; esac)",
+            """printf '%s\\n' "$(case y in (x) printf no;; """
+            '''(y | artifacts:) (printf nested);; esac)"''',
+            """printf '%s\\n' "$(case y in (x) printf no;; (y | artifacts:) """
+            '''unset z; printf '%s' "${z:-$(printf nested)}";; esac)"''',
+            """printf '%s\\n' "$(case y in (x) printf no;; (y | artifacts:) """
+            '''printf '%s' `printf backtick`;; esac)"''',
+            '''printf '%s\\n' "$(case y in (y) printf '%s' esac;; esac)"''',
+            """printf '%s\\n' "$(case y in (y) case z in """
+            '''(z | artifacts:) printf nested;; esac;; esac)"''',
+            "case y in (y) case z in (z | artifacts:) printf nested;; esac;; esac",
+            "case z in (x) :;; (''esac) printf no;; (z | artifacts:) printf yes;; esac",
+            "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
+            "(z | artifacts:) printf yes;; esac)",
+            r"printf '%s\n' $(case esac in (\esac) printf escaped;; esac)",
+            "printf '%s\\n' ''case",
+            "printf '%s\\n' ''if ''while ''until ''for ''then ''do ''case ''esac",
+            "printf '%s\\n' case'' esac'' if-x while: until_name then.word do/value",
+            """printf '%s\\n' "$(f() { case y in """
+            '''(y | artifacts:) printf nested;; esac; }; f)"''',
+            "until case y in (y | artifacts:) false;; esac; do :; done",
+            "for x in y; do case $x in (y | artifacts:) :;; esac; done",
+            "for x; do case $x in (y | artifacts:) :;; esac; done",
+            "for 'case' in y; do case $case in (y | artifacts:) :;; esac; done",
+            r"for \case in y; do case $case in (y | artifacts:) :;; esac; done",
+            "for case in y; do for esac in z; do case $case in "
+            "(y | artifacts:) :;; esac; done; done",
+            "{ case y in (y | artifacts:) :;; esac; }",
+            "true && case y in (y | artifacts:) :;; esac",
+            "false || case y in (y | artifacts:) :;; esac",
+            "printf x | case x in (x | artifacts:) :;; esac",
+            '''printf '%s\\n' "$(printf '%s' ordinary)"''',
+        ),
+    )
+    def test_dollar_case_boundaries_preserve_shell_frames(self, verify_command: str) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            f"AC: Dollar case boundary | verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf hidden;;",
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf $(unclosed",
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf `unclosed",
+            "case y in x) printf hidden;; y | artifacts:) printf hidden;;",
+            "for in y; do :; done",
+        ),
+    )
+    def test_unclosed_case_frames_cannot_hide_outer_fields(self, verify_command: str) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(
+                f"AC: Dollar case boundary | verify: {verify_command} | "
+                "artifacts: NONE | expect: NONE"
+            )
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            '''printf '%s\n' "`case x in x | artifacts:) printf case-ok;; esac`"''',
+            r"""printf '%s\n' `printf '%s' \`case x in x | artifacts:) printf nested;; esac\``""",
+            r"printf '%s\n' '` | artifacts: literal'",
+        ),
+    )
+    def test_legacy_backtick_boundaries_preserve_inner_reserved_pipes(
+        self, verify_command: str
+    ) -> None:
+        if Path("/bin/sh").exists():
+            syntax = subprocess.run(
+                ["/bin/sh", "-n", "-c", verify_command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert syntax.returncode == 0, syntax.stderr
+        criterion = _parse_acceptance_criterion_contract(
+            f"AC: Backtick boundary | verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+    def test_legacy_unclosed_backtick_cannot_hide_outer_fields(self) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(
+                "AC: Backtick boundary | verify: printf `case x in x | artifacts:) "
+                "printf hidden;; esac | artifacts: NONE | expect: NONE"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_command", "expected_output"),
+        (
+            (
+                r"printf '%s\n' 'trailing\' | grep -F 'trailing\'",
+                "trailing\\\n",
+            ),
+            (
+                r"printf '%s\n' foo're| artifacts: literal' | "
+                r"grep -F 'foore| artifacts: literal'",
+                "foore| artifacts: literal\n",
+            ),
+            (r"printf '%s\n' foo're' | grep -Fx foore", "foore\n"),
+            ("true # don't care", ""),
+            ("true;# user's note", ""),
+            (
+                r"printf '%s\n' foo#don't' | grep -Fx 'foo#dont'",
+                "foo#dont\n",
+            ),
+            (
+                r"printf '%s\n' foo\ #\| expect: forged",
+                "foo #|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\;#\| expect: forged",
+                "foo;#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\&#\| expect: forged",
+                "foo&#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\|#\| expect: forged",
+                "foo|#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\(#\| expect: forged",
+                "foo(#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\)#\| expect: forged",
+                "foo)#|\nexpect:\nforged\n",
+            ),
+            (
+                r'''printf '%s\n' "$(printf "%s | artifacts: literal" hi)"''',
+                "hi | artifacts: literal\n",
+            ),
+            (
+                r'''printf '%s\n' "$(printf '%s' "$(printf '%s | verify: literal' hi)")"''',
+                "hi | verify: literal\n",
+            ),
+            (
+                r'''unset a b; printf '%s\n' "${a:-"${b:-nested | artifacts: literal}"}"''',
+                "nested | artifacts: literal\n",
+            ),
+            (
+                r'''printf '%s\n' "$(printf '%s' escaped\))"''',
+                "escaped)\n",
+            ),
+            (
+                '''printf '%s\\n' "`printf "%s | artifacts: literal" hi`"''',
+                "hi | artifacts: literal\n",
+            ),
+            (
+                '''printf '%s\\n' "`printf '%s' "$(printf '%s | verify: literal' hi)"`"''',
+                "hi | verify: literal\n",
+            ),
+            (
+                '''printf '%s\\n' "`printf '%s' '\\`'`"''',
+                "`\n",
+            ),
+            (
+                "case x in x | artifacts:) printf '%s\\n' case-ok;; esac",
+                "case-ok\n",
+            ),
+            (
+                "f() { printf '%s\\n' 'function | verify: literal'; }; f",
+                "function | verify: literal\n",
+            ),
+            ("python -c 'print(1 << 2)'", "4\n"),
+            ("printf '%s\\n' 'ordinary << comparison text'", "ordinary << comparison text\n"),
+            (
+                '''printf "%s\\n" "$(python -c 'print(1 << 2)')"''',
+                "4\n",
+            ),
+            (r'''printf '%s\n' "plain <<EOF"''', "plain <<EOF\n"),
+            (r'''printf '%s\n' "\`literal <<EOF"''', "`literal <<EOF\n"),
+            (r"""printf '%s\n' $((1 << 2))""", "4\n"),
+            (r'''printf '%s\n' "$((1 << 2))"''', "4\n"),
+            (
+                r'''unset x; printf '%s\n' "${x:-literal << text}"''',
+                "literal << text\n",
+            ),
+        ),
+    )
+    async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
+        self,
+        verify_command: str,
+        expected_output: str,
+    ) -> None:
+        """Concrete `/bin/sh` forms survive extraction, Seed grading, and execution.
+
+        These expand the markdown-truncated review examples into complete
+        commands: one ends a single-quoted value with a literal backslash; the
+        other begins an adjacent quoted segment with contraction-like ``re``.
+        Comment forms prove apostrophes are inert after a token-boundary ``#``;
+        the token-internal control proves ``#`` does not always start a comment.
+        Escaped whitespace and control operators prove raw boundary spelling
+        cannot forge comment state or promote an escaped pipe into a DSL marker.
+        Balanced command/parameter expansions prove nested quotes, escapes,
+        delimiters, and reserved-looking pipes stay inside the verify command.
+        """
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+        mock_adapter = AsyncMock()
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "POSIX shell quoting survives",
+                        "verify": verify_command,
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                ]
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(
+                create_interview_state_with_rounds(),
+                create_low_ambiguity_score(),
+            )
+
+            assert result.is_ok
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+            grade = GradeGate().grade_seed(result.value)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=result.value,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="posix-quote-test",
+                execution_id="posix-quote-test",
+            )
+
+            assert gated.success is True
+            assert gated.verify_gate_outcome is not None
+            assert gated.verify_gate_outcome.passed is True
+            assert gated.verify_gate_outcome.output_tail == expected_output
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "verify_invocation",
+        (
+            "verify --mode strict",
+            'verify "$mode"',
+            "verify 'strict'",
+            r"verify \--mode",
+        ),
+    )
+    async def test_generate_preserves_reserved_command_name_in_verify_pipeline(
+        self,
+        verify_invocation: str,
+    ) -> None:
+        """Arguments after a complete reserved command token remain payload."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        verify_command = f"verify(){{ cat; }}; mode=strict; printf READY | {verify_invocation}"
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Verify pipeline succeeds | "
+                f"verify: {verify_command} | artifacts: NONE | expect: READY\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 1
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert criterion.expected_artifacts == ()
+            assert criterion.output_assertion == "READY"
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+
+            grade = GradeGate().grade_seed(result.value)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            executor = create_runtime_verify_executor(tmp_dir)
+            gated = await executor._apply_verify_gate(
+                seed=result.value,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="reserved-pipeline-test",
+                execution_id="reserved-pipeline-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
 
     @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:
@@ -762,17 +2369,46 @@ class TestSeedGeneratorExtraction:
             assert second.output_assertion == "5 passed"
 
     @pytest.mark.asyncio
-    async def test_generate_retries_when_verify_command_uses_heredoc(self) -> None:
+    @pytest.mark.parametrize(
+        "heredoc_command",
+        (
+            r"cat <<\EOF",
+            r"cat <<-\EOF",
+            'cat <<E"OF"',
+            "cat <<'E'OF",
+            r'''printf '%s' "`cat <<\EOF`"''',
+            r"""printf '%s\n' $(( $(cat <<\EOF; printf 1) + 1 ))""",
+            r"""unset x; printf '%s' ${x:-$(cat <<\EOF)}""",
+            r"""unset x; printf '%s' ${x:-`cat <<\EOF`}""",
+            r'''unset x; printf '%s' "${x:-$(cat <<\EOF)}"''',
+            r'''printf '%s\n' "$(( $(cat <<\EOF; printf 1) + 1 ))"''',
+        ),
+    )
+    async def test_generate_retries_when_verify_command_uses_heredoc(
+        self, heredoc_command: str
+    ) -> None:
         """Single-line AC contracts must reject heredoc commands before Seed build."""
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", heredoc_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
         bad_response = create_valid_extraction_response(
-            acceptance_criteria=(
-                "\n"
-                "AC: Import check prints OK | verify: python - <<'PY' | "
-                "artifacts: hello.py | expect: OK\n"
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "Import check prints OK",
+                        "verify": heredoc_command,
+                        "artifacts": ["hello.py"],
+                        "expect": "NONE",
+                    }
+                ]
             )
         )
         repaired_response = create_valid_extraction_response(
@@ -804,8 +2440,39 @@ class TestSeedGeneratorExtraction:
             (criterion,) = result.value.acceptance_criteria
             assert isinstance(criterion, AcceptanceCriterionSpec)
             assert criterion.verify_command is not None
-            assert "<<'PY'" not in criterion.verify_command
             assert "python -c" in criterion.verify_command
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_heredoc_on_initial_and_retry_extraction(self) -> None:
+        mock_adapter = AsyncMock()
+        bad_responses = [
+            create_valid_extraction_response(
+                acceptance_criteria=json.dumps(
+                    [
+                        {
+                            "description": "Output exists",
+                            "verify": command,
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                        }
+                    ]
+                )
+            )
+            for command in (r"cat <<\EOF", r"cat <<-\EOF")
+        ]
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(response)) for response in bad_responses
+            ]
+        )
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(
+            create_interview_state_with_rounds(), create_low_ambiguity_score()
+        )
+
+        assert result.is_err
+        assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_generate_extracts_ontology_schema(self) -> None:
@@ -1273,6 +2940,32 @@ class TestSeedGeneratorSaveAndLoad:
 
             assert result.is_err
 
+    @pytest.mark.asyncio
+    async def test_load_seed_rejects_persisted_legacy_multibyte_path_overflow(
+        self,
+        sample_seed: Seed,
+    ) -> None:
+        """Legacy replay fails explicitly when a persisted path is unmaterializable."""
+        artifact = "/".join(("😀" * 62, "a" * 7))
+        assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
+        seed_data = sample_seed.to_dict()
+        seed_data["acceptance_criteria"] = [
+            {
+                "description": "Persisted artifact exists",
+                "expected_artifacts": [artifact],
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "legacy_oversized_seed.yaml"
+            file_path.write_text(yaml.safe_dump(seed_data), encoding="utf-8")
+
+            result = await load_seed(file_path)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert "canonical path longer than 255 portable filesystem bytes" in result.error.message
+
     def test_save_seed_sync(self, sample_seed: Seed) -> None:
         """save_seed_sync() saves seed synchronously."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1413,12 +3106,20 @@ class TestAcceptanceCriteriaGranularityContract:
             )
             prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
 
-        assert "ACCEPTANCE_CRITERIA:\nAC:" in prompt
-        assert "verify: <command or NONE>" in prompt
-        assert "artifacts: <comma-list or NONE>" in prompt
+        assert 'ACCEPTANCE_CRITERIA: [{"description":' in prompt
+        assert '"verify": "<single-line command or NONE>"' in prompt
+        assert '"artifacts": ["<path>"]' in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
+        assert "combined stdout and stderr" in prompt
+        assert "JSON array of exact portable file or directory paths" in prompt
+        assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
+
+        retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
+        assert "combined stdout and stderr" in retry_prompt
+        assert "JSON array of exact portable file or directory paths" in retry_prompt
+        assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_extraction_retry_prompt_carries_granularity_contract(self) -> None:
         """The retry prompt is a parallel surface for the same contract: a parse
@@ -1467,6 +3168,43 @@ class TestAcceptanceCriteriaGranularityContract:
         assert not any(char.isdigit() for char in contract)
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+        assert (
+            "exact portable file or directory path relative to the run workspace" in system_prompt
+        )
+        assert "schema v2 outputs" in system_prompt
+        assert "artifacts: NONE" in system_prompt
+        assert "concrete `verify` command" in system_prompt
+
+    def test_seed_architect_agent_prompt_uses_strict_json_ac_contract(self) -> None:
+        from ouroboros.agents.loader import load_agent_prompt
+
+        system_prompt = load_agent_prompt("seed-architect")
+        assert 'ACCEPTANCE_CRITERIA: [{"description":' in system_prompt
+        assert "one field on one line" in system_prompt
+        assert "never emit nested `AC:` lines" in system_prompt
+        assert "\nAC: <description>" not in system_prompt
+
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        documented = next(
+            line
+            for line in system_prompt.splitlines()
+            if line.startswith('ACCEPTANCE_CRITERIA: [{"description":')
+        )
+        response = create_valid_extraction_response(
+            acceptance_criteria=documented.removeprefix("ACCEPTANCE_CRITERIA: ")
+        )
+        parsed = generator._parse_extraction_response(response)
+        assert parsed["acceptance_criteria"]
+
+        multi_example = next(
+            line.removeprefix("Multi-artifact example: `").removesuffix("`")
+            for line in system_prompt.splitlines()
+            if line.startswith("Multi-artifact example: `")
+        )
+        multi_response = create_valid_extraction_response(acceptance_criteria=multi_example)
+        multi_parsed = generator._parse_extraction_response(multi_response)
+        (criterion,) = multi_parsed["acceptance_criteria"]
+        assert criterion.expected_artifacts == ("dist/app", "docs/User Guide.md")
 
 
 class TestObjectArrayExtractionContract:

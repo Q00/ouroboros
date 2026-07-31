@@ -17,6 +17,11 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from ouroboros.bigbang.answer_provenance import (
+    WITHHELD_ANSWER_NOTE,
+    classify_answer_provenance,
+    extraction_rounds,
+)
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
@@ -283,9 +288,21 @@ class PMDocumentGenerator:
         Returns:
             Result containing the generated Markdown string or ProviderError.
         """
-        # Extract Q&A from interview state if not provided directly
-        if qa_pairs is None and interview_state is not None:
-            qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
+        # The PRD is a requirement-producing artifact. Typed state uses the
+        # shared projection; the public raw-pair ingress settles the same
+        # caller-facing marker before it enters the prompt.
+        if qa_pairs is not None:
+            qa_pairs = [
+                (
+                    question,
+                    WITHHELD_ANSWER_NOTE
+                    if classify_answer_provenance(answer) == "observation"
+                    else answer,
+                )
+                for question, answer in qa_pairs
+            ]
+        elif interview_state is not None:
+            qa_pairs = [(r.question, r.answer or "") for r in extraction_rounds(interview_state)]
 
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 

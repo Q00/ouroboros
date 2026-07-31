@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import subprocess
 
+from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoPipelineState, AutoWorktreePolicy
-from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
+from ouroboros.auto.worktree import (
+    auto_worktree_cleanup_eligible,
+    ensure_auto_worktree,
+    release_auto_worktree,
+)
 from ouroboros.core.worktree import TaskWorkspace
 
 
@@ -48,7 +53,7 @@ def test_coding_auto_policy_creates_managed_worktree_and_updates_cwd(tmp_path, m
             "uncommitted caller work\n"
         )
     finally:
-        release_auto_worktree(workspace)
+        release_auto_worktree(workspace, cleanup=True)
 
 
 def test_coding_auto_policy_reuses_persisted_managed_worktree(tmp_path, monkeypatch) -> None:
@@ -60,7 +65,7 @@ def test_coding_auto_policy_reuses_persisted_managed_worktree(tmp_path, monkeypa
     state.worktree_policy = AutoWorktreePolicy.AUTO
 
     first = ensure_auto_worktree(state)
-    release_auto_worktree(first)
+    release_auto_worktree(first, cleanup=False)
 
     second = ensure_auto_worktree(state)
     try:
@@ -70,7 +75,7 @@ def test_coding_auto_policy_reuses_persisted_managed_worktree(tmp_path, monkeypa
         assert second.branch == first.branch
         assert state.managed_worktree is not None
     finally:
-        release_auto_worktree(second)
+        release_auto_worktree(second, cleanup=True)
 
 
 def test_auto_policy_gracefully_skips_non_repo(tmp_path, monkeypatch) -> None:
@@ -96,8 +101,50 @@ def test_release_auto_worktree_delegates_to_task_workspace_release(monkeypatch) 
         lock_path="/tmp/worktrees/.locks/repo/auto_test.json",
     )
     released = []
-    monkeypatch.setattr("ouroboros.auto.worktree.release_task_workspace", released.append)
 
-    release_auto_worktree(workspace)
+    def capture(candidate, *, cleanup: bool) -> None:
+        released.append((candidate, cleanup))
 
-    assert released == [workspace]
+    monkeypatch.setattr("ouroboros.auto.worktree.release_task_workspace", capture)
+
+    release_auto_worktree(workspace, cleanup=False)
+
+    assert released == [(workspace, False)]
+
+
+def _result(**overrides) -> AutoPipelineResult:
+    values = {
+        "status": "complete",
+        "auto_session_id": "auto_test",
+        "phase": "complete",
+    }
+    values.update(overrides)
+    return AutoPipelineResult(**values)
+
+
+def test_auto_cleanup_requires_positive_terminal_result() -> None:
+    assert auto_worktree_cleanup_eligible(None) is False
+    assert auto_worktree_cleanup_eligible(_result(status="blocked")) is False
+    assert auto_worktree_cleanup_eligible(_result(status="detached")) is False
+    assert auto_worktree_cleanup_eligible(_result(status="complete")) is True
+
+
+def test_auto_cleanup_rejects_live_handoff_and_plugin_delegation() -> None:
+    assert (
+        auto_worktree_cleanup_eligible(_result(run_handoff_status="started", job_id="job_live"))
+        is False
+    )
+    assert auto_worktree_cleanup_eligible(_result(ralph_dispatch_mode="plugin")) is False
+
+
+def test_auto_cleanup_accepts_reconciled_terminal_handoff() -> None:
+    assert (
+        auto_worktree_cleanup_eligible(
+            _result(
+                run_handoff_status="started",
+                job_id="job_done",
+                execution_job_status="completed",
+            )
+        )
+        is True
+    )

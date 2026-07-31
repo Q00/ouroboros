@@ -15,7 +15,13 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    Seed,
+    ac_text,
+    expected_artifact_path_error,
+    validate_ac_success_contract_values,
+)
 
 
 class SeedGrade(StrEnum):
@@ -249,6 +255,60 @@ class GradeGate:
             )
         for index, criterion_spec in enumerate(seed.acceptance_criteria):
             criterion = ac_text(criterion_spec)
+            if isinstance(criterion_spec, AcceptanceCriterionSpec):
+                try:
+                    validate_ac_success_contract_values(
+                        verify_command=criterion_spec.verify_command,
+                        expected_artifacts=criterion_spec.expected_artifacts,
+                        output_assertion=criterion_spec.output_assertion,
+                    )
+                except ValueError as exc:
+                    findings.append(
+                        GradeFinding(
+                            "invalid_success_contract_budget",
+                            "high",
+                            f"Acceptance success contract cannot be executed: {exc}",
+                            f"acceptance_criteria[{index}]",
+                            (
+                                "Reduce the artifact count, individual artifact path length, "
+                                "or total verify/artifact/assertion text to the execution "
+                                "capsule limits."
+                            ),
+                        )
+                    )
+                invalid_artifacts = _invalid_expected_artifacts(criterion_spec.expected_artifacts)
+                if invalid_artifacts:
+                    rendered = ", ".join(repr(artifact) for artifact in invalid_artifacts)
+                    findings.append(
+                        GradeFinding(
+                            "invalid_expected_artifact",
+                            "high",
+                            (
+                                "expected_artifacts contains values that are not exact "
+                                f"portable workspace-relative paths: {rendered}"
+                            ),
+                            f"acceptance_criteria[{index}].expected_artifacts",
+                            (
+                                "Replace descriptive labels with exact file or directory "
+                                "paths relative to the run workspace. If no exact path is "
+                                "known, remove expected_artifacts and add a concrete "
+                                "verify_command."
+                            ),
+                        )
+                    )
+                if criterion_spec.output_assertion and not criterion_spec.verify_command:
+                    findings.append(
+                        GradeFinding(
+                            "invalid_output_assertion",
+                            "high",
+                            "output_assertion cannot be evaluated without verify_command",
+                            f"acceptance_criteria[{index}].output_assertion",
+                            (
+                                "Add a concrete verify_command whose output is checked by "
+                                "output_assertion, or remove output_assertion."
+                            ),
+                        )
+                    )
             if _is_vague(criterion):
                 findings.append(
                     GradeFinding(
@@ -511,6 +571,14 @@ def _is_observable(value: str | AcceptanceCriterionSpec) -> bool:
         r"\b(http\s+)?status\s+2\d\d\b",
     )
     return any(re.search(pattern, lowered) for pattern in observable_patterns)
+
+
+def _invalid_expected_artifacts(artifacts: tuple[str, ...]) -> tuple[str, ...]:
+    """Return entries outside the shared literal artifact-path grammar."""
+
+    return tuple(
+        artifact for artifact in artifacts if expected_artifact_path_error(artifact) is not None
+    )
 
 
 def _is_concrete_final_report_observation(value: str) -> bool:

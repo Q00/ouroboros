@@ -26,6 +26,7 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
 )
@@ -645,11 +646,15 @@ class PMInterviewEngine:
         original technical question with the PM's answer so the inner
         InterviewEngine retains full context for follow-up generation.
 
-        The bundled format recorded in the inner engine is::
+        The bundled question recorded in the inner engine is::
 
             [Original technical question: <original>]
             [PM was asked (reframed): <reframed>]
-            PM answer: <response>
+
+        The answer itself is preserved byte-for-byte.  In particular, a
+        leading provenance marker such as ``[from-code]`` must remain leading
+        so ``InterviewState.record_answer`` and persisted-state validation do
+        not accidentally promote an observation into a user decision.
 
         This ensures the LLM generating follow-up questions sees both
         the underlying technical concern and the PM's product-level answer.
@@ -665,12 +670,12 @@ class PMInterviewEngine:
         original_question = self._reframe_map.pop(question, None)
 
         if original_question is not None:
-            # Bundle the original technical question with the PM's answer
+            # Bundle the original and reframed questions, but do not decorate
+            # the response: provenance is encoded by a leading caller marker.
             bundled_question = (
                 f"[Original technical question: {original_question}]\n"
                 f"[PM was asked (reframed): {question}]"
             )
-            bundled_response = f"PM answer: {user_response}"
 
             log.info(
                 "pm.response_bundled",
@@ -678,7 +683,7 @@ class PMInterviewEngine:
                 reframed_question=question[:100],
             )
 
-            return await self.inner.record_response(state, bundled_response, bundled_question)
+            return await self.inner.record_response(state, user_response, bundled_question)
 
         return await self.inner.record_response(state, user_response, question)
 
@@ -1113,7 +1118,7 @@ class PMInterviewEngine:
                 )
             )
 
-        context = self._build_interview_context(state)
+        context = self._build_interview_context(state, withhold_observations=True)
 
         messages = [
             Message(role=MessageRole.SYSTEM, content=_EXTRACTION_SYSTEM_PROMPT),
@@ -1226,23 +1231,37 @@ class PMInterviewEngine:
     # Internal helpers
     # ──────────────────────────────────────────────────────────────
 
-    def _build_interview_context(self, state: InterviewState) -> str:
+    def _build_interview_context(
+        self, state: InterviewState, *, withhold_observations: bool = False
+    ) -> str:
         """Build interview context string from state.
 
         Args:
             state: Current interview state.
+            withhold_observations: Render observation answers as a fixed note
+                instead of their content. True only for the requirement
+                extraction prompt — the question classifier reads the same
+                context and has to see observations in full, since informing
+                the next question is what they were collected for (#1755).
 
         Returns:
             Formatted context string.
         """
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
-        for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+        # Question lines are unchanged either way: an observation reaching a
+        # later question is where it was collected to arrive.
+        if withhold_observations:
+            rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
+        else:
+            rendered = [(item.question, item.user_response) for item in state.rounds]
+
+        for question, answer in rendered:
+            if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
-            if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+            parts.append(f"\nQ: {question}")
+            if answer:
+                parts.append(f"A: {answer}")
 
         return "\n".join(parts)
 

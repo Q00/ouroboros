@@ -591,6 +591,43 @@ class TestPMInterviewHandlerSubagentDispatch:
         payload = result.value.meta["_subagent"]
         assert payload["tool_name"] == "ouroboros_pm_interview"
 
+    async def test_generate_withholds_observations_but_resume_keeps_them(
+        self, handler, monkeypatch
+    ) -> None:
+        observed = "competitor-secret-retry-policy"
+
+        async def _load_observation(
+            state_dir: Path, session_id: str
+        ) -> Result[InterviewState, str]:
+            del state_dir
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                status=InterviewStatus.COMPLETED,
+            )
+            state.record_answer("What exists today?", f"[from-research] {observed}")
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_observation)
+
+        resumed = await handler.handle(
+            {
+                "session_id": "sess-observation",
+                "answer": "Keep investigating",
+                "last_question": "What should we decide next?",
+            }
+        )
+        assert resumed.is_ok
+        assert observed in resumed.value.meta["_subagent"]["prompt"]
+
+        generated = await handler.handle({"session_id": "sess-observation", "action": "generate"})
+        assert generated.is_ok
+        prompt = generated.value.meta["_subagent"]["prompt"]
+        assert observed not in prompt
+        assert "observation withheld" in prompt
+
     async def test_context_preserves_selected_repos(self, handler) -> None:
         result = await handler.handle(
             {

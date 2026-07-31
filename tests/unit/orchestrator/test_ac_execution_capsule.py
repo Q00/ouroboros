@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 
 import pytest
 
-from ouroboros.core.seed import AcceptanceCriterionSpec
+from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
+    AcceptanceCriterionSpec,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.ac_execution_capsule import (
     AC_EXECUTION_CAPSULE_VERSION,
@@ -18,6 +22,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     ACContextReferenceKind,
     ACExecutionCapsuleManifest,
     ACSuccessContract,
+    UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     compile_ac_execution_capsule,
@@ -267,11 +272,15 @@ def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> 
         execution_context_id="execution-contract-limit",
         retry_attempt=0,
     )
-    spec = AcceptanceCriterionSpec(
+    spec = AcceptanceCriterionSpec.model_construct(
         description="Implement the bounded AC",
         expected_artifacts=tuple(
             f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
         ),
+        verify_command=None,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
     )
 
     with pytest.raises(ValueError, match="success contract artifact limit exceeded"):
@@ -287,13 +296,129 @@ def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> 
         )
 
 
+def test_capsule_rejects_multibyte_artifact_byte_overflow_before_hashing(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-encoded-contract-limit",
+        retry_attempt=0,
+    )
+    artifact = "/".join(("😀" * 62, "a" * 7))
+    assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="Implement the encoded bounded AC",
+        expected_artifacts=(artifact,),
+        verify_command=None,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+
+    with pytest.raises(ValueError, match="success contract artifacts are invalid"):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-encoded-contract-limit",
+            semantic_ac_key="semantic-key",
+            workspace=str(tmp_path.resolve()),
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Implement the encoded bounded AC",
+            ac_spec=spec,
+        )
+
+
+def test_capsule_rejects_artifact_exceeding_workspace_path_capacity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX pathconf capacity regression")
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-workspace-path-limit",
+        retry_attempt=0,
+    )
+    workspace = str(tmp_path.resolve())
+    capacity = len(os.fsencode(workspace)) + 2
+    monkeypatch.setattr("ouroboros.core.seed.os.pathconf", lambda *_args: capacity)
+    spec = AcceptanceCriterionSpec(
+        description="Materialize artifact under workspace",
+        expected_artifacts=("a" * 255,),
+    )
+
+    with pytest.raises(
+        UnmaterializableSuccessContractError,
+        match=("unmaterializable_success_contract: .*workspace path exceeds POSIX capacity"),
+    ):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-workspace-path-limit",
+            semantic_ac_key="semantic-key",
+            workspace=workspace,
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Materialize artifact under workspace",
+            ac_spec=spec,
+        )
+
+
+def test_capsule_uses_typed_rejection_for_windows_workspace_capacity(monkeypatch) -> None:
+    from ouroboros.core.seed import expected_artifact_workspace_path_error
+
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-windows-path-limit",
+        retry_attempt=0,
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.ac_execution_capsule.expected_artifact_workspace_path_error",
+        lambda artifact, workspace: expected_artifact_workspace_path_error(
+            artifact,
+            workspace,
+            platform="windows",
+            path_capacity=260,
+        ),
+    )
+    spec = AcceptanceCriterionSpec(
+        description="Materialize artifact on Windows",
+        expected_artifacts=("nested/" + "a" * 200,),
+    )
+
+    with pytest.raises(UnmaterializableSuccessContractError) as raised:
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-windows-path-limit",
+            semantic_ac_key="semantic-key",
+            workspace=r"C:\Users\developer\source\ouroboros",
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Materialize artifact on Windows",
+            ac_spec=spec,
+        )
+
+    assert raised.value.code == "unmaterializable_success_contract"
+    assert "workspace path exceeds Windows capacity (260 UTF-16 units)" in str(raised.value)
+
+
+def test_schema_maximum_success_contract_materializes_into_capsule() -> None:
+    spec = AcceptanceCriterionSpec(
+        description="Implement the bounded AC",
+        expected_artifacts=tuple(
+            f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS)
+        ),
+    )
+
+    contract = ACSuccessContract.from_ac_spec(spec)
+
+    assert contract.expected_artifacts == spec.expected_artifacts
+
+
 def test_success_contract_rejects_unbounded_text_before_serialization() -> None:
     with pytest.raises(ValueError, match="success contract character budget exceeded"):
         ACSuccessContract(verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1))
 
 
 def test_success_contract_preserves_output_assertion_without_command() -> None:
-    """The public Seed schema permits output-only contracts and capsules preserve them."""
+    """The low-level capsule keeps compatibility while the public Seed rejects this shape."""
     contract = ACSuccessContract(output_assertion="OK")
 
     assert contract.has_success_contract is True

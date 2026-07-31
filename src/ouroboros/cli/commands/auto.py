@@ -58,7 +58,11 @@ from ouroboros.auto.state import (
     parse_auto_worktree_policy,
     validate_complete_product_timeout,
 )
-from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
+from ouroboros.auto.worktree import (
+    auto_worktree_cleanup_eligible,
+    ensure_auto_worktree,
+    release_auto_worktree,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -690,6 +694,7 @@ async def _run_auto(
         watchdog=watchdog,
         probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
     )
+    result: AutoPipelineResult | None = None
     try:
         result = await pipeline.run(state)
         if wait and _is_run_handoff_only_completion(result) and result.job_id:
@@ -718,8 +723,12 @@ async def _run_auto(
                 store=store,
             )
     finally:
-        release_auto_worktree(auto_workspace)
+        release_auto_worktree(
+            auto_workspace,
+            cleanup=auto_worktree_cleanup_eligible(result),
+        )
         await watchdog_event_store.close()
+    assert result is not None
     return result
 
 

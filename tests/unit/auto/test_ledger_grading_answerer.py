@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.auto.answerer import AutoAnswerContext, AutoAnswerer, AutoAnswerSource
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
@@ -365,6 +371,194 @@ def test_grade_gate_accepts_expected_artifacts_success_contract() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(finding.code == "missing_success_contract" for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("verify_command", "expected_artifacts"),
+    (
+        (
+            None,
+            tuple(
+                f"out/artifact-{index}.txt"
+                for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
+            ),
+        ),
+        (
+            None,
+            (
+                "/".join(
+                    "a" * 250 for _ in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS // 251 + 1)
+                ),
+            ),
+        ),
+        (
+            None,
+            ("/".join(("😀" * 62, "a" * 7)),),
+        ),
+        ("x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1), ()),
+    ),
+)
+def test_grade_gate_rejects_capsule_invalid_contract_before_grade_a(
+    verify_command: str | None,
+    expected_artifacts: tuple[str, ...],
+) -> None:
+    if expected_artifacts and "😀" in expected_artifacts[0]:
+        assert len(expected_artifacts[0].encode("utf-8")) == (
+            MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
+        )
+    ledger = SeedDraftLedger.from_goal("Create bounded execution artifacts")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_spec = AcceptanceCriterionSpec.model_construct(
+        description="All execution artifacts exist",
+        verify_command=verify_command,
+        expected_artifacts=expected_artifacts,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+    seed = _seed(
+        goal="Create bounded execution artifacts",
+        ac=(AcceptanceCriterionSpec(description="placeholder", verify_command="true"),),
+    )
+    object.__setattr__(seed, "acceptance_criteria", (invalid_spec,))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade != SeedGrade.A
+    assert not result.may_run
+    assert any(finding.code == "invalid_success_contract_budget" for finding in result.findings)
+
+
+def test_grade_gate_rejects_descriptive_expected_artifact_labels() -> None:
+    ledger = SeedDraftLedger.from_goal("Create schema outputs and an approval record")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_spec = AcceptanceCriterionSpec.model_construct(
+        description="Outputs are available",
+        verify_command=None,
+        expected_artifacts=(
+            "schema v2 outputs",
+            "user approval record",
+            "schema v2 outputs.json",
+            ".",
+        ),
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+    seed = _seed(
+        goal="Create schema outputs and an approval record",
+        ac=(AcceptanceCriterionSpec(description="placeholder", verify_command="true"),),
+    )
+    object.__setattr__(seed, "acceptance_criteria", (invalid_spec,))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    invalid = [
+        finding for finding in result.findings if finding.code == "invalid_expected_artifact"
+    ]
+    assert len(invalid) == 1
+    assert all(
+        repr(path) in invalid[0].message
+        for path in ("schema v2 outputs", "user approval record", "schema v2 outputs.json", ".")
+    )
+    assert "verify_command" in invalid[0].repair_instruction
+
+
+def test_grade_gate_accepts_concrete_relative_paths_with_spaces() -> None:
+    ledger = SeedDraftLedger.from_goal("Create build and documentation artifacts")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create build and documentation artifacts",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Build and documentation artifacts exist",
+                expected_artifacts=(
+                    "README.md",
+                    "docs",
+                    "dist/app",
+                    "docs/User Guide.md",
+                    "./Build Outputs",
+                ),
+            ),
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert result.may_run
+    assert not any(finding.code == "invalid_expected_artifact" for finding in result.findings)
+
+
+def test_grade_gate_rejects_windows_reserved_and_impossible_paths() -> None:
+    ledger = SeedDraftLedger.from_goal("Create a workspace artifact")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_paths = (
+        "NUL",
+        "nul.txt",
+        "dir/CON",
+        "foo.",
+        "docs/a:b",
+        "reports/summary,v2.json",
+        r"docs\guide.md",
+        r"D:folder\outside.txt",
+        r"D:\outside.txt",
+        r"\\server\share\outside.txt",
+        "a" * 256,
+        "docs/" + ("\u00e9" * 128),
+    )
+    invalid_spec = AcceptanceCriterionSpec.model_construct(
+        description="Artifact exists",
+        verify_command=None,
+        expected_artifacts=invalid_paths,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+    seed = _seed(
+        goal="Create a workspace artifact",
+        ac=(AcceptanceCriterionSpec(description="placeholder", verify_command="true"),),
+    )
+    object.__setattr__(seed, "acceptance_criteria", (invalid_spec,))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    invalid = [
+        finding for finding in result.findings if finding.code == "invalid_expected_artifact"
+    ]
+    assert len(invalid) == 1
+    assert all(repr(path) in invalid[0].message for path in invalid_paths)
+
+
+def test_grade_gate_defends_against_assertion_only_constructed_contract() -> None:
+    ledger = SeedDraftLedger.from_goal("Print a ready signal")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_spec = AcceptanceCriterionSpec.model_construct(
+        description="Command output contains READY",
+        verify_command=None,
+        expected_artifacts=(),
+        output_assertion="READY",
+    )
+    seed = _seed(
+        goal="Print a ready signal",
+        ac=(
+            AcceptanceCriterionSpec(
+                description="Command output contains READY",
+                verify_command="printf READY",
+            ),
+        ),
+    )
+    object.__setattr__(seed, "acceptance_criteria", (invalid_spec,))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.B
+    assert not result.may_run
+    assert any(finding.code == "invalid_output_assertion" for finding in result.findings)
 
 
 def test_grade_gate_rejects_vacuous_coding_command_acceptance_criteria() -> None:

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import json
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary
+import pytest
+
+from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.evolution.reflect import (
     ACPatch,
@@ -37,6 +40,20 @@ def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
             name="o",
             description="d",
             fields=(OntologyField(name="f", field_type="entity", description="a field"),),
+        ),
+    )
+
+
+def _seed_with_ontology(fields: tuple[OntologyField, ...]) -> Seed:
+    return Seed(
+        metadata=SeedMetadata(ambiguity_score=0.1),
+        goal="Build a thing",
+        constraints=("c1",),
+        acceptance_criteria=PARENT_ACS,
+        ontology_schema=OntologySchema(
+            name="o",
+            description="d",
+            fields=fields,
         ),
     )
 
@@ -119,6 +136,11 @@ class TestPatchParse:
         patches = _parse_ac_patches([{"op": "keep", "index": True}])
         assert patches[0].index is None
 
+    @pytest.mark.parametrize("raw_patches", [None, {"op": "keep"}, "not-a-list"])
+    def test_wrong_shaped_ac_patches_rejected(self, raw_patches: object) -> None:
+        with pytest.raises(TypeError, match="Expected ac_patches to be a list"):
+            _parse_ac_patches(raw_patches)
+
 
 class TestComposition:
     def test_keep_revise_in_place_add_appended(self) -> None:
@@ -138,7 +160,9 @@ class TestComposition:
         # LLM omits index 2 entirely — implicit keep must fill it.
         data = {"ac_patches": [{"op": "keep", "index": 0}, {"op": "keep", "index": 1}]}
         refined, patches, _ = _compose(data)
-        keep_revise_indices = [p.index for p in patches if p.op in ("keep", "revise")]
+        keep_revise_indices = [
+            p.index for p in patches if p.op in ("keep", "revise") and p.index is not None
+        ]
         assert sorted(keep_revise_indices) == [0, 1, 2]
         assert len(refined) == 3
 
@@ -241,6 +265,17 @@ class TestLegacyFallbackDiff:
         assert patches[1].op == "revise"
         assert patches[1].content == "X"
 
+    @pytest.mark.parametrize("raw_patches", [None, {"0": {"op": "keep"}}, "not-a-list"])
+    def test_present_wrong_shaped_ac_patches_do_not_use_legacy_fallback(
+        self, raw_patches: object
+    ) -> None:
+        data = {
+            "ac_patches": raw_patches,
+            "refined_acs": ["AC zero", "CHANGED one", "AC two", "NEW three"],
+        }
+        with pytest.raises(TypeError, match="Expected ac_patches to be a list"):
+            _compose(data, challenge=(1,))
+
 
 class TestMalformedPatches:
     def test_out_of_range_and_duplicate_dropped(self) -> None:
@@ -268,6 +303,113 @@ class TestMalformedPatches:
 
 
 class TestReflectEndToEnd:
+    async def test_whitespace_only_refined_constraints_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1", "   "],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    async def test_whitespace_only_ac_patch_content_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "revise", "index": 1, "content": "   "}],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    async def test_whitespace_only_legacy_refined_acs_rejected_before_seed_materialization(
+        self,
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "refined_acs": ["AC zero", "   ", "AC two"],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            {"action": "modify", "field_name": "f", "field_type": "   "},
+            {"action": "modify", "field_name": "f", "description": "   "},
+        ],
+    )
+    async def test_whitespace_only_ontology_values_rejected_before_seed_materialization(
+        self, mutation: dict[str, str]
+    ) -> None:
+        parent = _seed_with_ontology(
+            (OntologyField(name="f", field_type="entity", description="a field"),)
+        )
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [mutation],
+                "reasoning": "r",
+            }
+        )
+
+        reflect_result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response), model="test"
+        ).reflect(
+            current_seed=parent,
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert reflect_result.is_err
+
     async def test_reflect_composes_from_patches(self) -> None:
         response = json.dumps(
             {
@@ -301,6 +443,58 @@ class TestReflectEndToEnd:
         assert 0 in out.settled_ac_indices
         assert 2 in out.settled_ac_indices
         assert 1 not in out.settled_ac_indices
+
+    async def test_valid_mutations_materialize_downstream_seed(self) -> None:
+        parent = _seed_with_ontology(
+            (
+                OntologyField(name="f", field_type="entity", description="a field"),
+                OntologyField(name="obsolete", field_type="string", description="obsolete field"),
+            )
+        )
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing with materialized ontology",
+                "refined_constraints": ["c1"],
+                "ac_patches": [{"op": "keep", "index": 0}],
+                "ontology_mutations": [
+                    {
+                        "action": "add",
+                        "field_name": "new_signal",
+                        "field_type": "string",
+                        "reason": "Captures the new signal",
+                    },
+                    {
+                        "action": "modify",
+                        "field_name": "f",
+                        "field_type": "object",
+                    },
+                    {
+                        "action": "remove",
+                        "field_name": "obsolete",
+                    },
+                ],
+                "reasoning": "r",
+            }
+        )
+        result = await ReflectEngine(llm_adapter=_FakeAdapter(response), model="test").reflect(
+            current_seed=parent,
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        seed_result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent, result.value
+        )
+
+        assert seed_result.is_ok
+        fields = {field.name: field for field in seed_result.value.ontology_schema.fields}
+        assert fields["new_signal"].description == "Captures the new signal"
+        assert fields["f"].field_type == "object"
+        assert fields["f"].description == "a field"
+        assert "obsolete" not in fields
 
 
 class _FakeAdapter:

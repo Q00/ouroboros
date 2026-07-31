@@ -12,9 +12,10 @@ import functools
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import structlog
 
+from ouroboros.bigbang.answer_provenance import AnswerProvenance, classify_answer_provenance
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
@@ -165,13 +166,47 @@ class InterviewRound(BaseModel):
         round_number: 1-based round number (no upper limit - user controls).
         question: The question asked by the system.
         user_response: The user's response (None if not yet answered).
+        provenance: Whether the answer is a decision the caller made or a fact
+            the caller adopted from elsewhere. Consumers read this field rather
+            than re-reading the ``[from-*]`` marker, which is what drifted
+            before (#1755).
         timestamp: When this round was created.
     """
 
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
     user_response: str | None = None
+    provenance: AnswerProvenance = "user"
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @model_validator(mode="after")
+    def _settle_provenance(self) -> "InterviewRound":
+        """Settle provenance from the answer whenever a round is validated.
+
+        The field is written at ingestion, but interviews persisted before it
+        existed deserialize without it. Defaulting those to ``"user"`` would
+        leave every in-flight interview holding observations that still carry
+        requirement authority, so an answer's provenance is settled here too —
+        one classifier, still no consumer reading the marker.
+        """
+        if self.user_response is not None:
+            answer_for_classification = self.user_response
+            # PM interviews before #1823 decorated reframed answers after the
+            # provenance marker had already been supplied, producing
+            # ``PM answer: [from-code] ...``.  Recover that one canonical
+            # historical envelope using its paired question shape; accepting
+            # the wrapper globally would let arbitrary user prose redefine
+            # the marker grammar.
+            if (
+                self.question.startswith("[Original technical question: ")
+                and "\n[PM was asked (reframed): " in self.question
+                and answer_for_classification.startswith("PM answer: ")
+            ):
+                answer_for_classification = answer_for_classification.removeprefix("PM answer: ")
+            settled = classify_answer_provenance(answer_for_classification)
+            if settled != self.provenance:
+                self.provenance = settled
+        return self
 
 
 class InterviewState(BaseModel):
@@ -284,6 +319,12 @@ class InterviewState(BaseModel):
                         "round_number": round_data.round_number,
                         "question": round_data.question,
                         "user_response": round_data.user_response,
+                        # Provenance decides whether an answer may be promoted
+                        # at all, so it is a canonical input to the derived
+                        # distillation. Without it a distillation cached before
+                        # #1755 — one that promoted an observation — would be
+                        # judged current and reused.
+                        "provenance": round_data.provenance,
                     }
                     for round_data in self.rounds
                 ],
@@ -396,6 +437,46 @@ class InterviewState(BaseModel):
         )
         self.mark_updated()
         return question
+
+    def record_answer(self, question: str, answer: str) -> InterviewRound:
+        """Attach ``answer`` to the interview, deciding its provenance once.
+
+        Every transport funnels through here. That matters because a round is
+        not always born whole: the MCP transports persist a round carrying only
+        its question and fill the answer on a later call, so provenance decided
+        at construction would be decided on a round that has no answer yet.
+        Deciding it where the answer *arrives* covers both shapes — the trailing
+        question-only round is filled, anything else appends.
+
+        Returns the round the answer landed on.
+        """
+        provenance = classify_answer_provenance(answer)
+
+        if self.rounds and self.rounds[-1].user_response is None:
+            # A round persisted question-only. Refresh the question text when a
+            # caller supplies one, since the stored copy can be a placeholder
+            # from a partial persistence.
+            round_data = self.rounds[-1]
+            if question:
+                round_data.question = question
+            round_data.user_response = answer
+            round_data.provenance = provenance
+        else:
+            round_data = InterviewRound(
+                round_number=self.current_round_number,
+                question=question,
+                user_response=answer,
+                provenance=provenance,
+            )
+            self.rounds.append(round_data)
+
+        self.record_adapter_answer(round_data.question, answer)
+        detected_terms = detect_explicit_confusion_terms(answer)
+        if detected_terms:
+            self.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
+        self.invalidate_requirement_distillation()
+        self.mark_updated()
+        return round_data
 
     def record_adapter_answer(self, question: str, answer: str) -> None:
         """Resolve a persisted reference contrast when its exact question is answered."""
@@ -1008,21 +1089,7 @@ class InterviewEngine:
                 prior_completion_candidate_streak=prior_streak,
             )
 
-        state.record_adapter_answer(question, user_response)
-
-        # Create new round
-        round_data = InterviewRound(
-            round_number=state.current_round_number,
-            question=question,
-            user_response=user_response,
-        )
-
-        state.rounds.append(round_data)
-        detected_terms = detect_explicit_confusion_terms(user_response)
-        if detected_terms:
-            state.merge_turn_context(InterviewTurnContext(confused_terms=detected_terms))
-        state.invalidate_requirement_distillation()
-        state.mark_updated()
+        round_data = state.record_answer(question, user_response)
 
         log.info(
             "interview.response_recorded",
